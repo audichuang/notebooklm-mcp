@@ -3,12 +3,15 @@
 ## Authentication Issues
 
 ### "Not logged in"
+
 ```bash
 notebooklm login
 ```
+
 Browser opens → Complete Google login → Wait for NotebookLM homepage → Press Enter.
 
 ### "Missing required cookies: {'SID'}"
+
 You pressed Enter before fully logging in. Ensure you see the NotebookLM homepage before pressing Enter.
 
 ```bash
@@ -18,11 +21,13 @@ notebooklm login
 ```
 
 ### "Authentication expired"
+
 ```bash
 notebooklm login
 ```
 
 ### 認證資料存放位置
+
 ```
 ~/.notebooklm/
 ├── storage_state.json    # 認證狀態（cookies、session）
@@ -40,6 +45,7 @@ notebooklm login
 **解決方案：**
 
 1. **序列化執行（推薦）**
+
 ```bash
 # 一個完成後再啟動下一個
 notebooklm source add-research "Topic 1" --mode deep
@@ -49,6 +55,7 @@ notebooklm research wait --import-all --timeout 300
 ```
 
 2. **如果已經卡住**
+
 ```bash
 # 檢查來源是否已匯入（可能伺服器端已完成）
 notebooklm source list
@@ -57,6 +64,7 @@ notebooklm source list
 ```
 
 3. **多個主題用不同 Notebook**
+
 ```bash
 notebooklm create "Research A"
 notebooklm use <id-a>
@@ -68,14 +76,18 @@ notebooklm source add-research "Topic B"
 ```
 
 ### "Research timeout"
+
 Increase timeout or use fast mode:
+
 ```bash
 notebooklm source add-research "topic" --mode fast
 notebooklm research wait --import-all --timeout 300
 ```
 
 ### "No research running"
+
 Start research first:
+
 ```bash
 notebooklm source add-research "topic" --mode deep
 ```
@@ -100,6 +112,7 @@ notebooklm download audio ~/output/podcast.mp3
 ```
 
 #### 不知道 task-id？直接下載最新的：
+
 ```bash
 # 自動下載最新完成的同類型 artifact（推薦！）
 notebooklm download audio ~/output/podcast.mp3
@@ -108,38 +121,47 @@ notebooklm download video ~/output/video.mp4
 ```
 
 #### 查看所有 artifacts 狀態：
+
 ```bash
 notebooklm artifact list
 ```
 
 ### "Generation pending" (takes too long)
+
 Poll status or increase timeout:
+
 ```bash
 notebooklm artifact poll <task-id>
 notebooklm artifact wait <task-id> --timeout 600
 ```
 
 ### "No artifact found"
+
 Ensure notebook has sources before generating:
+
 ```bash
 notebooklm source list
 ```
 
 ### Generation fails
-- Content too short (<500 chars)
-- Content too long (>500K chars)
-- Try different generation type
+
+* Content too short (<500 chars)
+* Content too long (>500K chars)
+* Try different generation type
 
 ## Notebook Issues
 
 ### "No notebook selected"
+
 ```bash
 notebooklm list
 notebooklm use <notebook-id>
 ```
 
 ### "Notebook not found"
+
 Verify ID with:
+
 ```bash
 notebooklm list
 ```
@@ -147,25 +169,30 @@ notebooklm list
 ## Rate Limiting
 
 ### "Rate limit exceeded"
-- Free tier: ~50 queries/day
-- Wait 24 hours or use different Google account
+
+* Free tier: ~50 queries/day
+* Wait 24 hours or use different Google account
 
 ## Installation Issues
 
 ### "Playwright not installed"
+
 ```bash
 pip install playwright
 playwright install chromium
 ```
 
 ### "notebooklm command not found"
+
 安裝 notebooklm-py：
+
 ```bash
 pip install notebooklm-py
 playwright install chromium
 ```
 
 或確認安裝路徑在 PATH 中：
+
 ```bash
 which notebooklm
 # 如果找不到，用 pip show 找到安裝位置
@@ -175,6 +202,7 @@ pip show notebooklm-py
 ## Debug Mode
 
 Add verbose flag:
+
 ```bash
 notebooklm -v list
 notebooklm -vv source add-research "topic"
@@ -183,6 +211,40 @@ notebooklm -vv source add-research "topic"
 ## Output Directory
 
 Create if not exists:
+
 ```bash
 mkdir -p ~/Documents/NotebookLM/output
+```
+
+## Doppler Issues
+
+### "NOTEBOOKLM\_AUTH\_JSON is set but empty"
+
+Doppler 中的值為空，需要重新同步：
+
+```bash
+notebooklm login
+bash scripts/sync-auth.sh
+```
+
+### "Invalid JSON in NOTEBOOKLM\_AUTH\_JSON"
+
+JSON 格式損壞，重新同步：
+
+```bash
+notebooklm login
+bash scripts/sync-auth.sh
+```
+
+### VM 上認證過期
+
+在**本地**重新登入並同步即可，VM 不需要任何操作：
+
+```bash
+# 本地執行
+notebooklm login
+bash scripts/sync-auth.sh
+
+# VM 上直接使用（自動取得最新認證）
+doppler run -p notebooklm -c dev -- notebooklm list
 ```
