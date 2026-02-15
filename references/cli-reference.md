@@ -3,18 +3,19 @@
 Complete command reference for notebooklm-py CLI.
 
 ## Table of Contents
-- [Session Commands](#session-commands)
-- [Notebook Commands](#notebook-commands)
-- [Source Commands](#source-commands)
-- [Research Commands](#research-commands)
-- [Generate Commands](#generate-commands) ⭐ 詳細參數
-- [Download Commands](#download-commands)
-- [Artifact Commands](#artifact-commands)
-- [Chat Commands](#chat-commands)
-- [Note Commands](#note-commands)
-- [Share Commands](#share-commands)
 
----
+* [Session Commands](#session-commands)
+* [Notebook Commands](#notebook-commands)
+* [Source Commands](#source-commands)
+* [Research Commands](#research-commands)
+* [Generate Commands](#generate-commands) ⭐ 詳細參數
+* [Download Commands](#download-commands)
+* [Artifact Commands](#artifact-commands)
+* [Chat Commands](#chat-commands)
+* [Note Commands](#note-commands)
+* [Share Commands](#share-commands)
+
+***
 
 ## Session Commands
 
@@ -26,7 +27,7 @@ notebooklm status                   # 顯示目前狀態
 notebooklm clear                    # 清除目前 context
 ```
 
----
+***
 
 ## Notebook Commands
 
@@ -37,7 +38,7 @@ notebooklm delete <notebook-id>                # 刪除
 notebooklm summary                             # 取得摘要
 ```
 
----
+***
 
 ## Source Commands
 
@@ -61,7 +62,7 @@ notebooklm source guide <source-id>      # AI 摘要與關鍵字
 notebooklm source refresh <source-id>    # 重新整理
 ```
 
----
+***
 
 ## Research Commands
 
@@ -72,7 +73,7 @@ notebooklm research list                             # 列出研究結果
 notebooklm research delete                           # 刪除研究
 ```
 
----
+***
 
 ## Generate Commands
 
@@ -80,12 +81,12 @@ notebooklm research delete                           # 刪除研究
 
 | 命令 | `--language` 支援 | 中文設定方式 |
 |------|-------------------|-------------|
-| audio | ✅ | `--language zh-TW` |
-| slide-deck | ✅ | `--language zh-TW` |
-| video | ✅ | `--language zh-TW` |
-| infographic | ✅ | `--language zh-TW` |
-| report | ✅ | `--language zh-TW` |
-| data-table | ✅ | `--language zh-TW` |
+| audio | ✅ | `--language zh_Hant` |
+| slide-deck | ✅ | `--language zh_Hant` |
+| video | ✅ | `--language zh_Hant` |
+| infographic | ✅ | `--language zh_Hant` |
+| report | ✅ | `--language zh_Hant` |
+| data-table | ✅ | `--language zh_Hant` |
 | quiz | ❌ | DESCRIPTION 寫「請用繁體中文...」 |
 | flashcards | ❌ | DESCRIPTION 寫「請用繁體中文...」 |
 | mind-map | ❌ | 無法指定 |
@@ -100,7 +101,7 @@ notebooklm research delete                           # 刪除研究
 --wait / --no-wait     是否等待完成
 ```
 
----
+***
 
 ### 🎙️ Audio (Podcast)
 
@@ -117,14 +118,14 @@ Options:
            short: 短版
            default: 標準（預設）
            long: 長版
-  --language TEXT      語言代碼，如 "zh-TW", "en", "ja"
+  --language TEXT      語言代碼，如 "zh_Hant", "en", "ja"
 
 Examples:
-notebooklm generate audio "深度講解重點" --format deep-dive --length long --language zh-TW
-notebooklm generate audio "正反辯論" --format debate --language zh-TW
+notebooklm generate audio "深度講解重點" --format deep-dive --length long --language zh_Hant
+notebooklm generate audio "正反辯論" --format debate --language zh_Hant
 ```
 
----
+***
 
 ### 📊 Slide Deck (PPT)
 
@@ -141,11 +142,11 @@ Options:
   --language TEXT      語言代碼
 
 Examples:
-notebooklm generate slide-deck "教學簡報" --format detailed --language zh-TW
-notebooklm generate slide-deck "重點摘要" --format presenter --length short --language zh-TW
+notebooklm generate slide-deck "教學簡報" --format detailed --language zh_Hant
+notebooklm generate slide-deck "重點摘要" --format presenter --length short --language zh_Hant
 ```
 
----
+***
 
 ### 📝 Quiz (測驗)
 
@@ -168,7 +169,7 @@ notebooklm generate quiz "請用繁體中文製作測驗，附解析" --quantity
 notebooklm generate quiz "請用繁體中文製作基礎測驗" --difficulty easy
 ```
 
----
+***
 
 ### 🎬 Video (影片)
 
@@ -192,11 +193,11 @@ Options:
   --language TEXT      語言代碼
 
 Examples:
-notebooklm generate video "專業講解" --format explainer --style whiteboard --language zh-TW
-notebooklm generate video "輕鬆解說" --style kawaii --language zh-TW
+notebooklm generate video "專業講解" --format explainer --style whiteboard --language zh_Hant
+notebooklm generate video "輕鬆解說" --style kawaii --language zh_Hant
 ```
 
----
+***
 
 ### 📄 Report (報告)
 
@@ -212,11 +213,11 @@ Options:
   --language TEXT      語言代碼
 
 Examples:
-notebooklm generate report "完整分析" --format study-guide --language zh-TW
-notebooklm generate report "部落格風格" --format blog-post --language zh-TW
+notebooklm generate report "完整分析" --format study-guide --language zh_Hant
+notebooklm generate report "部落格風格" --format blog-post --language zh_Hant
 ```
 
----
+***
 
 ### 📋 Flashcards (學習卡)
 
@@ -232,7 +233,7 @@ Examples:
 notebooklm generate flashcards "請用繁體中文製作詞彙卡" --quantity more --difficulty easy
 ```
 
----
+***
 
 ### 📈 Infographic (資訊圖表)
 
@@ -251,10 +252,10 @@ Options:
   --language TEXT      語言代碼
 
 Examples:
-notebooklm generate infographic "重點統計" --orientation portrait --detail detailed --language zh-TW
+notebooklm generate infographic "重點統計" --orientation portrait --detail detailed --language zh_Hant
 ```
 
----
+***
 
 ### 🗺️ Mind Map (思維導圖)
 
@@ -269,7 +270,7 @@ Example:
 notebooklm generate mind-map
 ```
 
----
+***
 
 ### 📊 Data Table (數據表)
 
@@ -280,10 +281,10 @@ Options:
   --language TEXT      語言代碼
 
 Example:
-notebooklm generate data-table "整理關鍵數據" --language zh-TW
+notebooklm generate data-table "整理關鍵數據" --language zh_Hant
 ```
 
----
+***
 
 ## Download Commands
 
@@ -331,7 +332,7 @@ notebooklm download data-table ~/output/data.csv
 | mind-map | `.json` | JSON 結構 |
 | data-table | `.csv` | CSV 表格 |
 
----
+***
 
 ## Artifact Commands
 
@@ -347,7 +348,7 @@ notebooklm artifact export <artifact-id> --type docs  # 匯出到 Google Docs
 notebooklm artifact suggestions                       # AI 推薦的報告主題
 ```
 
----
+***
 
 ## Chat Commands
 
@@ -358,7 +359,7 @@ notebooklm history                       # 查看對話歷史
 notebooklm chat clear                    # 清除對話
 ```
 
----
+***
 
 ## Note Commands
 
@@ -370,7 +371,7 @@ notebooklm note delete <note-id>         # 刪除筆記
 notebooklm note clear-all                # 清除所有筆記
 ```
 
----
+***
 
 ## Share Commands
 
@@ -383,7 +384,7 @@ notebooklm share remove "email@example.com"          # 移除協作者
 notebooklm share link                                # 取得分享連結
 ```
 
----
+***
 
 ## Global Options
 
@@ -394,16 +395,18 @@ notebooklm share link                                # 取得分享連結
 --help                 顯示說明
 ```
 
----
+***
 
 ## Output Directory
 
 預設輸出位置：
+
 ```
 ~/Documents/NotebookLM/output/
 ```
 
 建立目錄：
+
 ```bash
 mkdir -p ~/Documents/NotebookLM/output
 ```

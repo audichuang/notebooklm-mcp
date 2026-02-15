@@ -216,6 +216,21 @@ Create if not exists:
 mkdir -p ~/Documents/NotebookLM/output
 ```
 
+## Doppler Integration
+
+認證由 [Doppler](https://doppler.com) 統一管理，環境變數：`NOTEBOOKLM_AUTH_JSON`
+
+```bash
+# 首次設定
+notebooklm login && bash scripts/sync-auth.sh
+
+# 日常使用（所有命令加此前綴）
+doppler run -p notebooklm -c dev -- notebooklm list
+
+# 認證過期
+notebooklm login && bash scripts/sync-auth.sh
+```
+
 ## Doppler Issues
 
 ### "NOTEBOOKLM\_AUTH\_JSON is set but empty"
