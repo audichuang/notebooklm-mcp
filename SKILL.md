@@ -91,7 +91,42 @@ notebooklm download slide-deck -a <task-id> /tmp/slides.pdf
 主代理：收到路徑 → 發送給用戶
 ```
 
-模板與多任務範例見 [subagent-templates.md](references/subagent-templates.md)。
+### sessions\_spawn 模板（單任務）
+
+```
+sessions_spawn task:"請依序執行以下命令：
+1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> --timeout 600
+2. exec mkdir -p <output-dir>
+3. exec doppler run -p notebooklm -c dev -- notebooklm download <type> -a <task-id> <output-path>
+4. exec ls -la <output-path>
+如果 step 1 超時，用 exec doppler run -p notebooklm -c dev -- notebooklm artifact poll <task-id> 檢查狀態再決定。
+最後回報下載的檔案路徑。"
+label:"NotebookLM 生成"
+runTimeoutSeconds: 900
+```
+
+### sessions\_spawn 模板（多任務）
+
+當同時生成多個內容（如中英文音頻 + 簡報）時，用**一個**子代理依序 wait + download 所有任務：
+
+```
+sessions_spawn task:"請依序執行以下命令：
+1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-1> --timeout 600
+2. exec doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id-1> <output-dir>/podcast_zh.mp3
+3. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-2> --timeout 600
+4. exec doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id-2> <output-dir>/podcast_en.mp3
+5. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-3> --timeout 600
+6. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id-3> <output-dir>/slides_zh.pdf
+7. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-4> --timeout 600
+8. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id-4> <output-dir>/slides_en.pdf
+9. exec ls -la <output-dir>/
+如果某個 wait 超時，用 artifact poll 檢查狀態後繼續。
+最後回報所有下載的檔案路徑。"
+label:"NotebookLM 多任務生成"
+runTimeoutSeconds: 2700
+```
+
+⚠️ **超時計算**：`runTimeoutSeconds = 任務數 × 單次 wait timeout + 300`
 
 ### 禁止事項
 
