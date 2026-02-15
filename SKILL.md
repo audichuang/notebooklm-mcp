@@ -1,5 +1,4 @@
 ---
-
 name: notebooklm
 description: "Manages Google NotebookLM notebooks via notebooklm-py CLI. Creates notebooks, adds sources (URLs, YouTube, PDFs, text, web research), generates content (podcasts, slides, videos, quizzes, reports, flashcards, infographics, mind maps, data tables), downloads artifacts, and queries notebooks for source-grounded answers. Use when working with NotebookLM or when the user wants to research topics, generate podcasts or slides, create quizzes, or ask questions grounded in notebook sources."
 ---
@@ -36,16 +35,40 @@ CLI: `notebooklm` (install: `pip install notebooklm-py`)
 
 ```
 sessions_spawn task:"使用 exec 工具依序執行以下命令：
-1. exec notebooklm artifact wait <task-id> --timeout 600
+1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> --timeout 600
 2. exec mkdir -p /tmp/notebooklm
-3. exec notebooklm download audio /tmp/notebooklm/podcast.mp3
+3. exec doppler run -p notebooklm -c dev -- notebooklm download audio /tmp/notebooklm/podcast.mp3
 4. exec ls -la /tmp/notebooklm/podcast.mp3
-如果 step 1 超時，執行 exec notebooklm artifact poll <task-id> 檢查狀態：
+如果 step 1 超時，執行 exec doppler run -p notebooklm -c dev -- notebooklm artifact poll <task-id> 檢查狀態：
 - in_progress → 再次 artifact wait
 - completed → 繼續 step 2
 - failed → 回報錯誤
 最後回報下載的檔案路徑。"
 label:"NotebookLM 生成"
+```
+
+### 多任務生成模板
+
+當需要同時生成多個內容（如中英文音頻 + 簡報）時：
+
+1. 在主代理中**依序**啟動所有 generate 任務，記錄每個 task-id
+2. 用**一個**子代理依序 wait + download 所有任務
+3. 下載路徑必須包含語言/類型標識，避免覆蓋
+
+```
+sessions_spawn task:"使用 exec 工具依序執行以下命令：
+1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-1> --timeout 600
+2. exec doppler run -p notebooklm -c dev -- notebooklm download audio /tmp/notebooklm/<描述>_zh.mp3
+3. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-2> --timeout 600
+4. exec doppler run -p notebooklm -c dev -- notebooklm download audio /tmp/notebooklm/<描述>_en.mp3
+5. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-3> --timeout 600
+6. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck /tmp/notebooklm/<描述>_zh.pdf
+7. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-4> --timeout 600
+8. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck /tmp/notebooklm/<描述>_en.pdf
+9. exec ls -la /tmp/notebooklm/
+如果某個 wait 超時，用 artifact poll 檢查狀態後繼續。
+最後回報所有下載的檔案路徑。"
+label:"NotebookLM 多任務生成"
 ```
 
 ### 禁止事項
@@ -92,8 +115,8 @@ label:"NotebookLM 生成"
 ### Step 1: 認證
 
 ```bash
-notebooklm list          # 檢查登入狀態
-notebooklm login         # 若未登入，開啟瀏覽器認證
+doppler run -p notebooklm -c dev -- notebooklm list          # 檢查登入狀態
+doppler run -p notebooklm -c dev -- notebooklm login         # 若未登入，開啟瀏覽器認證
 ```
 
 #### Doppler Integration
@@ -114,44 +137,44 @@ notebooklm login && bash scripts/sync-auth.sh
 ### Step 2: 筆記本
 
 ```bash
-notebooklm list                    # 列出所有筆記本
-notebooklm create "標題"           # 建立新筆記本
-notebooklm use <notebook-id>       # 選擇筆記本
+doppler run -p notebooklm -c dev -- notebooklm list                    # 列出所有筆記本
+doppler run -p notebooklm -c dev -- notebooklm create "標題"           # 建立新筆記本
+doppler run -p notebooklm -c dev -- notebooklm use <notebook-id>       # 選擇筆記本
 ```
 
 ### Step 3: 加入來源
 
 ```bash
-notebooklm source add-research "主題" --mode deep    # 網路研究
-notebooklm research wait --import-all --timeout 180  # 等待匯入
+doppler run -p notebooklm -c dev -- notebooklm source add-research "主題" --mode deep    # 網路研究
+doppler run -p notebooklm -c dev -- notebooklm research wait --import-all --timeout 180  # 等待匯入
 
-notebooklm source add "https://..."                  # URL / YouTube
-notebooklm source add "/path/to/file.md"             # 本地檔案
+doppler run -p notebooklm -c dev -- notebooklm source add "https://..."                  # URL / YouTube
+doppler run -p notebooklm -c dev -- notebooklm source add "/path/to/file.md"             # 本地檔案
 ```
 
 **⚠️ 多個研究必須序列化**，不可同時啟動，否則 `research wait` 會卡住。
 
 ### Step 4: 生成內容
 
-查詢參數：`notebooklm generate <type> --help`
+查詢參數：`doppler run -p notebooklm -c dev -- notebooklm generate <type> --help`
 
 可用類型：`audio`, `video`, `slide-deck`, `quiz`, `report`, `flashcards`, `infographic`, `mind-map`, `data-table`
 
 ```bash
-notebooklm generate audio "教學講解" --format deep-dive --language zh_Hant
-notebooklm generate quiz "請用繁體中文製作測驗" --difficulty hard
+doppler run -p notebooklm -c dev -- notebooklm generate audio "教學講解" --format deep-dive --language zh_Hant
+doppler run -p notebooklm -c dev -- notebooklm generate quiz "請用繁體中文製作測驗" --difficulty hard
 ```
 
 ### Step 5: 等待與下載
 
 ```bash
-notebooklm artifact wait <task-id> --timeout 600     # 等待完成
-notebooklm artifact poll <task-id>                    # 查詢狀態
-notebooklm artifact list                              # 列出所有 artifacts
+doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> --timeout 600     # 等待完成
+doppler run -p notebooklm -c dev -- notebooklm artifact poll <task-id>                    # 查詢狀態
+doppler run -p notebooklm -c dev -- notebooklm artifact list                              # 列出所有 artifacts
 
 mkdir -p /tmp/notebooklm
-notebooklm download audio /tmp/notebooklm/podcast.mp3
-notebooklm download slide-deck /tmp/notebooklm/slides.pdf
+doppler run -p notebooklm -c dev -- notebooklm download audio /tmp/notebooklm/podcast.mp3
+doppler run -p notebooklm -c dev -- notebooklm download slide-deck /tmp/notebooklm/slides.pdf
 ```
 
 **⚠️** 沒有 `artifact status` 命令，用 `artifact poll` 或 `artifact list`。
@@ -159,7 +182,7 @@ notebooklm download slide-deck /tmp/notebooklm/slides.pdf
 ### Step 6: 查詢筆記本
 
 ```bash
-notebooklm ask "你的問題"
+doppler run -p notebooklm -c dev -- notebooklm ask "你的問題"
 ```
 
 ***
@@ -169,13 +192,14 @@ notebooklm ask "你的問題"
 ### 研究主題 → 中文 Podcast
 
 ```bash
-notebooklm create "AI 研究"
-notebooklm use <id>
-notebooklm source add-research "AI 發展趨勢 2026" --mode deep
-notebooklm research wait --import-all --timeout 180
-notebooklm generate audio "深度講解" --format deep-dive --length long --language zh_Hant
-notebooklm artifact wait <task-id> --timeout 600
-notebooklm download audio /tmp/notebooklm/podcast.mp3
+doppler run -p notebooklm -c dev -- notebooklm create "AI 研究"
+doppler run -p notebooklm -c dev -- notebooklm use <id>
+doppler run -p notebooklm -c dev -- notebooklm source add-research "AI 發展趨勢 2026" --mode deep
+doppler run -p notebooklm -c dev -- notebooklm research wait --import-all --timeout 180
+doppler run -p notebooklm -c dev -- notebooklm generate audio "深度講解" --format deep-dive --length long --language zh_Hant
+# 以下步驟應委派子代理執行（見子代理等待模板）
+doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> --timeout 600
+doppler run -p notebooklm -c dev -- notebooklm download audio /tmp/notebooklm/podcast.mp3
 ```
 
 ***
