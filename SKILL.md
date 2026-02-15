@@ -83,28 +83,29 @@ notebooklm download slide-deck -a <task-id> /tmp/slides.pdf
 
 生成任務需 5-15 分鐘，**主代理禁止直接執行 `artifact wait`**（會阻塞超時）。
 
-⚠️ **必須嚴格照抄下方模板構建 `sessions_spawn` 的 task 參數**，不可自由改寫格式。子代理是 minimal mode，只有 `exec` 工具可用，開頭的「使用 exec 工具」和每行的 `exec` 前綴缺一不可。
+⚠️ **必須嚴格照抄下方模板構建 `sessions_spawn` 的 task 參數**，不可自由改寫格式。子代理是 minimal mode，只有 `exec` 和 `process` 兩個工具可用。
 
-流程：
+### 關鍵機制
 
-```
-主代理：generate --json → 取得 task-id → sessions_spawn → 告知用戶「生成中」
-子代理：artifact wait → download -a <task-id> → 返回路徑
-主代理：收到路徑 → 發送給用戶
-```
+artifact wait 會執行 5-15 分鐘，但 exec 在 10 秒後就會將命令送到背景，返回 `Command still running (session <session-id>)`。所以必須用以下模式：
+
+1. `exec {"command": "...", "background": true}` → 取得 session-id
+2. `process {"action": "poll", "sessionId": "<session-id>"}` → 反覆查詢直到 `Process exited`
+3. 完成後繼續下一步
 
 ### sessions\_spawn 模板（單任務）
 
 ```
-sessions_spawn task:"使用 exec 工具依序執行以下命令：
-1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> --timeout 600
-2. exec mkdir -p <output-dir>
-3. exec doppler run -p notebooklm -c dev -- notebooklm download <type> -a <task-id> <output-path>
-4. exec ls -la <output-path>
-如果 step 1 超時，執行 exec doppler run -p notebooklm -c dev -- notebooklm artifact poll <task-id> 檢查狀態：
-- in_progress → 再次 artifact wait
-- completed → 繼續 step 2
-- failed → 回報錯誤
+sessions_spawn task:"你有 exec 和 process 兩個工具。依序執行以下步驟：
+
+STEP 1: exec {"command": "mkdir -p <output-dir>"}
+STEP 2: exec {"command": "doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> --timeout 600", "background": true}
+  → 取得回傳的 session-id
+STEP 3: 反覆呼叫 process {"action": "poll", "sessionId": "<上一步的session-id>"} 每 30 秒一次，直到回傳包含 'Process exited' 為止
+  → 如果 exit code 不是 0，回報錯誤
+STEP 4: exec {"command": "doppler run -p notebooklm -c dev -- notebooklm download <type> -a <task-id> <output-path>"}
+STEP 5: exec {"command": "ls -la <output-path>"}
+
 最後回報下載的檔案路徑。"
 label:"NotebookLM 生成"
 runTimeoutSeconds: 900
@@ -115,18 +116,25 @@ runTimeoutSeconds: 900
 當同時生成多個內容（如中英文音頻 + 簡報）時，用**一個**子代理依序 wait + download 所有任務：
 
 ```
-sessions_spawn task:"使用 exec 工具依序執行以下命令：
-1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-1> --timeout 600
-2. exec doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id-1> <output-dir>/podcast_zh.mp3
-3. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-2> --timeout 600
-4. exec doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id-2> <output-dir>/podcast_en.mp3
-5. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-3> --timeout 600
-6. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id-3> <output-dir>/slides_zh.pdf
-7. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-4> --timeout 600
-8. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id-4> <output-dir>/slides_en.pdf
-9. exec ls -la <output-dir>/
-如果某個 wait 超時，用 artifact poll 檢查狀態後繼續。
-最後回報所有下載的檔案路徑。"
+sessions_spawn task:"你有 exec 和 process 兩個工具。依序執行以下步驟：
+
+STEP 1: exec {"command": "mkdir -p <output-dir>"}
+
+對以下每一組 (task-id, type, output-path)，依序執行 STEP A → B → C：
+- (<task-id-1>, audio, <output-dir>/podcast_zh.mp3)
+- (<task-id-2>, audio, <output-dir>/podcast_en.mp3)
+- (<task-id-3>, slide-deck, <output-dir>/slides_zh.pdf)
+- (<task-id-4>, slide-deck, <output-dir>/slides_en.pdf)
+
+STEP A: exec {"command": "doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> --timeout 600", "background": true}
+  → 取得回傳的 session-id
+STEP B: 反覆呼叫 process {"action": "poll", "sessionId": "<session-id>"} 每 30 秒一次，直到 'Process exited'
+  → exit code 非 0 就跳過這組，繼續下一組
+STEP C: exec {"command": "doppler run -p notebooklm -c dev -- notebooklm download <type> -a <task-id> <output-path>"}
+
+全部完成後：
+exec {"command": "ls -la <output-dir>/"}
+回報所有下載的檔案路徑。"
 label:"NotebookLM 多任務生成"
 runTimeoutSeconds: 2700
 ```
