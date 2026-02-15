@@ -35,13 +35,16 @@ CLI: `notebooklm` (install: `pip install notebooklm-py`)
 ### 子代理等待模板
 
 ```
-sessions_spawn task:"執行以下任務：
-1. notebooklm artifact wait <task-id> --timeout 300
-2. 成功 → 下載 → 返回路徑
-3. 超時 → artifact poll <task-id>
-   - processing → 再次 wait
-   - completed → 下載
-   - failed → 返回錯誤"
+sessions_spawn task:"使用 exec 工具依序執行以下命令：
+1. exec notebooklm artifact wait <task-id> --timeout 600
+2. exec mkdir -p /tmp/notebooklm
+3. exec notebooklm download audio /tmp/notebooklm/podcast.mp3
+4. exec ls -la /tmp/notebooklm/podcast.mp3
+如果 step 1 超時，執行 exec notebooklm artifact poll <task-id> 檢查狀態：
+- in_progress → 再次 artifact wait
+- completed → 繼續 step 2
+- failed → 回報錯誤
+最後回報下載的檔案路徑。"
 label:"NotebookLM 生成"
 ```
 
@@ -70,11 +73,13 @@ label:"NotebookLM 生成"
 
 | 命令 | 中文設定方式 |
 |------|-------------|
-| audio, slide-deck, video, infographic, report, data-table | `--language zh-TW` |
+| audio, slide-deck, video, infographic, report, data-table | `--language zh_Hant` |
 | quiz, flashcards | DESCRIPTION 寫「請用繁體中文...」 |
 | mind-map | 無法指定，取決於來源內容 |
 
-常用語言代碼：`zh-TW`(繁中), `zh-CN`(簡中), `en`, `ja`, `ko`
+⚠️ **語言代碼用底線不用連字號**：`zh_Hant`(繁中), `zh_Hans`(簡中), `en`, `ja`, `ko`
+
+執行 `notebooklm language list` 查看所有支援的語言代碼。
 
 ***
 
@@ -133,7 +138,7 @@ notebooklm source add "/path/to/file.md"             # 本地檔案
 可用類型：`audio`, `video`, `slide-deck`, `quiz`, `report`, `flashcards`, `infographic`, `mind-map`, `data-table`
 
 ```bash
-notebooklm generate audio "教學講解" --format deep-dive --language zh-TW
+notebooklm generate audio "教學講解" --format deep-dive --language zh_Hant
 notebooklm generate quiz "請用繁體中文製作測驗" --difficulty hard
 ```
 
@@ -168,7 +173,7 @@ notebooklm create "AI 研究"
 notebooklm use <id>
 notebooklm source add-research "AI 發展趨勢 2026" --mode deep
 notebooklm research wait --import-all --timeout 180
-notebooklm generate audio "深度講解" --format deep-dive --length long --language zh-TW
+notebooklm generate audio "深度講解" --format deep-dive --length long --language zh_Hant
 notebooklm artifact wait <task-id> --timeout 600
 notebooklm download audio /tmp/notebooklm/podcast.mp3
 ```
@@ -182,6 +187,7 @@ notebooklm download audio /tmp/notebooklm/podcast.mp3
 | Not logged in | `notebooklm login` |
 | No notebook selected | `notebooklm use <id>` |
 | Generation timeout | 增加 `--timeout 600` |
+| Unknown language code | 用底線：`zh_Hant` 非 `zh-TW`，執行 `language list` 查詢 |
 
 ## 參考資料
 
