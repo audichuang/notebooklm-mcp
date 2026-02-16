@@ -117,6 +117,8 @@ doppler run -p notebooklm -c dev -- bash -c '
 
 多個生成任務時，用 `&` **並行**輪詢 + `wait` 等全部完成，總時間 = 最慢那一個：
 
+⚠️ **exec timeout 預設 1800 秒（30 分鐘）**。需設定足夠的 timeout：`exec {"timeout": 3600, "background": true, "command": "..."}`
+
 ```bash
 mkdir -p <output-dir>
 
