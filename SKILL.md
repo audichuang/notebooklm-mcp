@@ -101,14 +101,14 @@ mkdir -p <output-dir>
 # 用 exec background:true 執行，不要同步等待
 doppler run -p notebooklm -c dev -- bash -c '
   for i in $(seq 1 40); do
-    S=$(notebooklm artifact poll <task-id> 2>&1)
+    S=$(notebooklm artifact poll <task-id> -n <notebook-id> 2>&1)
     echo "$S"
     echo "$S" | grep -q "status=.completed" && break
     echo "$S" | grep -q "status=.failed" && exit 1
     [ $i -eq 40 ] && echo "POLL_TIMEOUT" && exit 1
     sleep 30
   done &&
-  notebooklm download <type> -a <task-id> <output-path> &&
+  notebooklm download <type> -a <task-id> -n <notebook-id> <output-path> &&
   echo "DOWNLOAD_COMPLETE: <output-path>"
 '
 ```
@@ -124,8 +124,8 @@ mkdir -p <output-dir>
 
 # 並行啟動所有輪詢，每組獨立互不影響
 doppler run -p notebooklm -c dev -- bash -c '
-  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-1> 2>&1); echo "[1] $S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-1>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-1>" && break; sleep 30; done && notebooklm download <type-1> -a <id-1> <path-1> && echo "[DONE] <path-1>") &
-  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-2> 2>&1); echo "[2] $S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-2>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-2>" && break; sleep 30; done && notebooklm download <type-2> -a <id-2> <path-2> && echo "[DONE] <path-2>") &
+  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-1> -n <notebook-id> 2>&1); echo "[1] $S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-1>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-1>" && break; sleep 30; done && notebooklm download <type-1> -a <id-1> -n <notebook-id> <path-1> && echo "[DONE] <path-1>") &
+  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-2> -n <notebook-id> 2>&1); echo "[2] $S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-2>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-2>" && break; sleep 30; done && notebooklm download <type-2> -a <id-2> -n <notebook-id> <path-2> && echo "[DONE] <path-2>") &
   wait
   ls -la <output-dir>/
 '
@@ -145,6 +145,7 @@ ls -la <output-dir>/
 
 ### 禁止事項
 
+* ❌ `artifact poll` / `download` 不加 `-n <notebook-id>`（會讀到 context.json 的舊 notebook，導致永遠 pending）
 * ❌ 用 `sessions_spawn` 委派子代理等待（子代理 `notifyOnExit=false`，收不到完成通知）
 * ❌ `download` 不加 `-a <task-id>`（多個同類型 artifact 會下載到同一個）
 * ❌ `generate` 不加 `--json`（無法取得 task-id）
