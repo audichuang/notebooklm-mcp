@@ -9,10 +9,12 @@ CLI: `notebooklm` (install: `pip install notebooklm-py`)
 
 所有命令前綴：`doppler run -p notebooklm -c dev --`
 
+不確定命令時，先執行 `notebooklm <command> --help` 確認。
+
 ## 核心流程
 
 ```
-認證 → 筆記本 → 加入來源 → 生成內容 → 等待 → 下載
+認證 → 筆記本 → 加入來源 → 生成內容 → 子代理等待 → 下載
 ```
 
 ### 認證
@@ -55,98 +57,91 @@ notebooklm research wait --import-all --timeout 180                   # 等待�
 可用類型：`audio`, `video`, `slide-deck`, `quiz`, `report`, `flashcards`, `infographic`, `mind-map`, `data-table`
 
 ```bash
-notebooklm generate audio "教學講解" --format deep-dive --language zh_Hant --json -n <notebook-id>
+doppler run -p notebooklm -c dev -- notebooklm generate audio "教學講解" --format deep-dive --language zh_Hant --json -n <notebook-id>
 ```
 
 **必須加 `--json`** 才能取得 task-id 供後續下載使用。
 
 ### 等待與下載
 
-⚠️ **download 預設下載 `--latest`（最新一個同類型 artifact）。多個同類型 artifact 時，不加 `-a` 會重複下載同一個檔案。**
-
 ```bash
-# 等待與查詢
-notebooklm artifact wait <task-id> --timeout 600      # 等待完成
-notebooklm artifact poll <task-id>                     # 單次查詢狀態
-notebooklm artifact list -n <notebook-id>              # 列出所有 artifacts
+# 查詢狀態
+doppler run -p notebooklm -c dev -- notebooklm artifact poll <task-id> -n <notebook-id>
+doppler run -p notebooklm -c dev -- notebooklm artifact list -n <notebook-id>
 
 # 下載——必須用 -a 指定 artifact ID
-notebooklm download audio -a <task-id> /tmp/podcast.mp3
-notebooklm download slide-deck -a <task-id> /tmp/slides.pdf
+mkdir -p /tmp/notebooklm
+doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id> -n <notebook-id> /tmp/notebooklm/podcast.mp3
+doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id> -n <notebook-id> /tmp/notebooklm/slides.pdf
 ```
 
 沒有 `artifact status` 命令，用 `artifact poll` 或 `artifact list`。
 
+### 查詢筆記本
+
+```bash
+doppler run -p notebooklm -c dev -- notebooklm ask "你的問題" -n <notebook-id>
+```
+
 ***
 
-## 背景等待與下載
+## 子代理處理
 
-生成任務需 5-15 分鐘。**不使用 `sessions_spawn` 子代理**（子代理無法持續等待長時間任務）。
+生成任務需 **5-15 分鐘**，必須用 `sessions_spawn` 委派子代理等待，避免主代理阻塞超時。
 
 ### 流程
 
 ```
-1. generate --json → 取得 task-id
-2. exec background:true → shell while loop（poll + sleep + download 全在一個 shell 裡）
-3. 告知用戶「生成中，完成會通知」
-4. 系統自動發送 "Exec completed" 通知（主代理 notifyOnExit=true）
-5. 收到通知 → 檢查輸出目錄 → 發送檔案給用戶
+主代理：觸發 generate --json → 取得 task-id → sessions_spawn 委派子代理 → 告知用戶「生成中」
+子代理：artifact wait <task-id> → 完成後下載 → 返回路徑
+主代理：收到子代理結果 → 發送給用戶
 ```
 
-### 單任務命令
+### 單任務子代理模板
 
-```bash
-mkdir -p <output-dir>
-
-# 用 exec background:true 執行，不要同步等待
-doppler run -p notebooklm -c dev -- bash -c '
-  for i in $(seq 1 40); do
-    S=$(notebooklm artifact poll <task-id> -n <notebook-id> 2>&1)
-    echo "$S"
-    echo "$S" | grep -q "status=.completed" && break
-    echo "$S" | grep -q "status=.failed" && exit 1
-    [ $i -eq 40 ] && echo "POLL_TIMEOUT" && exit 1
-    sleep 30
-  done &&
-  notebooklm download <type> -a <task-id> -n <notebook-id> <output-path> &&
-  echo "DOWNLOAD_COMPLETE: <output-path>"
-'
+```
+sessions_spawn task:"使用 exec 工具依序執行以下命令：
+1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id> -n <notebook-id> --timeout 600
+2. exec mkdir -p /tmp/notebooklm
+3. exec doppler run -p notebooklm -c dev -- notebooklm download <type> -a <task-id> -n <notebook-id> /tmp/notebooklm/<filename>
+4. exec ls -la /tmp/notebooklm/<filename>
+如果 step 1 超時，執行 exec doppler run -p notebooklm -c dev -- notebooklm artifact poll <task-id> -n <notebook-id> 檢查狀態：
+- in_progress → 再次 artifact wait
+- completed → 繼續 step 3
+- failed → 回報錯誤
+最後回報下載的檔案路徑。"
+label:"NotebookLM 生成"
 ```
 
-### 多任務命令
+### 多任務子代理模板
 
-多個生成任務時，用 `&` **並行**輪詢 + `wait` 等全部完成，總時間 = 最慢那一個：
+當需要同時生成多個內容（如中英文音頻 + 簡報）時：
 
-⚠️ **exec timeout 預設 1800 秒（30 分鐘）**。需設定足夠的 timeout：`exec {"timeout": 3600, "background": true, "command": "..."}`
+1. 在主代理中**依序**啟動所有 generate 任務，記錄每個 task-id
+2. 用**一個**子代理依序 wait + download 所有任務
+3. 下載路徑必須包含語言/類型標識，避免覆蓋
 
-```bash
-mkdir -p <output-dir>
-
-# 並行啟動所有輪詢，每組獨立互不影響
-doppler run -p notebooklm -c dev -- bash -c '
-  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-1> -n <notebook-id> 2>&1); echo "[1] $S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-1>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-1>" && break; sleep 30; done && notebooklm download <type-1> -a <id-1> -n <notebook-id> <path-1> && echo "[DONE] <path-1>") &
-  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-2> -n <notebook-id> 2>&1); echo "[2] $S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-2>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-2>" && break; sleep 30; done && notebooklm download <type-2> -a <id-2> -n <notebook-id> <path-2> && echo "[DONE] <path-2>") &
-  wait
-  ls -la <output-dir>/
-'
 ```
-
-### 收到 "Exec completed" 通知後
-
-```bash
-# 1. 用 process log 查看背景命令的輸出，確認哪些成功/失敗
-process {"action": "log", "sessionId": "<session-id>"}
-
-# 2. 檢查輸出目錄
-ls -la <output-dir>/
-
-# 3. 如果有檔案，用 send_file 發送給用戶
+sessions_spawn task:"使用 exec 工具依序執行以下命令：
+1. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-1> -n <notebook-id> --timeout 600
+2. exec doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id-1> -n <notebook-id> /tmp/notebooklm/<描述>_zh.mp3
+3. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-2> -n <notebook-id> --timeout 600
+4. exec doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id-2> -n <notebook-id> /tmp/notebooklm/<描述>_en.mp3
+5. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-3> -n <notebook-id> --timeout 600
+6. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id-3> -n <notebook-id> /tmp/notebooklm/<描述>_zh.pdf
+7. exec doppler run -p notebooklm -c dev -- notebooklm artifact wait <task-id-4> -n <notebook-id> --timeout 600
+8. exec doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id-4> -n <notebook-id> /tmp/notebooklm/<描述>_en.pdf
+9. exec ls -la /tmp/notebooklm/
+如果某個 wait 超時，用 artifact poll -n <notebook-id> 檢查狀態後繼續。
+最後回報所有下載的檔案路徑。"
+label:"NotebookLM 多任務生成"
 ```
 
 ### 禁止事項
 
-* ❌ `artifact poll` / `download` 不加 `-n <notebook-id>`（會讀到 context.json 的舊 notebook，導致永遠 pending）
-* ❌ 用 `sessions_spawn` 委派子代理等待（子代理 `notifyOnExit=false`，收不到完成通知）
+* ❌ 主代理直接執行 `artifact wait`（會阻塞）
+* ❌ 用 `exec background:true` 替代 `sessions_spawn`（heartbeat 通知在 Telegram 上不可靠）
+* ❌ `artifact poll` / `download` 不加 `-n <notebook-id>`（會讀到 context.json 的舊 notebook）
 * ❌ `download` 不加 `-a <task-id>`（多個同類型 artifact 會下載到同一個）
 * ❌ `generate` 不加 `--json`（無法取得 task-id）
 * ❌ 超時後不檢查狀態就放棄
@@ -171,7 +166,7 @@ ls -la <output-dir>/
 ## 常見錯誤
 
 | 錯誤 | 解決方案 |
-|------|---------|
+|------|----------|
 | Not logged in | `notebooklm login` |
 | No notebook selected | 改用 `-n <id>` 指定 |
 | Generation timeout | 增加 `--timeout 600`，超時不代表失敗 |
