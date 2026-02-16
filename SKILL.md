@@ -79,55 +79,65 @@ notebooklm download slide-deck -a <task-id> /tmp/slides.pdf
 
 ***
 
-## 子代理處理
+## 背景等待與下載
 
-生成任務需 5-15 分鐘，**主代理禁止直接執行 `artifact wait`**（會阻塞超時）。
+生成任務需 5-15 分鐘。**不使用 `sessions_spawn` 子代理**（子代理 `notifyOnExit=false`，無法收到完成通知）。
 
-⚠️ **必須嚴格照抄下方模板構建 `sessions_spawn` 的 task 參數**，不可自由改寫格式。子代理是 minimal mode，只有 `exec` 和 `process` 兩個工具可用。
-
-### 關鍵機制
-
-exec 的 `yieldMs` 預設 10 秒，超過就會把命令送到背景。子代理模型無法可靠地管理長時間 polling loop（實測 5 次全失敗，都在 poll 1-3 次後放棄）。
-
-**解法**：把等待邏輯封裝在 shell `while` loop 裡，整個 wait→download 在一個進程內完成。子代理只需要啟動這個命令、然後用 `process poll` 監控一個 session 直到結束。
-
-### sessions\_spawn 模板（單任務）
+### 流程
 
 ```
-sessions_spawn task:"使用 exec 工具依序執行以下命令：
-1. exec mkdir -p <output-dir>
-2. exec doppler run -p notebooklm -c dev -- bash -c 'while true; do S=$(notebooklm artifact poll <task-id> 2>&1); echo "$S"; echo "$S" | grep -q completed && break; echo "$S" | grep -q failed && exit 1; sleep 30; done && notebooklm download <type> -a <task-id> <output-path> && echo DOWNLOAD_COMPLETE'
-3. exec ls -la <output-path>
-最後回報下載的檔案路徑。"
-label:"NotebookLM 生成"
-runTimeoutSeconds: 900
+1. generate --json → 取得 task-id
+2. exec background:true → shell while loop（poll + sleep + download 全在一個 shell 裡）
+3. 告知用戶「生成中，完成會通知」
+4. 系統自動發送 "Exec completed" 通知（主代理 notifyOnExit=true）
+5. 收到通知 → 檢查輸出目錄 → 發送檔案給用戶
 ```
 
-### sessions\_spawn 模板（多任務）
-
-當同時生成多個內容（如中英文音頻 + 簡報）時，用**一個**子代理依序 wait + download 所有任務。
-
-**主代理構建方式**：每組 (task-id, type, output-path) 生成一個 shell block，用 `;` 連接：
+### 單任務命令
 
 ```bash
-# shell block 模板（每組一個，不需要 doppler 前綴，外層 bash -c 已注入環境變數）：
-(while true; do S=$(notebooklm artifact poll <task-id> 2>&1); echo "$S"; echo "$S" | grep -q completed && break; echo "$S" | grep -q failed && echo "[SKIP] <task-id>" && break; sleep 30; done && notebooklm download <type> -a <task-id> <output-path> && echo "[DONE] <output-path>")
+mkdir -p <output-dir>
+
+# 用 exec background:true 執行，不要同步等待
+doppler run -p notebooklm -c dev -- bash -c '
+  while true; do
+    S=$(notebooklm artifact poll <task-id> 2>&1)
+    echo "$S"
+    echo "$S" | grep -q completed && break
+    echo "$S" | grep -q failed && exit 1
+    sleep 30
+  done &&
+  notebooklm download <type> -a <task-id> <output-path> &&
+  echo "DOWNLOAD_COMPLETE: <output-path>"
+'
 ```
 
-```
-sessions_spawn task:"使用 exec 工具依序執行以下命令：
-1. exec mkdir -p <output-dir>
-2. exec doppler run -p notebooklm -c dev -- bash -c '<block-1> ; <block-2> ; <block-3> ; <block-4> ; ls -la <output-dir>/'
-最後回報所有下載的檔案路徑。"
-label:"NotebookLM 多任務生成"
-runTimeoutSeconds: 2700
+### 多任務命令
+
+多個生成任務時，把每組 poll+download 包在 `()` 裡用 `;` 串接，**一個 `exec background:true`** 搞定：
+
+```bash
+mkdir -p <output-dir>
+
+# 每組獨立：一組失敗不影響其他組
+doppler run -p notebooklm -c dev -- bash -c '
+  (while true; do S=$(notebooklm artifact poll <id-1> 2>&1); echo "$S"; echo "$S" | grep -q completed && break; echo "$S" | grep -q failed && echo "[SKIP] <id-1>" && break; sleep 30; done && notebooklm download <type-1> -a <id-1> <path-1> && echo "[DONE] <path-1>") ;
+  (while true; do S=$(notebooklm artifact poll <id-2> 2>&1); echo "$S"; echo "$S" | grep -q completed && break; echo "$S" | grep -q failed && echo "[SKIP] <id-2>" && break; sleep 30; done && notebooklm download <type-2> -a <id-2> <path-2> && echo "[DONE] <path-2>") ;
+  ls -la <output-dir>/
+'
 ```
 
-⚠️ **超時計算**：`runTimeoutSeconds = 任務數 × 單次 wait timeout + 300`
+### 收到 "Exec completed" 通知後
+
+```bash
+# 檢查輸出
+ls -la <output-dir>/
+# 如果有檔案，發送給用戶
+```
 
 ### 禁止事項
 
-* ❌ 主代理直接執行 `artifact wait`（會阻塞）
+* ❌ 用 `sessions_spawn` 委派子代理等待（子代理收不到完成通知）
 * ❌ `download` 不加 `-a <task-id>`（多個同類型 artifact 會下載到同一個）
 * ❌ `generate` 不加 `--json`（無法取得 task-id）
 * ❌ 超時後不檢查狀態就放棄
@@ -162,5 +172,4 @@ runTimeoutSeconds: 2700
 ## 參考資料
 
 * [cli-reference.md](references/cli-reference.md) — 完整 CLI 命令參考（generate 各類型參數詳解）
-* [subagent-templates.md](references/subagent-templates.md) — 子代理等待模板（單任務 / 多任務）
 * [troubleshooting.md](references/troubleshooting.md) — 疑難排解指南（認證、研究、生成、Doppler）
