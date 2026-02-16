@@ -100,11 +100,12 @@ mkdir -p <output-dir>
 
 # 用 exec background:true 執行，不要同步等待
 doppler run -p notebooklm -c dev -- bash -c '
-  while true; do
+  for i in $(seq 1 40); do
     S=$(notebooklm artifact poll <task-id> 2>&1)
     echo "$S"
-    echo "$S" | grep -q completed && break
-    echo "$S" | grep -q failed && exit 1
+    echo "$S" | grep -q "status=.completed" && break
+    echo "$S" | grep -q "status=.failed" && exit 1
+    [ $i -eq 40 ] && echo "POLL_TIMEOUT" && exit 1
     sleep 30
   done &&
   notebooklm download <type> -a <task-id> <output-path> &&
@@ -116,13 +117,15 @@ doppler run -p notebooklm -c dev -- bash -c '
 
 多個生成任務時，把每組 poll+download 包在 `()` 裡用 `;` 串接，**一個 `exec background:true`** 搞定：
 
+⚠️ **exec timeout 預設 1800 秒（30 分鐘）**。多任務序列化等待可能超過此限制，需設定足夠的 timeout（秒）：`exec {"timeout": 3600, "background": true, "command": "..."}`
+
 ```bash
 mkdir -p <output-dir>
 
 # 每組獨立：一組失敗不影響其他組
 doppler run -p notebooklm -c dev -- bash -c '
-  (while true; do S=$(notebooklm artifact poll <id-1> 2>&1); echo "$S"; echo "$S" | grep -q completed && break; echo "$S" | grep -q failed && echo "[SKIP] <id-1>" && break; sleep 30; done && notebooklm download <type-1> -a <id-1> <path-1> && echo "[DONE] <path-1>") ;
-  (while true; do S=$(notebooklm artifact poll <id-2> 2>&1); echo "$S"; echo "$S" | grep -q completed && break; echo "$S" | grep -q failed && echo "[SKIP] <id-2>" && break; sleep 30; done && notebooklm download <type-2> -a <id-2> <path-2> && echo "[DONE] <path-2>") ;
+  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-1> 2>&1); echo "$S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-1>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-1>" && break; sleep 30; done && notebooklm download <type-1> -a <id-1> <path-1> && echo "[DONE] <path-1>") ;
+  (for i in $(seq 1 40); do S=$(notebooklm artifact poll <id-2> 2>&1); echo "$S"; echo "$S" | grep -q "status=.completed" && break; echo "$S" | grep -q "status=.failed" && echo "[SKIP] <id-2>" && break; [ $i -eq 40 ] && echo "[TIMEOUT] <id-2>" && break; sleep 30; done && notebooklm download <type-2> -a <id-2> <path-2> && echo "[DONE] <path-2>") ;
   ls -la <output-dir>/
 '
 ```
@@ -130,14 +133,18 @@ doppler run -p notebooklm -c dev -- bash -c '
 ### 收到 "Exec completed" 通知後
 
 ```bash
-# 檢查輸出
+# 1. 用 process log 查看背景命令的輸出，確認哪些成功/失敗
+process {"action": "log", "sessionId": "<session-id>"}
+
+# 2. 檢查輸出目錄
 ls -la <output-dir>/
-# 如果有檔案，發送給用戶
+
+# 3. 如果有檔案，用 send_file 發送給用戶
 ```
 
 ### 禁止事項
 
-* ❌ 用 `sessions_spawn` 委派子代理等待（子代理收不到完成通知）
+* ❌ 用 `sessions_spawn` 委派子代理等待（子代理 `notifyOnExit=false`，收不到完成通知）
 * ❌ `download` 不加 `-a <task-id>`（多個同類型 artifact 會下載到同一個）
 * ❌ `generate` 不加 `--json`（無法取得 task-id）
 * ❌ 超時後不檢查狀態就放棄
