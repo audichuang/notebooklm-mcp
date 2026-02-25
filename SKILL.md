@@ -173,7 +173,78 @@ label:"NotebookLM 多任務生成"
 | Unknown language code | 用底線：`zh_Hant` 非 `zh-TW` |
 | 重複下載同一檔案 | `download` 加 `-a <task-id>` |
 
+## 連續性 Podcast（季播型續集）
+
+將資料轉化為多集連續性 Podcast。採用**序列回饋法**——每集完成後將音檔上傳回筆記本，AI 自動轉錄為逐字稿，下一集即擁有前集完整記憶。
+
+核心循環：**生成 → 下載 → ♻️ 上傳音檔回筆記本 → 生成下一集**
+
+### 自動化腳本
+
+```bash
+# 預覽模式
+python scripts/episodic_podcast.py --config series_config.yaml --dry-run
+
+# 生成全部集數（序列回饋法）
+python scripts/episodic_podcast.py --config series_config.yaml
+
+# 續製（從第 3 集開始）
+python scripts/episodic_podcast.py --config series_config.yaml --start 3
+
+# 加上知識蒸餾（可選）
+python scripts/episodic_podcast.py --config series_config.yaml --distill
+```
+
+配置檔範例見 [series_config_example.yaml](scripts/series_config_example.yaml)。
+
+### 手動執行流程
+
+1. **建立筆記本** → `notebooklm create "節目名稱"`
+2. **上傳第一集來源** → `source add "file.md" -n <id>`
+3. **生成第一集** → `generate audio "身份綁定+本集指令" --format deep-dive --language zh_Hant --json -n <id>`
+4. **等待+下載** → `artifact wait <task-id>` → `download audio -a <task-id> /tmp/ep01.mp3`
+5. **♻️ 上傳音檔回筆記本** → `source add /tmp/ep01.mp3 --title "EP01_第1集對話紀錄" -n <id>`
+6. **生成第二集** → 提示詞中要求先讀取 EP01 音檔來源，回顧上集對話
+7. **循環步驟 4-6 至完成**
+
+### 客製化指令模板（每集必須包含）
+
+```
+# 身份綁定（每集貼入）
+This is the podcast called "節目名稱".
+Male host: "Leo", Female host: "Ruby".
+Announce the show name at the beginning.
+Style: [風格描述]. No filler words. No interruptions.
+
+# 續集銜接（第 2 集起追加）
+IMPORTANT: First read the source titled "ep01_xxx.mp3" —
+it contains the FULL transcript of your conversation from the previous episode.
+Recap 2-3 specific points you discussed (reference actual things you said).
+Do NOT re-introduce background already covered.
+```
+
+### 超級提示詞策略
+
+| 策略 | 時機 | 效果 |
+|------|------|------|
+| 矛盾放大法 | 中期引入新觀點 | 雙主持人引用原文對辯 |
+| 來源缺口探測 | 季末回顧 | 找出論述漏洞，為下季鋪陳 |
+| 動態辯證法 | 解析單一視角文本 | 假設作者為不可靠敘事者 |
+| 逐字朗讀駭客 | 經典文獻導讀 | 強制先朗讀原文再討論 |
+
+完整模板見 [episodic_prompts.md](references/episodic_prompts.md)。
+
+### 連續性製作禁忌
+
+* ❌ 一次上傳全部章節（會被過度壓縮，深度不足）
+* ❌ 忘記將前集音檔上傳回筆記本（AI 會「失憶」重新開始）
+* ❌ 每集使用不同的人設指令（角色會漂移）
+* ❌ 來源命名隨意（用結構化命名如 `EP01_第1集對話紀錄`）
+
+***
+
 ## 參考資料
 
 * [cli-reference.md](references/cli-reference.md) — 完整 CLI 命令參考（generate 各類型參數詳解）
 * [troubleshooting.md](references/troubleshooting.md) — 疑難排解指南（認證、研究、生成、Doppler）
+* [episodic_prompts.md](references/episodic_prompts.md) — 連續性 Podcast 超級提示詞模板庫

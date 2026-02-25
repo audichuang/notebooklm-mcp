@@ -1,0 +1,52 @@
+# 連續性 Podcast 配置檔範例
+# 用法: python scripts/episodic_podcast.py --config series_config_example.yaml --dry-run
+
+series:
+  name: "深入白鯨記"
+  notebook_id: null  # null = 自動建立新筆記本; 或填入現有 ID
+  hosts:
+    host_a: "Leo"
+    host_b: "Ruby"
+  style: "深度探討、學術但不枯燥、帶有幽默感"
+  language: "zh_Hant"   # zh_Hant / en / ja / ko
+  format: "deep-dive"   # deep-dive / brief / critique / debate
+  length: "long"        # short / default / long
+
+episodes:
+  - title: "伊什梅爾的啟程"
+    sources:
+      - path: "./sources/chapter_01.md"
+        title: "白鯨記第一章"
+    custom_prompt: |
+      這是系列節目的第一集。
+      重點探討伊什梅爾為何離開陸地、19 世紀捕鯨業的社會背景。
+      為下一集埋下「亞哈船長」的伏筆。
+    strategy: null  # 第一集不需要策略
+
+  - title: "亞哈船長的執念"
+    sources:
+      - path: "./sources/chapter_02_03.md"
+        title: "白鯨記第二至三章"
+    custom_prompt: |
+      本集聚焦亞哈船長的角色塑造與其執念的心理學解讀。
+      請與上一集關於伊什梅爾的理性形成對比。
+    strategy: "contradiction"  # 使用矛盾放大法
+
+  - title: "白鯨的象徵"
+    sources:
+      - path: "./sources/chapter_04_06.md"
+        title: "白鯨記第四至六章"
+      - path: "./sources/literary_analysis.pdf"
+        title: "學術論文：白鯨的多重象徵意義"
+    custom_prompt: |
+      探討白鯨作為文學象徵的多重解讀：
+      自然的力量、命運的不可抗拒、還是人類執念的投射？
+    strategy: "dialectical"  # 使用動態辯證法
+
+  - title: "季末回顧：未解之謎"
+    sources: []  # 不需新來源，依賴前三集的蒸餾摘要
+    custom_prompt: |
+      這是本季的最後一集。
+      請回顧前三集的所有討論，指出我們遺漏了哪些重要觀點。
+      為可能的「第二季」提出三個值得深入探討的方向。
+    strategy: "source_gap"  # 使用來源缺口探測法
