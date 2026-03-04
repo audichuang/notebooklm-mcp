@@ -101,6 +101,11 @@ def load_config(path: str) -> dict:
     if not config.get("episodes"):
         print("❌ 配置檔中沒有 episodes")
         sys.exit(1)
+    # 驗證每集必須有 artifact_title
+    for i, ep in enumerate(config["episodes"], start=1):
+        if not ep.get("artifact_title"):
+            print(f"❌ 第 {i} 集缺少 artifact_title 欄位（每集必須指定 artifact_title 供重命名用）")
+            sys.exit(1)
     return config
 
 
@@ -315,6 +320,18 @@ def wait_and_download(
     return dry_run
 
 
+def rename_artifact(
+    task_id: str,
+    notebook_id: str,
+    new_title: str,
+    dry_run: bool,
+) -> None:
+    """重命名 artifact（task_id 即 artifact_id）。"""
+    print(f"   ✏️ 重命名 artifact: {new_title}")
+    nbm("artifact", "rename", task_id, new_title,
+         notebook_id=notebook_id, dry_run=dry_run)
+
+
 def feedback_audio(
     audio_path: str,
     episode_num: int,
@@ -439,6 +456,11 @@ def run_series(config: dict, args: argparse.Namespace):
         success = wait_and_download(
             task_id, notebook_id, output_path, args.dry_run, args.skip_wait
         )
+
+        # 4.5 重命名 artifact
+        artifact_title = episode.get("artifact_title", ep_title)
+        print(f"\n[4.5/{total_steps}] 重命名 artifact...")
+        rename_artifact(task_id, notebook_id, artifact_title, args.dry_run)
 
         # 5. 音檔回傳（序列回饋法核心）
         if not args.skip_wait:

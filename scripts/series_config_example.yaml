@@ -14,6 +14,7 @@ series:
 
 episodes:
   - title: "伊什梅爾的啟程"
+    artifact_title: "EP01 伊什梅爾的啟程 — 深入白鯨記"  # 必填，生成後重命名 artifact
     sources:
       - path: "./sources/chapter_01.md"
         title: "白鯨記第一章"
@@ -24,6 +25,7 @@ episodes:
     strategy: null  # 第一集不需要策略
 
   - title: "亞哈船長的執念"
+    artifact_title: "EP02 亞哈船長的執念 — 深入白鯨記"
     sources:
       - path: "./sources/chapter_02_03.md"
         title: "白鯨記第二至三章"
@@ -33,6 +35,7 @@ episodes:
     strategy: "contradiction"  # 使用矛盾放大法
 
   - title: "白鯨的象徵"
+    artifact_title: "EP03 白鯨的象徵 — 深入白鯨記"
     sources:
       - path: "./sources/chapter_04_06.md"
         title: "白鯨記第四至六章"
@@ -44,6 +47,7 @@ episodes:
     strategy: "dialectical"  # 使用動態辯證法
 
   - title: "季末回顧：未解之謎"
+    artifact_title: "EP04 季末回顧：未解之謎 — 深入白鯨記"
     sources: []  # 不需新來源，依賴前三集的蒸餾摘要
     custom_prompt: |
       這是本季的最後一集。
