@@ -5,7 +5,7 @@ description: "Manages Google NotebookLM notebooks via notebooklm-py CLI. Creates
 
 # NotebookLM
 
-CLI: `notebooklm` (install: `pip install notebooklm-py`)
+CLI: `notebooklm` (install: `uv tool install notebooklm-py`)
 
 所有命令前綴：`doppler run -p notebooklm -c dev --`
 
@@ -183,16 +183,16 @@ label:"NotebookLM 多任務生成"
 
 ```bash
 # 預覽模式
-python scripts/episodic_podcast.py --config series_config.yaml --dry-run
+uv run scripts/episodic_podcast.py --config series_config.yaml --dry-run
 
 # 生成全部集數（序列回饋法）
-python scripts/episodic_podcast.py --config series_config.yaml
+uv run scripts/episodic_podcast.py --config series_config.yaml
 
 # 續製（從第 3 集開始）
-python scripts/episodic_podcast.py --config series_config.yaml --start 3
+uv run scripts/episodic_podcast.py --config series_config.yaml --start 3
 
 # 加上知識蒸餾（可選）
-python scripts/episodic_podcast.py --config series_config.yaml --distill
+uv run scripts/episodic_podcast.py --config series_config.yaml --distill
 ```
 
 配置檔範例見 [series_config_example.yaml](scripts/series_config_example.yaml)。
@@ -200,12 +200,16 @@ python scripts/episodic_podcast.py --config series_config.yaml --distill
 ### 手動執行流程
 
 1. **建立筆記本** → `notebooklm create "節目名稱"`
-2. **上傳第一集來源** → `source add "file.md" -n <id>`
-3. **生成第一集** → `generate audio "身份綁定+本集指令" --format deep-dive --language zh_Hant --json -n <id>`
+2. **上傳來源** → `source add "file.md" -n <id>`
+3. **生成該集** → `generate audio "身份綁定+本集指令" --format deep-dive --language zh_Hant --json -n <id>`
 4. **等待+下載** → `artifact wait <task-id>` → `download audio -a <task-id> /tmp/ep01.mp3`
-5. **♻️ 上傳音檔回筆記本** → `source add /tmp/ep01.mp3 --title "EP01_第1集對話紀錄" -n <id>`
-6. **生成第二集** → 提示詞中要求先讀取 EP01 音檔來源，回顧上集對話
-7. **循環步驟 4-6 至完成**
+5. **重命名 artifact** → `artifact rename <task-id> "EP1 節目標題" -n <id>`
+6. **♻️ 上傳音檔回筆記本** → `source add /tmp/ep01.mp3 --title "EP01_第1集對話紀錄" -n <id>`
+7. **等待 source ready** → 確認 `source list` 中音檔狀態為 `ready`（~2-3 分鐘）
+8. **生成下一集** → 提示詞中要求先讀取前集音檔來源，`-s` 加入前集 source ID
+9. **循環步驟 4-8 至所有集數完成**
+
+⚠️ **步驟 5-6 適用於每一集，包含最後一集！** 最後一集也必須重命名 artifact 並上傳音檔回筆記本，確保筆記本擁有完整記錄，可用 `source fulltext` 取得逐字稿審閱內容。
 
 ### 客製化指令模板（每集必須包含）
 
@@ -238,8 +242,10 @@ Do NOT re-introduce background already covered.
 
 * ❌ 一次上傳全部章節（會被過度壓縮，深度不足）
 * ❌ 忘記將前集音檔上傳回筆記本（AI 會「失憶」重新開始）
+* ❌ 最後一集不上傳、不重命名（筆記本記錄不完整，無法用 `source fulltext` 取逐字稿）
 * ❌ 每集使用不同的人設指令（角色會漂移）
 * ❌ 來源命名隨意（用結構化命名如 `EP01_第1集對話紀錄`）
+* ❌ 不等 source ready 就生成下一集（音檔未處理完成，AI 無法讀取前集內容）
 
 ***
 

@@ -1,5 +1,5 @@
 # 連續性 Podcast 配置檔範例
-# 用法: python scripts/episodic_podcast.py --config series_config_example.yaml --dry-run
+# 用法: uv run scripts/episodic_podcast.py --config series_config_example.yaml --dry-run
 
 series:
   name: "深入白鯨記"

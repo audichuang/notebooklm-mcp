@@ -178,7 +178,7 @@ notebooklm list
 ### "Playwright not installed"
 
 ```bash
-pip install playwright
+uv tool install --with playwright notebooklm-py --force
 playwright install chromium
 ```
 
@@ -187,16 +187,15 @@ playwright install chromium
 安裝 notebooklm-py：
 
 ```bash
-pip install notebooklm-py
+uv tool install notebooklm-py
 playwright install chromium
 ```
 
-或確認安裝路徑在 PATH 中：
+或確認安裝狀態：
 
 ```bash
 which notebooklm
-# 如果找不到，用 pip show 找到安裝位置
-pip show notebooklm-py
+uv tool list | grep notebooklm
 ```
 
 ## Debug Mode
