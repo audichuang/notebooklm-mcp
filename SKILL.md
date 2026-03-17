@@ -1,6 +1,6 @@
 ---
 name: notebooklm
-description: "Manages Google NotebookLM notebooks via notebooklm-py CLI. Creates notebooks, adds sources (URLs, YouTube, PDFs, text, web research), generates content (podcasts, slides, videos, quizzes, reports, flashcards, infographics, mind maps, data tables), downloads artifacts, and queries notebooks for source-grounded answers. Use when working with NotebookLM or when the user wants to research topics, generate podcasts or slides, create quizzes, or ask questions grounded in notebook sources."
+description: "Manages Google NotebookLM notebooks via notebooklm-py CLI. Creates notebooks, adds sources (URLs, YouTube, PDFs, text, web research), generates content (podcasts, slides, videos, quizzes, reports, flashcards, infographics, mind maps, data tables), downloads artifacts, and queries notebooks for source-grounded answers. Use when working with NotebookLM or when the user wants to research topics, generate podcasts or slides, create quizzes, or ask questions grounded in notebook sources. Triggers on: NotebookLM, 上傳到筆記本, 生成podcast, 生成播客, 生成連續音檔, 做成PPT, 製作簡報, 製作影片, 幫我講解."
 ---
 
 # NotebookLM
@@ -46,6 +46,9 @@ notebooklm source add "/path/to/file.pdf" -n <notebook-id>           # 本地檔
 notebooklm source add "https://..." -n <notebook-id>                  # URL / YouTube
 notebooklm source add-research "主題" --mode deep -n <notebook-id>    # 網路研究
 notebooklm research wait --import-all --timeout 180                   # 等待匯入
+
+# 取得來源全文（SOURCE_ID 是 positional argument，不可用 -s）
+notebooklm source fulltext <source-id> -n <notebook-id>
 ```
 
 ⚠️ 多個研究必須**序列化**，不可同時啟動。
@@ -73,6 +76,9 @@ doppler run -p notebooklm -c dev -- notebooklm artifact list -n <notebook-id>
 mkdir -p /tmp/notebooklm
 doppler run -p notebooklm -c dev -- notebooklm download audio -a <task-id> -n <notebook-id> /tmp/notebooklm/podcast.mp3
 doppler run -p notebooklm -c dev -- notebooklm download slide-deck -a <task-id> -n <notebook-id> /tmp/notebooklm/slides.pdf
+
+# ⚠️ 下載後必須重命名 artifact（保持筆記本中可辨認）
+doppler run -p notebooklm -c dev -- notebooklm artifact rename <task-id> "描述性標題" -n <notebook-id>
 ```
 
 沒有 `artifact status` 命令，用 `artifact poll` 或 `artifact list`。
@@ -177,22 +183,30 @@ label:"NotebookLM 多任務生成"
 
 將資料轉化為多集連續性 Podcast。採用**序列回饋法**——每集完成後將音檔上傳回筆記本，AI 自動轉錄為逐字稿，下一集即擁有前集完整記憶。
 
-核心循環：**生成 → 下載 → ♻️ 上傳音檔回筆記本 → 生成下一集**
+核心循環：**生成 → 下載 → 重命名 artifact → ♻️ 上傳音檔回筆記本 → 生成下一集**
+
+⚠️ **多集 Podcast 務必使用自動化腳本**（`scripts/episodic_podcast.py`），不要手動拆解為多個 exec 呼叫。腳本會自動處理等待、下載、重命名、音檔回傳等機械性步驟，確保不遺漏任何環節。
 
 ### 自動化腳本
 
+⚠️ **配置檔必須存放在 `/tmp/notebooklm/`**，禁止放在 skill 目錄下（會污染 repo）。
+
 ```bash
+# 建立配置檔（存到 /tmp/notebooklm/）
+mkdir -p /tmp/notebooklm
+# 將 YAML 配置寫入 /tmp/notebooklm/<series_name>.yaml
+
 # 預覽模式
-uv run scripts/episodic_podcast.py --config series_config.yaml --dry-run
+uv run scripts/episodic_podcast.py --config /tmp/notebooklm/series_config.yaml --dry-run
 
 # 生成全部集數（序列回饋法）
-uv run scripts/episodic_podcast.py --config series_config.yaml
+uv run scripts/episodic_podcast.py --config /tmp/notebooklm/series_config.yaml
 
 # 續製（從第 3 集開始）
-uv run scripts/episodic_podcast.py --config series_config.yaml --start 3
+uv run scripts/episodic_podcast.py --config /tmp/notebooklm/series_config.yaml --start 3
 
 # 加上知識蒸餾（可選）
-uv run scripts/episodic_podcast.py --config series_config.yaml --distill
+uv run scripts/episodic_podcast.py --config /tmp/notebooklm/series_config.yaml --distill
 ```
 
 配置檔範例見 [series_config_example.yaml](scripts/series_config_example.yaml)。

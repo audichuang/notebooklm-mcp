@@ -67,12 +67,10 @@ notebooklm source list
 
 ```bash
 notebooklm create "Research A"
-notebooklm use <id-a>
-notebooklm source add-research "Topic A"
+notebooklm source add-research "Topic A" -n <id-a>
 # 切換到另一個 notebook
 notebooklm create "Research B"
-notebooklm use <id-b>
-notebooklm source add-research "Topic B"
+notebooklm source add-research "Topic B" -n <id-b>
 ```
 
 ### "Research timeout"
@@ -155,7 +153,8 @@ notebooklm source list
 
 ```bash
 notebooklm list
-notebooklm use <notebook-id>
+# 改用 -n 參數指定筆記本（避免使用 use 命令）
+notebooklm <command> -n <notebook-id>
 ```
 
 ### "Notebook not found"

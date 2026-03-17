@@ -8,7 +8,7 @@
 """
 episodic_podcast.py — 連續性 Podcast 自動化生成腳本（序列回饋法）
 
-核心流程：生成 → 下載 → 上傳回筆記本 → 生成下一集
+核心流程：生成 → 等待 → 下載 → 重命名 artifact → 上傳回筆記本 → 生成下一集
 每集完成後將音檔上傳回筆記本，NotebookLM 自動轉錄為逐字稿，
 使下一集的 AI 擁有前集的完整對話記憶。
 
@@ -223,8 +223,9 @@ def create_or_get_notebook(series: dict, dry_run: bool) -> str:
         print(f"📓 使用現有筆記本: {notebook_id}")
         return notebook_id
 
-    print(f'📓 建立新筆記本: {series["name"]}')
-    output = nbm("create", series["name"], json_output=True, dry_run=dry_run)
+    title = series.get("notebook_title", series["name"])
+    print(f'📓 建立新筆記本: {title}')
+    output = nbm("create", title, json_output=True, dry_run=dry_run)
     if dry_run:
         return "DRY_RUN_NOTEBOOK_ID"
 
@@ -236,10 +237,32 @@ def create_or_get_notebook(series: dict, dry_run: bool) -> str:
     sys.exit(1)
 
 
-def upload_sources(
+def upload_initial_sources(
+    sources: list[dict], notebook_id: str, config_dir: Path, dry_run: bool
+) -> list[str]:
+    """上傳筆記本層的初始來源（在生成任何 episode 之前）。"""
+    if not sources:
+        return []
+    print(f"\n📤 上傳初始來源 ({len(sources)} 個)")
+    source_ids = []
+    for src in sources:
+        path = resolve_source_path(src["path"], config_dir)
+        title = src.get("title", "")
+        print(f"   📄 {title or path}")
+        args = ["source", "add", path]
+        if title:
+            args += ["--title", title]
+        output = nbm(*args, notebook_id=notebook_id, json_output=True, dry_run=dry_run)
+        sid = parse_id(output) if not dry_run else ""
+        if sid:
+            source_ids.append(sid)
+    return source_ids
+
+
+def upload_episode_sources(
     episode: dict, notebook_id: str, config_dir: Path, dry_run: bool
 ) -> list[str]:
-    """上傳本集來源，回傳 source IDs。"""
+    """上傳單集的額外來源，回傳 source IDs。"""
     source_ids = []
     for src in episode.get("sources", []):
         path = resolve_source_path(src["path"], config_dir)
@@ -428,6 +451,12 @@ def run_series(config: dict, args: argparse.Namespace):
 
     # 筆記本
     notebook_id = create_or_get_notebook(series, args.dry_run)
+
+    # 上傳初始來源（筆記本層，所有集共用）
+    initial_sources = series.get("sources", [])
+    if initial_sources:
+        upload_initial_sources(initial_sources, notebook_id, config_dir, args.dry_run)
+
     prev_audio_title: str | None = None
 
     for i, episode in enumerate(selected, start=start):
@@ -436,9 +465,9 @@ def run_series(config: dict, args: argparse.Namespace):
         print(f"🎙️  第 {i} 集: {ep_title}")
         print(f"{'='*60}")
 
-        # 1. 上傳來源
+        # 1. 上傳本集額外來源
         print(f"\n[1/{total_steps}] 上傳來源...")
-        upload_sources(episode, notebook_id, config_dir, args.dry_run)
+        upload_episode_sources(episode, notebook_id, config_dir, args.dry_run)
 
         # 2. 組裝提示詞
         print(f"\n[2/{total_steps}] 組裝提示詞...")
