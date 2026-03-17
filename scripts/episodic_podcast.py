@@ -485,7 +485,7 @@ def run_series(config: dict, args: argparse.Namespace):
         task_id = generate_audio(description, series, notebook_id, args.dry_run)
 
         # 4. 等待 + 下載
-        ep_filename = f"ep{i:02d}_{re.sub(r'[^\\w]', '_', ep_title)}.mp3"
+        ep_filename = f"ep{i:02d}_{re.sub(r'\W+', '_', ep_title).strip('_')}.mp3"
         output_path = str(output_dir / ep_filename)
         print(f"\n[4/{total_steps}] 等待與下載...")
         success = wait_and_download(
