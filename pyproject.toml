@@ -1,0 +1,26 @@
+[project]
+name = "notebooklm-mcp-skill"
+version = "0.1.0"
+description = "Thin self-built MCP server over notebooklm-py for the NotebookLM skill"
+requires-python = ">=3.11"
+dependencies = [
+    "notebooklm-py>=0.3,<0.4",
+    "mcp[cli]>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+notebooklm-mcp = "notebooklm_mcp.server:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["notebooklm_mcp"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
