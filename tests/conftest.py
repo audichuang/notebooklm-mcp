@@ -14,6 +14,11 @@ class FakeArtifacts:
         # is_failed=True) — models a rate-limit/quota/refusal that the SDK reports
         # via status rather than by raising.
         self.fail_generate = False
+        # When True, wait_for_completion RETURNS a failed status (is_failed=True)
+        # instead of raising — models the real 0.3.4 behaviour where generation
+        # fails mid-poll and wait_for_completion returns the final failed
+        # GenerationStatus (it only raises TimeoutError on timeout).
+        self.fail_complete = False
 
     async def generate_audio(
         self,
@@ -50,6 +55,10 @@ class FakeArtifacts:
         self._wait_count += 1
         if self.fail_wait_on is not None and self._wait_count == self.fail_wait_on:
             raise TimeoutError(f"simulated generation timeout on wait #{self._wait_count}")
+        if self.fail_complete:
+            return type(
+                "S", (), {"task_id": task_id, "is_failed": True, "status": "failed", "error": "simulated mid-poll failure"}
+            )()
         return type("S", (), {"task_id": task_id, "is_failed": False})()
 
     async def download_audio(self, notebook_id, output_path, artifact_id=None):

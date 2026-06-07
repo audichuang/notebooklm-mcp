@@ -50,6 +50,27 @@ async def test_resume_preserves_existing_season_manifest(fake_client, tmp_path):
     assert [e["episode"] for e in manifest["episodes"]] == [1, 2, 3]
 
 
+async def test_resume_with_corrupt_manifest_fails_clearly(fake_client, tmp_path):
+    # A truncated / corrupt local manifest must surface a clear ValueError on
+    # resume (not a raw JSONDecodeError leaking the parse position), and must not
+    # start any generation before the failure.
+    (tmp_path / "series_manifest.json").write_text("{not valid json", encoding="utf-8")
+    eps = [{"brief": "1"}, {"brief": "2"}]
+    with pytest.raises(ValueError, match="corrupt"):
+        await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=2)
+    assert fake_client.artifacts.calls == []
+
+
+async def test_resume_with_non_object_manifest_fails_clearly(fake_client, tmp_path):
+    # Valid JSON but the wrong shape (a list, not an object) would AttributeError
+    # on data.get(...); it must also surface a clear ValueError instead.
+    (tmp_path / "series_manifest.json").write_text("[1, 2, 3]", encoding="utf-8")
+    eps = [{"brief": "1"}, {"brief": "2"}]
+    with pytest.raises(ValueError, match="corrupt"):
+        await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=2)
+    assert fake_client.artifacts.calls == []
+
+
 async def test_series_rejects_invalid_start(fake_client, tmp_path):
     eps = [{"brief": "1"}]
     with pytest.raises(ValueError, match="start must be >= 1"):

@@ -56,3 +56,17 @@ async def test_generate_audio_tool_fails_fast_on_failed_status(fake_client):
     fake_client.artifacts.fail_generate = True
     with pytest.raises(RuntimeError, match="Audio generation failed"):
         await t.generate_audio("nb-1", instructions="x")
+
+
+async def test_failure_during_wait_fails_fast(fake_client, tmp_path):
+    # Generation can START fine (valid task_id) but FAIL mid-poll. The real 0.3.4
+    # wait_for_completion RETURNS that failed status (it only raises on timeout),
+    # so ensure_completed must catch is_failed before we rename/download a dead
+    # artifact. Without that guard the run would proceed on a failed generation.
+    fake_client.artifacts.fail_complete = True
+    with pytest.raises(RuntimeError, match="failed while waiting"):
+        await p.podcast_episode("nb-1", episode_n=1, brief="x", output_dir=str(tmp_path))
+    # Stopped right after the wait — never reached rename/download/self-upload,
+    # so the failed episode left NO orphaned source or artifact rename.
+    assert [c[0] for c in fake_client.artifacts.calls] == ["generate_audio", "wait"]
+    assert fake_client.sources.titles() == []

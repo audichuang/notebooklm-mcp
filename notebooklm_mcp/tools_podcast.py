@@ -20,8 +20,18 @@ def _load_prior_manifest_episodes(manifest_path: str, notebook_id: str, start: i
     so resuming does not wipe earlier episodes from the record."""
     if start == 1 or not os.path.exists(manifest_path):
         return []
-    with open(manifest_path, encoding="utf-8") as f:
-        data = json.load(f)
+    # Validate before trusting it: a corrupt/truncated manifest must surface a
+    # clear error (not a raw JSONDecodeError leaking the parse position) so the
+    # caller knows resume can't safely preserve the earlier episodes.
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Existing series_manifest.json is corrupt and cannot be read for resume: {exc}"
+        ) from None
+    if not isinstance(data, dict):
+        raise ValueError("Existing series_manifest.json is corrupt: top level is not an object")
     if data.get("notebook_id") not in (None, notebook_id):
         raise ValueError("Existing series_manifest.json belongs to a different notebook_id")
     return [
