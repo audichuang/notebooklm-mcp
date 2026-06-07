@@ -1,263 +1,168 @@
-# Troubleshooting Guide
+# NotebookLM MCP Troubleshooting
 
-## Authentication Issues
+## MCP Server
 
-### "Not logged in"
+### Server does not appear in Claude Code
 
-```bash
-notebooklm login
-```
-
-Browser opens → Complete Google login → Wait for NotebookLM homepage → Press Enter.
-
-### "Missing required cookies: {'SID'}"
-
-You pressed Enter before fully logging in. Ensure you see the NotebookLM homepage before pressing Enter.
+Check registration:
 
 ```bash
-# Clear and retry
-rm -rf ~/.notebooklm/storage_state.json ~/.notebooklm/browser_profile
-notebooklm login
+claude mcp list
 ```
 
-### "Authentication expired"
+Register again if needed:
 
 ```bash
-notebooklm login
+claude mcp add notebooklm -- doppler run -p notebooklm -c dev -- \
+  uv run --directory /home/user/research/audiskill/notebooklm-skill \
+  python -m notebooklm_mcp.server --transport stdio
 ```
 
-### 認證資料存放位置
+### Server starts then exits
 
-```
-~/.notebooklm/
-├── storage_state.json    # 認證狀態（cookies、session）
-└── browser_profile/      # 瀏覽器設定檔
-```
-
-## Research Issues
-
-### "Research wait" 卡住（多個研究同時進行）
-
-**問題：** 同一個 Notebook 啟動多個研究後，`research wait` 一直顯示等待中，即使某些研究已完成。
-
-**原因：** `research wait` 只會追蹤清單中的第一個任務。如果第一個任務卡住或較慢，後面已完成的任務會被忽略。
-
-**解決方案：**
-
-1. **序列化執行（推薦）**
+Run the live smoke test in a shell with Doppler access:
 
 ```bash
-# 一個完成後再啟動下一個
-notebooklm source add-research "Topic 1" --mode deep
-notebooklm research wait --import-all --timeout 300
-notebooklm source add-research "Topic 2" --mode deep
-notebooklm research wait --import-all --timeout 300
+timeout 8 doppler run -p notebooklm -c dev -- \
+  uv run python -m notebooklm_mcp.server --transport stdio < /dev/null
 ```
 
-2. **如果已經卡住**
+There should be no traceback or auth error. Stdio may exit when stdin closes;
+that is not itself a failure.
+
+### Import or package errors
+
+Reinstall the local package:
 
 ```bash
-# 檢查來源是否已匯入（可能伺服器端已完成）
-notebooklm source list
-
-# 或直接跳過 wait，繼續下一步
+uv pip install -e ".[dev]"
+uv run python -c "from notebooklm_mcp.server import mcp; print(mcp.name)"
 ```
 
-3. **多個主題用不同 Notebook**
+Expected output: `notebooklm`.
 
-```bash
-notebooklm create "Research A"
-notebooklm source add-research "Topic A" -n <id-a>
-# 切換到另一個 notebook
-notebooklm create "Research B"
-notebooklm source add-research "Topic B" -n <id-b>
-```
+## Doppler Auth
 
-### "Research timeout"
+### `NOTEBOOKLM_AUTH_JSON` is empty
 
-Increase timeout or use fast mode:
-
-```bash
-notebooklm source add-research "topic" --mode fast
-notebooklm research wait --import-all --timeout 300
-```
-
-### "No research running"
-
-Start research first:
-
-```bash
-notebooklm source add-research "topic" --mode deep
-```
-
-## Generation Issues
-
-### "Generation timeout" (Timeout after 600s)
-
-**重要：超時不代表失敗！** 伺服器端任務通常仍在執行中。
-
-#### 處理步驟：
-
-```bash
-# 1. 檢查狀態（單次查詢）
-notebooklm artifact poll <task-id>
-
-# 2. 如果狀態是 processing，可以繼續等待
-notebooklm artifact wait <task-id> --timeout 600
-
-# 3. 如果狀態是 completed，直接下載
-notebooklm download audio ~/output/podcast.mp3
-```
-
-#### 不知道 task-id？直接下載最新的：
-
-```bash
-# 自動下載最新完成的同類型 artifact（推薦！）
-notebooklm download audio ~/output/podcast.mp3
-notebooklm download slide-deck ~/output/slides.pdf
-notebooklm download video ~/output/video.mp4
-```
-
-#### 查看所有 artifacts 狀態：
-
-```bash
-notebooklm artifact list
-```
-
-### "Generation pending" (takes too long)
-
-Poll status or increase timeout:
-
-```bash
-notebooklm artifact poll <task-id>
-notebooklm artifact wait <task-id> --timeout 600
-```
-
-### "No artifact found"
-
-Ensure notebook has sources before generating:
-
-```bash
-notebooklm source list
-```
-
-### Generation fails
-
-* Content too short (<500 chars)
-* Content too long (>500K chars)
-* Try different generation type
-
-## Notebook Issues
-
-### "No notebook selected"
-
-```bash
-notebooklm list
-# 改用 -n 參數指定筆記本（避免使用 use 命令）
-notebooklm <command> -n <notebook-id>
-```
-
-### "Notebook not found"
-
-Verify ID with:
-
-```bash
-notebooklm list
-```
-
-## Rate Limiting
-
-### "Rate limit exceeded"
-
-* Free tier: ~50 queries/day
-* Wait 24 hours or use different Google account
-
-## Installation Issues
-
-### "Playwright not installed"
-
-```bash
-uv tool install --with playwright notebooklm-py --force
-playwright install chromium
-```
-
-### "notebooklm command not found"
-
-安裝 notebooklm-py：
-
-```bash
-uv tool install notebooklm-py
-playwright install chromium
-```
-
-或確認安裝狀態：
-
-```bash
-which notebooklm
-uv tool list | grep notebooklm
-```
-
-## Debug Mode
-
-Add verbose flag:
-
-```bash
-notebooklm -v list
-notebooklm -vv source add-research "topic"
-```
-
-## Output Directory
-
-Create if not exists:
-
-```bash
-mkdir -p ~/Documents/NotebookLM/output
-```
-
-## Doppler Integration
-
-認證由 [Doppler](https://doppler.com) 統一管理，環境變數：`NOTEBOOKLM_AUTH_JSON`
-
-```bash
-# 首次設定
-notebooklm login && bash scripts/sync-auth.sh
-
-# 日常使用（所有命令加此前綴）
-doppler run -p notebooklm -c dev -- notebooklm list
-
-# 認證過期
-notebooklm login && bash scripts/sync-auth.sh
-```
-
-## Doppler Issues
-
-### "NOTEBOOKLM\_AUTH\_JSON is set but empty"
-
-Doppler 中的值為空，需要重新同步：
+Refresh locally and sync:
 
 ```bash
 notebooklm login
 bash scripts/sync-auth.sh
 ```
 
-### "Invalid JSON in NOTEBOOKLM\_AUTH\_JSON"
+Then verify:
 
-JSON 格式損壞，重新同步：
+```bash
+doppler secrets get NOTEBOOKLM_AUTH_JSON -p notebooklm -c dev --plain | head -c 50
+```
+
+Expected: JSON beginning with `{"cookies":`.
+
+### Invalid JSON or missing cookies
+
+Rebuild the storage state and sync again:
 
 ```bash
 notebooklm login
 bash scripts/sync-auth.sh
 ```
 
-### VM 上認證過期
-
-在**本地**重新登入並同步即可，VM 不需要任何操作：
+The fallback helper can write pasted storage state JSON:
 
 ```bash
-# 本地執行
-notebooklm login
-bash scripts/sync-auth.sh
-
-# VM 上直接使用（自動取得最新認證）
-doppler run -p notebooklm -c dev -- notebooklm list
+uv run python -m notebooklm_mcp.auth_cli --out ~/.notebooklm/storage_state.json
 ```
+
+### 3 VM sync
+
+Doppler is the source of truth. Do not log in independently on each VM.
+
+1. Run `notebooklm login` on a local machine.
+2. Run `bash scripts/sync-auth.sh`.
+3. Restart each VM's MCP server so it receives the refreshed secret.
+
+## Generation
+
+### Audio generation takes a long time
+
+Use `artifact_wait` with a large timeout. Long audio commonly needs more than
+600 seconds:
+
+```json
+{"notebook_id": "nb-...", "task_id": "task-...", "timeout": 1200}
+```
+
+Timeout does not prove the server-side job failed. Re-run `artifact_wait` with
+the same `task_id` or inspect the notebook in the UI.
+
+### Download gets the wrong artifact
+
+Always pass the `artifact_id` returned by `generate_audio` or
+`artifact_wait`:
+
+```json
+{
+  "notebook_id": "nb-...",
+  "output_path": "/tmp/notebooklm/ep01.mp3",
+  "artifact_id": "art-..."
+}
+```
+
+### Bad language code
+
+Use `zh_Hant`, not `zh-TW`. The MCP server validates language codes before
+calling the SDK.
+
+## Episodic Podcast
+
+### Episode N ignores episode N-1
+
+Check that episode N was generated through `podcast_series` or that
+`podcast_episode` received `prior_mp3_path`.
+
+For manual continuation, verify the prior file exists:
+
+```bash
+ls -l /tmp/notebooklm/series/ep01.mp3
+```
+
+### Regenerating a bad episode
+
+Delete the uploaded source for the bad episode before regenerating:
+
+```json
+{"notebook_id": "nb-...", "source_id": "src-..."}
+```
+
+Then rerun `podcast_episode` for that episode and continue the series from the
+next episode.
+
+### Resume does not feed the prior episode
+
+For `podcast_series(..., start=N)`, ensure this file exists:
+
+```text
+output_dir/ep{N-1}.mp3
+```
+
+Example: `start=3` needs `output_dir/ep02.mp3`.
+
+## Sources
+
+### mp3 upload fails
+
+Pass the MIME type explicitly:
+
+```json
+{
+  "notebook_id": "nb-...",
+  "file_path": "/tmp/notebooklm/ep01.mp3",
+  "mime_type": "audio/mpeg",
+  "wait": true
+}
+```
+
+If the file is remote, download it locally first; `source_add_file` takes a
+local path.
