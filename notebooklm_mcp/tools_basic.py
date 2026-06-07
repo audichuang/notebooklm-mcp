@@ -80,14 +80,15 @@ async def generate_audio(
         audio_format=to_audio_format(audio_format),
         audio_length=to_audio_length(audio_length),
     )
-    return {"task_id": status.task_id, "artifact_id": getattr(status, "artifact_id", None)}
+    # task_id IS the artifact_id (notebooklm-py _types/artifacts.py:421).
+    return {"task_id": status.task_id, "artifact_id": status.task_id}
 
 
 @mcp.tool()
 async def artifact_wait(notebook_id: str, task_id: str, timeout: float = 1200.0) -> dict:
     """Wait for a generation task to complete."""
     status = await runtime.get_client().artifacts.wait_for_completion(notebook_id, task_id, timeout=timeout)
-    return {"task_id": status.task_id, "artifact_id": getattr(status, "artifact_id", None)}
+    return {"task_id": status.task_id, "artifact_id": status.task_id}
 
 
 @mcp.tool()

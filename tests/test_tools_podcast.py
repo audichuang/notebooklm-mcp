@@ -13,6 +13,15 @@ async def test_episode_first_no_prior(fake_client, tmp_path):
     assert kinds == ["generate_audio", "wait", "download", "rename"]
     assert fake_client.artifacts.calls[0][1]["language"] == "zh_Hant"
     assert all(c[0] != "add_file" for c in fake_client.sources.calls)
+    # Regression: download AND rename must target the real artifact id (== task_id),
+    # never None. GenerationStatus has no artifact_id field, so the code must derive
+    # it from task_id. A None here means download falls back to "latest" (wrong
+    # artifact in a multi-artifact notebook) and rename targets nothing.
+    download_call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download")
+    rename_call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "rename")
+    assert download_call["artifact_id"] == "task-123"
+    assert rename_call["artifact_id"] == "task-123"
+    assert out["artifact_id"] == "task-123"
 
 
 async def test_episode_with_prior_reuploads_mp3(fake_client, tmp_path):

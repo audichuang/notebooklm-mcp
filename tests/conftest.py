@@ -28,11 +28,13 @@ class FakeArtifacts:
                 ),
             )
         )
-        return type("S", (), {"task_id": "task-123", "artifact_id": "art-123"})()
+        # Faithful to the real SDK: GenerationStatus exposes ONLY task_id
+        # (task_id IS the artifact id). No artifact_id attribute exists.
+        return type("S", (), {"task_id": "task-123"})()
 
     async def wait_for_completion(self, notebook_id, task_id, timeout=300.0, **kw):
         self.calls.append(("wait", dict(notebook_id=notebook_id, task_id=task_id, timeout=timeout)))
-        return type("S", (), {"task_id": task_id, "artifact_id": "art-123"})()
+        return type("S", (), {"task_id": task_id})()
 
     async def download_audio(self, notebook_id, output_path, artifact_id=None):
         self.calls.append(

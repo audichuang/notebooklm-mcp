@@ -45,8 +45,12 @@ async def _run_episode(
         audio_length=to_audio_length(audio_length),
     )
 
-    completed = await client.artifacts.wait_for_completion(notebook_id, status.task_id, timeout=wait_timeout)
-    artifact_id = getattr(completed, "artifact_id", None) or getattr(status, "artifact_id", None)
+    # task_id IS the artifact_id — notebooklm-py _types/artifacts.py:421 states
+    # "task_id and artifact_id are the same identifier"; GenerationStatus has NO
+    # artifact_id field, so we must use task_id for the download/rename targeting
+    # (otherwise download falls back to "latest" and rename targets None).
+    artifact_id = status.task_id
+    await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
 
     mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
     await client.artifacts.download_audio(notebook_id, mp3_path, artifact_id)

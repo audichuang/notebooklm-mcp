@@ -61,3 +61,15 @@ def test_add_file_accepts_mime_and_wait():
 def test_audio_enum_members():
     assert AudioFormat.DEEP_DIVE == 1 and AudioFormat.DEBATE == 4
     assert AudioLength.SHORT == 1 and AudioLength.DEFAULT == 2 and AudioLength.LONG == 3
+
+
+def test_generation_status_task_id_is_the_artifact_id():
+    """The composite tools derive artifact_id from task_id. The SDK documents
+    they are the SAME identifier and GenerationStatus exposes only task_id — it
+    has NO artifact_id field. If a future SDK adds a distinct artifact_id, revisit
+    _run_episode / generate_audio which currently treat task_id AS the artifact id."""
+    from notebooklm import GenerationStatus
+
+    fields = set(getattr(GenerationStatus, "__dataclass_fields__", {}))
+    assert "task_id" in fields
+    assert "artifact_id" not in fields
