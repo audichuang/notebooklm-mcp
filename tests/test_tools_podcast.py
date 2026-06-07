@@ -28,3 +28,26 @@ async def test_episode_with_prior_reuploads_mp3(fake_client, tmp_path):
     add = [c for c in fake_client.sources.calls if c[0] == "add_file"][0][1]
     assert add["mime_type"] == "audio/mpeg"
     assert out["mp3_path"].endswith("ep02.mp3")
+
+
+async def test_series_threads_prior_mp3_and_resumes(fake_client, tmp_path):
+    eps = [
+        {"brief": "第一集"},
+        {"brief": "第二集"},
+        {"brief": "第三集"},
+    ]
+    out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=1)
+    assert len(out["episodes"]) == 3
+    assert out["episodes"][0]["mp3_path"].endswith("ep01.mp3")
+    assert out["episodes"][2]["mp3_path"].endswith("ep03.mp3")
+    add_files = [c for c in fake_client.sources.calls if c[0] == "add_file"]
+    assert len(add_files) == 2
+    assert (tmp_path / "series_manifest.json").exists()
+
+
+async def test_series_start_offset(fake_client, tmp_path):
+    (tmp_path / "ep02.mp3").write_bytes(b"x")
+    eps = [{"brief": "1"}, {"brief": "2"}, {"brief": "3"}]
+    out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=3)
+    assert len(out["episodes"]) == 1
+    assert out["episodes"][0]["episode"] == 3

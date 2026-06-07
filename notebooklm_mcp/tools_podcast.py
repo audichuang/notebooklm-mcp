@@ -5,6 +5,7 @@ re-upload as a source. The generation loop is deterministic Python code.
 """
 from __future__ import annotations
 
+import json
 import os
 
 from . import runtime
@@ -83,3 +84,45 @@ async def podcast_episode(
         audio_length,
         wait_timeout,
     )
+
+
+@mcp.tool()
+async def podcast_series(
+    notebook_id: str,
+    episodes: list[dict],
+    output_dir: str,
+    start: int = 1,
+    language: str | None = None,
+    audio_format: str | None = "deep-dive",
+    audio_length: str | None = "long",
+    wait_timeout: float = 1200.0,
+) -> dict:
+    """Generate a full podcast series deterministically."""
+    os.makedirs(output_dir, exist_ok=True)
+    manifest_path = os.path.join(output_dir, "series_manifest.json")
+    results: list[dict] = []
+
+    prior_mp3 = None
+    if start > 1:
+        candidate = os.path.join(output_dir, f"ep{start - 1:02d}.mp3")
+        prior_mp3 = candidate if os.path.exists(candidate) else None
+
+    for episode_n in range(start, len(episodes) + 1):
+        brief = episodes[episode_n - 1]["brief"]
+        res = await _run_episode(
+            notebook_id,
+            episode_n,
+            brief,
+            output_dir,
+            prior_mp3,
+            language,
+            audio_format,
+            audio_length,
+            wait_timeout,
+        )
+        results.append(res)
+        prior_mp3 = res["mp3_path"]
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"notebook_id": notebook_id, "episodes": results}, f, ensure_ascii=False, indent=2)
+
+    return {"notebook_id": notebook_id, "episodes": results, "manifest": manifest_path}
