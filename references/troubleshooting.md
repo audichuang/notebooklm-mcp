@@ -143,15 +143,17 @@ next episode.
 
 `podcast_series(..., start=N)` does NOT read a local `ep{N-1}.mp3`. Continuity on
 resume relies on the SAME NotebookLM notebook already containing the prior
-episodes as sources named `EP{N-1:02d}` — each episode self-uploads its own mp3
-as a named source, so a normal prior run leaves them in place (they persist
-server-side across processes). The season `series_manifest.json` is merged, not
-overwritten, so earlier episodes stay in the record.
+episodes as sources named `EP{N-1:02d} {title}` — each episode self-uploads its
+own mp3 as a named source, so a normal prior run leaves them in place (they
+persist server-side across processes). The season `series_manifest.json` is
+merged, not overwritten, so earlier episodes stay in the record.
 
-If the notebook does NOT have the prior `EPxx` source (e.g. a crash before
+If the notebook does NOT have the prior `EPxx ...` source (e.g. a crash before
 self-upload), regenerate that single episode with
-`podcast_episode(..., prior_mp3_path=output_dir/epNN.mp3)` to re-seed it, then
-resume the series.
+`podcast_episode(..., title="...", prior_mp3_path=output_dir/epNN.mp3)` to
+re-seed it, then resume the series. (The re-seeded prior source keeps a bare
+`EP{N-1:02d}` name; that is fine — continuity comes from the audio content, not
+the source name.)
 
 ## Sources
 

@@ -15,6 +15,14 @@ from .languages import resolve_language
 from .app import mcp
 
 
+def _episode_label(episode_n: int, title: str) -> str:
+    """Unified name for BOTH the Studio artifact and the self-uploaded source:
+    ``EP{n:02d} {title}`` (e.g. ``EP01 心法篇``). The EP prefix keeps ordering /
+    resume / reject-then-delete addressable; the title makes it human-legible.
+    Both sides use this identical string (the unified-naming iron rule)."""
+    return f"EP{episode_n:02d} {title.strip()}"
+
+
 def _load_prior_manifest_episodes(manifest_path: str, notebook_id: str, start: int) -> list[dict]:
     """On resume (start>1), load episodes < start from the existing season manifest
     so resuming does not wipe earlier episodes from the record."""
@@ -48,6 +56,7 @@ def _write_manifest(manifest_path: str, notebook_id: str, episodes: list[dict]) 
 async def _run_episode(
     notebook_id: str,
     episode_n: int,
+    title: str,
     brief: str,
     output_dir: str,
     prior_mp3_path: str | None,
@@ -58,6 +67,10 @@ async def _run_episode(
 ) -> dict:
     client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
+
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError(f"episode {episode_n} requires a non-empty 'title'")
+    label = _episode_label(episode_n, title)
 
     if prior_mp3_path and episode_n <= 1:
         raise ValueError("prior_mp3_path requires episode_n >= 2 (there is no prior to episode 1)")
@@ -95,7 +108,7 @@ async def _run_episode(
 
     # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so
     # the notebook stays legible regardless of the download outcome, then pull the mp3.
-    await client.artifacts.rename(notebook_id, artifact_id, f"EP{episode_n:02d}")
+    await client.artifacts.rename(notebook_id, artifact_id, label)
 
     mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
     await client.artifacts.download_audio(notebook_id, mp3_path, artifact_id)
@@ -109,10 +122,12 @@ async def _run_episode(
     own_src = await client.sources.add_file(
         notebook_id, mp3_path, mime_type="audio/mpeg", wait=True, wait_timeout=600.0
     )
-    await client.sources.rename(notebook_id, own_src.id, f"EP{episode_n:02d}")
+    await client.sources.rename(notebook_id, own_src.id, label)
 
     return {
         "episode": episode_n,
+        "title": title.strip(),
+        "label": label,
         "task_id": status.task_id,
         "artifact_id": artifact_id,
         "mp3_path": mp3_path,
@@ -123,6 +138,7 @@ async def _run_episode(
 async def podcast_episode(
     notebook_id: str,
     episode_n: int,
+    title: str,
     brief: str,
     output_dir: str,
     prior_mp3_path: str | None = None,
@@ -131,10 +147,15 @@ async def podcast_episode(
     audio_length: str | None = "long",
     wait_timeout: float = 1200.0,
 ) -> dict:
-    """Generate one podcast episode end-to-end."""
+    """Generate one podcast episode end-to-end.
+
+    The Studio artifact and self-uploaded source are both named ``EP{n:02d} {title}``
+    (e.g. ``EP02 實戰篇``), so pass the outline's episode title.
+    """
     return await _run_episode(
         notebook_id,
         episode_n,
+        title,
         brief,
         output_dir,
         prior_mp3_path,
@@ -159,11 +180,17 @@ async def podcast_series(
     """Generate a full podcast series deterministically."""
     # Validate shape up front so a malformed episodes list fails with a clear
     # message instead of a raw KeyError/TypeError mid-loop (after burning a
-    # generation). Each episode must be a dict carrying a 'brief'.
+    # generation). Each episode must be a dict carrying a 'brief' AND a non-empty
+    # 'title' (the title names the Studio artifact + source as "EP{n:02d} {title}").
     for i, ep in enumerate(episodes, start=1):
         if not isinstance(ep, dict) or "brief" not in ep:
             raise ValueError(
                 f"episode {i} must be a dict with a 'brief' key, got: {ep!r}"
+            )
+        title = ep.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(
+                f"episode {i} must have a non-empty 'title' (got: {title!r})"
             )
 
     # Validate the resume cursor so start=0 (would index episodes[-1]) or an
@@ -184,11 +211,12 @@ async def podcast_series(
     # at the end of _run_episode, so the next episode (and a `start`-based resume
     # on the same notebook) automatically sees prior episodes already present.
     for episode_n in range(start, len(episodes) + 1):
-        brief = episodes[episode_n - 1]["brief"]
+        ep = episodes[episode_n - 1]
         res = await _run_episode(
             notebook_id,
             episode_n,
-            brief,
+            ep["title"],
+            ep["brief"],
             output_dir,
             None,
             language,

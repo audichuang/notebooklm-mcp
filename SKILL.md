@@ -22,8 +22,8 @@ NotebookLM 操作都走 `notebooklm` MCP server。Skill 只負責判斷意圖與
 | `artifact_download_audio` | 下載 audio artifact 到指定路徑 |
 | `artifact_rename` | 重命名 artifact |
 | `chat_ask` | 對筆記本做 source-grounded 問答 |
-| `podcast_episode` | 單集 podcast：生成→等待→重命名 artifact→下載→自上傳本集 mp3 為同名來源(可選 `prior_mp3_path` 做一次性續接) |
-| `podcast_series` | 整季 podcast：純 Python 迴圈；每集自上傳本集 mp3,下一集生成時自然讀到筆記本內的同名前集來源 |
+| `podcast_episode` | 單集 podcast：生成→等待→命名 artifact 為 `EP{n:02d} 標題`(需傳 `title`)→下載→自上傳本集 mp3 為同名來源(可選 `prior_mp3_path` 做一次性續接) |
+| `podcast_series` | 整季 podcast：純 Python 迴圈;每集命名 `EP{n:02d} 標題` 並自上傳本集 mp3,下一集生成時自然讀到筆記本內的同名前集來源 |
 
 完整參數與回傳格式見 [MCP 工具參考](references/cli-reference.md)。
 
@@ -45,10 +45,10 @@ NotebookLM 操作都走 `notebooklm` MCP server。Skill 只負責判斷意圖與
 
 連續系列先做大綱，不要直接開始生成。
 
-1. 先用對話規劃整季大綱與每集 `brief`，每集 brief 要包含主持人人設、節目風格、本集任務、承接要求。
-2. 讓使用者核可整季 `episodes` 陣列。
+1. 先用對話規劃整季大綱:每集都要有 `title`(本集標題)與 `brief`,brief 要包含主持人人設、節目風格、本集任務、承接要求。`title` 必填且不可為空——工作室 artifact 與來源都會命名成 `EP{n:02d} 標題`(例 `EP01 心法篇`)。
+2. 讓使用者核可整季 `episodes` 陣列(每項形如 `{"title": ..., "brief": ...}`)。
 3. 呼叫 `podcast_series(notebook_id, episodes, output_dir, start=1)`。
-4. 續製時用 `start=N`（前提是同一個筆記本來源區已有 `EP{N-1:02d}` 來源，這是前次跑時各集自上傳留下的）。`podcast_series` 不讀本機 `ep{N-1}.mp3`；本機檔只是下載與 manifest 的存放處。manifest 會合併保留前面集數,不會被覆寫。
+4. 續製時傳「完整的 episodes 陣列」加 `start=N`（前提是同一個筆記本來源區已有 `EP{N-1:02d} 標題` 來源，這是前次跑時各集自上傳留下的）。`podcast_series` 不讀本機 `ep{N-1}.mp3`；本機檔只是下載與 manifest 的存放處。manifest 會合併保留前面集數,不會被覆寫。
 
 Reject-then-delete 規則：人工聽完覺得某集要重生時，先用 `source_delete` 移除該集已回傳到筆記本的音檔來源，再用 `podcast_episode` 重生該集，避免壞集被下一集繼承。
 

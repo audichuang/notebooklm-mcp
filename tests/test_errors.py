@@ -20,7 +20,11 @@ async def test_bad_language_raises_before_any_sdk_call(fake_client):
 async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_client, tmp_path):
     # Episode 2's wait_for_completion raises (episode 1's wait is call #1, episode 2's is #2).
     fake_client.artifacts.fail_wait_on = 2
-    eps = [{"brief": "1"}, {"brief": "2"}, {"brief": "3"}]
+    eps = [
+        {"title": "心法篇", "brief": "1"},
+        {"title": "實戰篇", "brief": "2"},
+        {"title": "收尾篇", "brief": "3"},
+    ]
 
     with pytest.raises(TimeoutError):
         await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=1)
@@ -30,7 +34,7 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
     assert [e["episode"] for e in manifest["episodes"]] == [1]
     # Episode 1 fully recorded; episode 2 failed at wait (before rename/download/
     # self-upload), so it left NO orphaned source.
-    assert fake_client.sources.titles() == ["EP01"]
+    assert fake_client.sources.titles() == ["EP01 心法篇"]
 
 
 async def test_malformed_episodes_fail_fast_with_clear_error(fake_client, tmp_path):
@@ -46,7 +50,7 @@ async def test_failed_generation_status_fails_fast(fake_client, tmp_path):
     # NOT by raising. The wrapper must detect that instead of proceeding with an empty id.
     fake_client.artifacts.fail_generate = True
     with pytest.raises(RuntimeError, match="Audio generation failed"):
-        await p.podcast_episode("nb-1", episode_n=1, brief="x", output_dir=str(tmp_path))
+        await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))
     # It stopped right after generate — no wait/download on the empty id.
     kinds = [c[0] for c in fake_client.artifacts.calls]
     assert kinds == ["generate_audio"]
@@ -65,7 +69,7 @@ async def test_failure_during_wait_fails_fast(fake_client, tmp_path):
     # artifact. Without that guard the run would proceed on a failed generation.
     fake_client.artifacts.fail_complete = True
     with pytest.raises(RuntimeError, match="failed while waiting"):
-        await p.podcast_episode("nb-1", episode_n=1, brief="x", output_dir=str(tmp_path))
+        await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))
     # Stopped right after the wait — never reached rename/download/self-upload,
     # so the failed episode left NO orphaned source or artifact rename.
     assert [c[0] for c in fake_client.artifacts.calls] == ["generate_audio", "wait"]

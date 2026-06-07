@@ -211,6 +211,7 @@ Params:
 {
   "notebook_id": "nb-...",
   "episode_n": 2,
+  "title": "案例篇",
   "brief": "第二集 brief：承接上一集並進入新主題。",
   "output_dir": "/tmp/notebooklm/series",
   "prior_mp3_path": "/tmp/notebooklm/series/ep01.mp3",
@@ -221,11 +222,17 @@ Params:
 }
 ```
 
+`title` is required and non-empty: the Studio artifact and the self-uploaded
+source are both renamed to `EP{episode_n:02d} {title}` (e.g. `EP02 案例篇`) — the
+same string on both sides.
+
 Returns:
 
 ```json
 {
   "episode": 2,
+  "title": "案例篇",
+  "label": "EP02 案例篇",
   "task_id": "task-...",
   "artifact_id": "art-...",
   "mp3_path": "/tmp/notebooklm/series/ep02.mp3"
@@ -233,7 +240,9 @@ Returns:
 ```
 
 If `prior_mp3_path` is provided, the tool uploads it first as
-`mime_type="audio/mpeg"` and waits for the source to become ready.
+`mime_type="audio/mpeg"` and waits for the source to become ready. (The prior
+re-seed source keeps a bare `EP{n-1:02d}` name, since the caller may not know the
+prior episode's title.)
 
 ### `podcast_series`
 
@@ -243,8 +252,8 @@ Params:
 {
   "notebook_id": "nb-...",
   "episodes": [
-    {"brief": "第一集 brief"},
-    {"brief": "第二集 brief"}
+    {"title": "開場篇", "brief": "第一集 brief"},
+    {"title": "案例篇", "brief": "第二集 brief"}
   ],
   "output_dir": "/tmp/notebooklm/series",
   "start": 1,
@@ -255,22 +264,27 @@ Params:
 }
 ```
 
+Each episode must be a dict with a non-empty `title` AND `brief` (validated up
+front, before any generation). The Studio artifact and self-uploaded source for
+episode N are both named `EP{N:02d} {title}` (e.g. `EP01 開場篇`).
+
 Returns:
 
 ```json
 {
   "notebook_id": "nb-...",
   "episodes": [
-    {"episode": 1, "task_id": "task-...", "artifact_id": "art-...", "mp3_path": "..."}
+    {"episode": 1, "title": "開場篇", "label": "EP01 開場篇", "task_id": "task-...", "artifact_id": "art-...", "mp3_path": "..."}
   ],
   "manifest": "/tmp/notebooklm/series/series_manifest.json"
 }
 ```
 
-`start=N` resumes from episode N (validated: `1 <= N <= len(episodes)`). It relies
-on the same notebook already holding the prior `EP{N-1:02d}` source (self-uploaded
-on a prior run); it does NOT read a local `ep{N-1}.mp3`. The season manifest is
-merged across resumes, so earlier episodes are preserved.
+`start=N` resumes from episode N (validated: `1 <= N <= len(episodes)`; pass the
+FULL episodes list). It relies on the same notebook already holding the prior
+`EP{N-1:02d} {title}` source (self-uploaded on a prior run); it does NOT read a
+local `ep{N-1}.mp3`. The season manifest is merged across resumes, so earlier
+episodes are preserved.
 
 ## Language
 

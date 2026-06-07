@@ -1,10 +1,52 @@
+import pytest
+
 from notebooklm_mcp import tools_podcast as p
+
+
+async def test_series_names_artifact_and_source_with_title(fake_client, tmp_path):
+    # The outline gives every episode a title; both the Studio artifact and the
+    # self-uploaded source must be renamed to "EP{n:02d} {title}" — the SAME
+    # string for both (unified-naming iron rule).
+    eps = [{"title": "心法篇", "brief": "1"}, {"title": "實戰篇", "brief": "2"}]
+    await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=1)
+    artifact_renames = [c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename"]
+    source_renames = [c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename"]
+    assert artifact_renames == ["EP01 心法篇", "EP02 實戰篇"]
+    assert source_renames == ["EP01 心法篇", "EP02 實戰篇"]
+
+
+async def test_series_rejects_missing_title(fake_client, tmp_path):
+    eps = [{"brief": "no title here"}]
+    with pytest.raises(ValueError, match="title"):
+        await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
+    # Rejected up front — no generation burned.
+    assert fake_client.artifacts.calls == []
+
+
+async def test_series_rejects_empty_title(fake_client, tmp_path):
+    eps = [{"title": "   ", "brief": "blank title"}]
+    with pytest.raises(ValueError, match="title"):
+        await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
+    assert fake_client.artifacts.calls == []
+
+
+async def test_episode_names_with_title(fake_client, tmp_path):
+    out = await p.podcast_episode(
+        "nb-1", episode_n=2, title="實戰篇", brief="第二集", output_dir=str(tmp_path)
+    )
+    artifact_rename = next(c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename")
+    source_rename = next(c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename")
+    assert artifact_rename == "EP02 實戰篇"
+    assert source_rename == "EP02 實戰篇"
+    assert out["title"] == "實戰篇"
+    assert out["label"] == "EP02 實戰篇"
 
 
 async def test_episode_first_no_prior(fake_client, tmp_path):
     out = await p.podcast_episode(
         "nb-1",
         episode_n=1,
+        title="開場篇",
         brief="第一集講開場",
         output_dir=str(tmp_path),
     )
@@ -18,7 +60,7 @@ async def test_episode_first_no_prior(fake_client, tmp_path):
     add_files = [c for c in fake_client.sources.calls if c[0] == "add_file"]
     assert len(add_files) == 1
     src_rename = next(c[1] for c in fake_client.sources.calls if c[0] == "rename")
-    assert src_rename["new_title"] == "EP01"
+    assert src_rename["new_title"] == "EP01 開場篇"
     # Regression: download AND rename must target the real artifact id (== task_id),
     # never None. GenerationStatus has no artifact_id field, so the code must derive
     # it from task_id. A None here means download falls back to "latest" (wrong
@@ -36,25 +78,27 @@ async def test_episode_with_prior_reuploads_mp3(fake_client, tmp_path):
     out = await p.podcast_episode(
         "nb-1",
         episode_n=2,
+        title="實戰篇",
         brief="第二集",
         output_dir=str(tmp_path),
         prior_mp3_path=str(prior),
     )
     # Two add_file calls: the PRIOR (ep01, for continuity) and this episode's OWN
-    # mp3 (ep02). Both renamed to unified labels matching the Studio artifacts.
+    # mp3 (ep02). The prior re-seed keeps a bare EP01 (caller may not know its
+    # title); this episode's own source is the titled label "EP02 實戰篇".
     add_files = [c for c in fake_client.sources.calls if c[0] == "add_file"]
     assert len(add_files) == 2
     assert all(c[1]["mime_type"] == "audio/mpeg" for c in add_files)
     rename_titles = [c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename"]
-    assert rename_titles == ["EP01", "EP02"]
+    assert rename_titles == ["EP01", "EP02 實戰篇"]
     assert out["mp3_path"].endswith("ep02.mp3")
 
 
 async def test_series_every_episode_self_uploads_named_source(fake_client, tmp_path):
     eps = [
-        {"brief": "第一集"},
-        {"brief": "第二集"},
-        {"brief": "第三集"},
+        {"title": "心法篇", "brief": "第一集"},
+        {"title": "實戰篇", "brief": "第二集"},
+        {"title": "收尾篇", "brief": "第三集"},
     ]
     out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=1)
     assert len(out["episodes"]) == 3
@@ -65,24 +109,29 @@ async def test_series_every_episode_self_uploads_named_source(fake_client, tmp_p
     add_files = [c for c in fake_client.sources.calls if c[0] == "add_file"]
     assert len(add_files) == 3
     rename_titles = [c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename"]
-    assert rename_titles == ["EP01", "EP02", "EP03"]
+    assert rename_titles == ["EP01 心法篇", "EP02 實戰篇", "EP03 收尾篇"]
     assert (tmp_path / "series_manifest.json").exists()
 
 
 async def test_episode_rejects_prior_mp3_for_first_episode(fake_client, tmp_path):
     prior = tmp_path / "ep00.mp3"
     prior.write_bytes(b"x")
-    import pytest
 
     with pytest.raises(ValueError, match="episode_n >= 2"):
-        await p.podcast_episode("nb-1", episode_n=1, brief="x", output_dir=str(tmp_path), prior_mp3_path=str(prior))
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path), prior_mp3_path=str(prior)
+        )
 
 
 async def test_series_start_offset(fake_client, tmp_path):
-    eps = [{"brief": "1"}, {"brief": "2"}, {"brief": "3"}]
+    eps = [
+        {"title": "心法篇", "brief": "1"},
+        {"title": "實戰篇", "brief": "2"},
+        {"title": "收尾篇", "brief": "3"},
+    ]
     out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=3)
     assert len(out["episodes"]) == 1
     assert out["episodes"][0]["episode"] == 3
     # Resume still self-uploads the resumed episode as a named source.
     rename_titles = [c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename"]
-    assert rename_titles == ["EP03"]
+    assert rename_titles == ["EP03 收尾篇"]
