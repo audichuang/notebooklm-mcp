@@ -18,7 +18,9 @@ from . import runtime
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
-    async with NotebookLMClient.from_storage() as client:
+    # notebooklm-py 0.3.x: from_storage() is a coroutine and must be awaited
+    # (the no-await idiom only arrived in v0.5.0; we pin <0.4).
+    async with await NotebookLMClient.from_storage() as client:
         runtime.set_client(client)
         try:
             yield
