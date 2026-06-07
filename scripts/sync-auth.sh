@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# sync-auth.sh — 將 notebooklm login 產生的認證資料同步到 Doppler
+# sync-auth.sh — 必須流程：將 notebooklm login 產生的認證資料同步到 Doppler
+# 這是 3 台 VM 共用 NOTEBOOKLM_AUTH_JSON 唯讀認證的真相來源。
 #
 # 用法：
 #   notebooklm login          # 先登入
