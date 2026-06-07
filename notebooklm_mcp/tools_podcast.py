@@ -28,10 +28,10 @@ async def _run_episode(
     client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
 
-    # Re-upload the prior episode's mp3 as a source AND rename that source to a
-    # clear, unified label, so the Sources area mirrors the Studio artifact names
-    # ("EP01" artifact <-> "EP01 對話紀錄" source). 0.3.4's add_file has no title
-    # param, so the explicit sources.rename is the only way to label it.
+    # Standalone continuity: if the caller hands us a prior episode's mp3 that is
+    # NOT yet in the notebook (one-off podcast_episode use), upload + name it so
+    # this episode can recap it. In a full podcast_series this is unnecessary —
+    # each episode self-uploads at the end (below), so the prior is already there.
     if prior_mp3_path:
         prior_src = await client.sources.add_file(
             notebook_id,
@@ -40,9 +40,7 @@ async def _run_episode(
             wait=True,
             wait_timeout=600.0,
         )
-        await client.sources.rename(
-            notebook_id, prior_src.id, f"EP{episode_n - 1:02d} 對話紀錄"
-        )
+        await client.sources.rename(notebook_id, prior_src.id, f"EP{episode_n - 1:02d}")
 
     status = await client.artifacts.generate_audio(
         notebook_id,
@@ -65,6 +63,17 @@ async def _run_episode(
 
     mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
     await client.artifacts.download_audio(notebook_id, mp3_path, artifact_id)
+
+    # Re-upload THIS episode's own mp3 as a source named IDENTICALLY to its Studio
+    # artifact ("EP02" artifact <-> "EP02" source — same string, no suffix). This is
+    # the heart of the sequential-feedback method AND keeps a complete record:
+    #  - EVERY episode (including the last) ends up in Sources, name-matched to Studio.
+    #  - the NEXT episode's generation automatically sees this source for continuity,
+    #    so podcast_series needs no separate prior-upload step.
+    own_src = await client.sources.add_file(
+        notebook_id, mp3_path, mime_type="audio/mpeg", wait=True, wait_timeout=600.0
+    )
+    await client.sources.rename(notebook_id, own_src.id, f"EP{episode_n:02d}")
 
     return {
         "episode": episode_n,
@@ -116,11 +125,9 @@ async def podcast_series(
     manifest_path = os.path.join(output_dir, "series_manifest.json")
     results: list[dict] = []
 
-    prior_mp3 = None
-    if start > 1:
-        candidate = os.path.join(output_dir, f"ep{start - 1:02d}.mp3")
-        prior_mp3 = candidate if os.path.exists(candidate) else None
-
+    # No prior-mp3 threading: each episode self-uploads its mp3 as a named source
+    # at the end of _run_episode, so the next episode (and a `start`-based resume)
+    # automatically sees prior episodes already present in the notebook.
     for episode_n in range(start, len(episodes) + 1):
         brief = episodes[episode_n - 1]["brief"]
         res = await _run_episode(
@@ -128,14 +135,13 @@ async def podcast_series(
             episode_n,
             brief,
             output_dir,
-            prior_mp3,
+            None,
             language,
             audio_format,
             audio_length,
             wait_timeout,
         )
         results.append(res)
-        prior_mp3 = res["mp3_path"]
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump({"notebook_id": notebook_id, "episodes": results}, f, ensure_ascii=False, indent=2)
 
