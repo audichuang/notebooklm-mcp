@@ -50,6 +50,13 @@
 - 互動式 Google OAuth 要有頭瀏覽器；無頭 VM 報 `Missing X server or $DISPLAY`。
 - 對策：登入在有 GUI 的機器做，推 Doppler，無頭機消費——這正是 Doppler 架構的用意。本機登入機才裝 `[browser]` extra（pyproject 可選 `login` 群組）。
 
+### 坑 5：`python -m server` 的 `__main__` 雙載入 → MCP 暴露 0 個工具（最隱蔽）
+- 第一版把 `mcp = FastMCP(...)` 放在 `server.py`，工具用 `from .server import mcp` 註冊。但 `python -m notebooklm_mcp.server` 把 server 載成 `__main__`，工具的 `from .server import mcp` 又把它當 `notebooklm_mcp.server` **再載一次** → **兩個 `mcp` 實例**：工具註冊在一個，`run()` 服務另一個（空的）。
+- 影響：server 啟動、MCP 握手成功，但 `tools/list` 回傳 **0 個工具**。**單元測試（直接 import 函式）與直連函式的 live 測試全繞過協定 → 完全沒抓到**；只有真正的 MCP `tools/list` 才照出來（`TOOL_COUNT: 0`）。註冊進 Claude Code 會是「連上但零工具」。
+- 修法：把 app + 工具註冊抽到專屬 `app.py`（**永不當 `__main__`**），`server.py` 變薄只 `from .app import main`。確保任何啟動方式（`-m`、console script、import）都是同一個 `mcp`。
+- 教訓：**MCP 一定要用真實協定 `tools/list` 測**(`mcp.client.stdio`)，別只測「函式可呼叫」或「server 啟動無 traceback」。並注意 `stdio_client` 預設不傳完整 env，需 `StdioServerParameters(env=dict(os.environ))` 才帶得到 `NOTEBOOKLM_AUTH_JSON`。
+- Commit：`fix: serve tools from a dedicated app module`
+
 ---
 
 ## 3. 命名統一 + 完整記錄（每集自上傳）

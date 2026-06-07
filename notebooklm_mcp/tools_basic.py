@@ -8,7 +8,7 @@ from __future__ import annotations
 from . import runtime
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
-from .server import mcp
+from .app import mcp
 
 
 @mcp.tool()
