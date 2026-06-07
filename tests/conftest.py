@@ -66,6 +66,10 @@ class FakeSources:
         )
         return type("Src", (), {"id": "src-123"})()
 
+    async def rename(self, notebook_id, source_id, new_title):
+        self.calls.append(("rename", dict(source_id=source_id, new_title=new_title)))
+        return None
+
     async def add_url(self, notebook_id, url, wait=False, wait_timeout=120.0):
         self.calls.append(("add_url", dict(notebook_id=notebook_id, url=url, wait=wait)))
         return type("Src", (), {"id": "src-url"})()

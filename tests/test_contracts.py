@@ -58,6 +58,17 @@ def test_add_file_accepts_mime_and_wait():
     ]
 
 
+def test_rename_signatures_have_no_return_object():
+    """0.3.4 rename() takes only (notebook_id, id, new_title) — NO return_object
+    (that kwarg exists on GitHub HEAD but not the pinned 0.3.x). Passing it raises
+    TypeError at runtime. Pin both so the drift is caught offline."""
+    from notebooklm._artifacts import ArtifactsAPI
+    from notebooklm._sources import SourcesAPI
+
+    assert _params(ArtifactsAPI.rename) == ["self", "notebook_id", "artifact_id", "new_title"]
+    assert _params(SourcesAPI.rename) == ["self", "notebook_id", "source_id", "new_title"]
+
+
 def test_audio_enum_members():
     assert AudioFormat.DEEP_DIVE == 1 and AudioFormat.DEBATE == 4
     assert AudioLength.SHORT == 1 and AudioLength.DEFAULT == 2 and AudioLength.LONG == 3

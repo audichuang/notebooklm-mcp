@@ -10,7 +10,8 @@ async def test_episode_first_no_prior(fake_client, tmp_path):
     )
     assert out["mp3_path"].endswith("ep01.mp3")
     kinds = [c[0] for c in fake_client.artifacts.calls]
-    assert kinds == ["generate_audio", "wait", "download", "rename"]
+    # Artifact is renamed in NotebookLM BEFORE the mp3 is downloaded.
+    assert kinds == ["generate_audio", "wait", "rename", "download"]
     assert fake_client.artifacts.calls[0][1]["language"] == "zh_Hant"
     assert all(c[0] != "add_file" for c in fake_client.sources.calls)
     # Regression: download AND rename must target the real artifact id (== task_id),
@@ -37,6 +38,10 @@ async def test_episode_with_prior_reuploads_mp3(fake_client, tmp_path):
     add = [c for c in fake_client.sources.calls if c[0] == "add_file"][0][1]
     assert add["mime_type"] == "audio/mpeg"
     assert out["mp3_path"].endswith("ep02.mp3")
+    # The re-uploaded prior mp3 source is renamed to a unified label so the
+    # Sources area mirrors the Studio artifact naming.
+    src_rename = [c for c in fake_client.sources.calls if c[0] == "rename"][0][1]
+    assert src_rename["new_title"] == "EP01 對話紀錄"
 
 
 async def test_series_threads_prior_mp3_and_resumes(fake_client, tmp_path):

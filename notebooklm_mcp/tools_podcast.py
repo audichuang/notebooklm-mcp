@@ -28,13 +28,20 @@ async def _run_episode(
     client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
 
+    # Re-upload the prior episode's mp3 as a source AND rename that source to a
+    # clear, unified label, so the Sources area mirrors the Studio artifact names
+    # ("EP01" artifact <-> "EP01 對話紀錄" source). 0.3.4's add_file has no title
+    # param, so the explicit sources.rename is the only way to label it.
     if prior_mp3_path:
-        await client.sources.add_file(
+        prior_src = await client.sources.add_file(
             notebook_id,
             prior_mp3_path,
             mime_type="audio/mpeg",
             wait=True,
             wait_timeout=600.0,
+        )
+        await client.sources.rename(
+            notebook_id, prior_src.id, f"EP{episode_n - 1:02d} 對話紀錄"
         )
 
     status = await client.artifacts.generate_audio(
@@ -52,9 +59,12 @@ async def _run_episode(
     artifact_id = status.task_id
     await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
 
+    # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so
+    # the notebook stays legible regardless of the download outcome, then pull the mp3.
+    await client.artifacts.rename(notebook_id, artifact_id, f"EP{episode_n:02d}")
+
     mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
     await client.artifacts.download_audio(notebook_id, mp3_path, artifact_id)
-    await client.artifacts.rename(notebook_id, artifact_id, f"EP{episode_n:02d}")
 
     return {
         "episode": episode_n,
