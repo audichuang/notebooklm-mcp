@@ -267,8 +267,10 @@ Returns:
 }
 ```
 
-`start=N` resumes from episode N. If `N > 1`, the tool uses
-`output_dir/ep{N-1}.mp3` as the prior episode when that file exists.
+`start=N` resumes from episode N (validated: `1 <= N <= len(episodes)`). It relies
+on the same notebook already holding the prior `EP{N-1:02d}` source (self-uploaded
+on a prior run); it does NOT read a local `ep{N-1}.mp3`. The season manifest is
+merged across resumes, so earlier episodes are preserved.
 
 ## Language
 

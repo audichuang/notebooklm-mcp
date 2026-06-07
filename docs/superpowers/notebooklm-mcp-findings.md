@@ -86,3 +86,14 @@
 **踩坑：逐字稿關鍵字比對的假陰性。** NotebookLM 的 `get_fulltext` 會在**每個 CJK 字之間插空格**（「上 一 集」），naive 子字串比對（搜 "上一集"）會找不到 → 假性「無連續性」。比對前先 `"".join(text.split())` 去空格。
 
 **踩坑：逐字稿是對 AI 生成音檔的 STT，有同音錯字**（夜門/葉門、風迷/風靡、殖名地/殖民地、沖泡/充泡）。音檔本身應正確，但逐字稿會被下一集當記憶吃進去——錯字理論上會傳遞，實測仍能正確回顧，可接受。
+
+---
+
+## 5. 深度測試結果（Workflow 多維度對抗式驗證）
+
+以「先 scout 收集 live 證據 → Workflow 對證據做多維度對抗式驗證」的混合法跑了一輪深度測試（2 集系列 + 真實 MCP `tools/list` + pytest + SKILL.md）。
+
+- **happy path 7/7 維度 PASS**：MCP 協定暴露 13 工具、SKILL↔MCP 零漂移、命名統一、連續性+範圍、zh_Hant、manifest、pytest。
+- **真 bug（已修）**：見坑 5（`python -m` 暴露 0 工具）——這是 scout 階段揪出的最重要問題。
+- **critic 報的 P0「resume 斷連續性」→ 實證駁回**：critic 誤以為自上傳來源只活在單一 process。實際上 `add_file` 上傳到 NotebookLM **伺服器端**，跨 process 持久；用全新 process 列同一筆記本得到 `['EP01','EP02','Seed']`，`start=3` resume 時前集來源本就還在 → 連續性不斷。**教訓：對 AI 給的審查發現要工程驗證,不盲信。**
+- **真正有效的覆蓋缺口 → 已補測試**：resume 連續性（模擬伺服器端持久 + 不重複上傳）、reject-then-delete（`source_delete` + 重生不污染）、錯誤路徑（壞語言碼 fail-fast、生成 timeout 只留完成集的 manifest、malformed `episodes` 前置驗證清楚報錯）。

@@ -53,7 +53,7 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
 - `artifacts.rename` / `sources.rename` **無 `return_object`** 參數(傳了會 TypeError)。
 - 改 contract 測試時對「**實裝版本**」跑,別信 `_research/` 的 HEAD clone。
 - 改 podcast 流程務必對照鐵律:**每集(含最後一集)都要上傳自己的 mp3 回筆記本並命名**
-  `EP{n} 對話紀錄`,讓工作室與來源命名一致、記錄完整。
+  `EP{n:02d}`——與該集的工作室 artifact **完全同名**(無後綴),讓兩區命名一致、記錄完整。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`。
 - quiz/flashcards 無 `--language`(在 brief 內指定);mind-map 無法指定語言。
 

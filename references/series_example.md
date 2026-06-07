@@ -56,5 +56,7 @@ Resume from episode 3:
 }
 ```
 
-`start=3` uses `/tmp/notebooklm/my-series/ep02.mp3` as the prior episode if it
-exists.
+`start=3` assumes the same NotebookLM notebook already contains a source named
+`EP02` (left there when episode 2 self-uploaded on a prior run). `podcast_series`
+does not read the local `ep02.mp3`; local disk is only the download / manifest
+location, and the season manifest is merged (episodes 1–2 are preserved).

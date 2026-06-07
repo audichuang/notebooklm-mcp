@@ -139,15 +139,19 @@ Delete the uploaded source for the bad episode before regenerating:
 Then rerun `podcast_episode` for that episode and continue the series from the
 next episode.
 
-### Resume does not feed the prior episode
+### Resume (`start=N`) and continuity
 
-For `podcast_series(..., start=N)`, ensure this file exists:
+`podcast_series(..., start=N)` does NOT read a local `ep{N-1}.mp3`. Continuity on
+resume relies on the SAME NotebookLM notebook already containing the prior
+episodes as sources named `EP{N-1:02d}` — each episode self-uploads its own mp3
+as a named source, so a normal prior run leaves them in place (they persist
+server-side across processes). The season `series_manifest.json` is merged, not
+overwritten, so earlier episodes stay in the record.
 
-```text
-output_dir/ep{N-1}.mp3
-```
-
-Example: `start=3` needs `output_dir/ep02.mp3`.
+If the notebook does NOT have the prior `EPxx` source (e.g. a crash before
+self-upload), regenerate that single episode with
+`podcast_episode(..., prior_mp3_path=output_dir/epNN.mp3)` to re-seed it, then
+resume the series.
 
 ## Sources
 
