@@ -13,6 +13,9 @@ build/
 .DS_Store
 .env
 .notebooklm/
+# Auth material must never be committed (auth_cli --out can write here).
+storage_state.json
+storage_state*.json
 captured_rpcs/
 .worktrees/
 .worktree/

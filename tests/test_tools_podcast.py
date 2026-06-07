@@ -69,6 +69,15 @@ async def test_series_every_episode_self_uploads_named_source(fake_client, tmp_p
     assert (tmp_path / "series_manifest.json").exists()
 
 
+async def test_episode_rejects_prior_mp3_for_first_episode(fake_client, tmp_path):
+    prior = tmp_path / "ep00.mp3"
+    prior.write_bytes(b"x")
+    import pytest
+
+    with pytest.raises(ValueError, match="episode_n >= 2"):
+        await p.podcast_episode("nb-1", episode_n=1, brief="x", output_dir=str(tmp_path), prior_mp3_path=str(prior))
+
+
 async def test_series_start_offset(fake_client, tmp_path):
     eps = [{"brief": "1"}, {"brief": "2"}, {"brief": "3"}]
     out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=3)

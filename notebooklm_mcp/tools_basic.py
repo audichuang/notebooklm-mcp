@@ -6,6 +6,7 @@ baked in. Each tool returns a plain JSON-able dict.
 from __future__ import annotations
 
 from . import runtime
+from ._status import ensure_started
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
@@ -80,8 +81,10 @@ async def generate_audio(
         audio_format=to_audio_format(audio_format),
         audio_length=to_audio_length(audio_length),
     )
-    # task_id IS the artifact_id (notebooklm-py _types/artifacts.py:421).
-    return {"task_id": status.task_id, "artifact_id": status.task_id}
+    # Fail fast if the SDK reported a failed/refused generation via status
+    # (task_id="", is_failed=True) instead of raising. task_id IS the artifact_id.
+    task_id = ensure_started(status)
+    return {"task_id": task_id, "artifact_id": task_id}
 
 
 @mcp.tool()

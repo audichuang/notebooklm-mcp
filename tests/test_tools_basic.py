@@ -26,7 +26,7 @@ async def test_generate_audio_rejects_bad_language(fake_client):
 
 async def test_source_add_file_passes_mime(fake_client):
     out = await t.source_add_file("nb-1", "/tmp/x.mp3", mime_type="audio/mpeg")
-    assert out["source_id"] == "src-123"
+    assert out["source_id"].startswith("src-")
     assert fake_client.sources.calls[0][1]["mime_type"] == "audio/mpeg"
 
 

@@ -74,6 +74,55 @@ def test_audio_enum_members():
     assert AudioLength.SHORT == 1 and AudioLength.DEFAULT == 2 and AudioLength.LONG == 3
 
 
+def test_wait_for_completion_full_signature():
+    # Installed 0.3.4 ends with poll_interval (GitHub HEAD differs — trust installed).
+    from notebooklm._artifacts import ArtifactsAPI
+
+    assert _params(ArtifactsAPI.wait_for_completion) == [
+        "self",
+        "notebook_id",
+        "task_id",
+        "initial_interval",
+        "max_interval",
+        "timeout",
+        "poll_interval",
+    ]
+
+
+def test_chat_ask_signature_and_answer_field():
+    from notebooklm import AskResult
+    from notebooklm._chat import ChatAPI
+
+    assert _params(ChatAPI.ask) == ["self", "notebook_id", "question", "source_ids", "conversation_id"]
+    assert "answer" in getattr(AskResult, "__dataclass_fields__", {})
+
+
+def test_source_signatures_and_fields():
+    from notebooklm import Source
+    from notebooklm._sources import SourcesAPI
+
+    assert _params(SourcesAPI.add_url) == ["self", "notebook_id", "url", "wait", "wait_timeout"]
+    assert _params(SourcesAPI.add_text) == ["self", "notebook_id", "title", "content", "wait", "wait_timeout"]
+    assert _params(SourcesAPI.delete) == ["self", "notebook_id", "source_id"]
+    assert "id" in getattr(Source, "__dataclass_fields__", {})
+
+
+def test_notebook_signatures_and_fields():
+    from notebooklm import Notebook
+    from notebooklm._notebooks import NotebooksAPI
+
+    assert _params(NotebooksAPI.create) == ["self", "title"]
+    assert _params(NotebooksAPI.list) == ["self"]
+    assert {"id", "title"} <= set(getattr(Notebook, "__dataclass_fields__", {}))
+
+
+def test_generation_status_has_is_failed_for_failure_detection():
+    # ensure_started/ensure_completed rely on is_failed to fail fast on a failed status.
+    from notebooklm import GenerationStatus
+
+    assert hasattr(GenerationStatus(task_id="x", status="completed"), "is_failed")
+
+
 def test_generation_status_task_id_is_the_artifact_id():
     """The composite tools derive artifact_id from task_id. The SDK documents
     they are the SAME identifier and GenerationStatus exposes only task_id — it
