@@ -1307,9 +1307,11 @@ Expected: 無 traceback / import error(會看到 NotebookLM 200 OK 或正常啟�
 
 一主題 = 一節目 = 一 feed。跑完 `podcast_series` 後:
 
-1. `publish_series(show_id, notebook_id, show_description, author, owner_name, owner_email, artwork_path, ...)`
+1. `publish_series(show_id=..., notebook_id=..., manifest_path=..., show_title=..., show_description=..., author=..., owner_name=..., owner_email=..., artwork_path=...)`
    - `show_id`:穩定 slug(feed identity,決定 URL,**永不改**)
-   - `artwork_path`:正方形 1400–3000px、PNG/JPG、無 alpha(Apple Show Cover 規格)
+   - `manifest_path`:`podcast_series` 產出的 `series_manifest.json` 路徑
+   - `show_title`:節目標題(channel `<title>`)
+   - `artwork_path`:正方形 1400–3000px、PNG/JPG、RGB 無 alpha(Apple Show Cover 規格)
 2. 回傳 `feed_url` → 在 Apple Podcast「加入節目(用 URL)」貼上即可訂閱。
 
 需在 Doppler 設三個 secret:`PODCAST_PUBLIC_BASE_URL`、`PODCAST_FEEDS_ROOT`、`PODCAST_TOKEN_SALT`。
