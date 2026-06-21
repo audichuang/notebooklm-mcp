@@ -271,6 +271,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import uuid
 
 _CHUNK = 1 << 20
 
@@ -290,12 +291,24 @@ def media_filename(episode_n: int, hash8: str) -> str:
 def atomic_write_bytes(path: str, data: bytes) -> None:
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
-    tmp = os.path.join(directory, f".tmp-{os.path.basename(path)}")
+    # Unique temp name so concurrent writers to the same target never collide
+    # on the temp file (a fixed name would let one writer's os.replace race the
+    # other's temp). pid + uuid is unique per process and per call.
+    tmp = os.path.join(directory, f".tmp-{os.path.basename(path)}-{os.getpid()}-{uuid.uuid4().hex}")
     with open(tmp, "wb") as f:
         f.write(data)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    # Best-effort directory fsync so the rename itself is durable.
+    try:
+        dfd = os.open(directory, os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
 
 
 def atomic_write_text(path: str, text: str) -> None:
@@ -480,6 +493,16 @@ def test_alpha_channel_rejected(tmp_path):
         artwork.validate_artwork(_make(tmp_path, "rgba.png", (1500, 1500), mode="RGBA"))
 
 
+def test_grayscale_rejected(tmp_path):
+    with pytest.raises(ValueError, match="RGB"):
+        artwork.validate_artwork(_make(tmp_path, "gray.png", (1500, 1500), mode="L"))
+
+
+def test_cmyk_rejected(tmp_path):
+    with pytest.raises(ValueError, match="RGB"):
+        artwork.validate_artwork(_make(tmp_path, "cmyk.jpg", (1500, 1500), mode="CMYK", fmt="JPEG"))
+
+
 def test_wrong_format_rejected(tmp_path):
     with pytest.raises(ValueError, match="PNG or JPEG"):
         artwork.validate_artwork(_make(tmp_path, "x.gif", (1500, 1500), fmt="GIF"))
@@ -519,6 +542,7 @@ def validate_artwork(path: str) -> dict:
             fmt = img.format
             width, height = img.size
             bands = img.getbands()
+            mode = img.mode
     except OSError as exc:
         raise ValueError(f"artwork is not a readable image: {exc}") from None
 
@@ -532,6 +556,9 @@ def validate_artwork(path: str) -> dict:
         raise ValueError(f"artwork side must be <= {_MAX}px (got: {width})")
     if "A" in bands:
         raise ValueError("artwork must not have an alpha channel (use flat RGB)")
+    if mode != "RGB":
+        # Reject grayscale (L), CMYK, palette (P) etc. Apple wants flat RGB.
+        raise ValueError(f"artwork must be RGB color space (got mode: {mode})")
 
     return {"width": width, "height": height, "format": fmt}
 ```
@@ -630,6 +657,8 @@ def test_channel_required_fields():
     assert ch.findtext("itunes:explicit", namespaces=NS) == "false"  # 小寫
     assert ch.find("atom:link", NS).get("href") == f"{BASE}/feeds/tok123/feed.xml"
     assert ch.findtext("link") == f"{BASE}/feeds/tok123/index.html"
+    # lastBuildDate = 最後一集 live(EP02;EP03 tombstone)的 pubDate,穩定
+    assert ch.findtext("lastBuildDate") == "Sun, 22 Jun 2026 09:00:00 +0800"
 
 
 def test_items_exclude_tombstones_and_escape_xml():
@@ -651,6 +680,7 @@ def test_items_exclude_tombstones_and_escape_xml():
 def test_namespaces_declared():
     raw = feed.build_feed_xml(SHOW, BASE)
     assert 'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"' in raw
+    assert 'xmlns:content="http://purl.org/rss/1.0/modules/content/"' in raw
     assert 'xmlns:atom="http://www.w3.org/2005/Atom"' in raw
     assert raw.startswith("<?xml")
 
@@ -702,6 +732,7 @@ from xml.sax.saxutils import escape, quoteattr
 from .rss_models import live_episodes
 
 _ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+_CONTENT = "http://purl.org/rss/1.0/modules/content/"
 _ATOM = "http://www.w3.org/2005/Atom"
 
 
@@ -714,10 +745,12 @@ def build_feed_xml(show: dict, base_url: str) -> str:
     base = _feed_dir_url(base_url, token)
     feed_url = f"{base}/feed.xml"
     explicit = "true" if show.get("explicit") else "false"
+    eps = live_episodes(show)
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        f'<rss version="2.0" xmlns:itunes="{_ITUNES}" xmlns:atom="{_ATOM}">',
+        f'<rss version="2.0" xmlns:itunes="{_ITUNES}" '
+        f'xmlns:content="{_CONTENT}" xmlns:atom="{_ATOM}">',
         "  <channel>",
         f"    <title>{escape(show['title'])}</title>",
         f"    <link>{escape(base + '/index.html')}</link>",
@@ -735,7 +768,12 @@ def build_feed_xml(show: dict, base_url: str) -> str:
         f'    <atom:link href={quoteattr(feed_url)} rel="self" type="application/rss+xml"/>',
     ]
 
-    for n, ep in live_episodes(show):
+    # lastBuildDate = the most recent live episode's (stable) pubDate, so the feed
+    # stays byte-identical across rebuilds when nothing changed (no wall clock).
+    if eps:
+        lines.append(f"    <lastBuildDate>{escape(eps[-1][1]['pub_date'])}</lastBuildDate>")
+
+    for n, ep in eps:
         media_url = f"{base}/{ep['media_file']}"
         lines += [
             "    <item>",
@@ -828,7 +866,7 @@ def artwork_png(tmp_path):
 
 def _manifest(tmp_path):
     out = tmp_path / "series"
-    out.mkdir()
+    out.mkdir(exist_ok=True)
     for n in (1, 2):
         (out / f"ep{n:02d}.mp3").write_bytes(f"audio-{n}".encode())
     manifest = {
@@ -1018,8 +1056,8 @@ async def publish_series(
     owner_name: str,
     owner_email: str,
     artwork_path: str,
-    manifest_path: str | None = None,
-    show_title: str | None = None,
+    manifest_path: str,
+    show_title: str,
     category: str = "Technology",
     explicit: bool = False,
     episode_overrides: dict | None = None,
@@ -1035,17 +1073,20 @@ async def publish_series(
     salt = _require_env("PODCAST_TOKEN_SALT")
 
     identity.validate_show_id(show_id)
+    _require(notebook_id, "notebook_id")
     _require(show_description, "show_description")
+    _require(show_title, "show_title")
     _require(author, "author")
     _require(owner_name, "owner_name")
     _require(owner_email, "owner_email")
-    artwork_mod.validate_artwork(artwork_path)
+    # Validate artwork once, up front (fail-fast before any writes). Pick the
+    # output extension from the real format so a JPEG is never served as .png.
+    art_info = artwork_mod.validate_artwork(artwork_path)
+    artwork_file = "artwork.jpg" if art_info["format"] == "JPEG" else "artwork.png"
 
     token = identity.make_token(show_id, salt)
     feed_dir = os.path.join(feeds_root, "feeds", token)
 
-    if manifest_path is None:
-        raise ValueError("manifest_path is required (path to series_manifest.json)")
     with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
     manifest_eps = manifest.get("episodes", [])
@@ -1097,7 +1138,7 @@ async def publish_series(
         "show_id": show_id,
         "token": token,
         "notebook_id": notebook_id,
-        "title": (show_title or manifest.get("title") or show_id).strip() or show_id,
+        "title": show_title.strip(),
         "description": show_description,
         "language": "zh-Hant",
         "author": author,
@@ -1105,11 +1146,10 @@ async def publish_series(
         "owner_email": owner_email,
         "category": category,
         "explicit": bool(explicit),
-        "artwork_file": "artwork.png",
+        "artwork_file": artwork_file,
         "episodes": new_eps,
     }
-    artwork_mod.validate_artwork(artwork_path)
-    layout.atomic_copy(artwork_path, os.path.join(feed_dir, "artwork.png"))
+    layout.atomic_copy(artwork_path, os.path.join(feed_dir, artwork_file))
     state.save_show(feed_dir, show)
 
     # 3) Render outputs from committed state.
@@ -1128,7 +1168,7 @@ async def publish_series(
 
 
 @mcp.tool()
-async def feed_list() -> dict:
+async def feed_list() -> list:
     """List all published shows by scanning feeds/*/show.json."""
     feeds_root = _require_env("PODCAST_FEEDS_ROOT")
     base_url = _require_env("PODCAST_PUBLIC_BASE_URL")
@@ -1148,7 +1188,7 @@ async def feed_list() -> dict:
                     [e for e in show.get("episodes", {}).values() if not e.get("tombstone")]
                 ),
             })
-    return {"shows": shows}
+    return shows
 
 
 @mcp.tool()
@@ -1292,4 +1332,6 @@ git commit -m "feat(publish): register publish tools + docs for podcast RSS feed
 
 **已知取捨(非阻擋):**
 - `atomic_copy` 一次讀整個 mp3 進記憶體;podcast 單集數十 MB 可接受,若日後檔案極大再改串流。
-- 同一全新 show 在兩台 VM「同一瞬間」首發可能各寫一次(內容相同、token 相同、互相覆蓋無害)。
+- 原子寫的 temp 檔名帶 pid+uuid,併發寫同一 target 不撞 temp;最終 `os.replace` 為最後寫入者勝,
+  同一全新 show 在兩台 VM「同一瞬間」首發內容相同、token 相同,覆蓋無害。
+- artwork 依實際格式輸出 `artwork.png`/`artwork.jpg`,`show.json` 記 `artwork_file` 供 feed 引用。

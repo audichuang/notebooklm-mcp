@@ -151,8 +151,8 @@ notebooklm_mcp/
 publish_series(
   show_id,                      # 必填:穩定 slug,feed identity;決定 token
   notebook_id,                  # 必填:目前內容來源(記入 show.json 供追溯)
-  manifest_path = None,         # 預設讀該 notebook output_dir 的 series_manifest.json
-  show_title = None,            # 預設帶 notebook 標題
+  manifest_path,                # 必填:series_manifest.json 路徑(無法從 notebook_id 推 output_dir)
+  show_title,                   # 必填非空:節目標題(channel <title>;manifest 無 title 可帶)
   show_description,             # 必填非空
   author,                       # 必填
   owner_name, owner_email,      # 必填(Apple)
