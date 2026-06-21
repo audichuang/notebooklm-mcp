@@ -614,7 +614,7 @@ SHOW = {
             "title": "心法篇",
             "description": "心法篇",
             "guid": "g1",
-            "pub_date": "Sat, 21 Jun 2026 09:00:00 +0800",
+            "pub_date": "Sun, 21 Jun 2026 09:00:00 +0800",
             "media_file": "EP01-ab12cd34.mp3",
             "length": 12345,
             "tombstone": False,
@@ -623,7 +623,7 @@ SHOW = {
             "title": "實戰篇 <重點>",  # 含 < 測 escape
             "description": "實戰篇",
             "guid": "g2",
-            "pub_date": "Sun, 22 Jun 2026 09:00:00 +0800",
+            "pub_date": "Mon, 22 Jun 2026 09:00:00 +0800",
             "media_file": "EP02-deadbeef.mp3",
             "length": 22222,
             "tombstone": False,
@@ -631,7 +631,7 @@ SHOW = {
         "3": {  # tombstone:不應出現在 feed
             "title": "壞集",
             "guid": "g3",
-            "pub_date": "Mon, 23 Jun 2026 09:00:00 +0800",
+            "pub_date": "Tue, 23 Jun 2026 09:00:00 +0800",
             "media_file": "EP03-00000000.mp3",
             "length": 1,
             "tombstone": True,
@@ -658,7 +658,7 @@ def test_channel_required_fields():
     assert ch.find("atom:link", NS).get("href") == f"{BASE}/feeds/tok123/feed.xml"
     assert ch.findtext("link") == f"{BASE}/feeds/tok123/index.html"
     # lastBuildDate = 最後一集 live(EP02;EP03 tombstone)的 pubDate,穩定
-    assert ch.findtext("lastBuildDate") == "Sun, 22 Jun 2026 09:00:00 +0800"
+    assert ch.findtext("lastBuildDate") == "Mon, 22 Jun 2026 09:00:00 +0800"
 
 
 def test_items_exclude_tombstones_and_escape_xml():
@@ -672,7 +672,7 @@ def test_items_exclude_tombstones_and_escape_xml():
     assert enc.get("url") == f"{BASE}/feeds/tok123/EP01-ab12cd34.mp3"
     assert enc.get("length") == "12345"
     assert enc.get("type") == "audio/mpeg"
-    assert ep1.findtext("pubDate") == "Sat, 21 Jun 2026 09:00:00 +0800"
+    assert ep1.findtext("pubDate") == "Sun, 21 Jun 2026 09:00:00 +0800"
     # XML escaping round-trips: parser yields the raw chars.
     assert items[1].findtext("title") == "實戰篇 <重點>"
 
@@ -949,6 +949,31 @@ async def test_regenerated_episode_gets_new_url_same_guid(env, tmp_path, artwork
     assert ep1.find("enclosure").get("url") != before.find("channel").find("item").find("enclosure").get("url")
 
 
+async def test_tombstoned_episode_is_not_resurrected(env, tmp_path, artwork_png):
+    # Publish EP1+EP2 -> drop EP2 (tombstone) -> re-add EP2; the retired number 2
+    # must stay tombstoned and NOT reappear as a live item (spec iron rule).
+    full = _manifest(tmp_path)
+    common = dict(
+        show_id="ai-news", notebook_id="nb1", show_title="AI 新聞",
+        show_description="每日 AI 摘要", author="Audi", owner_name="Audi",
+        owner_email="audi@example.com", artwork_path=artwork_png,
+    )
+    await tools_publish.publish_series(manifest_path=full, **common)
+
+    data = json.loads(open(full, encoding="utf-8").read())
+    only1 = dict(data, episodes=[data["episodes"][0]])
+    p1 = tmp_path / "series" / "only1.json"
+    p1.write_text(json.dumps(only1, ensure_ascii=False), encoding="utf-8")
+    await tools_publish.publish_series(manifest_path=str(p1), **common)  # EP2 -> tombstone
+
+    res = await tools_publish.publish_series(manifest_path=full, **common)  # re-add EP2
+    info = await tools_publish.feed_info("ai-news")
+    assert info["episodes"]["2"]["tombstone"] is True   # 不復活
+    assert res["episode_count"] == 1
+    ch = ET.fromstring((env / "feeds" / res["token"] / "feed.xml").read_text()).find("channel")
+    assert len(ch.findall("item")) == 1
+
+
 async def test_missing_required_metadata_errors(env, tmp_path, artwork_png):
     with pytest.raises(ValueError, match="show_description"):
         await tools_publish.publish_series(
@@ -1051,13 +1076,13 @@ async def _ensure_local_mp3(notebook_id: str, ep: dict) -> str:
 async def publish_series(
     show_id: str,
     notebook_id: str,
+    manifest_path: str,
+    show_title: str,
     show_description: str,
     author: str,
     owner_name: str,
     owner_email: str,
     artwork_path: str,
-    manifest_path: str,
-    show_title: str,
     category: str = "Technology",
     explicit: bool = False,
     episode_overrides: dict | None = None,
@@ -1102,6 +1127,14 @@ async def publish_series(
     published = []
     for ep in manifest_eps:
         n = int(ep["episode"])
+        prev = prior_eps.get(str(n), {})
+        # Spec iron rule: a tombstoned episode number is PERMANENTLY retired and
+        # never reused. If a retired number reappears in the manifest (e.g. a
+        # source was re-added), keep it dead — do not resurrect or republish it.
+        if prev.get("tombstone"):
+            new_eps[str(n)] = prev
+            continue
+
         local = await _ensure_local_mp3(notebook_id, ep)
         hash8 = layout.content_hash8(local)
         media_file = layout.media_filename(n, hash8)
@@ -1110,7 +1143,6 @@ async def publish_series(
             layout.atomic_copy(local, dst)
         length = os.path.getsize(dst)
 
-        prev = prior_eps.get(str(n), {})
         ov = overrides.get(n) or overrides.get(str(n)) or {}
         new_eps[str(n)] = {
             "title": ep["title"],

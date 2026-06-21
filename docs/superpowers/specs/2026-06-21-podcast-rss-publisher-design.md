@@ -62,7 +62,7 @@ $PODCAST_FEEDS_ROOT/                 # 例 /nas/podcasts
       feed.xml                       # 衍生輸出,原子重建
       index.html                     # 極簡節目頁(供 RSS <link> 指向,避免指到不存在 URL)
       show.json                      # 節目級 metadata + 各集 state(guid/pubDate/檔名/tombstone)
-      artwork.png                    # 節目封面(必填,Apple 規格驗證過)
+      artwork.png|artwork.jpg        # 節目封面(必填;副檔名依實際格式 PNG/JPEG)
       EP01-<hash8>.mp3               # 內容版本化檔名(immutable)
       EP02-<hash8>.mp3
 ```
@@ -102,14 +102,16 @@ $PODCAST_FEEDS_ROOT/                 # 例 /nas/podcasts
 | `<itunes:explicit>` | 輸出**小寫** `true`/`false`(預設 `false`) |
 | `<link>` | 指向同目錄 `index.html` 的公開 URL(真實存在) |
 | `<atom:link rel="self" href type="application/rss+xml">` | feed 自身 URL |
-| `<lastBuildDate>` | 重建時間 |
+| `<lastBuildDate>` | 取最後一集 live 的 `pubDate`(穩定值,保持 feed 跨重建 byte 一致;不用 wall clock) |
 
 XML root 宣告 namespaces:`itunes`、`content`、`atom`。所有文字欄位做 XML escaping。
 
 ### Artwork 規格驗證(Apple Show Cover)
 
 `artwork_path` **必填**。發布前驗證:正方形、邊長 **1400–3000 px**、PNG 或 JPG、
-RGB 色彩空間、**無 alpha 通道**。不符直接報錯(不靜默略過)。輸出複製為 `artwork.png`。
+RGB 色彩空間、**無 alpha 通道**。不符直接報錯(不靜默略過)。輸出依實際格式複製為
+`artwork.png`(PNG)或 `artwork.jpg`(JPEG),檔名記入 `show.json` 的 `artwork_file`,
+feed 的 `<itunes:image>` 一律引用該值,避免 JPEG bytes 配 `.png` 副檔名。
 
 ### Item(每集,來自 manifest + show.json 穩定欄位)
 
@@ -171,7 +173,7 @@ feed_info(show_id|token) -> 該節目完整 state(含各集 guid/pubDate/檔名/
 ```
 1. 驗證 show_id;token = HMAC(salt, show_id) → base32(決定性,無 registry)
 2. 讀 series_manifest.json 檔案(整季,非 podcast_series 的 run 回傳)→ EP 清單
-3. 驗證 artwork_path 規格;複製為 artwork.png(原子)
+3. 驗證 artwork_path 規格;依格式複製為 artwork.png/artwork.jpg(原子)
 4. 每集:
    a. stat manifest 的 mp3_path;若不存在 → 用 artifact_id 重新 download_audio 到 staging;
       仍失敗 → fail-fast 明確報錯(指出哪一集、原路徑、artifact_id)
