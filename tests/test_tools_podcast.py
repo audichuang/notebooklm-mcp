@@ -40,6 +40,7 @@ async def test_episode_names_with_title(fake_client, tmp_path):
     assert source_rename == "EP02 實戰篇"
     assert out["title"] == "實戰篇"
     assert out["label"] == "EP02 實戰篇"
+    assert isinstance(out["published_at"], str) and out["published_at"]
 
 
 async def test_episode_first_no_prior(fake_client, tmp_path):

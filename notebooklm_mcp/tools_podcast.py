@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
 from . import runtime
 from ._status import ensure_completed, ensure_started
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
+
+_TZ = timezone(timedelta(hours=8))
 
 
 def _episode_label(episode_n: int, title: str) -> str:
@@ -131,6 +135,7 @@ async def _run_episode(
         "task_id": status.task_id,
         "artifact_id": artifact_id,
         "mp3_path": mp3_path,
+        "published_at": format_datetime(datetime.now(_TZ)),  # 首次生成時間 → 進 manifest
     }
 
 
