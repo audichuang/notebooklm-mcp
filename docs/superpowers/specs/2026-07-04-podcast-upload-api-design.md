@@ -85,7 +85,7 @@
 | `uploader/Dockerfile` | **新檔**:`python:3.12-alpine` + COPY 一檔 |
 | `uploader/test_server.py` | **新檔**:離線自檢(path 白名單 + 原子寫 roundtrip) |
 | `docker-compose.yml` | **改**:兩 service(caddy ro + uploader rw),新增 `UPLOAD_PORT`/`UPLOAD_TOKEN` |
-| `.env.example` | **改**:新增 `UPLOAD_PORT`、`UPLOAD_TOKEN` |
+| `.env.example` | **改**:新增 `UPLOAD_BIND`(LAN IP)、`UPLOAD_PORT`、`UPLOAD_TOKEN` |
 | `Caddyfile` | **改**:加 `respond /feeds/*/show.json 403`(show.json 含 owner_email/notebook_id,不對外) |
 | `.github/workflows/build.yml` | **改**:matrix 兩 image(`podcast-feed-host` 讀 + `podcast-feed-uploader` 寫),multi-arch 保留 |
 | `Caddy` 讀 image / 讀站 Caddyfile 其餘規則 | **不動**(mp3 immutable、feed.xml no-cache、Range 206 皆沿用) |
@@ -256,13 +256,17 @@ async def _ensure_local_mp3(notebook_id: str, ep: dict) -> str:
 
 async def _auth_precheck(client, base: str, upload_token: str) -> None:
     """Probe GET /healthz WITH the bearer before sending any big mp3, so a wrong
-    token fails fast (clean 401) instead of surfacing as a mid-PUT connection reset."""
+    token (or a PODCAST_UPLOAD_URL mis-pointed at the read-only Caddy) fails fast
+    instead of surfacing as a mid-PUT connection reset. Require BOTH 200 AND the
+    uploader's marker header — Caddy's /healthz also returns 200 but lacks it."""
     r = await client.get(f"{base}/healthz",
                          headers={"Authorization": f"Bearer {upload_token}"})
-    if r.status_code != 200:
+    if r.status_code != 200 or r.headers.get("X-Podcast-Uploader") != "1":
         raise ValueError(
-            f"uploader auth precheck failed ({r.status_code}): check that Doppler "
-            "PODCAST_UPLOAD_TOKEN matches the NAS .env UPLOAD_TOKEN"
+            f"uploader auth precheck failed (status={r.status_code}, "
+            f"marker={r.headers.get('X-Podcast-Uploader')!r}): check PODCAST_UPLOAD_URL "
+            "points at the uploader (not the read Caddy) and PODCAST_UPLOAD_TOKEN "
+            "matches the NAS .env UPLOAD_TOKEN"
         )
 
 
@@ -320,6 +324,19 @@ async def publish_series(
     manifest_eps = manifest.get("episodes", [])
     if not manifest_eps:
         raise ValueError(f"manifest has no episodes: {manifest_path}")
+    # Preflight the WHOLE manifest before any upload, so bad data fails fast
+    # instead of after some media already landed. EP\d{2} on the wire caps a feed
+    # at 99 episodes; enforce that + integer + uniqueness + non-empty title here.
+    seen_n: set[int] = set()
+    for ep in manifest_eps:
+        n = ep.get("episode")
+        if not isinstance(n, int) or not (1 <= n <= 99):
+            raise ValueError(f"episode number must be an int in 1..99, got: {n!r}")
+        if n in seen_n:
+            raise ValueError(f"duplicate episode number in manifest: {n}")
+        seen_n.add(n)
+        if not isinstance(ep.get("title"), str) or not ep["title"].strip():
+            raise ValueError(f"episode {n}: title is required and must be non-empty")
 
     # One mp3 in RAM at a time: read -> hash -> PUT -> drop. NEVER accumulate the
     # whole season (8-12 episodes x tens of MB = 300-600MB resident on a possibly
@@ -453,7 +470,9 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.environ.get("FEEDS_ROOT", "/srv")
-TOKEN = os.environ["UPLOAD_TOKEN"]                       # fail fast if unset
+TOKEN = os.environ.get("UPLOAD_TOKEN", "")
+if not TOKEN:                                            # empty token = no auth at all
+    raise RuntimeError("UPLOAD_TOKEN is required and must be non-empty")
 PORT = int(os.environ.get("PORT", "80"))
 MAX_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))  # 500 MB/file
 
@@ -503,11 +522,19 @@ def atomic_write(dst: str, rfile, length: int) -> None:
         pass
 
 
+# Marker on EVERY response, so the client's precheck can prove it reached THIS
+# uploader and not the read-only Caddy (whose /healthz also returns 200). Caddy
+# never sets this -> a mis-pointed PODCAST_UPLOAD_URL fails the precheck instead
+# of passing then dying mid-mp3.
+_MARKER = ("X-Podcast-Uploader", "1")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _reply(self, code: int, body: bytes = b"") -> None:
         self.send_response(code)
+        self.send_header(*_MARKER)
         self.send_header("Content-Length", str(len(body)))
         if code >= 400:
             # Don't keep-alive a connection whose request body we may not have
@@ -523,9 +550,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(404)
         auth = self.headers.get("Authorization")
         if auth is None:
-            return self._reply(200, b"ok\n")              # docker healthcheck
+            return self._reply(200, b"ok\n")              # docker healthcheck (200 only)
         ok = secrets.compare_digest(auth, f"Bearer {TOKEN}")  # client token probe
-        return self._reply(200 if ok else 401)
+        return self._reply(200 if ok else 401)            # marker header set above
 
     def do_PUT(self):
         if not secrets.compare_digest(
@@ -638,7 +665,7 @@ CMD ["python3", "/app/server.py"]
 | `media_file` | str | `EP{n:02d}-{hash8}.mp3` |
 | `length` | int | `len(mp3_bytes)`(= 檔案大小) |
 
-**pubDate 穩定性**:主來源是 manifest 的 `published_at`(首次生成寫入、跨重發不變)。缺欄位(舊 manifest)時走**決定性且每集相異**的 fallback:`base = 2020-01-01T09:00:00+0800`,第 n 集 = `base − (n−1) 天` → 集序正確、跨重發 byte 穩定、無同季 tie。**任何情況下同季連發兩次,feed.xml byte 完全一致。**
+**pubDate 穩定性**:主來源是 manifest 的 `published_at`(首次生成寫入、跨重發不變)。缺欄位(舊 manifest)時走**決定性且每集相異**的 fallback:`base = 2020-01-01T09:00:00+0800`,第 n 集 = `base + (n−1) 天`(集號越大日期越新,與 published_at 主路徑同向)→ 集序正確、跨重發 byte 穩定、無同季 tie。**任何情況下同季連發兩次,feed.xml byte 完全一致。**
 
 ## 8. 安全模型(兩 port + 兩 token)
 
@@ -729,8 +756,9 @@ FEEDS_ROOT_HOST=/volume1/podcasts
 # ingress points at http://<this-host-lan-ip>:${HOST_PORT}. (unchanged)
 HOST_PORT=8080
 
-# WRITE side: uploader host port. LAN-ONLY — do NOT add it to the tunnel.
-# MCP's PODCAST_UPLOAD_URL = http://<this-host-lan-ip>:${UPLOAD_PORT}
+# WRITE side: uploader. LAN-ONLY — do NOT add it to the tunnel, and firewall the
+# port off the WAN. MCP's PODCAST_UPLOAD_URL = http://${UPLOAD_BIND}:${UPLOAD_PORT}
+UPLOAD_BIND=192.0.2.10          # NAS LAN IP; compose binds the port to THIS only (not 0.0.0.0)
 UPLOAD_PORT=8086
 
 # Shared bearer token for uploads. MUST equal Doppler PODCAST_UPLOAD_TOKEN
@@ -762,7 +790,9 @@ services:
     environment:
       UPLOAD_TOKEN: ${UPLOAD_TOKEN:?set UPLOAD_TOKEN in .env}
     ports:
-      - "${UPLOAD_PORT:-8086}:80"     # LAN-only; never add to the tunnel ingress
+      # Bind to the NAS LAN IP ONLY (not 0.0.0.0), so the write port is never
+      # exposed on a public/WAN/IPv6 interface. Never add it to the tunnel.
+      - "${UPLOAD_BIND:?set UPLOAD_BIND to the NAS LAN IP in .env}:${UPLOAD_PORT:-8086}:80"
     volumes:
       - ${FEEDS_ROOT_HOST:?set FEEDS_ROOT_HOST in .env}:/srv
     healthcheck:
@@ -775,7 +805,8 @@ services:
 
 **`Caddyfile`(讀站,加一行)**
 ```caddyfile
-	# Internal state — never expose publicly (contains owner_email / notebook_id).
+	# Internal audit state — never expose (contains notebook_id / internal state).
+	# (owner_email is already public in feed.xml; this 403 is about notebook_id.)
 	respond /feeds/*/show.json 403
 ```
 (feed_info 已改純計算、不經 HTTP 讀 show.json,故此擋無副作用。)
@@ -787,7 +818,8 @@ services:
 - show_id 非法 / 必填 metadata 空 → `ValueError`。
 - artwork 不合規 → `ValueError`(任何上傳前)。
 - manifest 無 episodes → `ValueError`。
-- **auth 預檢 `GET /healthz` 非 200 → `ValueError`**(不送任何大 mp3)。
+- **manifest preflight**:每集 `episode` 為 1..99 整數、不重複、`title` 非空 → 否則 `ValueError`(任何上傳前)。
+- **auth 預檢 `GET /healthz` 非 200 或缺 marker header `X-Podcast-Uploader: 1` → `ValueError`**(不送任何大 mp3;marker 確保打到 uploader 而非讀站 Caddy)。
 - mp3 遺失且無 `artifact_id` / 重抓後仍無檔 → `ValueError`。
 - 任一 PUT 非 201 → `raise ValueError`(**不 retry**;冪等,使用者重跑即收斂)。
 
@@ -817,7 +849,7 @@ services:
 - `test_feed_info` —— `feed_info("ai-news")` 回 `{show_id, token, feed_url, show_page_url}`,`token == make_token(...)`。
 - **刪** `feed_list`、tombstone 復活測試。
 
-**uploader**:`podcast-feed-host/uploader/test_server.py`(§6.5)—— path 白名單 + 原子寫 roundtrip。auth 預檢與 traversal 拒絕由 §12 部署驗收 `curl` 覆蓋(http.server handler 難純單元測)。
+**uploader**:`podcast-feed-host/uploader/test_server.py`(§6.5)—— 除 path 白名單 + 原子寫 roundtrip 外,**用 loopback `ThreadingHTTPServer(("127.0.0.1", 0))` 起在 thread + stdlib client 做 handler 端到端測**:(a) 無 token PUT→401;(b) 對 token PUT 合法檔→201 且檔案落地;(c) 白名單外/traversal 路徑→404;(d) 缺 Content-Length→411、超 `MAX_UPLOAD_BYTES`→413;(e) `GET /healthz` 帶對/錯 token→200/401 且回應含 `X-Podcast-Uploader: 1` marker。auth/marker/traversal 是安全與 wire 契約核心,不只靠部署 curl。
 
 **執行**:`uv run pytest -q` 全綠;`asyncio_mode="auto"` 沿用。DoD:全綠 + 上述具名測試存在通過 + 全程無真網路/NAS/NotebookLM。
 
