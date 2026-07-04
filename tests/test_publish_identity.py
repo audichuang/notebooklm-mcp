@@ -41,3 +41,11 @@ def test_validate_show_id_rejects_bad(bad):
 @pytest.mark.parametrize("ok", ["ai-news", "rust-deep", "s2", "a1b2-c3"])
 def test_validate_show_id_accepts_good(ok):
     assert identity.validate_show_id(ok) == ok
+
+
+def test_episode_guid_stable_and_source_decoupled():
+    from notebooklm_mcp.publish import identity
+    g1 = identity.episode_guid("ai-news", 1)
+    assert g1 == identity.episode_guid("ai-news", 1)
+    assert g1 != identity.episode_guid("ai-news", 2)
+    assert g1 != identity.episode_guid("other", 1)

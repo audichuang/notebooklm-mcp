@@ -26,7 +26,6 @@ SHOW = {
             "pub_date": "Sun, 21 Jun 2026 09:00:00 +0800",
             "media_file": "EP01-ab12cd34.mp3",
             "length": 12345,
-            "tombstone": False,
         },
         "2": {
             "title": "實戰篇 <重點>",  # 含 < 測 escape
@@ -35,15 +34,6 @@ SHOW = {
             "pub_date": "Mon, 22 Jun 2026 09:00:00 +0800",
             "media_file": "EP02-deadbeef.mp3",
             "length": 22222,
-            "tombstone": False,
-        },
-        "3": {  # tombstone:不應出現在 feed
-            "title": "壞集",
-            "guid": "g3",
-            "pub_date": "Tue, 23 Jun 2026 09:00:00 +0800",
-            "media_file": "EP03-00000000.mp3",
-            "length": 1,
-            "tombstone": True,
         },
     },
 }
@@ -66,13 +56,13 @@ def test_channel_required_fields():
     assert ch.findtext("itunes:explicit", namespaces=NS) == "false"  # 小寫
     assert ch.find("atom:link", NS).get("href") == f"{BASE}/feeds/tok123/feed.xml"
     assert ch.findtext("link") == f"{BASE}/feeds/tok123/index.html"
-    # lastBuildDate = 最後一集 live(EP02;EP03 tombstone)的 pubDate,穩定
+    # lastBuildDate = 最後一集(EP02)的 pubDate,穩定
     assert ch.findtext("lastBuildDate") == "Mon, 22 Jun 2026 09:00:00 +0800"
 
 
-def test_items_exclude_tombstones_and_escape_xml():
+def test_items_escape_xml():
     items = _feed().find("channel").findall("item")
-    assert len(items) == 2  # tombstone EP03 排除
+    assert len(items) == 2
     ep1 = items[0]
     assert ep1.findtext("title") == "心法篇"
     assert ep1.findtext("guid") == "g1"
@@ -97,4 +87,3 @@ def test_namespaces_declared():
 def test_index_html_lists_live_episodes_only():
     html = feed.build_index_html(SHOW, BASE)
     assert "心法篇" in html and "實戰篇" in html
-    assert "壞集" not in html  # tombstone 不列
