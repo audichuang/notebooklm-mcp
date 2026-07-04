@@ -158,8 +158,11 @@ timeout 8 doppler run -p notebooklm -c dev -- \
 2. 回傳 `feed_url` → 在 Apple Podcast「用 URL 加入節目」貼上訂閱。續製只要重跑 `publish_series`
    (同 URL / 同 GUID),Apple 自動抓新集。
 
-需 3 個 Doppler secret(`PODCAST_PUBLIC_BASE_URL` / `PODCAST_FEEDS_ROOT` / `PODCAST_TOKEN_SALT`)與
-NAS + Cloudflare Tunnel 靜態服務;托管與一次性部署見 [podcast-feed-host](https://github.com/audichuang/podcast-feed-host)。
+需 4 個 Doppler secret(`PODCAST_PUBLIC_BASE_URL` / `PODCAST_TOKEN_SALT` /
+`PODCAST_UPLOAD_URL` / `PODCAST_UPLOAD_TOKEN`);MCP 不掛載 NAS,改內網 HTTP PUT 到
+NAS uploader(讀寫分離),讀站仍經 Cloudflare Tunnel 對外;托管與一次性部署見
+[podcast-feed-host](https://github.com/audichuang/podcast-feed-host)。**重跑 `publish_series`
+= 重發整季**(逐檔覆寫,GUID/URL 不變的集數視為同集更新)。
 
 ---
 

@@ -40,10 +40,10 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `server.py` — thin launcher,只 `from .app import _lifespan, main, mcp`(可被當 `__main__` 跑)
   - `tools_basic.py` — notebook / source / `generate_audio` / artifact / `chat_ask`(薄包,`zh_Hant` 預設)
   - `tools_podcast.py` — `podcast_episode`(單集 5 步)/ `podcast_series`(整季純程式碼迴圈)
-  - `tools_publish.py` — `publish_series` / `feed_list` / `feed_info`(把整季發布成 Apple 合規
-    RSS feed;薄 I/O 編排,提交順序:媒體檔→show.json→feed.xml/index.html)
-  - `publish/` — 純邏輯(離線可測):`identity.py`(HMAC→base32 決定性 token,無 registry)、
-    `layout.py`(內容 hash + temp/fsync/replace 原子寫)、`state.py`(show.json 權威 state + 穩定 guid)、
+  - `tools_publish.py` — `publish_series` / `feed_info`(把整季發布成 Apple 合規
+    RSS feed;薄 I/O 編排,內網 HTTP PUT 到 NAS uploader,提交順序:媒體檔→show.json→feed.xml/index.html)
+  - `publish/` — 純邏輯(離線可測):`identity.py`(HMAC→base32 決定性 token + `episode_guid`,無 registry)、
+    `layout.py`(內容 hash + 媒體檔名)、
     `artwork.py`(Apple Show Cover 規格驗證)、`rss_models.py` / `feed.py`(RSS+iTunes XML + index.html)
   - `_status.py` — generation-status 防護:SDK 把失敗/限流回報成 `task_id=""` 而非丟例外,用前要先擋掉
   - `languages.py`(白名單 + `zh_Hant` 預設)、`enums.py`(字串→int-enum)、`runtime.py`(client holder)
@@ -55,12 +55,15 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
 
 ### 發布(podcast RSS → Apple Podcast)
 
-`publish_series` 讀 3 個 Doppler secret(同 `-p notebooklm -c dev` 注入):
-`PODCAST_PUBLIC_BASE_URL`(公開 URL 根,無尾斜線)、`PODCAST_FEEDS_ROOT`(NAS 輸出目錄,
-MCP 所在機掛載得寫)、`PODCAST_TOKEN_SALT`(token HMAC salt;**洩漏會讓 feed URL 可被推算**)。
+`publish_series` 讀 4 個 Doppler secret(同 `-p notebooklm -c dev` 注入):
+`PODCAST_PUBLIC_BASE_URL`(公開 URL 根,無尾斜線)、`PODCAST_TOKEN_SALT`(token HMAC salt;
+**洩漏會讓 feed URL 可被推算**)、`PODCAST_UPLOAD_URL`(NAS uploader 內網 base,無尾斜線)、
+`PODCAST_UPLOAD_TOKEN`(bearer,**必須 = NAS `.env` 的 `UPLOAD_TOKEN`**)。MCP 不再掛載 NAS
+檔案系統,改成內網 HTTP PUT 到 NAS uploader(讀寫分離)。
 對外靜態服務是獨立 public repo [podcast-feed-host](https://github.com/audichuang/podcast-feed-host)
-(Caddy 靜態服務,由使用者既有的 Cloudflare Tunnel 指過來;完整部署/驗收步驟在該 repo README)。
-feed identity = 穩定 `show_id`(**永不改**),不綁 notebook_id。
+(Caddy 唯讀對外,由使用者既有的 Cloudflare Tunnel 指過來;寫端 uploader 僅內網,不進
+tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `show_id`(**永不改**),
+不綁 notebook_id。
 
 ## Gotchas(notebooklm-py 0.3.4,pin `>=0.3,<0.4`;與 GitHub HEAD 不同,以**實裝版本**為準)
 
