@@ -146,6 +146,21 @@ timeout 8 doppler run -p notebooklm -c dev -- \
 
 範例見 [`references/series_example.md`](references/series_example.md);brief / 提示詞模板見 [`references/episodic_prompts.md`](references/episodic_prompts.md);疑難排解見 [`references/troubleshooting.md`](references/troubleshooting.md)。
 
+### 發布成 podcast RSS(Apple Podcast 訂閱)
+
+一主題 = 一節目 = 一 feed。跑完 `podcast_series` 後,把整季發布成可訂閱的 RSS feed:
+
+1. `publish_series(show_id, notebook_id, manifest_path, show_title, show_description, author, owner_name, owner_email, artwork_path)`
+   - `show_id`:穩定 slug(feed identity,決定 URL,**永不改**;`[a-z0-9-]`)
+   - `manifest_path`:`podcast_series` 產出的 `series_manifest.json` 路徑
+   - `artwork_path`:正方形 1400–3000px、PNG/JPG、RGB、**無 alpha**(Apple Show Cover 規格)
+   - `owner_email`:Apple 必填
+2. 回傳 `feed_url` → 在 Apple Podcast「用 URL 加入節目」貼上訂閱。續製只要重跑 `publish_series`
+   (同 URL / 同 GUID),Apple 自動抓新集。
+
+需 3 個 Doppler secret(`PODCAST_PUBLIC_BASE_URL` / `PODCAST_FEEDS_ROOT` / `PODCAST_TOKEN_SALT`)與
+NAS + Cloudflare Tunnel 靜態服務;托管與一次性部署見 [podcast-feed-host](https://github.com/audichuang/podcast-feed-host)。
+
 ---
 
 ## 測試

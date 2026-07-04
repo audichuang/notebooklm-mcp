@@ -38,7 +38,7 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
 mcp = FastMCP("notebooklm", lifespan=_lifespan)
 
 # Register tools. Each module imports `mcp` from here and calls @mcp.tool().
-from . import tools_basic, tools_podcast  # noqa: E402,F401
+from . import tools_basic, tools_podcast, tools_publish  # noqa: E402,F401
 
 
 def main() -> None:

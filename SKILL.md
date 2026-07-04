@@ -1,6 +1,6 @@
 ---
 name: notebooklm
-description: "Route NotebookLM work through the local notebooklm MCP server. Creates notebooks, adds sources, generates zh_Hant-first audio, asks source-grounded questions, and runs deterministic episodic podcast workflows. Use when working with NotebookLM, 上傳到筆記本, 生成 podcast, 生成播客, 生成連續音檔, 幫我講解."
+description: "Route NotebookLM work through the local notebooklm MCP server. Creates notebooks, adds sources, generates zh_Hant-first audio, asks source-grounded questions, runs deterministic episodic podcast workflows, and publishes a series as an Apple-Podcast-compliant RSS feed. Use when working with NotebookLM, 上傳到筆記本, 生成 podcast, 生成播客, 生成連續音檔, 幫我講解, 發布 podcast, 訂閱, RSS, Apple Podcast."
 ---
 
 # NotebookLM
@@ -24,6 +24,9 @@ NotebookLM 操作都走 `notebooklm` MCP server。Skill 只負責判斷意圖與
 | `chat_ask` | 對筆記本做 source-grounded 問答 |
 | `podcast_episode` | 單集 podcast：生成→等待→命名 artifact 為 `EP{n:02d} 標題`(需傳 `title`)→下載→自上傳本集 mp3 為同名來源(可選 `prior_mp3_path` 做一次性續接) |
 | `podcast_series` | 整季 podcast：純 Python 迴圈;每集命名 `EP{n:02d} 標題` 並自上傳本集 mp3,下一集生成時自然讀到筆記本內的同名前集來源 |
+| `publish_series` | 把整季 manifest + mp3 發布成 Apple-Podcast 合規 RSS feed(寫到 NAS,Cloudflare Tunnel 對外 HTTPS);回傳 `feed_url` 供訂閱 |
+| `feed_list` | 列出已發布的節目 |
+| `feed_info` | 查單一節目完整狀態(各集 guid / pubDate / 檔名 / tombstone) |
 
 完整參數與回傳格式見 [MCP 工具參考](references/cli-reference.md)。
 
@@ -53,6 +56,23 @@ NotebookLM 操作都走 `notebooklm` MCP server。Skill 只負責判斷意圖與
 Reject-then-delete 規則：人工聽完覺得某集要重生時，先用 `source_delete` 移除該集已回傳到筆記本的音檔來源，再用 `podcast_episode` 重生該集，避免壞集被下一集繼承。
 
 Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_prompts.md)，`episodes` 範例見 [series_example.md](references/series_example.md)。
+
+## Publish to Apple Podcast(RSS feed)
+
+一主題 = 一節目 = 一 feed。跑完 `podcast_series` 後,把整季發布成可訂閱的 RSS feed。
+
+1. 準備節目封面圖(Apple 硬規格:正方形、1400–3000px、PNG/JPG、RGB、**無透明通道**)與
+   節目 metadata(title / description / author / **owner_email**——Apple 必填)。
+2. 呼叫 `publish_series(show_id, notebook_id, manifest_path, show_title, show_description,
+   author, owner_name, owner_email, artwork_path)`。
+   - `show_id`:穩定 slug(feed identity,決定 URL,**永不改**;`[a-z0-9-]`)。
+   - `manifest_path`:`podcast_series` 產出的 `series_manifest.json` 路徑。
+3. 回傳 `feed_url` → 在 Apple Podcast「用 URL 加入節目」貼上訂閱。續製只要重跑
+   `publish_series`(同 URL、同 GUID),Apple 自動抓新集;重生壞集內容 hash 變 → 換音檔
+   URL 但 GUID 不變(視為同集更新)。
+
+前提:三個 Doppler secret(`PODCAST_PUBLIC_BASE_URL` / `PODCAST_FEEDS_ROOT` /
+`PODCAST_TOKEN_SALT`)與 NAS + Cloudflare Tunnel 靜態服務;托管見 [podcast-feed-host](https://github.com/audichuang/podcast-feed-host)。
 
 ## Language
 
