@@ -286,6 +286,115 @@ FULL episodes list). It relies on the same notebook already holding the prior
 local `ep{N-1}.mp3`. The season manifest is merged across resumes, so earlier
 episodes are preserved.
 
+### `generate_slides`
+
+Params:
+
+```json
+{
+  "notebook_id": "nb-...",
+  "manifest_path": "/tmp/notebooklm/series/series_manifest.json",
+  "episode_n": 1,
+  "source_ids": ["src-..."],
+  "language": "zh_Hant",
+  "instructions": "選填:簡報產生指示",
+  "slide_format": "detailed",
+  "slide_length": "default",
+  "wait_timeout": 1800
+}
+```
+
+按需生某集簡報並下載 PDF。`slide_format`:`detailed`(內容較完整)/ `presenter`;
+`slide_length`:`default` / `short`。`source_ids` 不傳則用全部來源(要聚焦原文請明確傳)。
+下載到 manifest 同目錄 `ep{N:02d}-slides.pdf`,並把路徑回寫該集 `slides_pdf_path`。
+
+Returns:
+
+```json
+{"episode": 1, "slides_pdf_path": ".../ep01-slides.pdf", "artifact_id": "art-..."}
+```
+
+### `generate_report`
+
+Params:
+
+```json
+{
+  "notebook_id": "nb-...",
+  "manifest_path": "/tmp/notebooklm/series/series_manifest.json",
+  "episode_n": 1,
+  "report_format": "study_guide",
+  "source_ids": ["src-..."],
+  "language": "zh_Hant",
+  "extra_instructions": "選填:附加指示",
+  "wait_timeout": 1800
+}
+```
+
+按需生某集研讀文件並下載 Markdown。`report_format`:`study_guide`(預設)/ `briefing_doc`
+/ `blog_post`。下載到 `ep{N:02d}-report.md`,回寫該集 `report_md_path` + `report_format`。
+發布時 `publish_series` 會把它渲染成自包含 HTML 再 host。
+
+Returns:
+
+```json
+{"episode": 1, "report_md_path": ".../ep01-report.md", "report_format": "study_guide", "artifact_id": "art-..."}
+```
+
+### `publish_series`
+
+Params:
+
+```json
+{
+  "show_id": "my-show",
+  "notebook_id": "nb-...",
+  "manifest_path": "/tmp/notebooklm/series/series_manifest.json",
+  "show_title": "節目名",
+  "show_description": "節目描述",
+  "author": "作者",
+  "owner_name": "擁有者",
+  "owner_email": "owner@example.com",
+  "artwork_path": "/path/cover.jpg",
+  "category": "Technology",
+  "explicit": false
+}
+```
+
+把整季 manifest + mp3 發布成 Apple 合規 RSS feed(內網 HTTP PUT 到 NAS uploader)。
+`show_id` 是穩定 slug(feed identity、決定 URL、**永不改**、`[a-z0-9-]`)。manifest 每集
+可帶**選填**欄位:`description`(→ 單集 `<description>` 純文字 + `<content:encoded>` 富文字)、
+`slides_pdf_path` / `report_md_path`(→ content-hash 後 host 附件,具名連結附進單集簡介)。
+提交順序:媒體(mp3 + 附件 + 封面)→ show.json → feed.xml/index.html。
+
+Returns:
+
+```json
+{
+  "feed_url": "https://.../feeds/<token>/feed.xml",
+  "show_page_url": "https://.../feeds/<token>/index.html",
+  "token": "<token>",
+  "episode_count": 1,
+  "episodes": [{"n": 1, "title": "...", "guid": "...", "url": "https://.../EP01-<hash>.mp3"}]
+}
+```
+
+### `feed_info`
+
+Params:
+
+```json
+{"show_id": "my-show"}
+```
+
+純計算(token = HMAC(salt, show_id)),不含各集細節。
+
+Returns:
+
+```json
+{"show_id": "my-show", "token": "<token>", "feed_url": "https://.../feed.xml", "show_page_url": "https://.../index.html"}
+```
+
 ## Language
 
 `zh_Hant` is the default for audio tools. Invalid codes fail before the SDK
