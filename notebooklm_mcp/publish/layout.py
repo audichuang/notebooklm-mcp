@@ -17,3 +17,8 @@ def content_hash8(path: str) -> str:
 
 def media_filename(episode_n: int, hash8: str) -> str:
     return f"EP{episode_n:02d}-{hash8}.mp3"
+
+
+def attachment_filename(episode_n: int, hash8: str, ext: str) -> str:
+    """單集附件(pdf/html)的 content-addressed 檔名,與 media_filename 同族。"""
+    return f"EP{episode_n:02d}-{hash8}.{ext}"

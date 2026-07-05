@@ -16,3 +16,10 @@ def test_content_hash8_is_stable_and_content_addressed(tmp_path):
 def test_media_filename():
     assert layout.media_filename(1, "ab12cd34") == "EP01-ab12cd34.mp3"
     assert layout.media_filename(12, "deadbeef") == "EP12-deadbeef.mp3"
+
+
+def test_attachment_filename():
+    from notebooklm_mcp.publish.layout import attachment_filename
+
+    assert attachment_filename(1, "deadbeef", "pdf") == "EP01-deadbeef.pdf"
+    assert attachment_filename(12, "0a1b2c3d", "html") == "EP12-0a1b2c3d.html"
