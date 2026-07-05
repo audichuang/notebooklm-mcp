@@ -1,24 +1,34 @@
-# AGENTS.md — notebooklm-skill
+# AGENTS.md — notebooklm-mcp
 
-自建薄 MCP server(建在 `notebooklm-py` 之上)+ 薄 `SKILL.md` 路由層 + 確定性續集 podcast 工具。
+自建薄 MCP server(建在 `notebooklm-py` 之上)+ 確定性續集 podcast 工具。**本 repo 只含 MCP 程式碼**,
+發布成 private repo `github.com/audichuang/notebooklm-mcp`,靠 `uv tool install` 裝成 console 命令
+`notebooklm-mcp`(server)/ `notebooklm-cover`(封面 CLI)。薄 `SKILL.md` 路由層 + `references/`
+**已拆到 skill repo `audi-skill/notebooklm`(docs-only)**;兩者是一組配置(見底部 Cross-Repo Sync Checklist)。
 完整設計理由與 live 驗證踩坑見 `docs/superpowers/notebooklm-mcp-findings.md`(經驗庫,值得先讀)。
 
 ## Commands
 
 ```bash
-# 安裝（必須用 Python 3.12；3.14 會觸發 SDK 的 inspect.signature bug）
+# 本 repo 開發（必須用 Python 3.12；3.14 會觸發 SDK 的 inspect.signature bug）
 uv venv --python 3.12 && uv pip install -e ".[dev]"
 
 # 全套離線測試（mock client，不需網路/認證）
 uv run pytest -q
+#   註:fresh venv + uv pip install 後首次 uv run 可能撞暫時性 re-sync churn(ModuleNotFoundError),
+#   再跑一次或 rm -rf .venv 重建即收斂。
 
-# 跑 MCP server（認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
-doppler run -p notebooklm -c dev -- uv run python -m notebooklm_mcp.server --transport stdio
+# 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master）
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.1.0"
+
+# 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
+doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
 #   HTTP 模式：--transport streamable-http --host 0.0.0.0 --port 8484
+#   repo 內開發時亦可 uv run python -m notebooklm_mcp.server --transport stdio
 
-# 註冊進 Claude Code（3 台 VM 各跑一份；細節見 docs/mcp-setup.md）
-claude mcp add notebooklm -- doppler run -p notebooklm -c dev -- \
-  uv run --directory <repo> python -m notebooklm_mcp.server --transport stdio
+# 註冊進 Claude Code（細節見 docs/mcp-setup.md）。CLI 2.1.201 的 `claude mcp add … -- …`
+# 會把 `--` 後整串當 prompt，改用 add-json：
+claude mcp add-json notebooklm -s local \
+  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","notebooklm-mcp","--transport","stdio"]}'
 ```
 
 ### 認證（Doppler，3 VM 同步）
@@ -53,8 +63,10 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `_status.py` — generation-status 防護:SDK 把失敗/限流回報成 `task_id=""` 而非丟例外,用前要先擋掉
   - `languages.py`(白名單 + `zh_Hant` 預設)、`enums.py`(字串→int-enum)、`runtime.py`(client holder)
   - `auth_cli.py` — 貼 storage_state JSON 建檔(headless 備援)
+  - `cover_cli.py` — `notebooklm-cover` console script(封面 CLI,PIL);原 `scripts/make_cover.py` 移進套件,才能隨 `uv tool install` 上 PATH
 - `tests/test_contracts.py` — 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API,擋上游漂移(離線 tripwire)
-- `SKILL.md` 薄路由層;`references/` 工具參考 + 連續性提示詞模板;`docs/superpowers/` 設計/計畫/findings
+- `scripts/` — `check_skill_sync.py`(CI 用:MCP 工具名 ⟷ skill 文件同步硬檢查)、`sync-auth.sh`(登入機推 Doppler)
+- `docs/superpowers/` — 設計/計畫/findings。**`SKILL.md` 路由層 + `references/`(工具參考 + 連續性提示詞)已不在本 repo**,在 skill repo `audi-skill/notebooklm`(見 Cross-Repo Sync Checklist)
 
 **判斷只在「大綱」前置點**(Opus 規劃每集 brief,人核可);大綱定稿後是確定性腳本,迴圈內無 LLM。
 
@@ -82,7 +94,7 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   artifact **完全同名**(同一字串),讓兩區命名一致、記錄完整。命名邏輯集中在 `_episode_label()`。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`。
 - **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`);要當公開文字(如單集 show notes)
-  前用 regex `\[[\d,\s\-–]+\]` 清掉。單集簡介 = manifest 該集加 `description`(見 SKILL §Publish)。
+  前用 regex `\[[\d,\s\-–]+\]` 清掉。單集簡介 = manifest 該集加 `description`(見 skill repo `audi-skill/notebooklm` 的 SKILL §Publish)。
 - **附加簡報/講義**:`generate_slides`/`generate_report` 只吃**傳入的 `source_ids`**才聚焦原文;
   不傳則 SDK 用全部來源(v1 不自動排除音檔來源)。附件缺檔時 `publish_series` **fail-fast**。
   **順序鐵律**:uploader 白名單放寬 `.pdf`/`.html` 後**要先重部署 NAS**,再跑帶附件的發布,否則附件 PUT 404。
@@ -93,13 +105,13 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - **X 長文(Article)餵不進來**:貼文只是 t.co 短連結,文章本體在 `x.com/i/article/…`
   需登入,`source_add_url` / WebFetch 都回 402。存成 PDF(Read 讀得出全文)或直接貼全文
   用 `source_add_text`。
-- **封面圖用 `scripts/make_cover.py` 生**(PIL,已固化排版 + 自帶 Apple 驗證器)。
-  `agy` 之類 coding agent **不能直接出點陣圖**,只會幫你寫這種 PIL code;要「AI 生成圖」得
-  另接影像模型(Imagen/DALL·E)。NotebookLM 下載的音檔是 MPEG-4 容器但副檔名 `.mp3`、
-  以 `audio/mpeg` 發布,Apple 可正常播(已實測訂閱+播放通過)。
-- **單集封面(每集各自封面)**:`make_cover.py` 加 `--episode EP0n` 走「集號決定性 HSL 配色」
+- **封面圖用 `notebooklm-cover` 生**(console script,實作 `notebooklm_mcp/cover_cli.py`,PIL,
+  已固化排版 + 自帶 Apple 驗證器)。`agy` 之類 coding agent **不能直接出點陣圖**,只會幫你寫這種
+  PIL code;要「AI 生成圖」得另接影像模型(Imagen/DALL·E)。NotebookLM 下載的音檔是 MPEG-4 容器但
+  副檔名 `.mp3`、以 `audio/mpeg` 發布,Apple 可正常播(已實測訂閱+播放通過)。
+- **單集封面(每集各自封面)**:`notebooklm-cover` 加 `--episode EP0n` 走「集號決定性 HSL 配色」
   (色相 `(n*77)%360`)+ 集標當大標 + EP 徽章 + 節目名副標;不給 `--episode` 則產出與舊版
-  **byte 完全一致的節目封面**(向後相容)。`--manifest <json> --show-name .. --tag .. --byline .. --output-dir <dir>`
+  **byte 完全一致的節目封面**(向後相容)。`notebooklm-cover --manifest <json> --show-name .. --tag .. --byline .. --output-dir <dir>`
   批次讀 episodes 逐集生、把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>`
   掛 `itunes:image`,沒給 fallback 節目封面)。**決定性鐵律**:發布端用封面 bytes 做 content-hash,
   同一集必須永遠生同一張,所以配色只能是集號的函式,不可隨機。`.jpg`/`.png` uploader 白名單本來就放行,
