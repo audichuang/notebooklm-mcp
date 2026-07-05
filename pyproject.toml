@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "notebooklm-py>=0.3,<0.4",
+    "notebooklm-py>=0.4.1,<0.5",
     "mcp[cli]>=1.0.0",
     "Pillow>=10,<12",
     "httpx>=0.27,<1",
@@ -16,7 +16,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 # Only the LOCAL login machine needs a browser; the 3 VMs auth via Doppler
 # (NOTEBOOKLM_AUTH_JSON) and never install this. After installing, run:
 #   uv run playwright install chromium
-login = ["notebooklm-py[browser]>=0.3,<0.4"]
+login = ["notebooklm-py[browser]>=0.4.1,<0.5"]
 
 [project.scripts]
 notebooklm-mcp = "notebooklm_mcp.server:main"

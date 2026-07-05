@@ -9,6 +9,18 @@ def _params(func):
     return list(inspect.signature(func).parameters)
 
 
+def test_from_storage_is_awaitable_and_supports_keepalive():
+    """app.py 的 lifespan 依賴兩件事:(1) from_storage 仍是 coroutine(async with await
+    寫法;免 await 慣用法 v0.5.0 才有),(2) 0.4.1 起的 keepalive= 參數 —— session 內
+    背景 RotateCookies task,讓跨小時長生成不因 __Secure-1PSIDTS 過期中途死。
+    這裡紅了就要連同 app.py 的呼叫慣用法一起改。"""
+    from notebooklm import NotebookLMClient
+
+    assert inspect.iscoroutinefunction(NotebookLMClient.from_storage)
+    p = _params(NotebookLMClient.from_storage)
+    assert "keepalive" in p and "keepalive_min_interval" in p
+
+
 def test_generate_audio_signature():
     from notebooklm._artifacts import ArtifactsAPI
 
@@ -57,7 +69,8 @@ def test_read_surface_signatures_and_fields():
     from notebooklm._sources import SourcesAPI
     from notebooklm.types import Notebook, Source, SourceFulltext
 
-    assert _params(SourcesAPI.list) == ["self", "notebook_id"]
+    # 0.4.1 加了尾端 strict=False(malformed 回應改可 fail-loud;預設維持舊寬鬆行為)
+    assert _params(SourcesAPI.list) == ["self", "notebook_id", "strict"]
     assert _params(SourcesAPI.get_fulltext) == ["self", "notebook_id", "source_id"]
     assert _params(NotebooksAPI.get) == ["self", "notebook_id"]
     # chat_ask focuses on a subset / continues a thread via these kwargs.
@@ -93,8 +106,8 @@ def test_add_file_accepts_mime_and_wait():
 
 
 def test_rename_signatures_have_no_return_object():
-    """0.3.4 rename() takes only (notebook_id, id, new_title) — NO return_object
-    (that kwarg exists on GitHub HEAD but not the pinned 0.3.x). Passing it raises
+    """0.4.1 rename() takes only (notebook_id, id, new_title) — NO return_object
+    (that kwarg exists on GitHub HEAD but not the pinned 0.4.x). Passing it raises
     TypeError at runtime. Pin both so the drift is caught offline."""
     from notebooklm._artifacts import ArtifactsAPI
     from notebooklm._sources import SourcesAPI
@@ -109,9 +122,11 @@ def test_audio_enum_members():
 
 
 def test_wait_for_completion_full_signature():
-    # Installed 0.3.4 ends with poll_interval (GitHub HEAD differs — trust installed).
+    # Installed 0.4.1 ends with poll_interval (GitHub HEAD differs — trust installed).
     from notebooklm._artifacts import ArtifactsAPI
 
+    # 0.4.1 加了尾端 max_not_found=5 / min_not_found_window=10.0(輪詢容忍
+    # 暫時性 NOT_FOUND 才 fail,預設即生效,對呼叫端 API 無影響)
     assert _params(ArtifactsAPI.wait_for_completion) == [
         "self",
         "notebook_id",
@@ -120,6 +135,8 @@ def test_wait_for_completion_full_signature():
         "max_interval",
         "timeout",
         "poll_interval",
+        "max_not_found",
+        "min_not_found_window",
     ]
 
 

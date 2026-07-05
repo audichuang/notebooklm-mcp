@@ -82,9 +82,14 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
 tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `show_id`(**永不改**),
 不綁 notebook_id。
 
-## Gotchas(notebooklm-py 0.3.4,pin `>=0.3,<0.4`;與 GitHub HEAD 不同,以**實裝版本**為準)
+## Gotchas(notebooklm-py 0.4.1,pin `>=0.4.1,<0.5`;與 GitHub HEAD 不同,以**實裝版本**為準)
 
-- `from_storage()` 是 coroutine → `async with await NotebookLMClient.from_storage()`。
+- `from_storage()` 仍是 coroutine → `async with await NotebookLMClient.from_storage(keepalive=600)`
+  (免 await 慣用法 v0.5.0 才有)。`keepalive=600` 是 0.4.1 新參數:session 內背景
+  RotateCookies task(process-scoped,隨 server 生滅),長生成不因 `__Secure-1PSIDTS`
+  過期中途死。**env-var 唯讀模式下只轉記憶體、不落盤**,跨 session 的 cookie 老化
+  不變——2–4 週一次 GUI 機重登 + `sync-auth.sh` 的節奏照舊。網路擋
+  `accounts.google.com` 時可設 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1` 關閉。
 - `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。
 - `sources.add_file` **無 `title`** 參數;要命名來源得另呼叫 `sources.rename`。
 - `artifacts.rename` / `sources.rename` **無 `return_object`** 參數(傳了會 TypeError)。
