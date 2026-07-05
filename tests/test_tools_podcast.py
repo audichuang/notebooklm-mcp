@@ -148,3 +148,33 @@ async def test_all_renames_are_fire_and_forget(fake_client, tmp_path):
     renames += [c[1] for c in fake_client.artifacts.calls if c[0] == "rename"]
     assert renames, "podcast flow 必須有 rename 呼叫"
     assert all(r["return_object"] is False for r in renames)
+
+
+async def test_podcast_series_fails_fast_when_auth_dead(fake_client, tmp_path):
+    """整季開跑前先預檢:cookie 死了要秒退,一個生成都不能燒。"""
+    fake_client.notebooks.fail_list = True
+    with pytest.raises(RuntimeError, match="sync-auth"):
+        await p.podcast_series(
+            "nb-123",
+            episodes=[{"title": "心法篇", "brief": "b"}],
+            output_dir=str(tmp_path),
+        )
+    assert fake_client.artifacts.calls == []
+
+
+async def test_podcast_episode_fails_fast_when_auth_dead(fake_client, tmp_path):
+    fake_client.notebooks.fail_list = True
+    with pytest.raises(RuntimeError, match="sync-auth"):
+        await p.podcast_episode(
+            "nb-123", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path)
+        )
+    assert fake_client.artifacts.calls == []
+
+
+async def test_local_validation_beats_auth_probe(fake_client, tmp_path):
+    """壞參數必須在打任何網路 RPC 之前用 ValueError 秒退——認證錯誤不得蓋掉參數錯誤。"""
+    fake_client.notebooks.fail_list = True  # 若先 probe 會變 RuntimeError → 測試失敗
+    with pytest.raises(ValueError, match="title"):
+        await p.podcast_episode(
+            "nb-123", episode_n=1, title="  ", brief="b", output_dir=str(tmp_path)
+        )

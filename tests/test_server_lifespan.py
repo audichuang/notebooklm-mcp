@@ -43,6 +43,7 @@ async def test_mcp_exposes_expected_tools():
     tools = await app.mcp.list_tools()
     names = {t.name for t in tools}
     expected = {
+        "auth_check",
         "notebook_create",
         "notebook_list",
         "source_add_url",

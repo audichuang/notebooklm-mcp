@@ -7,9 +7,20 @@ from __future__ import annotations
 
 from . import runtime
 from ._status import ensure_completed, ensure_started
+from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
+
+
+@mcp.tool()
+async def auth_check() -> dict:
+    """輕量真 RPC 驗證 NotebookLM 認證(cookie)是否有效。
+
+    長流程(整季生成、發布)前先跑,cookie 死了會秒退並回重登指引,
+    避免燒掉數小時等待。回傳 {"ok": True, "notebooks": N}。
+    """
+    return await probe_auth(runtime.get_client())
 
 
 @mcp.tool()

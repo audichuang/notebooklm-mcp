@@ -138,3 +138,16 @@ async def test_artifact_rename_is_fire_and_forget(fake_client):
     await t.artifact_rename("nb-123", "task-123", "EP01 心法篇")
     call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "rename")
     assert call["return_object"] is False
+
+
+async def test_auth_check_ok(fake_client):
+    """認證活著:輕量真 RPC 成功,回 ok + 筆記本數。"""
+    result = await t.auth_check()
+    assert result == {"ok": True, "notebooks": 1}
+
+
+async def test_auth_check_dead_gives_relogin_hint(fake_client):
+    """認證死亡:fail-fast 並給出可操作的重登指引(不是裸 stack trace)。"""
+    fake_client.notebooks.fail_list = True
+    with pytest.raises(RuntimeError, match="sync-auth"):
+        await t.auth_check()

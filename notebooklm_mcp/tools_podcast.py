@@ -12,6 +12,7 @@ from email.utils import format_datetime
 
 from . import runtime
 from ._status import ensure_completed, ensure_started
+from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
@@ -57,6 +58,15 @@ def _write_manifest(manifest_path: str, notebook_id: str, episodes: list[dict]) 
         json.dump({"notebook_id": notebook_id, "episodes": episodes}, f, ensure_ascii=False, indent=2)
 
 
+def _validate_episode_args(episode_n: int, title: str, prior_mp3_path: str | None) -> None:
+    """單集參數的純本地驗證(不打網路)。壞參數 ValueError 秒退——必須在
+    auth 預檢之前跑,認證錯誤不得蓋掉參數錯誤。"""
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError(f"episode {episode_n} requires a non-empty 'title'")
+    if prior_mp3_path and episode_n <= 1:
+        raise ValueError("prior_mp3_path requires episode_n >= 2 (there is no prior to episode 1)")
+
+
 async def _run_episode(
     notebook_id: str,
     episode_n: int,
@@ -72,12 +82,8 @@ async def _run_episode(
     client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
 
-    if not isinstance(title, str) or not title.strip():
-        raise ValueError(f"episode {episode_n} requires a non-empty 'title'")
+    _validate_episode_args(episode_n, title, prior_mp3_path)
     label = _episode_label(episode_n, title)
-
-    if prior_mp3_path and episode_n <= 1:
-        raise ValueError("prior_mp3_path requires episode_n >= 2 (there is no prior to episode 1)")
 
     # Standalone continuity: if the caller hands us a prior episode's mp3 that is
     # NOT yet in the notebook (one-off podcast_episode use), upload + name it so
@@ -161,6 +167,10 @@ async def podcast_episode(
     The Studio artifact and self-uploaded source are both named ``EP{n:02d} {title}``
     (e.g. ``EP02 實戰篇``), so pass the outline's episode title.
     """
+    # 本地驗證先行(壞參數 ValueError 秒退,不浪費 RPC),再做認證預檢:
+    # 單集也要等最多 20 分鐘,cookie 死了先秒退(見 auth_probe docstring)。
+    _validate_episode_args(episode_n, title, prior_mp3_path)
+    await probe_auth(runtime.get_client())
     return await _run_episode(
         notebook_id,
         episode_n,
@@ -215,6 +225,11 @@ async def podcast_series(
     run_results: list[dict] = []  # episodes generated THIS call (the return value)
     # Season manifest preserves earlier episodes across a resume.
     manifest_results = _load_prior_manifest_episodes(manifest_path, notebook_id, start)
+
+    # 所有本地驗證(episodes 形狀、start 邊界、manifest 載入)通過後才做認證
+    # 預檢:整季動輒數小時,cookie 死了要在燒任何生成之前秒退。只在季開頭驗
+    # 一次;跑到一半的鮮度由 lifespan 的 keepalive=600 背景續命。
+    await probe_auth(runtime.get_client())
 
     # No prior-mp3 threading: each episode self-uploads its mp3 as a named source
     # at the end of _run_episode, so the next episode (and a `start`-based resume

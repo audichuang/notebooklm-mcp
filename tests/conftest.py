@@ -203,10 +203,16 @@ class FakeSources:
 
 
 class FakeNotebooks:
+    def __init__(self):
+        # True 時 list() 擲認證死亡錯誤——模擬 cookie 過期(auth 預檢的紅路徑)。
+        self.fail_list = False
+
     async def create(self, title):
         return type("NB", (), {"id": "nb-123", "title": title})()
 
     async def list(self):
+        if self.fail_list:
+            raise ValueError("Authentication expired or invalid. Please re-authenticate.")
         return [type("NB", (), {"id": "nb-123", "title": "Test"})()]
 
     async def get(self, notebook_id):
