@@ -35,6 +35,26 @@ a { color: #2563eb; }
 """
 
 
+def render_episode_notes_html(notes_text: str, attachments: list[tuple[str, str, str]]) -> str:
+    """把純文字單集 show notes(`•` 條列 + 空行分段)+ 附件連結,轉成 RSS
+    `<content:encoded>` 用的 HTML fragment(`<p>`/`<ul>`/具名 `<a>`)。
+
+    複用 markdown 渲染:`•` 開頭行改成 `- ` 讓它出 `<ul>`;附件以 markdown 連結
+    `emoji [label](url)` 附在末尾 → 具名可點連結,不再裸露長 URL。內容全為本站
+    自產(notes + 自家 podcast URL),不含外部資源。"""
+    md_lines = []
+    for line in notes_text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("•"):
+            md_lines.append("- " + stripped[1:].strip())
+        else:
+            md_lines.append(line)
+    md = "\n".join(md_lines)
+    if attachments:
+        md += "\n\n" + "\n\n".join(f"{emoji} [{label}]({url})" for emoji, label, url in attachments)
+    return _md.markdown(md, extensions=["extra", "sane_lists"])
+
+
 def render_report_html(markdown_text: str, title: str) -> str:
     body = _md.markdown(markdown_text, extensions=["extra", "sane_lists"])
     if _UNSAFE_RE.search(body):

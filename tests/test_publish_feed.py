@@ -4,6 +4,7 @@ from notebooklm_mcp.publish import feed
 NS = {
     "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
     "atom": "http://www.w3.org/2005/Atom",
+    "content": "http://purl.org/rss/1.0/modules/content/",
 }
 
 SHOW = {
@@ -87,3 +88,23 @@ def test_namespaces_declared():
 def test_index_html_lists_live_episodes_only():
     html = feed.build_index_html(SHOW, BASE)
     assert "心法篇" in html and "實戰篇" in html
+
+
+def test_content_encoded_emitted_when_description_html_present():
+    show = {**SHOW, "episodes": {
+        "1": {**SHOW["episodes"]["1"],
+              "description_html": '<p>鉤子</p><ul><li>一</li></ul><p>📄 <a href="https://h/x.pdf">本集簡報 (PDF)</a></p>'},
+    }}
+    item = feed.build_feed_xml(show, BASE)
+    # content:encoded 有出現且含 CDATA
+    assert "<content:encoded><![CDATA[" in item
+    # 解析後拿得到 HTML(具名連結,不是裸 URL 當文字)
+    it = ET.fromstring(item).find("channel/item")
+    ce = it.findtext("content:encoded", namespaces=NS)
+    assert '<a href="https://h/x.pdf">本集簡報 (PDF)</a>' in ce
+    assert "<ul><li>一</li></ul>" in ce
+
+
+def test_no_content_encoded_when_absent():
+    # SHOW 的兩集都沒 description_html → 不應出現 content:encoded(向後相容)
+    assert "content:encoded" not in feed.build_feed_xml(SHOW, BASE)

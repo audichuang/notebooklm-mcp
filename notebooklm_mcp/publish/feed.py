@@ -51,15 +51,25 @@ def build_feed_xml(show: dict, base_url: str) -> str:
 
     for n, ep in eps:
         media_url = f"{base}/{ep['media_file']}"
-        lines += [
+        item = [
             "    <item>",
             f"      <title>{escape(ep['title'])}</title>",
+            # <description> = 純文字(fallback,含裸 URL);<content:encoded> = 富文字 HTML
+            # (Apple/Overcast/Pocket Casts 優先渲染:條列 + 具名連結,不裸露長 URL)。
             f"      <description>{escape(ep.get('description', ep['title']))}</description>",
+        ]
+        html = ep.get("description_html")
+        if html:
+            # CDATA 安全:內容若含 "]]>" 會提前關閉,拆開再續。
+            safe = html.replace("]]>", "]]]]><![CDATA[>")
+            item.append(f"      <content:encoded><![CDATA[{safe}]]></content:encoded>")
+        item += [
             f"      <pubDate>{escape(ep['pub_date'])}</pubDate>",
             f'      <guid isPermaLink="false">{escape(ep["guid"])}</guid>',
             f'      <enclosure url={quoteattr(media_url)} length="{int(ep["length"])}" type="audio/mpeg"/>',
             "    </item>",
         ]
+        lines += item
 
     lines += ["  </channel>", "</rss>", ""]
     return "\n".join(lines)

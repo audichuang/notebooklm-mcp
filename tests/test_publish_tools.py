@@ -285,6 +285,11 @@ async def test_attachments_hosted_and_linked(env, tmp_path, artwork_png, monkeyp
     html_put = next(c["content"] for c in captured if c["name"].endswith(".html") and c["name"].startswith("EP01-"))
     assert b"<h1" in html_put and "講義".encode() in html_put
 
+    # description_html(→ feed content:encoded):具名可點連結,不裸露 URL 當顯示文字
+    dh = show["episodes"]["1"]["description_html"]
+    assert ">本集簡報 (PDF)</a>" in dh and ">研讀講義</a>" in dh
+    assert 'href="https://podcast.example/feeds/' in dh
+
 
 async def test_missing_attachment_file_fails_fast(env, tmp_path, artwork_png, monkeypatch):
     captured = _install_mock(monkeypatch)

@@ -35,3 +35,29 @@ def test_code_showing_html_tags_is_safe():
     html = render_report_html("```html\n<script>x</script>\n```", "x")
     assert "&lt;script&gt;" in html          # 逸出後當文字顯示
     assert "<script>" not in html            # 沒有真的 script 標籤
+
+
+def test_episode_notes_html_bullets_and_named_links():
+    from notebooklm_mcp.publish.notes_html import render_episode_notes_html
+
+    notes = "鉤子一段。\n\n• 穩固地基:harness 七檔\n• 最小迴圈:三步驟\n\n改編自《X》。"
+    atts = [
+        ("📄", "本集簡報 (PDF)", "https://h.example/EP01-a.pdf"),
+        ("📖", "研讀講義", "https://h.example/EP01-b.html"),
+    ]
+    html = render_episode_notes_html(notes, atts)
+    # bullets 變真正清單
+    assert "<ul>" in html and "<li>穩固地基:harness 七檔</li>" in html
+    # 具名連結:顯示 label,href 藏 URL(不再裸露長 URL 當顯示文字)
+    assert '<a href="https://h.example/EP01-a.pdf">本集簡報 (PDF)</a>' in html
+    assert '<a href="https://h.example/EP01-b.html">研讀講義</a>' in html
+    # 段落
+    assert "<p>鉤子一段。</p>" in html
+
+
+def test_episode_notes_html_no_attachments():
+    from notebooklm_mcp.publish.notes_html import render_episode_notes_html
+
+    html = render_episode_notes_html("只有一段話。", [])
+    assert "<p>只有一段話。</p>" in html
+    assert "<a " not in html

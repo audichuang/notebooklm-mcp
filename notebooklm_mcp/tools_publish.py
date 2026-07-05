@@ -187,8 +187,8 @@ async def publish_series(
             # 1b) media: 選填附件(簡報 PDF / 研讀講義 HTML),content-addressed,
             #     公開 URL append 到單集 description。缺檔 fail-fast(不 re-download)。
             base_pub = base_url.rstrip("/")
-            desc = (ep.get("description") or "").strip() or ep["title"]
-            links: list[str] = []
+            desc_base = (ep.get("description") or "").strip() or ep["title"]
+            attachments: list[tuple[str, str, str]] = []   # (emoji, label, url)
 
             spath = ep.get("slides_pdf_path")
             if spath:
@@ -198,7 +198,7 @@ async def publish_series(
                     pdf_bytes = f.read()
                 pfile = attachment_filename(n, hashlib.sha256(pdf_bytes).hexdigest()[:8], "pdf")
                 await _put(client, upload_url, token, upload_token, pfile, pdf_bytes)
-                links.append(f"📄 本集簡報:{base_pub}/feeds/{token}/{pfile}")
+                attachments.append(("📄", "本集簡報 (PDF)", f"{base_pub}/feeds/{token}/{pfile}"))
                 del pdf_bytes
 
             rpath = ep.get("report_md_path")
@@ -210,14 +210,19 @@ async def publish_series(
                 hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
                 await _put(client, upload_url, token, upload_token, hfile, html_bytes)
                 del html_bytes                                     # 同 mp3/pdf:一次一 blob,傳完即釋放
-                links.append(f"📖 研讀講義:{base_pub}/feeds/{token}/{hfile}")
+                attachments.append(("📖", "研讀講義", f"{base_pub}/feeds/{token}/{hfile}"))
 
-            if links:
-                desc = desc + "\n\n" + "\n".join(links)
+            # 純文字 <description>(fallback,含裸 URL)+ 富文字 <content:encoded>
+            # (Apple/Overcast/Pocket Casts 優先渲染:條列 + 具名連結,不裸露長 URL)。
+            desc = desc_base
+            if attachments:
+                desc += "\n\n" + "\n".join(f"{e} {label}:{u}" for e, label, u in attachments)
+            desc_html = notes_html.render_episode_notes_html(desc_base, attachments)
 
             new_eps[str(n)] = {
                 "title": ep["title"],
                 "description": desc,
+                "description_html": desc_html,
                 "guid": identity.episode_guid(show_id, n),
                 "pub_date": ep.get("published_at") or _fallback_pub_date(n),
                 "media_file": mfile,
