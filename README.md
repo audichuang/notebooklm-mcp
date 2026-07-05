@@ -4,7 +4,7 @@
 
 - 設計理由與 live 驗證踩坑:[`docs/superpowers/notebooklm-mcp-findings.md`](docs/superpowers/notebooklm-mcp-findings.md)(經驗庫,值得先讀)
 - 工具路由與意圖判斷:[`SKILL.md`](SKILL.md)
-- 完整工具參數/回傳:[`references/cli-reference.md`](references/cli-reference.md)
+- 完整工具參數/回傳:[`references/tool-reference.md`](references/tool-reference.md)
 - 開發者導覽:[`CLAUDE.md`](CLAUDE.md)
 
 ---
@@ -118,7 +118,7 @@ timeout 8 doppler run -p notebooklm -c dev -- \
 
 ## 使用
 
-意圖判斷與工具路由都在 [`SKILL.md`](SKILL.md);完整參數見 [`references/cli-reference.md`](references/cli-reference.md)。
+意圖判斷與工具路由都在 [`SKILL.md`](SKILL.md);完整參數見 [`references/tool-reference.md`](references/tool-reference.md)。
 
 ### 簡單任務
 
