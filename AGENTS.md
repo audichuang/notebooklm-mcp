@@ -39,6 +39,9 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     main。獨立模組以確保「唯一 mcp instance」,不論用什麼方式啟動。
   - `server.py` — thin launcher,只 `from .app import _lifespan, main, mcp`(可被當 `__main__` 跑)
   - `tools_basic.py` — notebook / source / `generate_audio` / artifact / `chat_ask`(薄包,`zh_Hant` 預設)
+  - `tools_artifacts.py` — `generate_slides`(簡報 PDF)/ `generate_report`(研讀 Markdown)按需生,
+    路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈
+  - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
   - `tools_podcast.py` — `podcast_episode`(單集 5 步)/ `podcast_series`(整季純程式碼迴圈)
   - `tools_publish.py` — `publish_series` / `feed_info`(把整季發布成 Apple 合規
     RSS feed;薄 I/O 編排,內網 HTTP PUT 到 NAS uploader,提交順序:媒體檔→show.json→feed.xml/index.html)
@@ -78,6 +81,10 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`。
 - **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`);要當公開文字(如單集 show notes)
   前用 regex `\[[\d,\s\-–]+\]` 清掉。單集簡介 = manifest 該集加 `description`(見 SKILL §Publish)。
+- **附加簡報/講義**:`generate_slides`/`generate_report` 只吃**傳入的 `source_ids`**才聚焦原文;
+  不傳則 SDK 用全部來源(v1 不自動排除音檔來源)。附件缺檔時 `publish_series` **fail-fast**。
+  **順序鐵律**:uploader 白名單放寬 `.pdf`/`.html` 後**要先重部署 NAS**,再跑帶附件的發布,否則附件 PUT 404。
+  講義是 Markdown(`download_report`),`notes_html` 渲染成 HTML 才 host;`.md` 只留本機。
 - quiz/flashcards 無 `--language`(在 brief 內指定);mind-map 無法指定語言。
 - **發布單集也走 `podcast_series`**(episodes 放一集):`publish_series` 只吃
   `series_manifest.json`,`podcast_episode` 純單集不產 manifest。

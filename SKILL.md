@@ -24,7 +24,9 @@ NotebookLM 操作都走 `notebooklm` MCP server。Skill 只負責判斷意圖與
 | `chat_ask` | 對筆記本做 source-grounded 問答 |
 | `podcast_episode` | 單集 podcast：生成→等待→命名 artifact 為 `EP{n:02d} 標題`(需傳 `title`)→下載→自上傳本集 mp3 為同名來源(可選 `prior_mp3_path` 做一次性續接) |
 | `podcast_series` | 整季 podcast：純 Python 迴圈;每集命名 `EP{n:02d} 標題` 並自上傳本集 mp3,下一集生成時自然讀到筆記本內的同名前集來源 |
-| `publish_series` | 把整季 manifest + mp3 發布成 Apple-Podcast 合規 RSS feed(內網 HTTP PUT 到 NAS uploader,Cloudflare Tunnel 對外 HTTPS);回傳 `feed_url` 供訂閱 |
+| `generate_slides` | 按需生某集簡報並下載 PDF,路徑回寫 manifest 的 `slides_pdf_path`(供 publish 附連結) |
+| `generate_report` | 按需生某集研讀文件(預設 `study_guide`,可 `briefing_doc`/`blog_post`)下載 Markdown,回寫 `report_md_path` |
+| `publish_series` | 把整季 manifest + mp3 發布成 Apple-Podcast 合規 RSS feed(內網 HTTP PUT 到 NAS uploader,Cloudflare Tunnel 對外 HTTPS);有 `slides_pdf_path`/`report_md_path` 的集會一併 host PDF/HTML 並把連結附進單集簡介;回傳 `feed_url` 供訂閱 |
 | `feed_info` | 純計算,傳 `show_id`,回 `{show_id, token, feed_url, show_page_url}`,不含各集細節 |
 
 完整參數與回傳格式見 [MCP 工具參考](references/cli-reference.md)。
@@ -73,6 +75,9 @@ Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_promp
    - **單集簡介(show notes)**:在 manifest 的該集加一個 `description` 欄位,`publish_series`
      會拿它當單集 `<description>`(沒有則 fallback 用標題)。可用 `chat_ask` 生一段繁中簡介,
      **記得先清掉 NotebookLM 的引用標記**(`[1]`/`[3, 4]`/`[8-10]`,regex `\[[\d,\s\-–]+\]`)再寫進去。
+   - **附加簡報 PDF / 研讀講義**:先 `generate_slides` / `generate_report`(路徑自動回寫 manifest),
+     再 `publish_series`,附件會 content-hash 後 host(講義 Markdown 渲染成自包含 HTML),公開連結
+     自動 append 到單集簡介。前提:uploader 白名單已收 `.pdf`/`.html`(2026-07-05 起)。
 3. 回傳 `feed_url` → 在 Apple Podcast「用 URL 加入節目」貼上訂閱。續製只要重跑
    `publish_series`(同 URL、同 GUID),Apple 自動抓新集;重生壞集內容 hash 變 → 換音檔
    URL 但 GUID 不變(視為同集更新)。
