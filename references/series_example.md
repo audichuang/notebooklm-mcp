@@ -67,3 +67,13 @@ Resume from episode 3 (pass the FULL episodes list — titles and all — and se
 `podcast_series` does not read the local `ep02.mp3`; local disk is only the
 download / manifest location, and the season manifest is merged (episodes 1–2 are
 preserved).
+
+## 季後:加料 + 發布
+
+`podcast_series` 產出 `series_manifest.json` 後,可對任一集(選配)按需加料:
+
+- `generate_slides(notebook_id, manifest_path, episode_n, ...)` — 該集簡報 PDF
+- `generate_report(notebook_id, manifest_path, episode_n, report_format="study_guide", ...)` — 研讀講義
+
+兩者路徑自動回寫 manifest;之後 `publish_series` 會 host 附件並把具名連結附進單集簡介。
+單集簡介文字則在 manifest 該集加 `description`。完整端到端序列見 SKILL.md 的 §Publish。

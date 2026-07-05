@@ -103,9 +103,12 @@ Then proceed with analysis and discussion of the text just read.
 
 ***
 
-## 7. 知識蒸餾指令（用於生成本集摘要）
+## 7. 知識蒸餾指令（生成本集研讀講義 / 續集摘要）
 
-此模板用於 `generate report --format study-guide`，產出物回傳為下一集的來源。
+把下方結構要求放進 `generate_report` 的 `extra_instructions`（`report_format="study_guide"`）。
+產出的 study guide 有兩種用途:(a) 當**單集研讀講義**發布 —— 路徑自動回寫 manifest,
+`publish_series` 會渲染成 HTML 附進單集簡介(見 SKILL §Publish 步驟 3);(b) 或用
+`source_add_file` 加回筆記本當來源,供下一集 recap(續集連續性)。
 
 ```
 Create a concise study guide for Episode {episode_number} of "{show_name}".
@@ -119,10 +122,11 @@ Keep it under 500 words. This will be used as context for the next episode.
 
 ***
 
-## 8. Persona 設定模板（用於 `configure --persona`）
+## 8. 大綱規劃提示詞（當作 `chat_ask` 的提問）
 
-此提示詞透過 `configure --persona` 設定，影響 `ask` 命令，不直接影響音頻生成。
-可用於事先請 NotebookLM 規劃集數大綱。
+沒有 persona / configure 工具;規劃整季大綱時,把下方文字當作 `chat_ask(notebook_id, question)`
+的問題送進筆記本,讓 NotebookLM 依來源產出結構化大綱(標題 / 主題 / 來源 / 連續性鉤子 / 預告)。
+產出的大綱經你核可後,整理成 `podcast_series` 的 `episodes` 陣列。
 
 ```
 You are the executive producer of a podcast series called "{show_name}".
