@@ -35,6 +35,40 @@ def test_download_audio_arg_order():
     ]
 
 
+def test_list_signature_and_artifact_fields():
+    """artifact_list depends on ArtifactsAPI.list + these Artifact attrs."""
+    import dataclasses
+
+    from notebooklm._artifacts import ArtifactsAPI
+    from notebooklm.types import Artifact
+
+    assert _params(ArtifactsAPI.list) == ["self", "notebook_id", "artifact_type"]
+    fields = {f.name for f in dataclasses.fields(Artifact)}
+    assert {"id", "title"} <= fields
+    assert all(hasattr(Artifact, p) for p in ("kind", "is_completed", "status_str"))
+
+
+def test_read_surface_signatures_and_fields():
+    """source_list / source_fulltext / notebook_get / chat_ask depend on these."""
+    import dataclasses
+
+    from notebooklm._chat import ChatAPI
+    from notebooklm._notebooks import NotebooksAPI
+    from notebooklm._sources import SourcesAPI
+    from notebooklm.types import Notebook, Source, SourceFulltext
+
+    assert _params(SourcesAPI.list) == ["self", "notebook_id"]
+    assert _params(SourcesAPI.get_fulltext) == ["self", "notebook_id", "source_id"]
+    assert _params(NotebooksAPI.get) == ["self", "notebook_id"]
+    # chat_ask focuses on a subset / continues a thread via these kwargs.
+    assert _params(ChatAPI.ask) == ["self", "notebook_id", "question", "source_ids", "conversation_id"]
+
+    assert {"id", "title"} <= {f.name for f in dataclasses.fields(Source)}
+    assert all(hasattr(Source, p) for p in ("kind", "is_ready"))
+    assert {"source_id", "content", "char_count"} <= {f.name for f in dataclasses.fields(SourceFulltext)}
+    assert {"id", "title", "sources_count", "is_owner"} <= {f.name for f in dataclasses.fields(Notebook)}
+
+
 def test_wait_for_completion_has_task_id_and_timeout():
     from notebooklm._artifacts import ArtifactsAPI
 

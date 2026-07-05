@@ -18,7 +18,7 @@ def ensure_started(status: object) -> str:
             or getattr(status, "status", None)
             or "no task_id returned"
         )
-        raise RuntimeError(f"Audio generation failed: {detail}")
+        raise RuntimeError(f"Generation failed: {detail}")
     return task_id
 
 
@@ -26,4 +26,4 @@ def ensure_completed(status: object) -> None:
     """Raise RuntimeError if a generation finished in a failed state."""
     if getattr(status, "is_failed", False):
         detail = getattr(status, "error", None) or getattr(status, "status", None) or "failed"
-        raise RuntimeError(f"Audio generation failed while waiting: {detail}")
+        raise RuntimeError(f"Generation failed while waiting: {detail}")

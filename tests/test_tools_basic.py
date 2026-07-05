@@ -1,7 +1,15 @@
 import pytest
 from notebooklm.rpc.types import AudioFormat, AudioLength
+from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import tools_basic as t
+
+
+def _fake_art(id, title, kind, completed=True):
+    return type("A", (), {
+        "id": id, "title": title, "kind": kind, "is_completed": completed,
+        "status_str": "completed" if completed else "processing", "created_at": None,
+    })()
 
 
 async def test_generate_audio_defaults_zh_hant(fake_client):
@@ -40,3 +48,66 @@ async def test_artifact_download_arg_order(fake_client):
 async def test_ask(fake_client):
     out = await t.chat_ask("nb-1", "重點?")
     assert "重點" in out["answer"]
+
+
+async def test_ask_passes_scope_and_returns_refs(fake_client):
+    out = await t.chat_ask("nb-1", "重點?", source_ids=["src-1"], conversation_id="c9")
+    call = fake_client.chat.calls[-1][1]
+    assert call["source_ids"] == ["src-1"] and call["conversation_id"] == "c9"
+    assert out["conversation_id"] == "c9"
+    assert out["references"][0] == {"source_id": "src-1", "citation_number": 1, "cited_text": "引用片段"}
+
+
+async def test_source_list(fake_client):
+    fake_client.sources.seed("EP01 心法篇", "原文一")
+    out = await t.source_list("nb-1")
+    titles = [s["title"] for s in out["sources"]]
+    assert "EP01 心法篇" in titles and "原文一" in titles
+    assert out["sources"][0]["ready"] is True and out["sources"][0]["kind"] == "web_page"
+
+
+async def test_source_fulltext(fake_client):
+    out = await t.source_fulltext("nb-1", "src-9")
+    assert out["source_id"] == "src-9" and out["content"] == "來源全文" and out["char_count"] == 4
+
+
+async def test_notebook_get(fake_client):
+    out = await t.notebook_get("nb-7")
+    assert out["notebook_id"] == "nb-7" and out["sources_count"] == 2 and out["is_owner"] is True
+
+
+async def test_artifact_wait_fail_closed(fake_client):
+    # SDK 的 wait_for_completion 可能回 failed status(非丟例外);工具必須 fail-closed,
+    # 不能把失敗當成功回傳 artifact_id。
+    fake_client.artifacts.fail_complete = True
+    with pytest.raises(RuntimeError):
+        await t.artifact_wait("nb-1", "task-x")
+
+
+async def test_artifact_list_maps_fields(fake_client):
+    fake_client.artifacts.seed_artifacts(
+        _fake_art("a1", "EP01 心法篇", ArtifactType.AUDIO),
+        _fake_art("a2", "研讀講義", ArtifactType.REPORT, completed=False),
+    )
+    out = await t.artifact_list("nb-1")
+    rows = out["artifacts"]
+    assert [r["artifact_id"] for r in rows] == ["a1", "a2"]
+    assert rows[0] == {"artifact_id": "a1", "title": "EP01 心法篇", "kind": "audio",
+                       "completed": True, "status": "completed", "created_at": None}
+    assert rows[1]["kind"] == "report" and rows[1]["completed"] is False
+    assert rows[1]["status"] == "processing"
+
+
+async def test_artifact_list_filters_by_kind(fake_client):
+    fake_client.artifacts.seed_artifacts(
+        _fake_art("a1", "EP01", ArtifactType.AUDIO),
+        _fake_art("a2", "講義", ArtifactType.REPORT),
+    )
+    out = await t.artifact_list("nb-1", kind="audio")
+    assert [r["artifact_id"] for r in out["artifacts"]] == ["a1"]
+    assert fake_client.artifacts.calls[-1][1]["artifact_type"] == ArtifactType.AUDIO
+
+
+async def test_artifact_list_rejects_bad_kind(fake_client):
+    with pytest.raises(ValueError):
+        await t.artifact_list("nb-1", kind="podcast")
