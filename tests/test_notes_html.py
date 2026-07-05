@@ -51,8 +51,19 @@ def test_episode_notes_html_bullets_and_named_links():
     # 具名連結:顯示 label,href 藏 URL(不再裸露長 URL 當顯示文字)
     assert '<a href="https://h.example/EP01-a.pdf">本集簡報 (PDF)</a>' in html
     assert '<a href="https://h.example/EP01-b.html">研讀講義</a>' in html
+    # URL 只在 href,不裸露當顯示文字
+    assert ">https://h.example/EP01-a.pdf</a>" not in html
     # 段落
     assert "<p>鉤子一段。</p>" in html
+
+
+def test_episode_notes_neutralizes_raw_html():
+    # notes 夾帶原始 <script> 先被逸出成文字,公開 feed 不會有可執行標籤
+    from notebooklm_mcp.publish.notes_html import render_episode_notes_html
+
+    html = render_episode_notes_html("正文\n\n<script>alert(1)</script>", [])
+    assert "<script>" not in html            # 沒有真的 script 標籤
+    assert "&lt;script&gt;" in html          # 逸出後當文字顯示
 
 
 def test_episode_notes_html_no_attachments():

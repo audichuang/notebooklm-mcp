@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from html import escape
+from xml.sax.saxutils import quoteattr
 
 import markdown as _md
 
@@ -39,20 +40,31 @@ def render_episode_notes_html(notes_text: str, attachments: list[tuple[str, str,
     """把純文字單集 show notes(`•` 條列 + 空行分段)+ 附件連結,轉成 RSS
     `<content:encoded>` 用的 HTML fragment(`<p>`/`<ul>`/具名 `<a>`)。
 
-    複用 markdown 渲染:`•` 開頭行改成 `- ` 讓它出 `<ul>`;附件以 markdown 連結
-    `emoji [label](url)` 附在末尾 → 具名可點連結,不再裸露長 URL。內容全為本站
-    自產(notes + 自家 podcast URL),不含外部資源。"""
-    md_lines = []
+    這頁走公開 `<content:encoded>`,notes 半信任(chat_ask 產),故**先逐行逸出**再交
+    markdown:夾帶的原始 `<script>`/`<img>` 會變 `&lt;…` 純文字(neutralize,不執行也不載
+    資源),且 notes 無 code fence 不會雙重逸出——逸出本身即防護,不需 report 那種 raise
+    guard(那是因 report 要保留 code 才不能逸出、改用 guard)。附件以 `quoteattr` 手動組具名
+    anchor(URL 全為自家 podcast https、藏 href 不裸露)。`•` 開頭行改 markdown `- ` 起
+    `<ul>`;prose→bullet 轉換點補空行否則 markdown 不起清單。"""
+    md_lines: list[str] = []
     for line in notes_text.split("\n"):
         stripped = line.lstrip()
         if stripped.startswith("•"):
-            md_lines.append("- " + stripped[1:].strip())
+            # prose 直接接 bullet(前一行非空且非清單)時,markdown 需要一個空行才起 <ul>
+            if md_lines and md_lines[-1].strip() and not md_lines[-1].startswith("- "):
+                md_lines.append("")
+            item = escape(stripped[1:].strip())
+            if item:
+                md_lines.append("- " + item)
         else:
-            md_lines.append(line)
-    md = "\n".join(md_lines)
+            md_lines.append(escape(line))
+    body = _md.markdown("\n".join(md_lines), extensions=["extra", "sane_lists"])
     if attachments:
-        md += "\n\n" + "\n\n".join(f"{emoji} [{label}]({url})" for emoji, label, url in attachments)
-    return _md.markdown(md, extensions=["extra", "sane_lists"])
+        body += "\n" + "\n".join(
+            f"<p>{escape(emoji)} <a href={quoteattr(url)}>{escape(label)}</a></p>"
+            for emoji, label, url in attachments
+        )
+    return body
 
 
 def render_report_html(markdown_text: str, title: str) -> str:

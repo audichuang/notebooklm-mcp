@@ -108,3 +108,13 @@ def test_content_encoded_emitted_when_description_html_present():
 def test_no_content_encoded_when_absent():
     # SHOW 的兩集都沒 description_html → 不應出現 content:encoded(向後相容)
     assert "content:encoded" not in feed.build_feed_xml(SHOW, BASE)
+
+
+def test_content_encoded_escapes_cdata_end_marker():
+    # description_html 內含 "]]>" 不能提前關閉 CDATA;拆分後解析仍還原原字串
+    html = "<p>a]]>b</p>"
+    show = {**SHOW, "episodes": {"1": {**SHOW["episodes"]["1"], "description_html": html}}}
+    raw = feed.build_feed_xml(show, BASE)
+    assert "]]]]><![CDATA[>" in raw
+    ce = ET.fromstring(raw).findtext("channel/item/content:encoded", namespaces=NS)
+    assert ce == html          # round-trip 還原
