@@ -22,7 +22,8 @@ from .app import mcp
 from .publish import artwork as artwork_mod
 from .publish import feed as feed_mod
 from .publish import identity
-from .publish.layout import media_filename
+from .publish.layout import attachment_filename, media_filename
+from .publish import notes_html
 
 _TZ = timezone(timedelta(hours=8))          # Asia/Taipei, RFC-2822 +0800
 _TIMEOUT = 600.0                            # a season of mp3 PUTs can take a while
@@ -181,22 +182,50 @@ async def publish_series(
             hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]      # hash bytes we already read
             mfile = media_filename(n, hash8)
             await _put(client, upload_url, token, upload_token, mfile, mp3_bytes)
+            del mp3_bytes
+
+            # 1b) media: 選填附件(簡報 PDF / 研讀講義 HTML),content-addressed,
+            #     公開 URL append 到單集 description。缺檔 fail-fast(不 re-download)。
+            base_pub = base_url.rstrip("/")
+            desc = (ep.get("description") or "").strip() or ep["title"]
+            links: list[str] = []
+
+            spath = ep.get("slides_pdf_path")
+            if spath:
+                if not (os.path.exists(spath) and os.path.getsize(spath) > 0):
+                    raise ValueError(f"episode {n}: slides_pdf_path missing file: {spath}")
+                with open(spath, "rb") as f:
+                    pdf_bytes = f.read()
+                pfile = attachment_filename(n, hashlib.sha256(pdf_bytes).hexdigest()[:8], "pdf")
+                await _put(client, upload_url, token, upload_token, pfile, pdf_bytes)
+                links.append(f"📄 本集簡報:{base_pub}/feeds/{token}/{pfile}")
+                del pdf_bytes
+
+            rpath = ep.get("report_md_path")
+            if rpath:
+                if not (os.path.exists(rpath) and os.path.getsize(rpath) > 0):
+                    raise ValueError(f"episode {n}: report_md_path missing file: {rpath}")
+                with open(rpath, encoding="utf-8") as f:
+                    html_bytes = notes_html.render_report_html(f.read(), ep["title"]).encode("utf-8")
+                hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
+                await _put(client, upload_url, token, upload_token, hfile, html_bytes)
+                links.append(f"📖 研讀講義:{base_pub}/feeds/{token}/{hfile}")
+
+            if links:
+                desc = desc + "\n\n" + "\n".join(links)
+
             new_eps[str(n)] = {
                 "title": ep["title"],
-                # Show notes: prefer a manifest 'description' (e.g. a chat_ask
-                # briefing), else fall back to the title. feed.py already reads
-                # ep['description'], so this is the only wiring needed.
-                "description": (ep.get("description") or "").strip() or ep["title"],
+                "description": desc,
                 "guid": identity.episode_guid(show_id, n),
                 "pub_date": ep.get("published_at") or _fallback_pub_date(n),
                 "media_file": mfile,
-                "length": len(mp3_bytes),
+                "length": os.path.getsize(local),   # mp3_bytes 已 del,用檔案大小(同值)
             }
             published.append({
                 "n": n, "title": ep["title"], "guid": new_eps[str(n)]["guid"],
-                "url": f"{base_url.rstrip('/')}/feeds/{token}/{mfile}",
+                "url": f"{base_pub}/feeds/{token}/{mfile}",
             })
-            del mp3_bytes                                          # free before next episode
 
         with open(artwork_path, "rb") as f:                        # 1) media: artwork
             await _put(client, upload_url, token, upload_token, artwork_file, f.read())

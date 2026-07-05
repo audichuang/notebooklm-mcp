@@ -257,3 +257,41 @@ async def test_manifest_preflight_rejects_bad(env, tmp_path, artwork_png, monkey
         await _publish(blank_title, artwork_png)
 
     assert captured == []  # every bad manifest fails before any network activity
+
+
+async def test_attachments_hosted_and_linked(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    pdf = _write_mp3(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 x")   # _write_mp3 只是寫 bytes
+    md = tmp_path / "ep01-report.md"
+    md.write_text("# 講義\n\n- 重點", encoding="utf-8")
+    manifest = _manifest(tmp_path, [{
+        "episode": 1, "title": "第1集", "description": "本集重點。",
+        "mp3_path": _write_mp3(tmp_path, "e1.mp3", b"a"),
+        "slides_pdf_path": pdf, "report_md_path": str(md),
+    }], "att.json")
+
+    res = await _publish(manifest, artwork_png)
+    names = [c["name"] for c in captured]
+    assert any(n.startswith("EP01-") and n.endswith(".pdf") for n in names)
+    assert any(n.startswith("EP01-") and n.endswith(".html") for n in names)
+
+    show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
+    desc = show["episodes"]["1"]["description"]
+    assert desc.startswith("本集重點。")
+    assert "本集簡報" in desc and ".pdf" in desc
+    assert "研讀講義" in desc and ".html" in desc
+
+    # PUT 上去的 html 是渲染後的(含 <h1>),不是原始 markdown
+    html_put = next(c["content"] for c in captured if c["name"].endswith(".html") and c["name"].startswith("EP01-"))
+    assert b"<h1" in html_put and "講義".encode() in html_put
+
+
+async def test_missing_attachment_file_fails_fast(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    manifest = _manifest(tmp_path, [{
+        "episode": 1, "title": "第1集",
+        "mp3_path": _write_mp3(tmp_path, "e1b.mp3", b"a"),
+        "slides_pdf_path": str(tmp_path / "does-not-exist.pdf"),
+    }], "att_missing.json")
+    with pytest.raises(ValueError, match="slides_pdf_path"):
+        await _publish(manifest, artwork_png)
