@@ -41,3 +41,6 @@ downloads/
 # VCR cassettes - committed after security review
 # Cassettes are scrubbed of sensitive data (cookies, tokens, user IDs, emails)
 # See tests/vcr_config.py for scrubbing patterns
+
+# SDD scratch (ledger + task reports)
+.superpowers/
