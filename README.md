@@ -22,7 +22,7 @@ uv run pytest -q
 uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.1.0"
 ```
 
-The install exposes `notebooklm-mcp` on PATH. `notebooklm-cover` is added in the packaging task of this migration.
+The install exposes `notebooklm-mcp` and `notebooklm-cover` on PATH.
 
 ## Run the MCP server
 
@@ -56,6 +56,20 @@ timeout 8 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio <
 ```
 
 Expected: no traceback and no auth error. Stdio may exit when stdin closes.
+
+## Cover CLI
+
+Generate a show cover:
+
+```bash
+notebooklm-cover --output cover.jpg --line Agentic --line 工程 --tag "~/.claude/" --subtitle "NotebookLM podcast" --byline audichuang
+```
+
+Generate per-episode covers from `series_manifest.json` and write absolute `cover_path` values back into the manifest:
+
+```bash
+notebooklm-cover --manifest series_manifest.json --show-name "節目名" --tag "~/.claude/" --byline audichuang --output-dir covers
+```
 
 ## Tests
 

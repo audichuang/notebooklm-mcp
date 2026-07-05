@@ -1,33 +1,42 @@
-"""make_cover.py --manifest 的 preflight 契約(跑真 CLI,只測錯誤路徑:壞資料在
+"""notebooklm-cover --manifest 的 preflight 契約(跑真 CLI,只測錯誤路徑:壞資料在
 任何算圖/寫回前就 fail,且不覆寫 manifest)。錯誤路徑不觸發字型/算圖,所以快且不依賴字型。
 
 斷言鎖到 argparse error 的 exit code 2 + 特定錯誤訊息 + stderr 無 Traceback——
 只看 `returncode != 0` 會假綠(import 錯、語法錯、任何 traceback 都是非零)。"""
 import json
 import subprocess
-import sys
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "make_cover.py"
 
-
-def _run(manifest_path):
+def _run(manifest_path: Path):
     return subprocess.run(
-        [sys.executable, str(SCRIPT), "--manifest", str(manifest_path),
-         "--tag", "~/.claude/", "--byline", "x"],
-        capture_output=True, text=True,
+        [
+            "uv",
+            "run",
+            "notebooklm-cover",
+            "--manifest",
+            str(manifest_path),
+            "--tag",
+            "~/.claude/",
+            "--byline",
+            "x",
+        ],
+        capture_output=True,
+        text=True,
     )
 
 
 def _write(tmp_path, episodes, title="節目名"):
     p = tmp_path / "m.json"
-    p.write_text(json.dumps({"title": title, "episodes": episodes}, ensure_ascii=False),
-                 encoding="utf-8")
+    p.write_text(
+        json.dumps({"title": title, "episodes": episodes}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return p
 
 
 def _assert_preflight_rejected(r, msg_substr):
-    # argparse error → exit 2;不是 traceback(exit 1)也不是任何其他非零。
+    # argparse error -> exit 2;不是 traceback(exit 1)也不是任何其他非零。
     assert r.returncode == 2, f"expected argparse exit 2, got {r.returncode}: {r.stderr}"
     assert "Traceback" not in r.stderr, f"crashed instead of clean reject: {r.stderr}"
     assert msg_substr in r.stderr, f"missing preflight msg {msg_substr!r} in: {r.stderr}"

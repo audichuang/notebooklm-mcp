@@ -20,6 +20,7 @@ login = ["notebooklm-py[browser]>=0.3,<0.4"]
 
 [project.scripts]
 notebooklm-mcp = "notebooklm_mcp.server:main"
+notebooklm-cover = "notebooklm_mcp.cover_cli:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
