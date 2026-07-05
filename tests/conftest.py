@@ -71,6 +71,37 @@ class FakeArtifacts:
         self.calls.append(("rename", dict(artifact_id=artifact_id, new_title=new_title)))
         return None
 
+    async def generate_slide_deck(self, notebook_id, source_ids=None, language="en",
+                                  instructions=None, slide_format=None, slide_length=None):
+        self.calls.append(("generate_slide_deck", dict(
+            notebook_id=notebook_id, source_ids=source_ids, language=language,
+            instructions=instructions, slide_format=slide_format, slide_length=slide_length)))
+        if self.fail_generate:
+            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"})()
+        return type("S", (), {"task_id": "slide-task", "is_failed": False})()
+
+    async def download_slide_deck(self, notebook_id, output_path, artifact_id=None, output_format="pdf"):
+        self.calls.append(("download_slide_deck", dict(output_path=output_path,
+                          artifact_id=artifact_id, output_format=output_format)))
+        with open(output_path, "wb") as f:      # 落一個非空檔,讓 publish 的存在性檢查過
+            f.write(b"%PDF-1.4 fake")
+        return output_path
+
+    async def generate_report(self, notebook_id, report_format=None, source_ids=None,
+                              language="en", custom_prompt=None, extra_instructions=None):
+        self.calls.append(("generate_report", dict(
+            notebook_id=notebook_id, report_format=report_format, source_ids=source_ids,
+            language=language, extra_instructions=extra_instructions)))
+        if self.fail_generate:
+            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"})()
+        return type("S", (), {"task_id": "report-task", "is_failed": False})()
+
+    async def download_report(self, notebook_id, output_path, artifact_id=None):
+        self.calls.append(("download_report", dict(output_path=output_path, artifact_id=artifact_id)))
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("# 假講義\n\n- 重點一\n")
+        return output_path
+
 
 class FakeSources:
     """Models the NotebookLM notebook's SERVER-SIDE source set: `sources` persists
