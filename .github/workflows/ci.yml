@@ -38,7 +38,7 @@ jobs:
 
       - name: uv tool install wheel smoke
         run: |
-          uv tool install --python 3.12 --force dist/notebooklm_mcp-0.1.0-py3-none-any.whl
+          uv tool install --python 3.12 --force dist/*.whl
           notebooklm-mcp --help
           notebooklm-cover --help
 

@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.1.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.0"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -82,17 +82,29 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
 tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `show_id`(**永不改**),
 不綁 notebook_id。
 
-## Gotchas(notebooklm-py 0.4.1,pin `>=0.4.1,<0.5`;與 GitHub HEAD 不同,以**實裝版本**為準)
+## Gotchas(notebooklm-py 0.7.3,pin `>=0.7.3,<0.8`;與 GitHub HEAD 不同,以**實裝版本**為準)
 
-- `from_storage()` 仍是 coroutine → `async with await NotebookLMClient.from_storage(keepalive=600)`
-  (免 await 慣用法 v0.5.0 才有)。`keepalive=600` 是 0.4.1 新參數:session 內背景
-  RotateCookies task(process-scoped,隨 server 生滅),長生成不因 `__Secure-1PSIDTS`
-  過期中途死。**env-var 唯讀模式下只轉記憶體、不落盤**,跨 session 的 cookie 老化
-  不變——2–4 週一次 GUI 機重登 + `sync-auth.sh` 的節奏照舊。網路擋
-  `accounts.google.com` 時可設 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1` 關閉。
+- **上游/NotebookLM 行為突變時的情報站**:讀 `_research/notebooklm-mcp-cli` 既有 clone 的
+  CHANGELOG.md 與 docs/KNOWN_ISSUES.md(jacob-bd,全生態追 Google 改版最快;bl 漂移、cookie
+  語意、RPC schema 變動幾乎都最先出現在那),再對照 notebooklm-py 的 GitHub issues。
+  **`_research/` 唯讀:連 `git pull` 都不做**,clone 更新請使用者自行決定。
+- `from_storage()` 是**同步函式**,回傳可直接 `async with` 的 context →
+  `async with NotebookLMClient.from_storage(keepalive=600)`(0.4.x「coroutine 必須 await」
+  已走入歷史)。`keepalive=600`:session 內背景 RotateCookies task(process-scoped,隨
+  server 生滅),長生成不因 `__Secure-1PSIDTS` 過期中途死;**env-var 唯讀模式只轉記憶體、
+  不落盤**,跨 session 老化照舊 2–4 週 GUI 機重登 + `sync-auth.sh`。網路擋
+  `accounts.google.com` 時設 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1` 關閉。
+- 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
+  (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
 - `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。
-- `sources.add_file` **無 `title`** 參數;要命名來源得另呼叫 `sources.rename`。
-- `artifacts.rename` / `sources.rename` **無 `return_object`** 參數(傳了會 TypeError)。
+- `sources.add_file` 有 `title`(0.7.x),**但內部仍是 add→rename 兩步且改名失敗只 log 不
+  raise** → podcast 流程維持顯式 add_file → rename 兩步(fail-loud);`source_add_file` 工具
+  的 title= 有回傳後檢,未生效會 raise。
+- `rename()` 的 `return_object` **預設 True 會再抓一次全量清單驗證、可能 raise not-found**
+  → 我們所有 rename 呼叫點顯式傳 `return_object=False`(fire-and-forget,RPC 錯誤仍會 raise)。
+- 0.7.0 起 source add API 尾端參數(`wait`/`wait_timeout`/`title` 等)**keyword-only**,
+  位置呼叫直接 TypeError(contract 測試有鎖)。
+- `wait_for_completion` 的 `poll_interval` 已移除(0.7.x);呼叫只用 `timeout=`。
 - 改 contract 測試時對「**實裝版本**」跑,別信 `_research/` 的 HEAD clone。
 - 改 podcast 流程務必對照鐵律:**每集(含最後一集)都要上傳自己的 mp3 回筆記本並命名**
   `EP{n:02d} 標題`(例 `EP01 心法篇`,標題來自大綱的 `title`,必填非空)——與該集的工作室
