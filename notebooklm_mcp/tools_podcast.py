@@ -91,7 +91,9 @@ async def _run_episode(
             wait=True,
             wait_timeout=600.0,
         )
-        await client.sources.rename(notebook_id, prior_src.id, f"EP{episode_n - 1:02d}")
+        await client.sources.rename(
+            notebook_id, prior_src.id, f"EP{episode_n - 1:02d}", return_object=False
+        )
 
     status = await client.artifacts.generate_audio(
         notebook_id,
@@ -112,7 +114,9 @@ async def _run_episode(
 
     # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so
     # the notebook stays legible regardless of the download outcome, then pull the mp3.
-    await client.artifacts.rename(notebook_id, artifact_id, label)
+    # fire-and-forget:0.7.3 預設 return_object=True 會再抓全量清單驗證且可能
+    # raise not-found;顯式 False 保留 0.4.1 語意(RPC 層錯誤仍會 raise)。
+    await client.artifacts.rename(notebook_id, artifact_id, label, return_object=False)
 
     mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
     await client.artifacts.download_audio(notebook_id, mp3_path, artifact_id)
@@ -126,7 +130,7 @@ async def _run_episode(
     own_src = await client.sources.add_file(
         notebook_id, mp3_path, mime_type="audio/mpeg", wait=True, wait_timeout=600.0
     )
-    await client.sources.rename(notebook_id, own_src.id, label)
+    await client.sources.rename(notebook_id, own_src.id, label, return_object=False)
 
     return {
         "episode": episode_n,

@@ -81,8 +81,9 @@ class FakeArtifacts:
         )
         return output_path
 
-    async def rename(self, notebook_id, artifact_id, new_title):
-        self.calls.append(("rename", dict(artifact_id=artifact_id, new_title=new_title)))
+    async def rename(self, notebook_id, artifact_id, new_title, *, return_object=True):
+        self.calls.append(("rename", dict(artifact_id=artifact_id, new_title=new_title,
+                                          return_object=return_object)))
         return None
 
     async def generate_slide_deck(self, notebook_id, source_ids=None, language="en",
@@ -126,6 +127,9 @@ class FakeSources:
         self.calls = []
         self.sources = []  # [{"id", "title"}] — server-side persistent set
         self._counter = 0
+        # True(預設)= add_file(title=) 的內部改名成功;False 模擬 0.7.3 的
+        # 靜默改名失敗(SDK 只 log,回傳舊 title)。
+        self.title_lands = True
 
     def _add(self, title):
         self._counter += 1
@@ -141,7 +145,11 @@ class FakeSources:
         for title in titles:
             self._add(title)
 
-    async def add_file(self, notebook_id, file_path, mime_type=None, wait=False, wait_timeout=120.0):
+    async def add_file(self, notebook_id, file_path, mime_type=None, *, wait=False,
+                       wait_timeout=120.0, title=None, on_progress=None):
+        # 鏡射 notebooklm-py 0.7.3:mime_type 之後的參數 keyword-only;title= 內部
+        # 其實是 add→rename 兩步,rename 失敗只 log 不 raise(回傳舊 title 的 Source)。
+        # title_lands=False 模擬那個靜默失敗,供 source_add_file 後檢的紅路徑測試。
         self.calls.append(
             (
                 "add_file",
@@ -151,13 +159,16 @@ class FakeSources:
                     mime_type=mime_type,
                     wait=wait,
                     wait_timeout=wait_timeout,
+                    title=title,
                 ),
             )
         )
-        return type("Src", (), {"id": self._add(None)})()  # title set later via rename
+        landed = title if self.title_lands else None
+        return type("Src", (), {"id": self._add(landed), "title": landed})()
 
-    async def rename(self, notebook_id, source_id, new_title):
-        self.calls.append(("rename", dict(source_id=source_id, new_title=new_title)))
+    async def rename(self, notebook_id, source_id, new_title, *, return_object=True):
+        self.calls.append(("rename", dict(source_id=source_id, new_title=new_title,
+                                          return_object=return_object)))
         for s in self.sources:
             if s["id"] == source_id:
                 s["title"] = new_title
@@ -176,11 +187,12 @@ class FakeSources:
         return type("FT", (), {"source_id": source_id, "title": "來源標題",
                                "content": "來源全文", "char_count": 4})()
 
-    async def add_url(self, notebook_id, url, wait=False, wait_timeout=120.0):
+    async def add_url(self, notebook_id, url, *, wait=False, wait_timeout=120.0):
         self.calls.append(("add_url", dict(notebook_id=notebook_id, url=url, wait=wait)))
         return type("Src", (), {"id": self._add(url)})()
 
-    async def add_text(self, notebook_id, title, content, wait=False, wait_timeout=120.0):
+    async def add_text(self, notebook_id, title, content, *, wait=False,
+                       wait_timeout=120.0, idempotent=False):
         self.calls.append(("add_text", dict(title=title, wait=wait)))
         return type("Src", (), {"id": self._add(title)})()
 

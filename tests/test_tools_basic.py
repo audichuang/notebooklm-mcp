@@ -111,3 +111,30 @@ async def test_artifact_list_filters_by_kind(fake_client):
 async def test_artifact_list_rejects_bad_kind(fake_client):
     with pytest.raises(ValueError):
         await t.artifact_list("nb-1", kind="podcast")
+
+
+async def test_source_add_file_passes_title_and_returns_id(fake_client, tmp_path):
+    """0.7.3 add_file 有 title=;工具下傳並回 source_id。"""
+    f = tmp_path / "ep03.mp3"
+    f.write_bytes(b"x")
+    result = await t.source_add_file("nb-123", str(f), mime_type="audio/mpeg", title="EP03 進階篇")
+    call = next(c[1] for c in fake_client.sources.calls if c[0] == "add_file")
+    assert call["title"] == "EP03 進階篇"
+    assert result["source_id"].startswith("src-")
+
+
+async def test_source_add_file_fails_loud_when_title_does_not_land(fake_client, tmp_path):
+    """0.7.3 SDK 的內部改名失敗只 log 不 raise;工具端必須後檢 fail-loud
+    (「source 與 artifact 同名」鐵律不容靜默破功)。"""
+    fake_client.sources.title_lands = False
+    f = tmp_path / "ep03.mp3"
+    f.write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="title"):
+        await t.source_add_file("nb-123", str(f), title="EP03 進階篇")
+
+
+async def test_artifact_rename_is_fire_and_forget(fake_client):
+    """artifact_rename 工具同樣必須顯式 return_object=False。"""
+    await t.artifact_rename("nb-123", "task-123", "EP01 心法篇")
+    call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "rename")
+    assert call["return_object"] is False

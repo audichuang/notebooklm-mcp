@@ -46,15 +46,26 @@ async def source_add_file(
     file_path: str,
     mime_type: str | None = None,
     wait: bool = True,
+    title: str | None = None,
 ) -> dict:
-    """Add a local file as a source, including audio/mp3 feedback sources."""
+    """Add a local file as a source. mp3 回饋來源用 mime_type="audio/mpeg";
+    title 可直接命名(如手動補一集時傳 "EP03 標題",與 Studio artifact 同名)。"""
     src = await runtime.get_client().sources.add_file(
         notebook_id,
         file_path,
         mime_type=mime_type,
         wait=wait,
         wait_timeout=600.0,
+        title=title,
     )
+    # 0.7.3 的 title= 內部是 add→rename,改名失敗只 log 不 raise(回傳舊 title)。
+    # 命名是鐵律的一部分,靜默破功不可接受 → 後檢 fail-loud。
+    if title is not None and getattr(src, "title", None) != title:
+        raise RuntimeError(
+            f"來源已上傳(source_id={src.id})但 title 未生效"
+            f"(期望 {title!r},實際 {getattr(src, 'title', None)!r});"
+            f"請用 sources.rename 補命名或刪除重傳。"
+        )
     return {"source_id": src.id}
 
 
@@ -142,7 +153,9 @@ async def artifact_download_audio(
 @mcp.tool()
 async def artifact_rename(notebook_id: str, artifact_id: str, new_title: str) -> dict:
     """Rename an artifact so it stays identifiable in the notebook."""
-    await runtime.get_client().artifacts.rename(notebook_id, artifact_id, new_title)
+    await runtime.get_client().artifacts.rename(
+        notebook_id, artifact_id, new_title, return_object=False
+    )
     return {"artifact_id": artifact_id, "title": new_title}
 
 

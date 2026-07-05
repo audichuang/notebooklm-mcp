@@ -136,3 +136,15 @@ async def test_series_start_offset(fake_client, tmp_path):
     # Resume still self-uploads the resumed episode as a named source.
     rename_titles = [c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename"]
     assert rename_titles == ["EP03 收尾篇"]
+
+
+async def test_all_renames_are_fire_and_forget(fake_client, tmp_path):
+    """0.7.3 rename 預設 return_object=True 會多抓一次全量清單且可能 raise
+    not-found;我們所有呼叫點必須顯式傳 False(保留 0.4.1 語意)。"""
+    await p.podcast_episode(
+        "nb-123", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path)
+    )
+    renames = [c[1] for c in fake_client.sources.calls if c[0] == "rename"]
+    renames += [c[1] for c in fake_client.artifacts.calls if c[0] == "rename"]
+    assert renames, "podcast flow 必須有 rename 呼叫"
+    assert all(r["return_object"] is False for r in renames)
