@@ -110,3 +110,9 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - 全程繁體中文註解/文件。TDD:測試先紅再綠,每任務一 commit。
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
 - 不污染 `_research/`(唯讀參考 clone)。
+
+## Cross-Repo Sync Checklist
+
+MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/home/user/research/audi-skill/notebooklm/SKILL.md` 的工具表與 `/home/user/research/audi-skill/notebooklm/references/tool-reference.md`。
+
+新增、移除或改名工具時,commit message 要明講 skill repo 是否已同步;若尚未同步,不要 push MCP release tag。若本 repo 已落地 CI hard check,PR 必須等該檢查綠燈後才能 tag release。
