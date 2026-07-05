@@ -110,6 +110,18 @@ def test_no_content_encoded_when_absent():
     assert "content:encoded" not in feed.build_feed_xml(SHOW, BASE)
 
 
+def test_item_itunes_image_only_when_episode_has_artwork():
+    # EP01 有自己的封面 → <item> 內帶 itunes:image;EP02 沒有 → 該集省略,
+    # 由播放器 fallback 到 channel 層的節目封面(向後相容:舊 show 無此欄位即無 item image)。
+    show = {**SHOW, "episodes": {
+        "1": {**SHOW["episodes"]["1"], "artwork_file": "EP01-cover-abcd1234.jpg"},
+        "2": SHOW["episodes"]["2"],
+    }}
+    items = ET.fromstring(feed.build_feed_xml(show, BASE)).find("channel").findall("item")
+    assert items[0].find("itunes:image", NS).get("href") == f"{BASE}/feeds/tok123/EP01-cover-abcd1234.jpg"
+    assert items[1].find("itunes:image", NS) is None
+
+
 def test_content_encoded_escapes_cdata_end_marker():
     # description_html 內含 "]]>" 不能提前關閉 CDATA;拆分後解析仍還原原字串
     html = "<p>a]]>b</p>"

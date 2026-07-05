@@ -23,3 +23,11 @@ def test_attachment_filename():
 
     assert attachment_filename(1, "deadbeef", "pdf") == "EP01-deadbeef.pdf"
     assert attachment_filename(12, "0a1b2c3d", "html") == "EP12-0a1b2c3d.html"
+
+
+def test_cover_filename():
+    # -cover- 區隔,避免和同副檔名的附件(理論上的 .jpg 附件)撞名。
+    from notebooklm_mcp.publish.layout import cover_filename
+
+    assert cover_filename(1, "ab12cd34", "jpg") == "EP01-cover-ab12cd34.jpg"
+    assert cover_filename(12, "0a1b2c3d", "png") == "EP12-cover-0a1b2c3d.png"

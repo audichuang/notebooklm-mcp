@@ -5,6 +5,7 @@ episode here already has a local mp3_path, so _ensure_local_mp3's re-download
 branch, which needs fake_client, is never exercised)."""
 import json
 import os
+import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
 import httpx
@@ -12,6 +13,8 @@ import pytest
 
 from notebooklm_mcp import tools_publish
 from notebooklm_mcp.publish import identity
+
+_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
 
 @pytest.fixture
@@ -299,4 +302,56 @@ async def test_missing_attachment_file_fails_fast(env, tmp_path, artwork_png, mo
         "slides_pdf_path": str(tmp_path / "does-not-exist.pdf"),
     }], "att_missing.json")
     with pytest.raises(ValueError, match="slides_pdf_path"):
+        await _publish(manifest, artwork_png)
+
+
+def _valid_cover(tmp_path, name):
+    from PIL import Image
+
+    p = tmp_path / name
+    Image.new("RGB", (1500, 1500)).save(str(p))
+    return str(p)
+
+
+async def test_episode_cover_hosted_and_wired_into_feed(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    manifest = _manifest(tmp_path, [{
+        "episode": 1, "title": "第1集",
+        "mp3_path": _write_mp3(tmp_path, "ec1.mp3", b"a"),
+        "cover_path": _valid_cover(tmp_path, "ep01-cover.png"),
+    }], "cover.json")
+    await _publish(manifest, artwork_png)
+
+    names = [c["name"] for c in captured]
+    assert any(n.startswith("EP01-cover-") and n.endswith(".png") for n in names)   # 上傳了單集封面
+
+    show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
+    art = show["episodes"]["1"]["artwork_file"]
+    assert art.startswith("EP01-cover-") and art.endswith(".png")
+
+    feedxml = next(c["content"] for c in captured if c["name"] == "feed.xml")
+    it = ET.fromstring(feedxml).find("channel/item")
+    assert it.find("itunes:image", _NS).get("href").endswith(art)                   # feed <item> 帶該集封面
+
+
+async def test_episode_without_cover_falls_back_to_show_art(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    await _publish(_two_episode_manifest(tmp_path), artwork_png)
+    show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
+    # 沒給 cover_path → 該集不寫 artwork_file(feed 省略 item image,fallback 節目封面)
+    assert "artwork_file" not in show["episodes"]["1"]
+    names = [c["name"] for c in captured]
+    assert not any(n.startswith("EP01-cover-") for n in names)
+
+
+async def test_bad_episode_cover_fails_fast(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    bad = tmp_path / "bad-cover.png"
+    bad.write_bytes(b"not a real image")
+    manifest = _manifest(tmp_path, [{
+        "episode": 1, "title": "第1集",
+        "mp3_path": _write_mp3(tmp_path, "ec2.mp3", b"a"),
+        "cover_path": str(bad),
+    }], "badcover.json")
+    with pytest.raises(ValueError):
         await _publish(manifest, artwork_png)
