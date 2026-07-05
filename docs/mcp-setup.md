@@ -7,11 +7,13 @@ git ls-remote https://github.com/audichuang/notebooklm-mcp.git refs/tags/v0.1.0
 uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.1.0"
 ```
 
-Register the MCP server with Claude Code using stdio transport and Doppler auth injection:
+Register the MCP server with Claude Code using stdio transport and Doppler auth injection.
+NOTE: on Claude CLI 2.1.201 the `claude mcp add … -- …` form treats everything after `--` as a
+prompt and does NOT register — use `add-json`:
 
 ```bash
-claude mcp add notebooklm -- doppler run -p notebooklm -c dev -- \
-  notebooklm-mcp --transport stdio
+claude mcp add-json notebooklm -s local \
+  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","notebooklm-mcp","--transport","stdio"]}'
 ```
 
 Project `.mcp.json` entries should use the same zero-path command:
