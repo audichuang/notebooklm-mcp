@@ -98,7 +98,7 @@ Run: `git -C /home/user/research/audiskill/notebooklm-skill status --short --bra
 Expected:
 
 ```text
-## master...origin/master [ahead 9]
+## master...origin/master [ahead N]
 ```
 
 Run: `git -C /home/user/research/audiskill/notebooklm-skill log --oneline -1`
@@ -145,7 +145,7 @@ Run: `git -C /home/user/research/audiskill/notebooklm-mcp status --short --branc
 Expected:
 
 ```text
-## master...origin/master [ahead 9]
+## master...origin/master [ahead N]
 ```
 
 - [ ] **Step 4: Remove the skill routing layer from the MCP repo**
