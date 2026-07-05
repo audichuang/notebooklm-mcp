@@ -1,8 +1,8 @@
 [project]
-name = "notebooklm-mcp-skill"
+name = "notebooklm-mcp"
 version = "0.1.0"
-description = "Thin self-built MCP server over notebooklm-py for the NotebookLM skill"
-requires-python = ">=3.11"
+description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "notebooklm-py>=0.3,<0.4",
     "mcp[cli]>=1.0.0",
