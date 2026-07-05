@@ -19,6 +19,20 @@ class FakeArtifacts:
         # fails mid-poll and wait_for_completion returns the final failed
         # GenerationStatus (it only raises TimeoutError on timeout).
         self.fail_complete = False
+        # Server-side artifact set — what artifacts.list() would return. Seed via
+        # seed_artifacts() to model episodes/reports that already exist in the notebook.
+        self.artifacts = []
+
+    def seed_artifacts(self, *arts):
+        """Test helper: pre-populate the notebook's artifact set."""
+        self.artifacts.extend(arts)
+
+    # Signature mirrors notebooklm-py 0.3.4 ArtifactsAPI.list (filter by .kind).
+    async def list(self, notebook_id, artifact_type=None):
+        self.calls.append(("list", dict(notebook_id=notebook_id, artifact_type=artifact_type)))
+        if artifact_type is None:
+            return list(self.artifacts)
+        return [a for a in self.artifacts if a.kind == artifact_type]
 
     async def generate_audio(
         self,
@@ -149,6 +163,19 @@ class FakeSources:
                 s["title"] = new_title
         return None
 
+    async def list(self, notebook_id):
+        self.calls.append(("list", dict(notebook_id=notebook_id)))
+        return [
+            type("Src", (), {"id": s["id"], "title": s["title"] or "",
+                             "kind": "web_page", "is_ready": True})()
+            for s in self.sources
+        ]
+
+    async def get_fulltext(self, notebook_id, source_id):
+        self.calls.append(("get_fulltext", dict(source_id=source_id)))
+        return type("FT", (), {"source_id": source_id, "title": "來源標題",
+                               "content": "來源全文", "char_count": 4})()
+
     async def add_url(self, notebook_id, url, wait=False, wait_timeout=120.0):
         self.calls.append(("add_url", dict(notebook_id=notebook_id, url=url, wait=wait)))
         return type("Src", (), {"id": self._add(url)})()
@@ -170,10 +197,24 @@ class FakeNotebooks:
     async def list(self):
         return [type("NB", (), {"id": "nb-123", "title": "Test"})()]
 
+    async def get(self, notebook_id):
+        return type("NB", (), {"id": notebook_id, "title": "Test", "sources_count": 2,
+                               "is_owner": True, "created_at": None})()
+
 
 class FakeChat:
-    async def ask(self, notebook_id, question):
-        return type("R", (), {"answer": f"answer to {question}"})()
+    def __init__(self):
+        self.calls = []
+
+    # Signature mirrors notebooklm-py 0.3.4 ChatAPI.ask (source_ids + conversation_id).
+    async def ask(self, notebook_id, question, source_ids=None, conversation_id=None):
+        self.calls.append(("ask", dict(question=question, source_ids=source_ids,
+                                        conversation_id=conversation_id)))
+        refs = [type("Ref", (), {"source_id": "src-1", "citation_number": 1,
+                                 "cited_text": "引用片段"})()]
+        return type("R", (), {"answer": f"answer to {question}",
+                              "conversation_id": conversation_id or "conv-1",
+                              "references": refs})()
 
 
 class FakeClient:

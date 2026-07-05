@@ -63,6 +63,11 @@ def build_feed_xml(show: dict, base_url: str) -> str:
             # CDATA 安全:內容若含 "]]>" 會提前關閉,拆開再續。
             safe = html.replace("]]>", "]]]]><![CDATA[>")
             item.append(f"      <content:encoded><![CDATA[{safe}]]></content:encoded>")
+        # 單集封面(選填):有才放 <itunes:image>,沒有就省略 → 播放器 fallback 到 channel
+        # 層的節目封面(向後相容:舊 show 無此欄位即無單集圖)。
+        ep_art = ep.get("artwork_file")
+        if ep_art:
+            item.append(f'      <itunes:image href={quoteattr(base + "/" + ep_art)}/>')
         item += [
             f"      <pubDate>{escape(ep['pub_date'])}</pubDate>",
             f'      <guid isPermaLink="false">{escape(ep["guid"])}</guid>',

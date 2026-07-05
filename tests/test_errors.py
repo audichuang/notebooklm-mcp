@@ -49,7 +49,7 @@ async def test_failed_generation_status_fails_fast(fake_client, tmp_path):
     # SDK reports a failed/refused generation as a status (task_id="", is_failed=True),
     # NOT by raising. The wrapper must detect that instead of proceeding with an empty id.
     fake_client.artifacts.fail_generate = True
-    with pytest.raises(RuntimeError, match="Audio generation failed"):
+    with pytest.raises(RuntimeError, match="Generation failed"):
         await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))
     # It stopped right after generate — no wait/download on the empty id.
     kinds = [c[0] for c in fake_client.artifacts.calls]
@@ -58,7 +58,7 @@ async def test_failed_generation_status_fails_fast(fake_client, tmp_path):
 
 async def test_generate_audio_tool_fails_fast_on_failed_status(fake_client):
     fake_client.artifacts.fail_generate = True
-    with pytest.raises(RuntimeError, match="Audio generation failed"):
+    with pytest.raises(RuntimeError, match="Generation failed"):
         await t.generate_audio("nb-1", instructions="x")
 
 

@@ -6,7 +6,7 @@ baked in. Each tool returns a plain JSON-able dict.
 from __future__ import annotations
 
 from . import runtime
-from ._status import ensure_started
+from ._status import ensure_completed, ensure_started
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
@@ -88,9 +88,43 @@ async def generate_audio(
 
 
 @mcp.tool()
+async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
+    """List artifacts already in a notebook, so you can see and recover them —
+    e.g. an audio episode whose download got interrupted (find its artifact_id
+    here, then artifact_download_audio). Pass kind to filter: "audio", "video",
+    "report", "quiz", "flashcards", "mind_map", "infographic", "slide_deck",
+    "data_table"; omit for everything.
+    """
+    from notebooklm.types import ArtifactType
+
+    try:
+        artifact_type = ArtifactType(kind) if kind else None
+    except ValueError:
+        valid = ", ".join(e.value for e in ArtifactType if e.value != "unknown")
+        raise ValueError(f"unknown kind {kind!r}; use one of: {valid}")
+    arts = await runtime.get_client().artifacts.list(notebook_id, artifact_type=artifact_type)
+    return {
+        "artifacts": [
+            {
+                "artifact_id": a.id,
+                "title": a.title,
+                "kind": getattr(a.kind, "value", str(a.kind)),
+                "completed": a.is_completed,
+                "status": a.status_str,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in arts
+        ]
+    }
+
+
+@mcp.tool()
 async def artifact_wait(notebook_id: str, task_id: str, timeout: float = 1200.0) -> dict:
     """Wait for a generation task to complete."""
     status = await runtime.get_client().artifacts.wait_for_completion(notebook_id, task_id, timeout=timeout)
+    # Fail-closed: the SDK returns a FAILED status (not an exception) when generation
+    # fails mid-poll; without this a failed wait would be reported as success.
+    ensure_completed(status)
     return {"task_id": status.task_id, "artifact_id": status.task_id}
 
 
@@ -113,7 +147,84 @@ async def artifact_rename(notebook_id: str, artifact_id: str, new_title: str) ->
 
 
 @mcp.tool()
-async def chat_ask(notebook_id: str, question: str) -> dict:
-    """Ask a source-grounded question."""
-    res = await runtime.get_client().chat.ask(notebook_id, question)
-    return {"answer": res.answer}
+async def chat_ask(
+    notebook_id: str,
+    question: str,
+    source_ids: list[str] | None = None,
+    conversation_id: str | None = None,
+) -> dict:
+    """Ask a source-grounded question.
+
+    Pass source_ids to focus on specific sources (e.g. one episode's article,
+    excluding earlier episodes' audio) so show notes don't get polluted; pass
+    conversation_id to continue a thread. Returns answer + citation references +
+    conversation_id. NOTE: answer carries citation markers like [1]/[3, 4]; strip
+    with regex `\\[[\\d,\\s\\-–]+\\]` before using as public text.
+    """
+    res = await runtime.get_client().chat.ask(
+        notebook_id, question, source_ids=source_ids, conversation_id=conversation_id
+    )
+    return {
+        "answer": res.answer,
+        "conversation_id": getattr(res, "conversation_id", None),
+        "references": [
+            {
+                "source_id": getattr(r, "source_id", None),
+                "citation_number": getattr(r, "citation_number", None),
+                "cited_text": getattr(r, "cited_text", None),
+            }
+            for r in getattr(res, "references", None) or []
+        ],
+    }
+
+
+@mcp.tool()
+async def source_list(notebook_id: str) -> dict:
+    """List a notebook's sources — find a source_id (e.g. to rename or delete a
+    rejected episode's mp3 source, or feed generate_slides/report a focused
+    source_ids set) and confirm uploads landed. Each entry has ready=True once
+    NotebookLM finished ingesting it."""
+    srcs = await runtime.get_client().sources.list(notebook_id)
+    return {
+        "sources": [
+            {
+                "source_id": s.id,
+                "title": s.title,
+                "kind": getattr(s.kind, "value", str(s.kind)),
+                "ready": s.is_ready,
+            }
+            for s in srcs
+        ]
+    }
+
+
+@mcp.tool()
+async def source_fulltext(notebook_id: str, source_id: str) -> dict:
+    """Get a source's extracted full text — verify a PDF / Medium / pasted article
+    actually ingested its body, or read back an uploaded mp3's transcript. NOTE:
+    NotebookLM inserts spaces between CJK chars; `"".join(text.split())` before
+    keyword matching."""
+    ft = await runtime.get_client().sources.get_fulltext(notebook_id, source_id)
+    return {
+        "source_id": ft.source_id,
+        "title": ft.title,
+        "char_count": ft.char_count,
+        "content": ft.content,
+    }
+
+
+@mcp.tool()
+async def notebook_get(notebook_id: str) -> dict:
+    """Get a notebook's metadata (title, source count, owner) — confirm you're
+    targeting the right notebook before generating or publishing."""
+    nb = await runtime.get_client().notebooks.get(notebook_id)
+    # SDK 0.3.4 的 get() 不一定回 None——找不到可能回帶空 id 的物件,兩種都當「找不到」。
+    if nb is None or not getattr(nb, "id", None):
+        raise RuntimeError(f"notebook not found: {notebook_id}")
+    return {
+        "notebook_id": nb.id,
+        "title": nb.title,
+        "sources_count": nb.sources_count,
+        "is_owner": nb.is_owner,
+        "created_at": nb.created_at.isoformat() if nb.created_at else None,
+    }
