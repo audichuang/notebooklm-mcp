@@ -58,3 +58,33 @@ async def generate_slides(
     await client.artifacts.download_slide_deck(notebook_id, out, artifact_id=artifact_id, output_format="pdf")
     _load_ep_and_write(manifest_path, episode_n, slides_pdf_path=out)
     return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
+
+
+@mcp.tool()
+async def generate_report(
+    notebook_id: str,
+    manifest_path: str,
+    episode_n: int,
+    report_format: str = "study_guide",
+    source_ids: list[str] | None = None,
+    language: str | None = None,
+    extra_instructions: str | None = None,
+    wait_timeout: float = 1800.0,
+) -> dict:
+    """生成該集研讀文件(預設 study_guide)並下載 Markdown,路徑回寫 report_md_path。"""
+    client = runtime.get_client()
+    status = await client.artifacts.generate_report(
+        notebook_id,
+        report_format=to_report_format(report_format),
+        source_ids=source_ids,
+        language=resolve_language(language),
+        extra_instructions=extra_instructions,
+    )
+    artifact_id = ensure_started(status)
+    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
+    ensure_completed(final)
+
+    out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-report.md")
+    await client.artifacts.download_report(notebook_id, out, artifact_id=artifact_id)
+    _load_ep_and_write(manifest_path, episode_n, report_md_path=out, report_format=report_format)
+    return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}

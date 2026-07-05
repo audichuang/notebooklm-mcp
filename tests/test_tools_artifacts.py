@@ -34,3 +34,19 @@ async def test_generate_slides_unknown_episode_errors(fake_client, tmp_path):
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     with pytest.raises(ValueError, match="episode 2 not found"):
         await a.generate_slides("nb-1", m, 2)
+
+
+async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    res = await a.generate_report("nb-1", m, 1, report_format="study_guide", source_ids=["src-1"])
+
+    from notebooklm.types import ReportFormat
+    gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_report")
+    assert gen["report_format"] == ReportFormat.STUDY_GUIDE
+    assert gen["language"] == "zh_Hant"
+
+    assert res["report_md_path"].endswith("ep01-report.md")
+    assert res["report_format"] == "study_guide"
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
+    assert data["episodes"][0]["report_format"] == "study_guide"
