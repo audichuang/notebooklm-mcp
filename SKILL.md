@@ -50,7 +50,9 @@ NotebookLM 操作都走 `notebooklm` MCP server;此 skill 只判斷意圖、組�
 連續系列先做大綱，不要直接開始生成。
 
 1. 先用對話規劃整季大綱:每集都要有 `title`(本集標題)與 `brief`,brief 要包含主持人人設、節目風格、本集任務、承接要求。`title` 必填且不可為空——工作室 artifact 與來源都會命名成 `EP{n:02d} 標題`(例 `EP01 心法篇`)。
-2. 讓使用者核可整季 `episodes` 陣列(每項形如 `{"title": ..., "brief": ...}`)。
+2. 讓使用者核可整季 `episodes` 陣列(每項形如 `{"title": ..., "brief": ...}`)。若最終會發布,
+   核可時一併攤開**整包交付內容**讓使用者確認:show notes(必做)、簡報、研讀講義、封面——
+   預設全做,請使用者挑要略過哪些,別自己預設只生音檔(見 §Publish)。
 3. 呼叫 `podcast_series(notebook_id, episodes, output_dir, start=1)`。
 4. 續製時傳「完整的 episodes 陣列」加 `start=N`（前提是同一個筆記本來源區已有 `EP{N-1:02d} 標題` 來源，這是前次跑時各集自上傳留下的）。`podcast_series` 不讀本機 `ep{N-1}.mp3`；本機檔只是下載與 manifest 的存放處。manifest 會合併保留前面集數,不會被覆寫。
 
@@ -63,13 +65,14 @@ Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_promp
 一主題 = 一節目 = 一 feed。`publish_series` 吃 `podcast_series` 產出的 `series_manifest.json`
 (**單集也走 `podcast_series`**、episodes 放一集才有 manifest;`podcast_episode` 不產 manifest)。
 
-端到端固化流程(生成 → 加料 → 封面 → 發布 → 訂閱)。標「(選)」的可略過:
+端到端固化流程(生成 → 加料 → 封面 → 發布 → 訂閱)。**預設整包全做**——只有使用者在 §Episodic
+核可關卡明講不要某項才略過,不要自己靜默跳過。發布前用下方「交付清單」逐集核對才算完成。
 
 1. **生成音檔** — 依 §Episodic 跑 `podcast_series`,得 `series_manifest.json` + 各集 mp3。
-2. **(選)單集簡介** — 在 manifest 該集加 `description`(繁中 show notes)。可用 `chat_ask` 生,
-   **先清引用標記** `\[[\d,\s\-–]+\]` 再寫入;沒有則 fallback 用標題。
-3. **(選)簡報 / 研讀講義** — `generate_slides` / `generate_report`(路徑自動回寫 manifest)。
-   發布時自動 content-hash → host(講義 Markdown 渲染成自包含 HTML),具名連結附進單集簡介。
+2. **單集簡介** — 用 `chat_ask` 生繁中 show notes(約 100–150 字),**先清引用標記**
+   `\[[\d,\s\-–]+\]` 再寫進該集 manifest 的 `description`。
+3. **簡報 / 研讀講義** — `generate_slides` + `generate_report`,路徑自動回寫 manifest;發布時
+   content-hash → host(講義 Markdown 渲染成自包含 HTML),具名連結附進單集簡介。
 4. **封面** — Apple 硬規格:正方形、1400–3000px、PNG/JPG、RGB、**無透明通道**。無現成圖用
    `uv run python scripts/make_cover.py --output cover.jpg --line 標題行1 --line 標題行2
    --subtitle ... --byline ...`(自帶 Apple 驗證器,產出即保證過 `publish_series`)。
@@ -78,6 +81,18 @@ Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_promp
    URL、**永不改**、`[a-z0-9-]`);`owner_email` Apple 必填。
 6. **訂閱** — 回傳 `feed_url`,在 Apple Podcast「用 URL 加入節目」貼上。續製重跑 `publish_series`
    (同 URL/GUID)Apple 自動抓新集;重生壞集內容 hash 變 → 換音檔 URL、GUID 不變(視為同集更新)。
+
+**交付清單(跑 `publish_series` 前逐集核對,缺項=還沒做完,只有使用者明講不要才准空):**
+
+- [ ] `mp3_path` — 音檔
+- [ ] `description` — 真 show notes,**不可等於標題**(缺漏時 publish 會 fallback 成標題,
+      播放器上簡介跟標題一字不差、看起來像壞掉)
+- [ ] `slides_pdf_path` — 簡報
+- [ ] `report_md_path` — 研讀講義
+- [ ] 封面過 Apple 驗證;show 層 `show_id`/`show_title`/`show_description`/`author`/
+      `owner_name`/`owner_email`/`artwork_path` 七欄齊(`publish_series` 全必填)
+
+清單全綠再發布;報告完成時,對照本清單說明每項的狀態(已做 / 使用者略過),不要只說「已發布」。
 
 前提:四個 Doppler secret(`PODCAST_PUBLIC_BASE_URL` / `PODCAST_TOKEN_SALT` /
 `PODCAST_UPLOAD_URL` / `PODCAST_UPLOAD_TOKEN`),MCP 內網 PUT 到 NAS uploader,讀站經
