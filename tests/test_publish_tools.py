@@ -208,6 +208,22 @@ async def test_missing_required_metadata_errors(env, tmp_path, artwork_png, monk
     assert captured == []
 
 
+async def test_manifest_description_becomes_episode_description(env, tmp_path, artwork_png, monkeypatch):
+    """A manifest episode carrying a 'description' (show notes) threads into
+    show.json; an episode without one falls back to its title."""
+    captured = _install_mock(monkeypatch)
+    manifest = _manifest(tmp_path, [
+        {"episode": 1, "title": "第1集", "description": "本集重點:harness 七檔、loop 三步。",
+         "mp3_path": _write_mp3(tmp_path, "e1.mp3", b"a")},
+        {"episode": 2, "title": "第2集",  # no description -> falls back to title
+         "mp3_path": _write_mp3(tmp_path, "e2.mp3", b"b")},
+    ], "notes.json")
+    await _publish(manifest, artwork_png)
+    show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
+    assert show["episodes"]["1"]["description"] == "本集重點:harness 七檔、loop 三步。"
+    assert show["episodes"]["2"]["description"] == "第2集"
+
+
 async def test_feed_info(env):
     info = await tools_publish.feed_info("ai-news")
     token = identity.make_token("ai-news", os.environ["PODCAST_TOKEN_SALT"])

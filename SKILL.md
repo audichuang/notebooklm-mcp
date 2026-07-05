@@ -59,13 +59,20 @@ Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_promp
 ## Publish to Apple Podcast(RSS feed)
 
 一主題 = 一節目 = 一 feed。跑完 `podcast_series` 後,把整季發布成可訂閱的 RSS feed。
+`publish_series` 吃 `podcast_series` 產出的 `series_manifest.json`;**單集也走 `podcast_series`**
+(episodes 只放一集)才有 manifest —— `podcast_episode` 純單集不產 manifest。
 
 1. 準備節目封面圖(Apple 硬規格:正方形、1400–3000px、PNG/JPG、RGB、**無透明通道**)與
-   節目 metadata(title / description / author / **owner_email**——Apple 必填)。
+   節目 metadata(title / description / author / **owner_email**——Apple 必填)。無現成封面時,
+   用 `uv run python scripts/make_cover.py --output cover.jpg --line 標題行1 --line 標題行2
+   --subtitle ... --byline ...` 生一張合規深色封面(自帶驗證器,產出即保證過 `publish_series`)。
 2. 呼叫 `publish_series(show_id, notebook_id, manifest_path, show_title, show_description,
    author, owner_name, owner_email, artwork_path)`。
    - `show_id`:穩定 slug(feed identity,決定 URL,**永不改**;`[a-z0-9-]`)。
    - `manifest_path`:`podcast_series` 產出的 `series_manifest.json` 路徑。
+   - **單集簡介(show notes)**:在 manifest 的該集加一個 `description` 欄位,`publish_series`
+     會拿它當單集 `<description>`(沒有則 fallback 用標題)。可用 `chat_ask` 生一段繁中簡介,
+     **記得先清掉 NotebookLM 的引用標記**(`[1]`/`[3, 4]`/`[8-10]`,regex `\[[\d,\s\-–]+\]`)再寫進去。
 3. 回傳 `feed_url` → 在 Apple Podcast「用 URL 加入節目」貼上訂閱。續製只要重跑
    `publish_series`(同 URL、同 GUID),Apple 自動抓新集;重生壞集內容 hash 變 → 換音檔
    URL 但 GUID 不變(視為同集更新)。

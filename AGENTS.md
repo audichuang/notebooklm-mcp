@@ -76,7 +76,18 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   `EP{n:02d} 標題`(例 `EP01 心法篇`,標題來自大綱的 `title`,必填非空)——與該集的工作室
   artifact **完全同名**(同一字串),讓兩區命名一致、記錄完整。命名邏輯集中在 `_episode_label()`。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`。
+- **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`);要當公開文字(如單集 show notes)
+  前用 regex `\[[\d,\s\-–]+\]` 清掉。單集簡介 = manifest 該集加 `description`(見 SKILL §Publish)。
 - quiz/flashcards 無 `--language`(在 brief 內指定);mind-map 無法指定語言。
+- **發布單集也走 `podcast_series`**(episodes 放一集):`publish_series` 只吃
+  `series_manifest.json`,`podcast_episode` 純單集不產 manifest。
+- **X 長文(Article)餵不進來**:貼文只是 t.co 短連結,文章本體在 `x.com/i/article/…`
+  需登入,`source_add_url` / WebFetch 都回 402。存成 PDF(Read 讀得出全文)或直接貼全文
+  用 `source_add_text`。
+- **封面圖用 `scripts/make_cover.py` 生**(PIL,已固化排版 + 自帶 Apple 驗證器)。
+  `agy` 之類 coding agent **不能直接出點陣圖**,只會幫你寫這種 PIL code;要「AI 生成圖」得
+  另接影像模型(Imagen/DALL·E)。NotebookLM 下載的音檔是 MPEG-4 容器但副檔名 `.mp3`、
+  以 `audio/mpeg` 發布,Apple 可正常播(已實測訂閱+播放通過)。
 
 ## Conventions
 

@@ -183,7 +183,10 @@ async def publish_series(
             await _put(client, upload_url, token, upload_token, mfile, mp3_bytes)
             new_eps[str(n)] = {
                 "title": ep["title"],
-                "description": ep["title"],       # manifest carries no separate brief
+                # Show notes: prefer a manifest 'description' (e.g. a chat_ask
+                # briefing), else fall back to the title. feed.py already reads
+                # ep['description'], so this is the only wiring needed.
+                "description": (ep.get("description") or "").strip() or ep["title"],
                 "guid": identity.episode_guid(show_id, n),
                 "pub_date": ep.get("published_at") or _fallback_pub_date(n),
                 "media_file": mfile,
