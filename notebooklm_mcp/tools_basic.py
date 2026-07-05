@@ -218,7 +218,8 @@ async def notebook_get(notebook_id: str) -> dict:
     """Get a notebook's metadata (title, source count, owner) — confirm you're
     targeting the right notebook before generating or publishing."""
     nb = await runtime.get_client().notebooks.get(notebook_id)
-    if nb is None:
+    # SDK 0.3.4 的 get() 不一定回 None——找不到可能回帶空 id 的物件,兩種都當「找不到」。
+    if nb is None or not getattr(nb, "id", None):
         raise RuntimeError(f"notebook not found: {notebook_id}")
     return {
         "notebook_id": nb.id,

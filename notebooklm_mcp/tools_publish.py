@@ -164,6 +164,10 @@ async def publish_series(
         seen_n.add(n)
         if not isinstance(ep.get("title"), str) or not ep["title"].strip():
             raise ValueError(f"episode {n}: title is required and must be non-empty")
+        # 單集封面在此就驗(存在 + Apple 規格),讓缺檔/不合規在**任何 PUT 之前**就 fail,
+        # 不會出現「該集 mp3 已上傳、封面才炸」留下 orphan media。迴圈內會再驗一次取格式。
+        if ep.get("cover_path"):
+            artwork_mod.validate_artwork(ep["cover_path"])
 
     # One mp3 in RAM at a time: read -> hash -> PUT -> drop. NEVER accumulate the
     # whole season (8-12 episodes x tens of MB = 300-600MB resident on a possibly

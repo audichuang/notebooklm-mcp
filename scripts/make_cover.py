@@ -62,13 +62,18 @@ def _fit_font(path: str, text: str, max_w: int, start: int) -> ImageFont.FreeTyp
     return ImageFont.truetype(path, 24, index=0)
 
 
-def make_cover(output: str, lines: list[str], tag: str, subtitle: str, byline: str, episode: str | None = None) -> None:
+def make_cover(output: str, lines: list[str], tag: str, subtitle: str, byline: str,
+               episode: str | None = None, font_cjk: str | None = None,
+               font_mono: str | None = None) -> None:
     import colorsys
     import hashlib
     import re
 
-    cjk = _first_existing(_CJK_CANDIDATES, "CJK")
-    mono = _first_existing(_MONO_CANDIDATES, "mono")
+    # font_cjk/font_mono 可 pin 明確字型路徑:輸出 bytes 是 feed 的 content-hash 依據,
+    # 各 VM 的 _first_existing 若挑到不同字型會產生不同 bytes → feed churn。要跨機器
+    # 決定性,發布前在各機傳同一個明確字型路徑(或確保候選清單首選在各機一致)。
+    cjk = font_cjk or _first_existing(_CJK_CANDIDATES, "CJK")
+    mono = font_mono or _first_existing(_MONO_CANDIDATES, "mono")
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
 
     # 決定配色
@@ -166,6 +171,46 @@ def make_cover(output: str, lines: list[str], tag: str, subtitle: str, byline: s
     img.convert("RGB").resize((S, S), Image.LANCZOS).save(output, "JPEG", quality=92)
 
 
+def _preflight_episodes(episodes: list) -> None:
+    """批次模式前先驗整份 episodes,壞資料 fail-fast(而非靜默 continue 漏集、
+    或 string episode 撞上 `:02d` 崩潰)。契約對齊 publish_series:episode 為 int 1..99、
+    title 非空、集號不重複。"""
+    if not episodes:
+        raise ValueError("manifest 沒有 episodes")
+    seen: set[int] = set()
+    for ep in episodes:
+        n = ep.get("episode")
+        if not isinstance(n, int) or isinstance(n, bool) or not (1 <= n <= 99):
+            raise ValueError(f"episode 必須是 1..99 的整數,got: {n!r}")
+        if n in seen:
+            raise ValueError(f"重複的 episode 集號: {n}")
+        seen.add(n)
+        t = ep.get("title")
+        if not isinstance(t, str) or not t.strip():
+            raise ValueError(f"episode {n}: title 必填且非空")
+
+
+def _atomic_write_json(path: str, data: object) -> None:
+    """同目錄 temp + fsync + os.replace 原子覆寫,避免中斷把 manifest 截斷。"""
+    import json
+    import tempfile
+
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="生成 Apple-Podcast 合規節目封面")
     ap.add_argument("--output", help="輸出路徑(.jpg)")
@@ -174,8 +219,11 @@ def main() -> None:
     ap.add_argument("--subtitle", default="", help="標題下方副標")
     ap.add_argument("--byline", default="", help="左下署名")
     ap.add_argument("--episode", default=None, help="集數識別(如 EP01),啟用每集視覺差異化配色")
-    ap.add_argument("--manifest", default=None, help="JSON manifest 檔案路徑")
+    ap.add_argument("--manifest", default=None, help="JSON manifest 路徑;批次為每集生單集封面並寫回 cover_path")
+    ap.add_argument("--show-name", default=None, help="批次模式的節目名(單集封面副標);未給則用 manifest 的 title")
     ap.add_argument("--output-dir", default=None, help="批次生成封面時的輸出目錄")
+    ap.add_argument("--font-cjk", default=None, help="pin CJK 字型路徑(跨機器決定性用)")
+    ap.add_argument("--font-mono", default=None, help="pin mono 字型路徑(跨機器決定性用)")
     args = ap.parse_args()
 
     # 檢查必填參數，維持向後相容
@@ -185,53 +233,47 @@ def main() -> None:
         if not args.line:
             ap.error("在未指定 --manifest 時，至少要一個 --line 當標題")
 
+    from notebooklm_mcp.publish.artwork import validate_artwork
+
     if args.manifest:
         import json
-        with open(args.manifest, "r", encoding="utf-8") as f:
+
+        with open(args.manifest, encoding="utf-8") as f:
             manifest = json.load(f)
-        
         episodes = manifest.get("episodes", [])
-        program_title = manifest.get("title") or " ".join(args.line) or "Agentic 工程 筆記"
-        
-        out_dir = args.output_dir
-        if not out_dir:
-            out_dir = os.path.dirname(os.path.abspath(args.manifest))
+
+        # 先驗整份(壞資料 fail-fast,絕不動 manifest / 不半途覆寫)
+        try:
+            _preflight_episodes(episodes)
+        except ValueError as e:
+            ap.error(str(e))
+
+        program_title = args.show_name or manifest.get("title") or " ".join(args.line) or "Agentic 工程 筆記"
+        out_dir = args.output_dir or os.path.dirname(os.path.abspath(args.manifest))
         os.makedirs(out_dir, exist_ok=True)
-        
-        from notebooklm_mcp.publish.artwork import validate_artwork
-        
+
         for ep_item in episodes:
-            ep_num = ep_item.get("episode")
-            ep_title = ep_item.get("title")
-            if ep_num is None or ep_title is None:
-                continue
-            
-            cover_filename = f"EP{ep_num:02d}.jpg"
-            cover_path = os.path.abspath(os.path.join(out_dir, cover_filename))
-            
+            ep_num = int(ep_item["episode"])            # 已過 preflight,保證 int
+            cover_path = os.path.abspath(os.path.join(out_dir, f"EP{ep_num:02d}.jpg"))
             make_cover(
                 output=cover_path,
-                lines=[ep_title],
+                lines=[ep_item["title"]],
                 tag=args.tag,
                 subtitle=program_title,
                 byline=args.byline,
-                episode=str(ep_num)
+                episode=str(ep_num),
+                font_cjk=args.font_cjk,
+                font_mono=args.font_mono,
             )
-            
-            # 自我驗證
             info = validate_artwork(cover_path)
             print(f"OK {cover_path} -> {info}")
-            
-            # 寫回絕對路徑
-            ep_item["cover_path"] = cover_path
-            
-        with open(args.manifest, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+            ep_item["cover_path"] = cover_path          # 寫回絕對路徑
+
+        _atomic_write_json(args.manifest, manifest)     # 原子覆寫,避免截斷
         print(f"Manifest updated: {args.manifest}")
     else:
-        make_cover(args.output, args.line, args.tag, args.subtitle, args.byline, args.episode)
-        
-        from notebooklm_mcp.publish.artwork import validate_artwork
+        make_cover(args.output, args.line, args.tag, args.subtitle, args.byline,
+                   args.episode, font_cjk=args.font_cjk, font_mono=args.font_mono)
         info = validate_artwork(args.output)
         print(f"OK {args.output} -> {info}")
 
