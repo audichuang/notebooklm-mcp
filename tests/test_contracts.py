@@ -133,3 +133,40 @@ def test_generation_status_task_id_is_the_artifact_id():
     fields = set(getattr(GenerationStatus, "__dataclass_fields__", {}))
     assert "task_id" in fields
     assert "artifact_id" not in fields
+
+
+def test_slide_deck_signatures():
+    from notebooklm._artifacts import ArtifactsAPI
+
+    assert _params(ArtifactsAPI.generate_slide_deck) == [
+        "self", "notebook_id", "source_ids", "language",
+        "instructions", "slide_format", "slide_length",
+    ]
+    assert _params(ArtifactsAPI.download_slide_deck) == [
+        "self", "notebook_id", "output_path", "artifact_id", "output_format",
+    ]
+
+
+def test_report_signatures():
+    from notebooklm._artifacts import ArtifactsAPI
+
+    assert _params(ArtifactsAPI.generate_report) == [
+        "self", "notebook_id", "report_format", "source_ids",
+        "language", "custom_prompt", "extra_instructions",
+    ]
+    assert _params(ArtifactsAPI.generate_study_guide) == [
+        "self", "notebook_id", "source_ids", "language", "extra_instructions",
+    ]
+    assert _params(ArtifactsAPI.download_report) == [
+        "self", "notebook_id", "output_path", "artifact_id",
+    ]
+
+
+def test_slide_and_report_enum_members():
+    from notebooklm.types import SlideDeckFormat, SlideDeckLength, ReportFormat
+
+    assert SlideDeckFormat.DETAILED_DECK == 1 and SlideDeckFormat.PRESENTER_SLIDES == 2
+    assert SlideDeckLength.DEFAULT == 1 and SlideDeckLength.SHORT == 2
+    assert ReportFormat.STUDY_GUIDE.value == "study_guide"
+    assert ReportFormat.BRIEFING_DOC.value == "briefing_doc"
+    assert ReportFormat.BLOG_POST.value == "blog_post"
