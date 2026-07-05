@@ -82,7 +82,9 @@ def _two_episode_manifest(tmp_path, *, published_at=None, contents=None, filenam
     for n in (1, 2):
         ep = {
             "episode": n, "title": f"第{n}集",
+            "description": f"第{n}集 show notes:本集重點整理。",   # 必做且不可等於標題
             "mp3_path": _write_mp3(tmp_path, f"ep{n:02d}-{filename}.mp3", contents[n]),
+            "cover_path": _valid_cover(tmp_path, f"ep{n:02d}-{filename}-cover.png"),  # 每集必做
         }
         if published_at:
             ep["published_at"] = published_at.get(n) if isinstance(published_at, dict) else published_at
@@ -132,9 +134,12 @@ async def test_commit_order_media_then_state_then_derived(env, tmp_path, artwork
     captured = _install_mock(monkeypatch)
     await _publish(_two_episode_manifest(tmp_path), artwork_png)
     names = [c["name"] for c in captured]
+    # 每集迴圈內先 mp3 再單集封面,兩集跑完才 artwork/show/feed/index
     assert names[0].startswith("EP01-") and names[0].endswith(".mp3")
-    assert names[1].startswith("EP02-") and names[1].endswith(".mp3")
-    assert names[2:] == ["artwork.png", "show.json", "feed.xml", "index.html"]
+    assert names[1].startswith("EP01-cover-") and names[1].endswith(".png")
+    assert names[2].startswith("EP02-") and names[2].endswith(".mp3")
+    assert names[3].startswith("EP02-cover-") and names[3].endswith(".png")
+    assert names[4:] == ["artwork.png", "show.json", "feed.xml", "index.html"]
 
 
 async def test_auth_precheck_runs_before_any_put(env, tmp_path, artwork_png, monkeypatch):
@@ -150,8 +155,8 @@ async def test_publish_is_idempotent(env, tmp_path, artwork_png, monkeypatch):
     manifest = _two_episode_manifest(tmp_path, published_at=pub_at)
     await _publish(manifest, artwork_png)
     await _publish(manifest, artwork_png)
-    assert len(captured) == 12  # two identical publishes, 6 PUTs each
-    first, second = captured[:6], captured[6:]
+    assert len(captured) == 16  # two identical publishes, 8 PUTs each (2 mp3 + 2 cover + artwork + show + feed + index)
+    first, second = captured[:8], captured[8:]
     for a, b in zip(first, second):
         assert a["name"] == b["name"]
         assert a["content"] == b["content"]  # byte-identical, incl. media filenames
@@ -212,19 +217,42 @@ async def test_missing_required_metadata_errors(env, tmp_path, artwork_png, monk
 
 
 async def test_manifest_description_becomes_episode_description(env, tmp_path, artwork_png, monkeypatch):
-    """A manifest episode carrying a 'description' (show notes) threads into
-    show.json; an episode without one falls back to its title."""
+    """A manifest episode's 'description' (show notes) threads verbatim into show.json."""
     captured = _install_mock(monkeypatch)
     manifest = _manifest(tmp_path, [
         {"episode": 1, "title": "第1集", "description": "本集重點:harness 七檔、loop 三步。",
-         "mp3_path": _write_mp3(tmp_path, "e1.mp3", b"a")},
-        {"episode": 2, "title": "第2集",  # no description -> falls back to title
-         "mp3_path": _write_mp3(tmp_path, "e2.mp3", b"b")},
+         "mp3_path": _write_mp3(tmp_path, "e1.mp3", b"a"),
+         "cover_path": _valid_cover(tmp_path, "n1-cover.png")},
+        {"episode": 2, "title": "第2集", "description": "本集重點:subagent 派工、worktree 隔離。",
+         "mp3_path": _write_mp3(tmp_path, "e2.mp3", b"b"),
+         "cover_path": _valid_cover(tmp_path, "n2-cover.png")},
     ], "notes.json")
     await _publish(manifest, artwork_png)
     show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
     assert show["episodes"]["1"]["description"] == "本集重點:harness 七檔、loop 三步。"
-    assert show["episodes"]["2"]["description"] == "第2集"
+    assert show["episodes"]["2"]["description"] == "本集重點:subagent 派工、worktree 隔離。"
+
+
+async def test_missing_description_fails_fast(env, tmp_path, artwork_png, monkeypatch):
+    """description 每集必做:缺 或 等於標題 → preflight raise,一個 byte 都不傳。"""
+    captured = _install_mock(monkeypatch)
+    no_desc = _manifest(tmp_path, [
+        {"episode": 1, "title": "第1集",  # 缺 description
+         "mp3_path": _write_mp3(tmp_path, "nd1.mp3", b"a"),
+         "cover_path": _valid_cover(tmp_path, "nd1-cover.png")},
+    ], "no_desc.json")
+    with pytest.raises(ValueError, match="description is required"):
+        await _publish(no_desc, artwork_png)
+
+    eq_title = _manifest(tmp_path, [
+        {"episode": 1, "title": "第1集", "description": "第1集",  # 等於標題
+         "mp3_path": _write_mp3(tmp_path, "et1.mp3", b"a"),
+         "cover_path": _valid_cover(tmp_path, "et1-cover.png")},
+    ], "eq_title.json")
+    with pytest.raises(ValueError, match="must not equal title"):
+        await _publish(eq_title, artwork_png)
+
+    assert captured == []
 
 
 async def test_feed_info(env):
@@ -247,8 +275,10 @@ async def test_manifest_preflight_rejects_bad(env, tmp_path, artwork_png, monkey
         await _publish(too_high, artwork_png)
 
     dup = _manifest(tmp_path, [
-        {"episode": 1, "title": "x", "mp3_path": _write_mp3(tmp_path, "b.mp3", b"b")},
-        {"episode": 1, "title": "y", "mp3_path": _write_mp3(tmp_path, "c.mp3", b"c")},
+        {"episode": 1, "title": "x", "description": "d1",
+         "mp3_path": _write_mp3(tmp_path, "b.mp3", b"b"), "cover_path": _valid_cover(tmp_path, "dup1-cover.png")},
+        {"episode": 1, "title": "y", "description": "d2",
+         "mp3_path": _write_mp3(tmp_path, "c.mp3", b"c"), "cover_path": _valid_cover(tmp_path, "dup2-cover.png")},
     ], "dup.json")
     with pytest.raises(ValueError, match="duplicate"):
         await _publish(dup, artwork_png)
@@ -270,6 +300,7 @@ async def test_attachments_hosted_and_linked(env, tmp_path, artwork_png, monkeyp
     manifest = _manifest(tmp_path, [{
         "episode": 1, "title": "第1集", "description": "本集重點。",
         "mp3_path": _write_mp3(tmp_path, "e1.mp3", b"a"),
+        "cover_path": _valid_cover(tmp_path, "att-cover.png"),
         "slides_pdf_path": pdf, "report_md_path": str(md),
     }], "att.json")
 
@@ -297,8 +328,9 @@ async def test_attachments_hosted_and_linked(env, tmp_path, artwork_png, monkeyp
 async def test_missing_attachment_file_fails_fast(env, tmp_path, artwork_png, monkeypatch):
     captured = _install_mock(monkeypatch)
     manifest = _manifest(tmp_path, [{
-        "episode": 1, "title": "第1集",
+        "episode": 1, "title": "第1集", "description": "本集重點。",
         "mp3_path": _write_mp3(tmp_path, "e1b.mp3", b"a"),
+        "cover_path": _valid_cover(tmp_path, "attm-cover.png"),
         "slides_pdf_path": str(tmp_path / "does-not-exist.pdf"),
     }], "att_missing.json")
     with pytest.raises(ValueError, match="slides_pdf_path"):
@@ -316,7 +348,7 @@ def _valid_cover(tmp_path, name):
 async def test_episode_cover_hosted_and_wired_into_feed(env, tmp_path, artwork_png, monkeypatch):
     captured = _install_mock(monkeypatch)
     manifest = _manifest(tmp_path, [{
-        "episode": 1, "title": "第1集",
+        "episode": 1, "title": "第1集", "description": "本集重點。",
         "mp3_path": _write_mp3(tmp_path, "ec1.mp3", b"a"),
         "cover_path": _valid_cover(tmp_path, "ep01-cover.png"),
     }], "cover.json")
@@ -334,14 +366,17 @@ async def test_episode_cover_hosted_and_wired_into_feed(env, tmp_path, artwork_p
     assert it.find("itunes:image", _NS).get("href").endswith(art)                   # feed <item> 帶該集封面
 
 
-async def test_episode_without_cover_falls_back_to_show_art(env, tmp_path, artwork_png, monkeypatch):
+async def test_missing_cover_fails_fast(env, tmp_path, artwork_png, monkeypatch):
+    """單集封面每集必做:缺 cover_path → preflight raise,不再靜默 fallback 節目封面,
+    一個 byte 都不傳(避免漏封面的集數「發布成功」卻掛錯圖)。"""
     captured = _install_mock(monkeypatch)
-    await _publish(_two_episode_manifest(tmp_path), artwork_png)
-    show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
-    # 沒給 cover_path → 該集不寫 artwork_file(feed 省略 item image,fallback 節目封面)
-    assert "artwork_file" not in show["episodes"]["1"]
-    names = [c["name"] for c in captured]
-    assert not any(n.startswith("EP01-cover-") for n in names)
+    no_cover = _manifest(tmp_path, [{
+        "episode": 1, "title": "第1集", "description": "本集重點。",
+        "mp3_path": _write_mp3(tmp_path, "ncov.mp3", b"a"),  # 無 cover_path
+    }], "no_cover.json")
+    with pytest.raises(ValueError, match="cover_path is required"):
+        await _publish(no_cover, artwork_png)
+    assert captured == []
 
 
 async def test_bad_episode_cover_fails_fast(env, tmp_path, artwork_png, monkeypatch):
