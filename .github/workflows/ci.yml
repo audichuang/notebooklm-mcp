@@ -18,6 +18,8 @@ jobs:
         with:
           repository: audichuang/audi-skill
           path: audi-skill
+          ssh-key: ${{ secrets.AUDI_SKILL_DEPLOY_KEY }}
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
