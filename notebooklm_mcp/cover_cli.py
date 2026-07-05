@@ -9,7 +9,7 @@ coding agent **不能直接出點陣圖**(它只會幫你寫這種 PIL code),所
 標題字級會自動縮到塞得下版面寬度,長短標題都不爆框。
 
 用法:
-    uv run python scripts/make_cover.py --output cover.jpg \\
+    notebooklm-cover --output cover.jpg \\
         --line Agentic --line 工程 --line 筆記 \\
         --tag "~/.claude/" \\
         --subtitle "harness × loop · Claude Code 拆解" \\
