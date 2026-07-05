@@ -74,3 +74,16 @@ async def test_failure_during_wait_fails_fast(fake_client, tmp_path):
     # so the failed episode left NO orphaned source or artifact rename.
     assert [c[0] for c in fake_client.artifacts.calls] == ["generate_audio", "wait"]
     assert fake_client.sources.titles() == []
+
+
+async def test_removed_status_during_wait_fails_fast(fake_client, tmp_path):
+    # 0.6.0 起:配額耗盡/伺服器下架的 artifact 回 status="removed" 且 is_failed=False
+    #(0.4.x 是合成 "failed")。ensure_completed 只看 is_failed 會把它當成功放行,
+    # 於是帶著死 artifact 繼續 rename/download,最後以誤導性錯誤爆掉、遮蔽配額真因。
+    # 多小時整季生成撞每日配額正是這條路徑,必須 fail-loud 且點出配額。
+    fake_client.artifacts.fail_removed = True
+    with pytest.raises(RuntimeError, match="removed"):
+        await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))
+    # 停在 wait 之後,沒進 rename/download/自上傳。
+    assert [c[0] for c in fake_client.artifacts.calls] == ["generate_audio", "wait"]
+    assert fake_client.sources.titles() == []

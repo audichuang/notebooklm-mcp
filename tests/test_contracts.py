@@ -208,6 +208,16 @@ def test_generation_status_task_id_is_the_artifact_id():
     assert "artifact_id" not in fields
 
 
+def test_generation_status_has_is_removed_for_quota_removal():
+    """0.6.0 起 GenerationStatus.is_removed 區分「被伺服器下架(通常配額)」與 is_failed。
+    ensure_completed 依賴 is_removed 一併 fail-loud;此屬性消失就要回頭改 _status.py。"""
+    from notebooklm import GenerationStatus
+
+    s = GenerationStatus(task_id="x", status="removed")
+    assert hasattr(s, "is_removed") and s.is_removed is True
+    assert s.is_failed is False  # removed 不是 failed —— 正是 _status 必須各別擋的原因
+
+
 def test_slide_deck_signatures():
     from notebooklm._artifacts import ArtifactsAPI
 

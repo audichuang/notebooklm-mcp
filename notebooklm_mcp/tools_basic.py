@@ -61,6 +61,9 @@ async def source_add_file(
 ) -> dict:
     """Add a local file as a source. mp3 回饋來源用 mime_type="audio/mpeg";
     title 可直接命名(如手動補一集時傳 "EP03 標題",與 Studio artifact 同名)。"""
+    # SDK 會 strip title 後才落地;先在這裡 strip,後檢比較基準才會一致,
+    # 否則呼叫端傳前後空白會被誤判成「title 未生效」而 raise(明明成功了)。
+    title = title.strip() if title is not None else None
     src = await runtime.get_client().sources.add_file(
         notebook_id,
         file_path,

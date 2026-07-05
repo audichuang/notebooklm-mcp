@@ -97,6 +97,9 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
 - `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。
+- **`status="removed"` ≠ `is_failed`(0.6.0 起)**:被伺服器下架的 artifact(NOT_FOUND
+  輪詢耗盡,通常是每日配額)回 `status="removed"` 且 `is_failed=False`(0.4.x 是合成
+  `"failed"`)。`ensure_completed` 一併擋 `is_removed` 才不會把配額下架當成功放行。
 - `sources.add_file` 有 `title`(0.7.x),**但內部仍是 add→rename 兩步且改名失敗只 log 不
   raise** → podcast 流程維持顯式 add_file → rename 兩步(fail-loud);`source_add_file` 工具
   的 title= 有回傳後檢,未生效會 raise。

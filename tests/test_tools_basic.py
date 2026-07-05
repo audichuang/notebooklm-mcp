@@ -151,3 +151,13 @@ async def test_auth_check_dead_gives_relogin_hint(fake_client):
     fake_client.notebooks.fail_list = True
     with pytest.raises(RuntimeError, match="sync-auth"):
         await t.auth_check()
+
+
+async def test_source_add_file_title_whitespace_not_false_positive(fake_client, tmp_path):
+    """SDK 會 strip title;呼叫端傳前後空白不該讓後檢誤判 fail。"""
+    f = tmp_path / "ep.mp3"
+    f.write_bytes(b"x")
+    result = await t.source_add_file("nb-123", str(f), title="  EP03 進階篇  ")
+    call = next(c[1] for c in fake_client.sources.calls if c[0] == "add_file")
+    assert call["title"] == "EP03 進階篇"  # 已 strip 後才下傳
+    assert result["source_id"].startswith("src-")

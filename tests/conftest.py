@@ -19,6 +19,9 @@ class FakeArtifacts:
         # fails mid-poll and wait_for_completion returns the final failed
         # GenerationStatus (it only raises TimeoutError on timeout).
         self.fail_complete = False
+        # True 時 wait_for_completion 回 status="removed"、is_failed=False、is_removed=True
+        # —— 模擬 0.6.0 起的配額下架語意(SDK 不再合成成 "failed")。
+        self.fail_removed = False
         # Server-side artifact set — what artifacts.list() would return. Seed via
         # seed_artifacts() to model episodes/reports that already exist in the notebook.
         self.artifacts = []
@@ -73,7 +76,11 @@ class FakeArtifacts:
             return type(
                 "S", (), {"task_id": task_id, "is_failed": True, "status": "failed", "error": "simulated mid-poll failure"}
             )()
-        return type("S", (), {"task_id": task_id, "is_failed": False})()
+        if self.fail_removed:
+            return type(
+                "S", (), {"task_id": task_id, "is_failed": False, "is_removed": True, "status": "removed"}
+            )()
+        return type("S", (), {"task_id": task_id, "is_failed": False, "is_removed": False})()
 
     async def download_audio(self, notebook_id, output_path, artifact_id=None):
         self.calls.append(
