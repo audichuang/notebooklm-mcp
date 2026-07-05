@@ -2,9 +2,20 @@
 純函式、可離線測;inline CSS,無外部資源(才能被 uploader 白名單當單一 .html 檔服務)。"""
 from __future__ import annotations
 
+import re
 from html import escape
 
 import markdown as _md
+
+# 這頁對外公開靜態服務,必須「自包含」:不執行 script、不載外部資源。report 來自
+# NotebookLM(半信任),markdown 會讓原始 HTML 標籤與 ![](http) 圖片穿透,故渲染後
+# 掃描危險/外部資源標記,命中就 fail-closed(raise)——寧可發布中止也不上架不安全頁面。
+# 只比對「未逸出」的原始標籤;code 區塊裡的 <script> 會被 markdown 逸出成 &lt;script,
+# 不會誤觸(那是程式碼展示,安全)。連結 <a href=http> 是導覽不是載入資源,允許。
+_UNSAFE_RE = re.compile(
+    r"(?i)<\s*(?:script|iframe|object|embed|img|link|audio|video|source|style|meta|base)\b"
+    r"|\son\w+\s*=|javascript:|data:text/html"
+)
 
 _CSS = """
 :root { color-scheme: light dark; }
@@ -26,6 +37,11 @@ a { color: #2563eb; }
 
 def render_report_html(markdown_text: str, title: str) -> str:
     body = _md.markdown(markdown_text, extensions=["extra", "sane_lists"])
+    if _UNSAFE_RE.search(body):
+        raise ValueError(
+            "report HTML 含 script / 外部資源標記,拒絕產出非自包含頁面"
+            "(來源 report 疑似夾帶原始 HTML 或 ![](http) 圖片)"
+        )
     return (
         "<!doctype html>\n"
         '<html lang="zh-Hant"><head><meta charset="utf-8">\n'

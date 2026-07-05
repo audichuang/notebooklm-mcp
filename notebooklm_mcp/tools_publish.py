@@ -209,6 +209,7 @@ async def publish_series(
                     html_bytes = notes_html.render_report_html(f.read(), ep["title"]).encode("utf-8")
                 hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
                 await _put(client, upload_url, token, upload_token, hfile, html_bytes)
+                del html_bytes                                     # 同 mp3/pdf:一次一 blob,傳完即釋放
                 links.append(f"📖 研讀講義:{base_pub}/feeds/{token}/{hfile}")
 
             if links:
