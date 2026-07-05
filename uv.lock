@@ -135,6 +135,15 @@ wheels = [
 ]
 
 [[package]]
+name = "filelock"
+version = "3.29.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/ee/29c668c50888588c432a702f7c2e8ee8a0c9e5286028d91f170308d6b2e9/filelock-3.29.5.tar.gz", hash = "sha256:6e6034c57a00a020e767f2614a5539863f056de7e7991d6d1473aef7ff73f156", size = 68927, upload-time = "2026-07-03T03:50:31.818Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/e3/f1fae3647d170919c2cf2a898e77e7d1a4e5c7cae0aed7bb4bd3f5ebff6f/filelock-3.29.5-py3-none-any.whl", hash = "sha256:8af830889ba3a0ffcefbd6c7d2af8a54012058103771f2e10848222f476a1693", size = 45073, upload-time = "2026-07-03T03:50:30.445Z" },
+]
+
+[[package]]
 name = "greenlet"
 version = "3.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -330,8 +339,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "markdown", specifier = ">=3.5" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0.0" },
-    { name = "notebooklm-py", specifier = ">=0.4.1,<0.5" },
-    { name = "notebooklm-py", extras = ["browser"], marker = "extra == 'login'", specifier = ">=0.4.1,<0.5" },
+    { name = "notebooklm-py", specifier = ">=0.7.3,<0.8" },
+    { name = "notebooklm-py", extras = ["browser"], marker = "extra == 'login'", specifier = ">=0.7.3,<0.8" },
     { name = "pillow", specifier = ">=10,<12" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -340,16 +349,17 @@ provides-extras = ["dev", "login"]
 
 [[package]]
 name = "notebooklm-py"
-version = "0.4.1"
+version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
+    { name = "filelock" },
     { name = "httpx" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e7/9b/54306fba7da147af6131f8bd72145b3d08c3ac783bda4bf33a3c5737f9e6/notebooklm_py-0.4.1.tar.gz", hash = "sha256:d429473c811b29f558e43becceac4b3b6c0d648b4e33eb63b7df732893aa03cf", size = 8170603, upload-time = "2026-05-11T23:17:48.938Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7c/89/672857229ffb5cbb8c9efdbbe36aa8e4dcf6ceee713af16a6ffde3e2c785/notebooklm_py-0.7.3.tar.gz", hash = "sha256:918bcd67eae877ec33565d7988501a58fd582fd63f19c6480223af95f065a5e3", size = 10977414, upload-time = "2026-06-30T01:10:59.009Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/13/bc345155510b9ae983316c8c5e16f7566589218e3417ebc41185b0660e44/notebooklm_py-0.4.1-py3-none-any.whl", hash = "sha256:4c2c04f3bf4c01dba871e831bad526d49f5a5992e8ace44bbf5c61efaebc3dc5", size = 221599, upload-time = "2026-05-11T23:17:47.054Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/ae/0132b7ca94cf256629db96aaa99893d4aa60410ea74bf85ce82a28108cfc/notebooklm_py-0.7.3-py3-none-any.whl", hash = "sha256:65ed6cc1d8420f65b74ab3fa85aa602307a8c6bb483c6573eed903b847532128", size = 790452, upload-time = "2026-06-30T01:10:56.889Z" },
 ]
 
 [package.optional-dependencies]

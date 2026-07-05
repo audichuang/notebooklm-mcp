@@ -9,14 +9,14 @@ def _params(func):
     return list(inspect.signature(func).parameters)
 
 
-def test_from_storage_is_awaitable_and_supports_keepalive():
-    """app.py 的 lifespan 依賴兩件事:(1) from_storage 仍是 coroutine(async with await
-    寫法;免 await 慣用法 v0.5.0 才有),(2) 0.4.1 起的 keepalive= 參數 —— session 內
-    背景 RotateCookies task,讓跨小時長生成不因 __Secure-1PSIDTS 過期中途死。
+def test_from_storage_is_sync_context_factory_with_keepalive():
+    """0.7.3:from_storage 是同步函式,回傳可直接 `async with` 的 context
+    (0.4.x「coroutine 必須 await」慣用法已走入歷史;app.py 用 no-await 寫法)。
+    keepalive= 是 session 內背景 RotateCookies 的開關,lifespan 依賴它。
     這裡紅了就要連同 app.py 的呼叫慣用法一起改。"""
     from notebooklm import NotebookLMClient
 
-    assert inspect.iscoroutinefunction(NotebookLMClient.from_storage)
+    assert not inspect.iscoroutinefunction(NotebookLMClient.from_storage)
     p = _params(NotebookLMClient.from_storage)
     assert "keepalive" in p and "keepalive_min_interval" in p
 
@@ -39,11 +39,13 @@ def test_generate_audio_signature():
 def test_download_audio_arg_order():
     from notebooklm._artifacts import ArtifactsAPI
 
+    # 0.7.x 尾端加 artifacts_data(預先抓好的 artifact 清單,避免重複 list;我們不傳)
     assert _params(ArtifactsAPI.download_audio) == [
         "self",
         "notebook_id",
         "output_path",
         "artifact_id",
+        "artifacts_data",
     ]
 
 
@@ -71,7 +73,7 @@ def test_read_surface_signatures_and_fields():
 
     # 0.4.1 加了尾端 strict=False(malformed 回應改可 fail-loud;預設維持舊寬鬆行為)
     assert _params(SourcesAPI.list) == ["self", "notebook_id", "strict"]
-    assert _params(SourcesAPI.get_fulltext) == ["self", "notebook_id", "source_id"]
+    assert _params(SourcesAPI.get_fulltext) == ["self", "notebook_id", "source_id", "output_format"]
     assert _params(NotebooksAPI.get) == ["self", "notebook_id"]
     # chat_ask focuses on a subset / continues a thread via these kwargs.
     assert _params(ChatAPI.ask) == ["self", "notebook_id", "question", "source_ids", "conversation_id"]
@@ -90,11 +92,13 @@ def test_wait_for_completion_has_task_id_and_timeout():
     assert "timeout" in p
 
 
-def test_add_file_accepts_mime_and_wait():
+def test_add_file_accepts_mime_wait_and_title():
     from notebooklm._sources import SourcesAPI
 
     p = _params(SourcesAPI.add_file)
     assert p[:3] == ["self", "notebook_id", "file_path"]
+    # 0.7.x:title= 存在但內部仍是 add→rename 兩步、改名失敗只 log 不 raise
+    #(podcast 流程因此維持顯式 rename;見 AGENTS.md gotcha)。on_progress 上傳進度 callback。
     assert p == [
         "self",
         "notebook_id",
@@ -102,18 +106,35 @@ def test_add_file_accepts_mime_and_wait():
         "mime_type",
         "wait",
         "wait_timeout",
+        "title",
+        "on_progress",
     ]
 
 
-def test_rename_signatures_have_no_return_object():
-    """0.4.1 rename() takes only (notebook_id, id, new_title) — NO return_object
-    (that kwarg exists on GitHub HEAD but not the pinned 0.4.x). Passing it raises
-    TypeError at runtime. Pin both so the drift is caught offline."""
+def test_source_add_tail_params_are_keyword_only():
+    """0.7.0 起 source add API 的尾端參數是 keyword-only(位置呼叫會 TypeError)。
+    我們的呼叫點已全 keyword;鎖住這件事,擋未來有人寫成位置參數。"""
+    from notebooklm._sources import SourcesAPI
+
+    for func, kwonly in (
+        (SourcesAPI.add_url, {"wait", "wait_timeout"}),
+        (SourcesAPI.add_text, {"wait", "wait_timeout", "idempotent"}),
+        (SourcesAPI.add_file, {"wait", "wait_timeout", "title", "on_progress"}),
+    ):
+        params = inspect.signature(func).parameters
+        for name in kwonly:
+            assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, (func, name)
+
+
+def test_rename_signatures_gained_return_object():
+    """0.7.0 起 rename() 有 return_object,**預設 True:改名後會再抓一次全量清單
+    驗證、找不到會 raise**。我們所有 rename 呼叫點顯式傳 return_object=False,
+    保留 0.4.1 的 fire-and-forget 語意(不多打 RPC、不引入新失敗模式)。"""
     from notebooklm._artifacts import ArtifactsAPI
     from notebooklm._sources import SourcesAPI
 
-    assert _params(ArtifactsAPI.rename) == ["self", "notebook_id", "artifact_id", "new_title"]
-    assert _params(SourcesAPI.rename) == ["self", "notebook_id", "source_id", "new_title"]
+    assert _params(ArtifactsAPI.rename) == ["self", "notebook_id", "artifact_id", "new_title", "return_object"]
+    assert _params(SourcesAPI.rename) == ["self", "notebook_id", "source_id", "new_title", "return_object"]
 
 
 def test_audio_enum_members():
@@ -122,11 +143,11 @@ def test_audio_enum_members():
 
 
 def test_wait_for_completion_full_signature():
-    # Installed 0.4.1 ends with poll_interval (GitHub HEAD differs — trust installed).
+    # 0.7.x 移除 poll_interval(0.4.1 尚存)、尾端加 on_status_change callback。
+    # 我們所有呼叫點只用 timeout=(tools_basic:124 / tools_podcast:110 /
+    # tools_artifacts:54,84),不受影響。
     from notebooklm._artifacts import ArtifactsAPI
 
-    # 0.4.1 加了尾端 max_not_found=5 / min_not_found_window=10.0(輪詢容忍
-    # 暫時性 NOT_FOUND 才 fail,預設即生效,對呼叫端 API 無影響)
     assert _params(ArtifactsAPI.wait_for_completion) == [
         "self",
         "notebook_id",
@@ -134,9 +155,9 @@ def test_wait_for_completion_full_signature():
         "initial_interval",
         "max_interval",
         "timeout",
-        "poll_interval",
         "max_not_found",
         "min_not_found_window",
+        "on_status_change",
     ]
 
 
@@ -153,7 +174,8 @@ def test_source_signatures_and_fields():
     from notebooklm._sources import SourcesAPI
 
     assert _params(SourcesAPI.add_url) == ["self", "notebook_id", "url", "wait", "wait_timeout"]
-    assert _params(SourcesAPI.add_text) == ["self", "notebook_id", "title", "content", "wait", "wait_timeout"]
+    # 0.7.x add_text 尾端加 idempotent(重試防重複;我們不傳,預設即可)
+    assert _params(SourcesAPI.add_text) == ["self", "notebook_id", "title", "content", "wait", "wait_timeout", "idempotent"]
     assert _params(SourcesAPI.delete) == ["self", "notebook_id", "source_id"]
     assert "id" in getattr(Source, "__dataclass_fields__", {})
 
@@ -194,7 +216,7 @@ def test_slide_deck_signatures():
         "instructions", "slide_format", "slide_length",
     ]
     assert _params(ArtifactsAPI.download_slide_deck) == [
-        "self", "notebook_id", "output_path", "artifact_id", "output_format",
+        "self", "notebook_id", "output_path", "artifact_id", "output_format", "artifacts_data",
     ]
 
 
@@ -209,7 +231,7 @@ def test_report_signatures():
         "self", "notebook_id", "source_ids", "language", "extra_instructions",
     ]
     assert _params(ArtifactsAPI.download_report) == [
-        "self", "notebook_id", "output_path", "artifact_id",
+        "self", "notebook_id", "output_path", "artifact_id", "artifacts_data",
     ]
 
 

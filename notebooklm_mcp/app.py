@@ -25,13 +25,13 @@ from . import runtime
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
-    # notebooklm-py 0.4.x: from_storage() 仍是 coroutine,必須 await(免 await
-    # 慣用法 v0.5.0 才有;we pin >=0.4.1,<0.5)。
+    # notebooklm-py 0.7.x:from_storage() 是同步函式,回傳可直接 async with 的
+    # context(0.4.x「coroutine 必須 await」慣用法已走入歷史)。
     # keepalive=600 開啟 session 內背景 RotateCookies task(Google 自宣告的輪替
     # 週期即 600s):process-scoped、隨 server 生滅,讓跨小時長生成不因
     # __Secure-1PSIDTS 過期中途死。env-var 唯讀模式下只轉記憶體、不落盤,
     # 跨 session 的 cookie 老化仍靠 GUI 機重登 + sync-auth.sh。
-    async with await NotebookLMClient.from_storage(keepalive=600) as client:
+    async with NotebookLMClient.from_storage(keepalive=600) as client:
         runtime.set_client(client)
         try:
             yield

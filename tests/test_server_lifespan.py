@@ -1,9 +1,8 @@
 """Regressions for the server app:
 
-1. notebooklm-py 0.3.x from_storage() is a coroutine that MUST be awaited.
-   The lifespan used `async with NotebookLMClient.from_storage()` without
-   `await`, which raises TypeError at runtime on 0.3.x (offline tests using the
-   fake client never exercise from_storage, so they missed it).
+1. notebooklm-py 0.7.x from_storage() 是同步函式,回傳可直接 async with 的
+   context(_FromStorageContext)。lifespan 必須用 no-await 慣用法,且必須帶
+   keepalive=600(session 內背景 RotateCookies;掉了會讓長生成中途認證死)。
 
 2. The canonical `mcp` must actually expose the tools. They were registered on a
    different instance than the one served when launched via `python -m
@@ -23,12 +22,14 @@ class _FakeClientCM:
         return False
 
 
-async def _fake_from_storage(*args, **kwargs):
-    # Mirrors 0.3.x: a coroutine returning an async-context-manager client.
+def _fake_from_storage(*args, **kwargs):
+    # 鏡射 0.7.3:同步函式,回傳可直接 async with 的 context。
+    # lifespan 掉了 keepalive=600 這裡就紅(它是長生成不中途死的關鍵)。
+    assert kwargs.get("keepalive") == 600
     return _FakeClientCM()
 
 
-async def test_lifespan_awaits_from_storage(monkeypatch):
+async def test_lifespan_enters_from_storage_context(monkeypatch):
     monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage)
     async with app._lifespan(app.mcp):
         # Inside the lifespan the client must be set (proves the CM entered).
