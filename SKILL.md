@@ -60,7 +60,7 @@ NotebookLM 操作都走 `notebooklm` MCP server;此 skill 只判斷意圖、組�
 3. 呼叫 `podcast_series(notebook_id, episodes, output_dir, start=1)`。
 4. 續製時傳「完整的 episodes 陣列」加 `start=N`（前提是同一個筆記本來源區已有 `EP{N-1:02d} 標題` 來源，這是前次跑時各集自上傳留下的）。`podcast_series` 不讀本機 `ep{N-1}.mp3`；本機檔只是下載與 manifest 的存放處。manifest 會合併保留前面集數,不會被覆寫。
 
-Reject-then-delete 規則：人工聽完覺得某集要重生時，先用 `source_delete` 移除該集已回傳到筆記本的音檔來源，再用 `podcast_episode` 重生該集，避免壞集被下一集繼承。
+Reject-then-delete 規則：人工聽完覺得某集要重生時，先用 `source_list` 找到該集 `EP{n:02d} 標題` 的來源 `source_id`，`source_delete` 移除該筆音檔來源，再用 `podcast_episode` 重生該集，避免壞集被下一集繼承。
 
 Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_prompts.md)，`episodes` 範例見 [series_example.md](references/series_example.md)。
 
@@ -73,7 +73,8 @@ Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_promp
 核可關卡明講不要某項才略過,不要自己靜默跳過。發布前用下方「交付清單」逐集核對才算完成。
 
 1. **生成音檔** — 依 §Episodic 跑 `podcast_series`,得 `series_manifest.json` + 各集 mp3。
-2. **單集簡介** — 用 `chat_ask` 生繁中 show notes(約 100–150 字),**先清引用標記**
+2. **單集簡介** — 用 `chat_ask` 生繁中 show notes(約 100–150 字)。**傳該集原文的 `source_ids`
+   聚焦**(用 `source_list` 拿該集來源 id),避免被筆記本裡前集音檔來源污染。**先清引用標記**
    `\[[\d,\s\-–]+\]` 再寫進該集 manifest 的 `description`。
 3. **簡報 / 研讀講義** — `generate_slides` + `generate_report`,路徑自動回寫 manifest;發布時
    content-hash → host(講義 Markdown 渲染成自包含 HTML),具名連結附進單集簡介。

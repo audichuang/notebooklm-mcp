@@ -95,7 +95,22 @@ Use `artifact_wait` with a large timeout. Long audio commonly needs more than
 ```
 
 Timeout does not prove the server-side job failed. Re-run `artifact_wait` with
-the same `task_id` or inspect the notebook in the UI.
+the same `task_id`, or use `artifact_list` (below) to see if it landed.
+
+### Generation was interrupted / lost the task_id
+
+If a `generate_audio` / `podcast_*` call was cut off (tool interrupted, crash)
+and you don't know whether the audio was actually produced, DON'T re-generate
+blind — list what the notebook already has and recover it:
+
+```json
+{"notebook_id": "nb-...", "kind": "audio"}
+```
+
+`artifact_list` returns each artifact's `artifact_id` + `completed`. Find the
+episode, then `artifact_download_audio` with that `artifact_id`. This is the
+reconciliation path when server-side generation ran but the download/manifest
+step never completed.
 
 ### Download gets the wrong artifact
 
@@ -130,7 +145,8 @@ ls -l /tmp/notebooklm/series/ep01.mp3
 
 ### Regenerating a bad episode
 
-Delete the uploaded source for the bad episode before regenerating:
+First find the bad episode's uploaded source id with `source_list` (match the
+`EP{n:02d} {title}` source), then delete it before regenerating:
 
 ```json
 {"notebook_id": "nb-...", "source_id": "src-..."}
@@ -172,3 +188,12 @@ Pass the MIME type explicitly:
 
 If the file is remote, download it locally first; `source_add_file` takes a
 local path.
+
+### Source added but seems empty (PDF / Medium / pasted article)
+
+Verify NotebookLM actually extracted the body, not just the title, with
+`source_fulltext(notebook_id, source_id)` (get the id from `source_list`). Check
+`char_count` is non-trivial. NotebookLM inserts spaces between CJK chars, so
+`"".join(content.split())` before matching keywords. If empty, re-add the source
+as pasted text (`source_add_text`) — a common fix for X long-form articles that
+只是 t.co 短連結。
