@@ -17,11 +17,15 @@ NotebookLM 操作都走 `notebooklm` MCP server;此 skill 只判斷意圖、組�
 | `source_add_text` | 加純文字來源 |
 | `source_add_file` | 加本機檔案來源；mp3 回傳用 `mime_type="audio/mpeg"` |
 | `source_delete` | 刪來源；重生壞集前先刪掉該集來源 |
+| `source_list` | 列出筆記本來源(找 `source_id`、確認上傳落地) |
+| `source_fulltext` | 取來源擷取到的全文(驗 PDF/Medium 是否吃進正文;CJK 字間有空格) |
+| `notebook_get` | 取筆記本 metadata(標題/來源數/擁有者);生成前確認跑對筆記本 |
 | `generate_audio` | 生成 audio overview；預設 `zh_Hant` |
-| `artifact_wait` | 等 generation `task_id` 完成 |
+| `artifact_list` | 列出筆記本現有 artifact(生成被打斷後救援/對帳,拿 `artifact_id` 再下載) |
+| `artifact_wait` | 等 generation `task_id` 完成(fail-closed:失敗會 raise) |
 | `artifact_download_audio` | 下載 audio artifact 到指定路徑 |
 | `artifact_rename` | 重命名 artifact |
-| `chat_ask` | 對筆記本做 source-grounded 問答 |
+| `chat_ask` | 對筆記本做 source-grounded 問答;`source_ids` 聚焦單集原文、`conversation_id` 續問,回引用 |
 | `podcast_episode` | 單集 podcast：生成→等待→命名 artifact 為 `EP{n:02d} 標題`(需傳 `title`)→下載→自上傳本集 mp3 為同名來源(可選 `prior_mp3_path` 做一次性續接) |
 | `podcast_series` | 整季 podcast：純 Python 迴圈;每集命名 `EP{n:02d} 標題` 並自上傳本集 mp3,下一集生成時自然讀到筆記本內的同名前集來源 |
 | `generate_slides` | 按需生某集簡報並下載 PDF,路徑回寫 manifest 的 `slides_pdf_path`(供 publish 附連結) |
@@ -73,9 +77,13 @@ Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_promp
    `\[[\d,\s\-–]+\]` 再寫進該集 manifest 的 `description`。
 3. **簡報 / 研讀講義** — `generate_slides` + `generate_report`,路徑自動回寫 manifest;發布時
    content-hash → host(講義 Markdown 渲染成自包含 HTML),具名連結附進單集簡介。
-4. **封面** — Apple 硬規格:正方形、1400–3000px、PNG/JPG、RGB、**無透明通道**。無現成圖用
-   `uv run python scripts/make_cover.py --output cover.jpg --line 標題行1 --line 標題行2
-   --subtitle ... --byline ...`(自帶 Apple 驗證器,產出即保證過 `publish_series`)。
+4. **封面** — Apple 硬規格:正方形、1400–3000px、PNG/JPG、RGB、**無透明通道**。
+   - **節目封面**(掛 channel):`uv run python scripts/make_cover.py --output cover.jpg
+     --line 標題行1 --line 標題行2 --subtitle ... --byline ...`(自帶 Apple 驗證器)。
+   - **單集封面**(每集各自封面,選填):`make_cover.py --manifest series_manifest.json
+     --show-name "節目名" --tag "~/.claude/" --byline ... --output-dir covers/` — 逐集生
+     「集標大標 + EP 徽章 + 每集不同色(集號決定性)」並把 `cover_path` 寫回 manifest。
+     `publish_series` 看到 `cover_path` 就讓該集 `<item>` 掛 `itunes:image`;沒給則 fallback 節目封面。
 5. **發布** — `publish_series(show_id, notebook_id, manifest_path, show_title, show_description,
    author, owner_name, owner_email, artwork_path)`。`show_id` 是穩定 slug(feed identity、決定
    URL、**永不改**、`[a-z0-9-]`);`owner_email` Apple 必填。
@@ -89,6 +97,7 @@ Podcast brief 模板與策略見 [episodic_prompts.md](references/episodic_promp
       播放器上簡介跟標題一字不差、看起來像壞掉)
 - [ ] `slides_pdf_path` — 簡報
 - [ ] `report_md_path` — 研讀講義
+- [ ] `cover_path` — 單集封面(每集各自;`make_cover.py --manifest` 批次生)
 - [ ] 封面過 Apple 驗證;show 層 `show_id`/`show_title`/`show_description`/`author`/
       `owner_name`/`owner_email`/`artwork_path` 七欄齊(`publish_series` 全必填)
 

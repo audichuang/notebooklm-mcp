@@ -38,7 +38,9 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `app.py` — 真正的 FastMCP app + 工具註冊 + lifespan(長駐單一 client,跨長生成不掉線)+ 多 transport
     main。獨立模組以確保「唯一 mcp instance」,不論用什麼方式啟動。
   - `server.py` — thin launcher,只 `from .app import _lifespan, main, mcp`(可被當 `__main__` 跑)
-  - `tools_basic.py` — notebook / source / `generate_audio` / artifact / `chat_ask`(薄包,`zh_Hant` 預設)
+  - `tools_basic.py` — notebook / source / `generate_audio` / artifact / `chat_ask`(薄包,`zh_Hant` 預設)。
+    含讀取/觀測面:`artifact_list`(列筆記本現有 artifact,救援/對帳用)、`source_list`、
+    `source_fulltext`、`notebook_get`;`chat_ask` 吃 `source_ids`(聚焦單集原文)/`conversation_id`
   - `tools_artifacts.py` — `generate_slides`(簡報 PDF)/ `generate_report`(研讀 Markdown)按需生,
     路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
@@ -95,6 +97,13 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   `agy` 之類 coding agent **不能直接出點陣圖**,只會幫你寫這種 PIL code;要「AI 生成圖」得
   另接影像模型(Imagen/DALL·E)。NotebookLM 下載的音檔是 MPEG-4 容器但副檔名 `.mp3`、
   以 `audio/mpeg` 發布,Apple 可正常播(已實測訂閱+播放通過)。
+- **單集封面(每集各自封面)**:`make_cover.py` 加 `--episode EP0n` 走「集號決定性 HSL 配色」
+  (色相 `(n*77)%360`)+ 集標當大標 + EP 徽章 + 節目名副標;不給 `--episode` 則產出與舊版
+  **byte 完全一致的節目封面**(向後相容)。`--manifest <json> --show-name .. --tag .. --byline .. --output-dir <dir>`
+  批次讀 episodes 逐集生、把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>`
+  掛 `itunes:image`,沒給 fallback 節目封面)。**決定性鐵律**:發布端用封面 bytes 做 content-hash,
+  同一集必須永遠生同一張,所以配色只能是集號的函式,不可隨機。`.jpg`/`.png` uploader 白名單本來就放行,
+  **不用重部署 NAS**(不像加 `.pdf`/`.html` 那次)。
 
 ## Conventions
 

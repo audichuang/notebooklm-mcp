@@ -29,6 +29,22 @@ Returns:
 {"notebooks": [{"notebook_id": "nb-...", "title": "Title"}]}
 ```
 
+### `notebook_get`
+
+Params:
+
+```json
+{"notebook_id": "nb-..."}
+```
+
+Returns:
+
+```json
+{"notebook_id": "nb-...", "title": "Title", "sources_count": 7, "is_owner": true, "created_at": "2026-07-05T09:00:00"}
+```
+
+用來在生成/發布前確認「跑對筆記本」。找不到會 fail-fast。
+
 ## Source Tools
 
 ### `source_add_url`
@@ -102,6 +118,40 @@ Returns:
 
 Use before regenerating a rejected episode source.
 
+### `source_list`
+
+Params:
+
+```json
+{"notebook_id": "nb-..."}
+```
+
+Returns:
+
+```json
+{"sources": [{"source_id": "src-...", "title": "EP01 心法篇", "kind": "web_page", "ready": true}]}
+```
+
+找 `source_id`(改名/刪除被否決的 mp3 來源、或給 `generate_slides`/`generate_report` 聚焦的
+`source_ids`),也確認上傳落地。`ready` 為 NotebookLM 是否吃完該來源。
+
+### `source_fulltext`
+
+Params:
+
+```json
+{"notebook_id": "nb-...", "source_id": "src-..."}
+```
+
+Returns:
+
+```json
+{"source_id": "src-...", "title": "...", "char_count": 1234, "content": "..."}
+```
+
+驗證 PDF / Medium / 貼上全文是否真的吃進正文,或讀回上傳 mp3 的逐字稿。**CJK 字間會被插空格**,
+關鍵字比對前先 `"".join(text.split())`。
+
 ## Audio Artifact Tools
 
 ### `generate_audio`
@@ -135,6 +185,26 @@ Defaults:
 Accepted `audio_format`: `deep-dive`, `brief`, `critique`, `debate`.
 Accepted `audio_length`: `short`, `default`, `long`.
 
+### `artifact_list`
+
+Params:
+
+```json
+{"notebook_id": "nb-...", "kind": "audio"}
+```
+
+`kind` 可省(=全部),或篩:`audio` / `video` / `report` / `quiz` / `flashcards` /
+`mind_map` / `infographic` / `slide_deck` / `data_table`。
+
+Returns:
+
+```json
+{"artifacts": [{"artifact_id": "art-...", "title": "EP01 心法篇", "kind": "audio", "completed": true, "status": "completed", "created_at": "2026-07-05T09:00:00"}]}
+```
+
+**救援/對帳用**:生成被打斷、只知道生了卻沒 `task_id` 時,用它列出筆記本現有 artifact、
+拿 `artifact_id` 再 `artifact_download_audio` 救回。
+
 ### `artifact_wait`
 
 Params:
@@ -149,7 +219,8 @@ Returns:
 {"task_id": "task-...", "artifact_id": "art-..."}
 ```
 
-Always pass the generation `task_id`, not a notebook id or source id.
+Always pass the generation `task_id`, not a notebook id or source id. **Fail-closed**:
+SDK 若回 failed status(非丟例外),這裡會 raise,不會把失敗當成功回傳。
 
 ### `artifact_download_audio`
 
@@ -192,14 +263,19 @@ Returns:
 Params:
 
 ```json
-{"notebook_id": "nb-...", "question": "請整理三個重點。"}
+{"notebook_id": "nb-...", "question": "請整理三個重點。", "source_ids": ["src-..."], "conversation_id": "conv-..."}
 ```
+
+`source_ids` 聚焦特定來源(如只看該集原文、排除前集音檔,避免單集 show notes 被污染);
+`conversation_id` 續問同一串。兩者皆可省。
 
 Returns:
 
 ```json
-{"answer": "..."}
+{"answer": "...", "conversation_id": "conv-...", "references": [{"source_id": "src-...", "citation_number": 1, "cited_text": "..."}]}
 ```
+
+`answer` 夾帶引用標記(`[1]`/`[3, 4]`);當公開文字前用 regex `\[[\d,\s\-–]+\]` 清掉。
 
 ## Podcast Tools
 
@@ -362,10 +438,14 @@ Params:
 ```
 
 把整季 manifest + mp3 發布成 Apple 合規 RSS feed(內網 HTTP PUT 到 NAS uploader)。
-`show_id` 是穩定 slug(feed identity、決定 URL、**永不改**、`[a-z0-9-]`)。manifest 每集
-可帶**選填**欄位:`description`(→ 單集 `<description>` 純文字 + `<content:encoded>` 富文字)、
-`slides_pdf_path` / `report_md_path`(→ content-hash 後 host 附件,具名連結附進單集簡介)。
-提交順序:媒體(mp3 + 附件 + 封面)→ show.json → feed.xml/index.html。
+`show_id` 是穩定 slug(feed identity、決定 URL、**永不改**、`[a-z0-9-]`)。`artwork_path` 是
+**節目層**封面(掛 channel 的 `itunes:image`)。manifest 每集可帶**選填**欄位:
+`description`(→ 單集 `<description>` 純文字 + `<content:encoded>` 富文字)、
+`slides_pdf_path` / `report_md_path`(→ content-hash 後 host 附件,具名連結附進單集簡介)、
+`cover_path`(→ **單集封面**,同 `validate_artwork` 規格驗證,host 成 `EP0n-cover-<hash>`,
+該集 `<item>` 掛 `itunes:image`;沒給就 fallback 節目封面)。單集封面用
+`scripts/make_cover.py --manifest` 批次生(見 AGENTS.md 封面段)。缺檔/不合規 **fail-fast**。
+提交順序:媒體(mp3 + 單集封面 + 附件 + 節目封面)→ show.json → feed.xml/index.html。
 
 Returns:
 
