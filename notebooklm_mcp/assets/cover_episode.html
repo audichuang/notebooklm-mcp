@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <title>Audicast Podcast Cover</title>
+    <style>
+        :root {
+            --hue: __HUE__;
+            --primary: hsl(var(--hue), 100%, 65%);
+            --primary-glow: hsla(var(--hue), 100%, 65%, 0.15);
+            --primary-dim: hsl(var(--hue), 85%, 45%);
+            --primary-bg: hsl(var(--hue), 40%, 6%);
+            --bg-color: #07070b;
+            
+            --syntax-kw: hsl(calc(var(--hue) + 120), 90%, 75%);
+            --syntax-str: hsl(calc(var(--hue) + 240), 85%, 75%);
+            --syntax-num: hsl(calc(var(--hue) + 60), 95%, 75%);
+            --syntax-comment: hsl(var(--hue), 25%, 50%);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 3000px;
+            height: 3000px;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            font-family: "Noto Sans CJK TC", sans-serif;
+            color: #ffffff;
+        }
+
+        /* Background & Grid Layout */
+        .wrapper {
+            position: relative;
+            width: 3000px;
+            height: 3000px;
+            background-color: var(--bg-color);
+            overflow: hidden;
+        }
+
+        .mesh-gradient {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 3000px;
+            height: 3000px;
+            background: 
+                radial-gradient(circle at 80% 20%, hsla(var(--hue), 100%, 65%, 0.15) 0%, transparent 55%),
+                radial-gradient(circle at 20% 80%, hsla(var(--hue), 80%, 55%, 0.1) 0%, transparent 60%),
+                radial-gradient(circle at 50% 50%, hsla(var(--hue), 100%, 75%, 0.04) 0%, transparent 40%);
+            z-index: 1;
+        }
+
+        .dot-grid {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 3000px;
+            height: 3000px;
+            background-image: radial-gradient(rgba(255, 255, 255, 0.02) 1.5px, transparent 1.5px);
+            background-size: 60px 60px;
+            z-index: 2;
+        }
+
+        /* Crosshair grid lines */
+        .lines-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 3000px;
+            height: 3000px;
+            z-index: 2;
+            pointer-events: none;
+        }
+        .line-v {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: linear-gradient(180deg, transparent, rgba(255,255,255,0.03) 10%, rgba(255,255,255,0.03) 90%, transparent);
+        }
+        .line-h {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.03) 10%, rgba(255,255,255,0.03) 90%, transparent);
+        }
+
+        /* Giant episode watermark */
+        .giant-watermark {
+            position: absolute;
+            bottom: -200px;
+            right: -100px;
+            font-size: 2000px;
+            font-family: "Noto Sans CJK TC", sans-serif;
+            font-weight: 900;
+            line-height: 0.8;
+            color: transparent;
+            -webkit-text-stroke: 4px hsla(var(--hue), 100%, 65%, 0.04);
+            user-select: none;
+            z-index: 3;
+            pointer-events: none;
+        }
+
+        /* Premium outer border layout */
+        .border-frame {
+            position: absolute;
+            top: 80px;
+            left: 80px;
+            right: 80px;
+            bottom: 80px;
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            border-radius: 32px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .border-frame::after {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: 31px;
+            border: 1px solid hsla(var(--hue), 100%, 65%, 0.08);
+        }
+
+        /* Technical labels on the corners */
+        .corner-label {
+            position: absolute;
+            font-family: "Noto Sans Mono", monospace;
+            font-size: 28px;
+            color: rgba(255, 255, 255, 0.35);
+            letter-spacing: 2px;
+            z-index: 11;
+        }
+        .label-tl { top: 120px; left: 130px; }
+        .label-tr { top: 120px; right: 130px; text-align: right; }
+        .label-bl { bottom: 120px; left: 130px; }
+        .label-br { bottom: 120px; right: 130px; text-align: right; }
+
+        /* Content container using exact margins */
+        .content {
+            position: absolute;
+            top: 240px;
+            left: 240px;
+            width: 2520px;
+            height: 2520px;
+            z-index: 5;
+        }
+
+        /* Header Section */
+        .header-group {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .wordmark {
+            font-family: "Noto Sans CJK TC", sans-serif;
+            font-weight: 900;
+            font-size: 140px;
+            letter-spacing: -4px;
+            color: #ffffff;
+            display: inline-flex;
+            align-items: center;
+        }
+        .wordmark::after {
+            content: '';
+            display: inline-block;
+            width: 30px;
+            height: 90px;
+            background-color: var(--primary);
+            margin-left: 20px;
+            box-shadow: 0 0 30px var(--primary);
+        }
+        .tagline {
+            font-family: "Noto Sans Mono", monospace;
+            font-size: 38px;
+            font-weight: bold;
+            color: var(--primary);
+            letter-spacing: 8px;
+            margin-top: 15px;
+        }
+
+        /* System Telemetry logs (top right) */
+        .telemetry {
+            position: absolute;
+            top: 0;
+            right: 0;
+            font-family: "Noto Sans Mono", monospace;
+            font-size: 32px;
+            line-height: 1.6;
+            color: rgba(255, 255, 255, 0.4);
+            text-align: right;
+        }
+        .telemetry-row::before {
+            content: '> ';
+            color: var(--primary);
+        }
+
+        /* Title Area (middle left) */
+        .title-area {
+            position: absolute;
+            top: 800px;
+            left: 0;
+            width: 1450px;
+        }
+        .badge-episode {
+            display: inline-flex;
+            align-items: center;
+            background: hsla(var(--hue), 100%, 65%, 0.08);
+            border: 2px solid var(--primary);
+            border-radius: 8px;
+            padding: 16px 36px;
+            margin-bottom: 50px;
+            box-shadow: 0 0 40px hsla(var(--hue), 100%, 65%, 0.1);
+        }
+        .badge-episode span {
+            font-family: "Noto Sans Mono", monospace;
+            font-size: 42px;
+            font-weight: 900;
+            color: var(--primary);
+            letter-spacing: 4px;
+        }
+        .episode-title {
+            font-family: "Noto Sans CJK TC", sans-serif;
+            font-weight: 900;
+            font-size: 155px;
+            line-height: 1.35;
+            color: #ffffff;
+            margin: 0;
+            letter-spacing: -2px;
+            text-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Host Byline Area (bottom left) */
+        .byline-container {
+            position: absolute;
+            bottom: 40px;
+            left: 0;
+            display: flex;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 24px 48px;
+            border-radius: 12px;
+        }
+        .byline-label {
+            font-family: "Noto Sans Mono", monospace;
+            font-size: 32px;
+            color: var(--primary);
+            margin-right: 24px;
+            letter-spacing: 2px;
+        }
+        .byline-val {
+            font-family: "Noto Sans CJK TC", sans-serif;
+            font-weight: 900;
+            font-size: 56px;
+            color: #ffffff;
+        }
+
+        /* Terminal spec dashboard (right side) */
+        .developer-console {
+            position: absolute;
+            top: 720px;
+            right: 0;
+            width: 950px;
+            height: 1100px;
+            background: rgba(11, 11, 17, 0.8);
+            border: 1.5px solid rgba(255, 255, 255, 0.07);
+            border-radius: 20px;
+            box-shadow: 
+                0 40px 100px rgba(0,0,0,0.8),
+                0 0 120px hsla(var(--hue), 100%, 65%, 0.03),
+                inset 0 1px 0 rgba(255,255,255,0.1);
+            overflow: hidden;
+        }
+
+        .console-bar {
+            height: 90px;
+            background: rgba(16, 16, 26, 0.9);
+            border-bottom: 1.5px solid rgba(255, 255, 255, 0.07);
+            display: flex;
+            align-items: center;
+            padding: 0 40px;
+            justify-content: space-between;
+        }
+        .console-dots {
+            display: flex;
+            gap: 16px;
+        }
+        .console-dot {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.1);
+        }
+        .console-dot-1 { background: hsla(var(--hue), 100%, 60%, 0.6); }
+        .console-dot-2 { background: hsla(var(--hue), 80%, 50%, 0.4); }
+        .console-dot-3 { background: hsla(var(--hue), 60%, 40%, 0.2); }
+        .console-title {
+            font-family: "Noto Sans Mono", monospace;
+            font-size: 28px;
+            color: rgba(255, 255, 255, 0.4);
+            letter-spacing: 2px;
+        }
+
+        .console-body {
+            padding: 60px;
+            font-family: "Noto Sans Mono", "DejaVu Sans Mono", monospace;
+            font-size: 32px;
+            line-height: 1.7;
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+        /* Syntax highlighting */
+        .line {
+            margin-bottom: 12px;
+            white-space: nowrap;
+        }
+        .indent {
+            padding-left: 60px;
+        }
+        .comment { color: var(--syntax-comment); }
+        .keyword { color: var(--syntax-kw); }
+        .string { color: var(--syntax-str); }
+        .number { color: var(--syntax-num); }
+        .accent-text { color: var(--primary); }
+        .cursor-line { color: #ffffff; }
+        .blinking-cursor {
+            color: var(--primary);
+            font-weight: 900;
+        }
+
+        /* Tech stats (bottom right) */
+        .stats-container {
+            position: absolute;
+            bottom: 40px;
+            right: 0;
+            text-align: right;
+            font-family: "Noto Sans Mono", monospace;
+            font-size: 32px;
+            line-height: 1.8;
+            color: rgba(255, 255, 255, 0.35);
+        }
+        .stats-item span {
+            color: var(--primary);
+        }
+
+        /* Connecting SVG graphic */
+        .svg-graphic {
+            position: absolute;
+            top: 450px;
+            left: 1000px;
+            width: 800px;
+            height: 800px;
+            z-index: 3;
+            pointer-events: none;
+            opacity: 0.65;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <div class="mesh-gradient"></div>
+        <div class="dot-grid"></div>
+
+        <!-- Overlay Axis Lines -->
+        <div class="lines-overlay">
+            <div class="line-v" style="left: 240px;"></div>
+            <div class="line-v" style="left: 1770px;"></div>
+            <div class="line-h" style="top: 240px;"></div>
+            <div class="line-h" style="top: 2280px;"></div>
+        </div>
+
+        <!-- Giant background Ep Number -->
+        <div class="giant-watermark">__EPNUM__</div>
+
+        <!-- Premium Outer Border Frame -->
+        <div class="border-frame"></div>
+        <div class="corner-label label-tl">[ SYS_INIT // 0x7F ]</div>
+        <div class="corner-label label-tr">[ REF_ID: AUDICAST_SR2 ]</div>
+        <div class="corner-label label-bl">[ HUE_VAL: __HUE__ ]</div>
+        <div class="corner-label label-br">[ LOC: 25.0330° N, 121.5654° E ]</div>
+
+        <!-- SVG Tech Graphic in Background/Middle -->
+        <svg class="svg-graphic" viewBox="0 0 1000 1000" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <linearGradient id="svg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stop-color="hsla(var(--hue), 100%, 65%, 0.8)" />
+                    <stop offset="100%" stop-color="hsla(var(--hue), 100%, 30%, 0.05)" />
+                </linearGradient>
+            </defs>
+            <!-- Concentric tech lines -->
+            <circle cx="500" cy="500" r="380" stroke="url(#svg-grad)" stroke-width="2" stroke-dasharray="8 12" />
+            <circle cx="500" cy="500" r="280" stroke="url(#svg-grad)" stroke-width="3" />
+            <circle cx="500" cy="500" r="180" stroke="url(#svg-grad)" stroke-width="1.5" stroke-dasharray="40 10" />
+            
+            <!-- Crosshairs -->
+            <line x1="500" y1="80" x2="500" y2="920" stroke="url(#svg-grad)" stroke-width="1.5" stroke-dasharray="10 15" />
+            <line x1="80" y1="500" x2="920" y2="500" stroke="url(#svg-grad)" stroke-width="1.5" stroke-dasharray="10 15" />
+            
+            <!-- Stylized agent node constellation -->
+            <g stroke="url(#svg-grad)" stroke-width="2">
+                <line x1="500" y1="500" x2="260" y2="350" />
+                <line x1="500" y1="500" x2="740" y2="350" />
+                <line x1="500" y1="500" x2="500" y2="780" />
+                <line x1="260" y1="350" x2="740" y2="350" stroke-dasharray="6 6" />
+            </g>
+            <circle cx="500" cy="500" r="24" fill="#ffffff" />
+            <circle cx="260" cy="350" r="14" fill="hsl(var(--hue), 100%, 65%)" />
+            <circle cx="740" cy="350" r="14" fill="hsl(var(--hue), 100%, 65%)" />
+            <circle cx="500" cy="780" r="14" fill="hsl(var(--hue), 100%, 65%)" />
+        </svg>
+
+        <!-- Main Interactive Content Frame -->
+        <div class="content">
+            
+            <!-- Header Group -->
+            <div class="header-group">
+                <div class="wordmark">__SHOW__</div>
+                <div class="tagline">AI AGENTIC ENGINEERING</div>
+            </div>
+
+            <!-- Telemetry Info -->
+            <div class="telemetry">
+                <div class="telemetry-row">SYSTEM: ACTIVE</div>
+                <div class="telemetry-row">ENV: CLAUDE_CODE</div>
+                <div class="telemetry-row">RUNTIME: L3_AGENT</div>
+            </div>
+
+            <!-- Main Left Episode Info -->
+            <div class="title-area">
+                <div class="badge-episode">
+                    <span>EPISODE __EPNUM__</span>
+                </div>
+                <h1 class="episode-title">__TITLE__</h1>
+            </div>
+
+            <!-- Developer Console Panel -->
+            <div class="developer-console">
+                <div class="console-bar">
+                    <div class="console-dots">
+                        <div class="console-dot console-dot-1"></div>
+                        <div class="console-dot console-dot-2"></div>
+                        <div class="console-dot console-dot-3"></div>
+                    </div>
+                    <div class="console-title">claude-agent-runtime.sh</div>
+                </div>
+                <div class="console-body">
+                    <div class="line comment"># Initialize agent environment</div>
+                    <div class="line"><span class="keyword">const</span> agent = <span class="keyword">new</span> Antigravity({</div>
+                    <div class="line indent">id: <span class="string">"__BYLINE__"</span>,</div>
+                    <div class="line indent">episode: <span class="number">__EPNUM__</span>,</div>
+                    <div class="line indent">hue: <span class="number">__HUE__</span></div>
+                    <div class="line">});</div>
+                    <div class="line">&nbsp;</div>
+                    <div class="line comment"># Fetching metadata...</div>
+                    <div class="line"><span class="keyword">await</span> agent.sync({</div>
+                    <div class="line indent">target: <span class="string">"__SHOW__"</span></div>
+                    <div class="line">});</div>
+                    <div class="line">&nbsp;</div>
+                    <div class="line comment"># Running autonomous execution</div>
+                    <div class="line"><span class="keyword">while</span> (agent.isActive) {</div>
+                    <div class="line indent"><span class="keyword">await</span> agent.solve();</div>
+                    <div class="line">}</div>
+                    <div class="line">&nbsp;</div>
+                    <div class="line prompt"><span class="accent-text">audicast@dev-env:~$</span> <span class="cursor-line">agy run --ep __EPNUM__</span><span class="blinking-cursor">_</span></div>
+                </div>
+            </div>
+
+            <!-- Bottom Host Byline -->
+            <div class="byline-container">
+                <span class="byline-label">HOSTED BY</span>
+                <span class="byline-val">__BYLINE__</span>
+            </div>
+
+            <!-- Bottom Right Stats -->
+            <div class="stats-container">
+                <div class="stats-item">AGENT_COMPILER: <span>V2.8.5</span></div>
+                <div class="stats-item">COMPATIBILITY: <span>TC_UTF-8</span></div>
+            </div>
+
+        </div>
+    </div>
+</body>
+</html>

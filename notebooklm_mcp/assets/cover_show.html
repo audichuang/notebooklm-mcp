@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>Audicast Brand Cover</title>
+  <style>
+    :root {
+      --hue: __HUE__;
+      --primary: hsl(var(--hue), 100%, 65%);
+      --primary-glow: hsla(var(--hue), 100%, 65%, 0.18);
+      --primary-dim: hsl(var(--hue), 85%, 45%);
+      --primary-bg: hsl(var(--hue), 40%, 6%);
+      --bg-color: #050508;
+      
+      --syntax-kw: hsl(calc(var(--hue) + 120), 90%, 75%);
+      --syntax-str: hsl(calc(var(--hue) + 240), 85%, 75%);
+      --syntax-num: hsl(calc(var(--hue) + 60), 95%, 75%);
+      --syntax-comment: hsl(var(--hue), 20%, 50%);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 3000px;
+      height: 3000px;
+      overflow: hidden;
+      background-color: var(--bg-color);
+      font-family: "Noto Sans CJK TC", sans-serif;
+      color: #ffffff;
+    }
+
+    /* Container & Layout */
+    .wrapper {
+      position: relative;
+      width: 3000px;
+      height: 3000px;
+      background-color: var(--bg-color);
+      overflow: hidden;
+    }
+
+    .radial-glow {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 3000px;
+      height: 3000px;
+      background: 
+        radial-gradient(circle at 50% 50%, hsla(var(--hue), 100%, 65%, 0.15) 0%, transparent 60%),
+        radial-gradient(circle at 80% 20%, hsla(var(--hue), 90%, 55%, 0.1) 0%, transparent 50%),
+        radial-gradient(circle at 20% 80%, hsla(var(--hue), 80%, 55%, 0.08) 0%, transparent 50%);
+      z-index: 2;
+    }
+
+    .dot-grid {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 3000px;
+      height: 3000px;
+      background-image: radial-gradient(rgba(255, 255, 255, 0.02) 1.5px, transparent 1.5px);
+      background-size: 60px 60px;
+      z-index: 3;
+    }
+
+    .lines-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 3000px;
+      height: 3000px;
+      z-index: 3;
+      pointer-events: none;
+    }
+    .line-v {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.03) 10%, rgba(255, 255, 255, 0.03) 90%, transparent);
+    }
+    .line-h {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.03) 10%, rgba(255, 255, 255, 0.03) 90%, transparent);
+    }
+
+    /* Ghost Glyph */
+    .ghost-glyph {
+      position: absolute;
+      font-family: "Noto Sans Mono", monospace;
+      font-size: 1900px;
+      font-weight: 900;
+      color: var(--primary);
+      opacity: 0.015;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(-12deg);
+      pointer-events: none;
+      z-index: 1;
+      white-space: nowrap;
+      user-select: none;
+    }
+
+    /* Outer Border & Corners */
+    .border-frame {
+      position: absolute;
+      top: 80px;
+      left: 80px;
+      right: 80px;
+      bottom: 80px;
+      border: 1px solid rgba(255, 255, 255, 0.03);
+      border-radius: 32px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .border-frame::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      border-radius: 31px;
+      border: 1px solid hsla(var(--hue), 100%, 65%, 0.08);
+    }
+
+    .corner-bracket {
+      position: absolute;
+      width: 60px;
+      height: 60px;
+      border-color: hsl(var(--hue), 100%, 65%);
+      border-style: solid;
+      border-width: 0;
+      box-shadow: 0 0 25px hsla(var(--hue), 100%, 65%, 0.35);
+      z-index: 12;
+    }
+    .corner-tl { top: 77px; left: 77px; border-top-width: 6px; border-left-width: 6px; border-top-left-radius: 32px; }
+    .corner-tr { top: 77px; right: 77px; border-top-width: 6px; border-right-width: 6px; border-top-right-radius: 32px; }
+    .corner-bl { bottom: 77px; left: 77px; border-bottom-width: 6px; border-left-width: 6px; border-bottom-left-radius: 32px; }
+    .corner-br { bottom: 77px; right: 77px; border-bottom-width: 6px; border-right-width: 6px; border-bottom-right-radius: 32px; }
+
+    /* Corner Labels */
+    .corner-label {
+      position: absolute;
+      font-family: "Noto Sans Mono", monospace;
+      font-size: 32px;
+      color: rgba(255, 255, 255, 0.45);
+      letter-spacing: 2px;
+      z-index: 15;
+    }
+    .label-tl { top: 130px; left: 140px; }
+    .label-tr { top: 130px; right: 140px; text-align: right; }
+    .label-bl { bottom: 130px; left: 140px; color: var(--primary); text-shadow: 0 0 15px var(--primary-glow); }
+    .label-bc { bottom: 130px; left: 50%; transform: translateX(-50%); text-align: center; }
+    .label-br { bottom: 130px; right: 140px; text-align: right; }
+
+    /* Main Content */
+    .content {
+      position: absolute;
+      top: 240px;
+      left: 240px;
+      width: 2520px;
+      height: 2520px;
+      z-index: 5;
+    }
+
+    .header-group {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    .wordmark {
+      font-family: "Noto Sans CJK TC", sans-serif;
+      font-weight: 900;
+      font-size: 300px;
+      letter-spacing: -6px;
+      color: #ffffff;
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      text-shadow: 0 0 80px hsla(var(--hue), 100%, 65%, 0.25);
+    }
+    .cursor-block {
+      display: inline-block;
+      width: 50px;
+      height: 210px;
+      background-color: var(--primary);
+      margin-left: 30px;
+      box-shadow: 0 0 60px var(--primary);
+    }
+    .tagline-en {
+      font-family: "Noto Sans Mono", monospace;
+      font-size: 54px;
+      font-weight: bold;
+      color: var(--primary);
+      letter-spacing: 12px;
+      margin-top: 15px;
+      text-shadow: 0 0 20px var(--primary-glow);
+    }
+    .tagline-zh {
+      font-family: "Noto Sans CJK TC", sans-serif;
+      font-weight: 900;
+      font-size: 90px;
+      color: rgba(255, 255, 255, 0.9);
+      letter-spacing: 8px;
+      margin-top: 40px;
+      text-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    /* Dual Column Grid */
+    .columns {
+      position: absolute;
+      top: 860px;
+      left: 0;
+      width: 2520px;
+      height: 1200px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* Left Column: Terminal */
+    .developer-console {
+      width: 1200px;
+      height: 1200px;
+      background: rgba(8, 8, 12, 0.85);
+      border: 1.5px solid rgba(255, 255, 255, 0.05);
+      border-radius: 24px;
+      box-shadow: 
+        0 50px 120px rgba(0,0,0,0.9),
+        0 0 100px hsla(var(--hue), 100%, 65%, 0.03),
+        inset 0 1px 0 rgba(255,255,255,0.08);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .console-bar {
+      height: 100px;
+      background: rgba(14, 14, 22, 0.95);
+      border-bottom: 1.5px solid rgba(255, 255, 255, 0.05);
+      display: flex;
+      align-items: center;
+      padding: 0 45px;
+      justify-content: space-between;
+    }
+    .console-dots {
+      display: flex;
+      gap: 18px;
+    }
+    .console-dot {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+    }
+    .console-dot-1 { background: hsl(0, 80%, 55%); opacity: 0.6; }
+    .console-dot-2 { background: hsl(45, 80%, 55%); opacity: 0.6; }
+    .console-dot-3 { background: hsl(120, 80%, 55%); opacity: 0.6; }
+    .console-title {
+      font-family: "Noto Sans Mono", monospace;
+      font-size: 32px;
+      color: rgba(255, 255, 255, 0.35);
+      letter-spacing: 2px;
+    }
+
+    .console-body {
+      padding: 70px;
+      font-family: "Noto Sans Mono", monospace;
+      font-size: 34px;
+      line-height: 1.8;
+      color: rgba(255, 255, 255, 0.85);
+    }
+    .line {
+      margin-bottom: 16px;
+      white-space: nowrap;
+    }
+    .indent {
+      padding-left: 80px;
+    }
+    .comment { color: var(--syntax-comment); }
+    .keyword { color: var(--syntax-kw); }
+    .string { color: var(--syntax-str); }
+    .number { color: var(--syntax-num); }
+    .accent-text { color: var(--primary); }
+    .cursor-line { color: #ffffff; }
+    .blinking-cursor {
+      color: var(--primary);
+      font-weight: 900;
+    }
+
+    /* Right Column: Constellation / Radar */
+    .constellation-wrapper {
+      width: 1200px;
+      height: 1200px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+    }
+    .svg-graphic {
+      width: 1200px;
+      height: 1200px;
+      overflow: visible;
+    }
+
+    /* Footer */
+    .footer-group {
+      position: absolute;
+      top: 2220px;
+      left: 0;
+      width: 2520px;
+      height: 300px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .byline-container {
+      display: flex;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      padding: 28px 56px;
+      border-radius: 16px;
+    }
+    .byline-label {
+      font-family: "Noto Sans Mono", monospace;
+      font-size: 36px;
+      color: var(--primary);
+      margin-right: 28px;
+      letter-spacing: 2px;
+    }
+    .byline-val {
+      font-family: "Noto Sans CJK TC", sans-serif;
+      font-weight: 900;
+      font-size: 64px;
+      color: #ffffff;
+    }
+    .stats-container {
+      text-align: right;
+      font-family: "Noto Sans Mono", monospace;
+      font-size: 36px;
+      line-height: 1.8;
+      color: rgba(255, 255, 255, 0.45);
+    }
+    .stats-item span {
+      color: var(--primary);
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="radial-glow"></div>
+    <div class="dot-grid"></div>
+
+    <!-- Overlay Axis Lines -->
+    <div class="lines-overlay">
+      <div class="line-v" style="left: 240px;"></div>
+      <div class="line-v" style="left: 1500px;"></div>
+      <div class="line-v" style="left: 2760px;"></div>
+      <div class="line-h" style="top: 240px;"></div>
+      <div class="line-h" style="top: 800px;"></div>
+      <div class="line-h" style="top: 2210px;"></div>
+      <div class="line-h" style="top: 2760px;"></div>
+    </div>
+
+    <!-- Faint Oversized Ghost Glyph for Depth -->
+    <div class="ghost-glyph">&lt;/&gt;</div>
+
+    <!-- Premium Outer Border Frame -->
+    <div class="border-frame"></div>
+    <div class="corner-bracket corner-tl"></div>
+    <div class="corner-bracket corner-tr"></div>
+    <div class="corner-bracket corner-bl"></div>
+    <div class="corner-bracket corner-br"></div>
+
+    <!-- HUD Labels in corners -->
+    <div class="corner-label label-tl">[ SYS_INIT // 0x7F ]</div>
+    <div class="corner-label label-tr">[ REF_ID: __SHOW__ ]</div>
+    <div class="corner-label label-bl">&gt; SYSTEM: ACTIVE</div>
+    <div class="corner-label label-bc">[ LOC: 25.0330° N, 121.5654° E ]</div>
+    <div class="corner-label label-br">AGENT_COMPILER: V2.8.5</div>
+
+    <!-- Main Content Grid -->
+    <div class="content">
+      <!-- Header Group -->
+      <div class="header-group">
+        <h1 class="wordmark">__SHOW__<span class="cursor-block"></span></h1>
+        <div class="tagline-en">AI AGENTIC ENGINEERING</div>
+        <div class="tagline-zh">__TAGLINE__</div>
+      </div>
+
+      <!-- Columns Area -->
+      <div class="columns">
+        <!-- Developer Console Panel -->
+        <div class="developer-console">
+          <div class="console-bar">
+            <div class="console-dots">
+              <div class="console-dot console-dot-1"></div>
+              <div class="console-dot console-dot-2"></div>
+              <div class="console-dot console-dot-3"></div>
+            </div>
+            <div class="console-title">audicast-agent-core.ts</div>
+          </div>
+          <div class="console-body">
+            <div class="line comment">// Bootstrap agentic podcast environment</div>
+            <div class="line"><span class="keyword">import</span> { <span class="accent-text">AudicastAgent</span> } <span class="keyword">from</span> <span class="string">"@audicast/core"</span>;</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="keyword">const</span> agent = <span class="keyword">new</span> <span class="accent-text">AudicastAgent</span>({</div>
+            <div class="line indent">id: <span class="string">"__BYLINE__"</span>,</div>
+            <div class="line indent">show: <span class="string">"__SHOW__"</span>,</div>
+            <div class="line indent">engine: <span class="string">"Antigravity/V2.8"</span>,</div>
+            <div class="line indent">secure: <span class="number">true</span></div>
+            <div class="line">});</div>
+            <div class="line">&nbsp;</div>
+            <div class="line comment">// Run deep-dive analysis on dev topics</div>
+            <div class="line"><span class="keyword">await</span> agent.analyze(<span class="string">"ai-agentic-engineering"</span>);</div>
+            <div class="line"><span class="keyword">await</span> agent.synthesize({ format: <span class="string">"audio/podcast"</span> });</div>
+            <div class="line">&nbsp;</div>
+            <div class="line prompt"><span class="accent-text">audicast@dev-env:~$</span> <span class="cursor-line">agy run --show __SHOW__</span><span class="blinking-cursor">_</span></div>
+          </div>
+        </div>
+
+        <!-- 3-Node Constellation Graph -->
+        <div class="constellation-wrapper">
+          <svg class="svg-graphic" viewBox="0 0 1200 1200" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="svg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="hsla(var(--hue), 100%, 65%, 0.85)" />
+                <stop offset="100%" stop-color="hsla(var(--hue), 100%, 30%, 0.05)" />
+              </linearGradient>
+              <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+                <feGaussianBlur stdDeviation="18" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+              <filter id="intense-glow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="30" result="blur1" />
+                <feGaussianBlur stdDeviation="15" result="blur2" />
+                <feMerge>
+                  <feMergeNode in="blur1" />
+                  <feMergeNode in="blur2" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+            </defs>
+
+            <!-- Crosshairs -->
+            <line x1="600" y1="80" x2="600" y2="1120" stroke="url(#svg-grad)" stroke-width="1.5" stroke-dasharray="12 12" />
+            <line x1="80" y1="600" x2="1120" y2="600" stroke="url(#svg-grad)" stroke-width="1.5" stroke-dasharray="12 12" />
+
+            <!-- Concentric Circles -->
+            <circle cx="600" cy="600" r="450" stroke="url(#svg-grad)" stroke-width="2" fill="none" />
+            <circle cx="600" cy="600" r="320" stroke="url(#svg-grad)" stroke-width="3" stroke-dasharray="16 16" fill="none" />
+            <circle cx="600" cy="600" r="180" stroke="url(#svg-grad)" stroke-width="1.5" fill="none" />
+            <circle cx="600" cy="600" r="500" stroke="url(#svg-grad)" stroke-width="1" stroke-dasharray="4 8" fill="none" />
+
+            <!-- Outer Ticks -->
+            <g stroke="url(#svg-grad)" stroke-width="3">
+              <line x1="600" y1="120" x2="600" y2="145" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(30, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(60, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(90, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(120, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(150, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(180, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(210, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(240, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(270, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(300, 600, 600)" />
+              <line x1="600" y1="120" x2="600" y2="145" transform="rotate(330, 600, 600)" />
+            </g>
+
+            <!-- Graph Connections -->
+            <polygon points="800,370 400,430 650,830" fill="hsla(var(--hue), 100%, 65%, 0.06)" stroke="hsl(var(--hue), 100%, 65%)" stroke-width="6" stroke-linejoin="round" filter="url(#glow)" />
+
+            <!-- Constellation Secondary Data Nodes -->
+            <circle cx="600" cy="405" r="8" fill="hsl(var(--hue), 100%, 75%)" />
+            <circle cx="525" cy="630" r="8" fill="hsl(var(--hue), 100%, 75%)" />
+
+            <!-- Interactive Node 1 -->
+            <circle cx="800" cy="370" r="30" fill="hsl(var(--hue), 100%, 65%)" opacity="0.3" filter="url(#intense-glow)" />
+            <circle cx="800" cy="370" r="14" fill="#ffffff" />
+
+            <!-- Interactive Node 2 -->
+            <circle cx="400" cy="430" r="30" fill="hsl(var(--hue), 100%, 65%)" opacity="0.3" filter="url(#intense-glow)" />
+            <circle cx="400" cy="430" r="14" fill="#ffffff" />
+
+            <!-- Interactive Node 3 -->
+            <circle cx="650" cy="830" r="30" fill="hsl(var(--hue), 100%, 65%)" opacity="0.3" filter="url(#intense-glow)" />
+            <circle cx="650" cy="830" r="14" fill="#ffffff" />
+          </svg>
+        </div>
+      </div>
+
+      <!-- Footer Area -->
+      <div class="footer-group">
+        <div class="byline-container">
+          <span class="byline-label">HOSTED BY</span>
+          <span class="byline-val">__BYLINE__</span>
+        </div>
+        <div class="stats-container">
+          <div class="stats-item">COMPILATION: <span>STABLE_V2.8.5</span></div>
+          <div class="stats-item">SECURITY: <span>100% ONLINE</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

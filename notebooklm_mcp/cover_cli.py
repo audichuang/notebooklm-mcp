@@ -1,174 +1,104 @@
 #!/usr/bin/env python3
-"""生成 Apple-Podcast 合規的節目封面(2000x2000 RGB JPEG,無 alpha)。
+"""生成 Apple-Podcast 合規封面(3000x3000 RGB JPEG,無 alpha)。
 
-為什麼有這支:`publish_series` 的封面是使用者自備 or 這裡生。agy 之類的
-coding agent **不能直接出點陣圖**(它只會幫你寫這種 PIL code),所以把已驗過的
-排版固化成一支 CLI,agent 不必每次重寫、產出也一致。
+設計固化成 HTML template(`assets/cover_episode.html` / `assets/cover_show.html`,
+由 agy/Gemini 設計),本工具只做「填佔位符 → headless Chrome 光柵化 → JPEG →
+過 artwork 驗證器」。要換設計就重生 template(見 docs/superpowers 的封面流程),程式不用動。
 
-深色終端機風:左上 mono tag(如 ~/.claude/)+ 大字標題(逐行)+ 副標 + 署名。
-標題字級會自動縮到塞得下版面寬度,長短標題都不爆框。
+為什麼不再用 PIL 手繪:coding agent 出不了漂亮的點陣排版,只能刻死座標;改成讓 agy
+產出自包含 HTML(它擅長 markup/CSS),我方光柵化,設計質感高一個檔次且改版只改 template。
+
+決定性:同 template + 同輸入 + 同 Chrome/CJK 字型 → 同 bytes(發布端拿封面 bytes 做
+content-hash)。換 Chrome 或字型版本可能改 bytes → 重發時該集封面 URL 變動(等同舊 PIL
+的字型 caveat);所以「產封面」固定在同一台機器跑,產出的 JPEG 即事實來源(可版控)。
+
+需求:系統要有 headless Chrome(google-chrome / chromium)。只有「產封面的那台」需要,
+3 個靠 Doppler 認證的 VM 不需要。可用 NOTEBOOKLM_COVER_CHROME 或 --chrome 指定 binary。
 
 用法:
-    notebooklm-cover --output cover.jpg \\
-        --line Agentic --line 工程 --line 筆記 \\
-        --tag "~/.claude/" \\
-        --subtitle "harness × loop · Claude Code 拆解" \\
-        --byline audichuang
+    # 整季單集封面(讀 manifest,逐集填集號決定色 + 寫回 cover_path)
+    notebooklm-cover --manifest series_manifest.json --show-name Audicast --byline audichuang
 
---line 可重複,每個 --line 是標題的一行。跑完會自己過 artwork 驗證器,不合規回傳非零。
+    # 節目封面(show 層,品牌)
+    notebooklm-cover --show --output assets/cover.jpg --show-name Audicast \\
+        --tagline "AI 協作工程・每集拆解" --byline audichuang
+
+    # 單集一次性
+    notebooklm-cover --output ep05.jpg --show-name Audicast --episode EP05 \\
+        --title "本集標題" --byline audichuang
 """
 from __future__ import annotations
 
 import argparse
+import html
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
-# 依偏好順序找 CJK / mono 字型;找不到 CJK 就直接報錯(PIL 內建字型畫不出中文)。
-_CJK_CANDIDATES = [
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    "/System/Library/Fonts/PingFang.ttc",                      # macOS
-    "/usr/share/fonts/truetype/arphic/uming.ttc",
-]
-_MONO_CANDIDATES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-    "/System/Library/Fonts/Menlo.ttc",
-]
+from notebooklm_mcp.publish.artwork import validate_artwork
 
-S = 2000        # 邊長:落在 Apple 的 1400–3000 中段
-M = 150         # 版面邊距
+_ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+_CHROME_CANDIDATES = ["google-chrome", "google-chrome-stable", "chromium",
+                      "chromium-browser", "chrome"]
+S = 3000        # 邊長:Apple 上限,縮圖與大圖都最清晰
+_SHOW_HUE = 265  # 節目封面品牌簽名色(色相),可 --hue 覆寫
 
 
-def _first_existing(paths: list[str], what: str) -> str:
-    for p in paths:
-        if os.path.exists(p):
+def _episode_hue(n: int) -> int:
+    """集號決定色相(決定性鐵律:同一集永遠同色,發布端 content-hash 才穩)。"""
+    return (n * 77) % 360
+
+
+def _find_chrome(explicit: str | None = None) -> str:
+    cand = explicit or os.environ.get("NOTEBOOKLM_COVER_CHROME")
+    if cand:
+        if os.path.exists(cand) or shutil.which(cand):
+            return cand
+        raise SystemExit(f"指定的 Chrome 找不到:{cand!r}")
+    for c in _CHROME_CANDIDATES:
+        p = shutil.which(c)
+        if p:
             return p
     raise SystemExit(
-        f"找不到 {what} 字型(試過:{paths})。裝一個(Linux: fonts-noto-cjk)"
-        " 或改 _CJK_CANDIDATES / _MONO_CANDIDATES。"
+        "找不到 headless Chrome。裝 google-chrome / chromium,或設 "
+        "NOTEBOOKLM_COVER_CHROME / --chrome 指向 binary。"
     )
 
 
-def _fit_font(path: str, text: str, max_w: int, start: int) -> ImageFont.FreeTypeFont:
-    """把字級從 start 往下縮,直到 text 的寬度塞進 max_w。"""
-    size = start
-    while size > 24:
-        font = ImageFont.truetype(path, size, index=0)
-        if font.getlength(text) <= max_w:
-            return font
-        size -= 8
-    return ImageFont.truetype(path, 24, index=0)
+def _load_template(name: str) -> str:
+    path = os.path.join(_ASSETS, name)
+    if not os.path.exists(path):
+        raise SystemExit(f"找不到封面 template:{path}")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
 
-def make_cover(output: str, lines: list[str], tag: str, subtitle: str, byline: str,
-               episode: str | None = None, font_cjk: str | None = None,
-               font_mono: str | None = None) -> None:
-    import colorsys
-    import hashlib
-    import re
-
-    # font_cjk/font_mono 可 pin 明確字型路徑:輸出 bytes 是 feed 的 content-hash 依據,
-    # 各 VM 的 _first_existing 若挑到不同字型會產生不同 bytes → feed churn。要跨機器
-    # 決定性,發布前在各機傳同一個明確字型路徑(或確保候選清單首選在各機一致)。
-    cjk = font_cjk or _first_existing(_CJK_CANDIDATES, "CJK")
-    mono = font_mono or _first_existing(_MONO_CANDIDATES, "mono")
+def _render(template: str, subs: dict, output: str, chrome: str) -> dict:
+    """填佔位符 → Chrome 光柵化 3000² PNG → RGB JPEG → 過 validate_artwork。
+    __HUE__ 是數值不轉義;其餘值 HTML-escape(標題可能含 & < >)。"""
+    doc = template
+    for key, val in subs.items():
+        doc = doc.replace(key, str(val) if key == "__HUE__" else html.escape(str(val)))
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-
-    # 決定配色
-    if episode is None:
-        # 完全維持原版常數，100% 向後相容
-        top_color = (11, 18, 32)
-        bot_color = (23, 30, 54)
-        glow_fill = "#1e3a8a"
-        accent_fill = "#38bdf8"
-        tag_fill = "#7dd3fc"
-        sub_fill = "#94a3b8"
-        by_fill = "#64748b"
-        border_outline = "#1e293b"
-    else:
-        # 決定 base_hue (基底色相)
-        match = re.search(r'\d+', episode)
-        if match:
-            n = int(match.group(0))
-            base_hue = (n * 77) % 360
-        else:
-            h = hashlib.sha256(episode.encode("utf-8")).hexdigest()
-            base_hue = int(h, 16) % 360
-
-        def hls_to_hex(h_deg: float, l: float, s: float) -> str:
-            r, g, b = colorsys.hls_to_rgb((h_deg % 360) / 360.0, l, s)
-            return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
-        
-        def hls_to_rgb255(h_deg: float, l: float, s: float) -> tuple[int, int, int]:
-            r, g, b = colorsys.hls_to_rgb((h_deg % 360) / 360.0, l, s)
-            return (int(r * 255), int(g * 255), int(b * 255))
-            
-        top_color = hls_to_rgb255(base_hue, 0.08, 0.49)
-        bot_color = hls_to_rgb255(base_hue + 6, 0.15, 0.40)
-        glow_fill = hls_to_hex(base_hue + 4, 0.33, 0.64)
-        accent_fill = hls_to_hex(base_hue - 21, 0.60, 0.94)
-        tag_fill = hls_to_hex(base_hue - 20, 0.74, 0.95)
-        sub_fill = hls_to_hex(base_hue - 7, 0.65, 0.20)
-        by_fill = hls_to_hex(base_hue - 5, 0.47, 0.16)
-        border_outline = hls_to_hex(base_hue - 3, 0.17, 0.33)
-
-    # 垂直漸層底 + 右上柔光球:低調的科技感,縮圖也吃得住。
-    img = Image.new("RGB", (S, S), top_color)
-    d = ImageDraw.Draw(img)
-    for y in range(S):
-        t = y / S
-        d.line([(0, y), (S, y)], fill=tuple(int(top_color[i] + (bot_color[i] - top_color[i]) * t) for i in range(3)))
-    glow = Image.new("RGB", (S, S), top_color)
-    ImageDraw.Draw(glow).ellipse([S * 0.55, -S * 0.15, S * 1.25, S * 0.55], fill=glow_fill)
-    img = Image.blend(img, glow, 0.28)
-    d = ImageDraw.Draw(img)
-
-    max_w = S - 2 * M
-    f_tag = ImageFont.truetype(mono, 70)
-    f_sub = ImageFont.truetype(cjk, 88, index=0)
-    f_by = ImageFont.truetype(cjk, 72, index=0)
-    # 標題字級以「最長那行」為準自動縮放,確保每行都不超寬。
-    longest = max(lines, key=lambda s: len(s)) if lines else ""
-    f_title = _fit_font(cjk, longest, max_w, start=300)
-    line_h = int(f_title.size * 1.1)
-
-    if tag:
-        d.text((M, 150), tag, font=f_tag, fill=tag_fill)
-        badge_x = M + int(f_tag.getlength(tag)) + 30
-    else:
-        badge_x = M
-
-    if episode:
-        match = re.search(r'\d+', episode)
-        n = int(match.group(0)) if match else 1
-        badge_text = f"EP{n:02d}"
-        f_badge = ImageFont.truetype(mono, 50)
-        badge_w = int(f_badge.getlength(badge_text))
-        px, py = 18, 6
-        bx1 = badge_x
-        by1 = 150 + 10 - py
-        by2 = by1 + 50 + 2 * py
-        bx2 = bx1 + badge_w + 2 * px
-        try:
-            d.rounded_rectangle([bx1, by1, bx2, by2], radius=8, fill=accent_fill)
-        except AttributeError:
-            d.rectangle([bx1, by1, bx2, by2], fill=accent_fill)
-        d.text((bx1 + px, by1 + py - 2), badge_text, font=f_badge, fill=top_color)
-
-    d.rectangle([M, 300, M + 180, 322], fill=accent_fill)     # accent bar
-    y = 470
-    for ln in lines:
-        d.text((M, y), ln, font=f_title, fill="#f8fafc")
-        y += line_h
-    if subtitle:
-        d.text((M, y + 20), subtitle, font=f_sub, fill=sub_fill)
-    if byline:
-        d.text((M, S - 200), byline, font=f_by, fill=by_fill)
-    d.rectangle([40, 40, S - 40, S - 40], outline=border_outline, width=6)
-
-    img.convert("RGB").resize((S, S), Image.LANCZOS).save(output, "JPEG", quality=92)
+    with tempfile.TemporaryDirectory() as td:
+        hpath = os.path.join(td, "cover.html")
+        png = os.path.join(td, "cover.png")
+        with open(hpath, "w", encoding="utf-8") as f:
+            f.write(doc)
+        r = subprocess.run(
+            [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+             "--hide-scrollbars", "--force-device-scale-factor=1",
+             f"--window-size={S},{S}", f"--screenshot={png}",
+             f"file://{os.path.abspath(hpath)}"],   # 必須絕對路徑,否則 Chrome 當 host → ERR_INVALID_URL
+            capture_output=True, text=True, timeout=180)
+        if not os.path.exists(png):
+            raise SystemExit(f"Chrome 光柵化失敗 (exit={r.returncode}):{r.stderr[-400:]}")
+        Image.open(png).convert("RGB").save(output, "JPEG", quality=92)
+    return validate_artwork(output)
 
 
 def _preflight_episodes(episodes: list) -> None:
@@ -193,7 +123,6 @@ def _preflight_episodes(episodes: list) -> None:
 def _atomic_write_json(path: str, data: object) -> None:
     """同目錄 temp + fsync + os.replace 原子覆寫,避免中斷把 manifest 截斷。"""
     import json
-    import tempfile
 
     d = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
@@ -212,70 +141,89 @@ def _atomic_write_json(path: str, data: object) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="生成 Apple-Podcast 合規節目封面")
-    ap.add_argument("--output", help="輸出路徑(.jpg)")
-    ap.add_argument("--line", action="append", default=[], help="標題的一行,可重複")
-    ap.add_argument("--tag", default="", help="左上 mono 標籤,如 ~/.claude/")
-    ap.add_argument("--subtitle", default="", help="標題下方副標")
-    ap.add_argument("--byline", default="", help="左下署名")
-    ap.add_argument("--episode", default=None, help="集數識別(如 EP01),啟用每集視覺差異化配色")
-    ap.add_argument("--manifest", default=None, help="JSON manifest 路徑;批次為每集生單集封面並寫回 cover_path")
-    ap.add_argument("--show-name", default=None, help="批次模式的節目名(單集封面副標);未給則用 manifest 的 title")
-    ap.add_argument("--output-dir", default=None, help="批次生成封面時的輸出目錄")
-    ap.add_argument("--font-cjk", default=None, help="pin CJK 字型路徑(跨機器決定性用)")
-    ap.add_argument("--font-mono", default=None, help="pin mono 字型路徑(跨機器決定性用)")
+    ap = argparse.ArgumentParser(
+        description="生成 Apple-Podcast 合規封面(HTML template + headless Chrome)")
+    ap.add_argument("--manifest", default=None,
+                    help="JSON manifest:批次為每集生單集封面並寫回 cover_path")
+    ap.add_argument("--show", action="store_true", help="產節目(show 層)品牌封面")
+    ap.add_argument("--output", default=None, help="輸出路徑(.jpg);單集/節目模式必填")
+    ap.add_argument("--output-dir", default=None, help="批次模式輸出目錄")
+    ap.add_argument("--show-name", default="Audicast", help="節目名(封面 wordmark)")
+    ap.add_argument("--title", default="", help="單集標題(單集一次性模式)")
+    ap.add_argument("--tagline", default="", help="節目封面副標(--show 模式)")
+    ap.add_argument("--byline", default="", help="署名")
+    ap.add_argument("--episode", default=None, help="集號如 EP05(單集一次性模式)")
+    ap.add_argument("--hue", type=int, default=None,
+                    help="覆寫色相 0-360(預設:單集用集號決定、節目用品牌色)")
+    ap.add_argument("--chrome", default=None,
+                    help="Chrome binary(否則自動找 / 用 NOTEBOOKLM_COVER_CHROME)")
     args = ap.parse_args()
 
-    # 檢查必填參數，維持向後相容
-    if not args.manifest:
-        if not args.output:
-            ap.error("在未指定 --manifest 時，必須指定 --output")
-        if not args.line:
-            ap.error("在未指定 --manifest 時，至少要一個 --line 當標題")
+    chrome = _find_chrome(args.chrome)
 
-    from notebooklm_mcp.publish.artwork import validate_artwork
-
+    # 1) 批次:整季單集封面
     if args.manifest:
         import json
 
         with open(args.manifest, encoding="utf-8") as f:
             manifest = json.load(f)
         episodes = manifest.get("episodes", [])
-
-        # 先驗整份(壞資料 fail-fast,絕不動 manifest / 不半途覆寫)
         try:
-            _preflight_episodes(episodes)
+            _preflight_episodes(episodes)   # 壞資料 fail-fast,絕不半途覆寫 manifest
         except ValueError as e:
             ap.error(str(e))
 
-        program_title = args.show_name or manifest.get("title") or " ".join(args.line) or "Agentic 工程 筆記"
+        show_name = args.show_name or manifest.get("title") or "Audicast"
         out_dir = args.output_dir or os.path.dirname(os.path.abspath(args.manifest))
         os.makedirs(out_dir, exist_ok=True)
-
-        for ep_item in episodes:
-            ep_num = int(ep_item["episode"])            # 已過 preflight,保證 int
-            cover_path = os.path.abspath(os.path.join(out_dir, f"EP{ep_num:02d}.jpg"))
-            make_cover(
-                output=cover_path,
-                lines=[ep_item["title"]],
-                tag=args.tag,
-                subtitle=program_title,
-                byline=args.byline,
-                episode=str(ep_num),
-                font_cjk=args.font_cjk,
-                font_mono=args.font_mono,
-            )
-            info = validate_artwork(cover_path)
+        tpl = _load_template("cover_episode.html")
+        for ep in episodes:
+            n = int(ep["episode"])                      # 已過 preflight,保證 int
+            cover_path = os.path.abspath(os.path.join(out_dir, f"EP{n:02d}.jpg"))
+            hue = args.hue if args.hue is not None else _episode_hue(n)
+            info = _render(tpl, {
+                "__SHOW__": show_name,
+                "__EPNUM__": f"{n:02d}",
+                "__TITLE__": ep["title"],
+                "__BYLINE__": args.byline,
+                "__HUE__": hue,
+            }, cover_path, chrome)
             print(f"OK {cover_path} -> {info}")
-            ep_item["cover_path"] = cover_path          # 寫回絕對路徑
-
+            ep["cover_path"] = cover_path               # 寫回絕對路徑
         _atomic_write_json(args.manifest, manifest)     # 原子覆寫,避免截斷
         print(f"Manifest updated: {args.manifest}")
-    else:
-        make_cover(args.output, args.line, args.tag, args.subtitle, args.byline,
-                   args.episode, font_cjk=args.font_cjk, font_mono=args.font_mono)
-        info = validate_artwork(args.output)
+        return
+
+    # 2) 節目(show 層)品牌封面
+    if args.show:
+        if not args.output:
+            ap.error("--show 模式需要 --output")
+        hue = args.hue if args.hue is not None else _SHOW_HUE
+        info = _render(_load_template("cover_show.html"), {
+            "__SHOW__": args.show_name,
+            "__TAGLINE__": args.tagline,
+            "__BYLINE__": args.byline,
+            "__HUE__": hue,
+        }, args.output, chrome)
         print(f"OK {args.output} -> {info}")
+        return
+
+    # 3) 單集一次性
+    if not (args.output and args.episode and args.title):
+        ap.error("單集模式需要 --output --episode --title(或改用 --manifest / --show)")
+    import re
+
+    m = re.search(r"\d+", args.episode)
+    n = int(m.group(0)) if m else 1
+    hue = args.hue if args.hue is not None else _episode_hue(n)
+    info = _render(_load_template("cover_episode.html"), {
+        "__SHOW__": args.show_name,
+        "__EPNUM__": f"{n:02d}",
+        "__TITLE__": args.title,
+        "__BYLINE__": args.byline,
+        "__HUE__": hue,
+    }, args.output, chrome)
+    print(f"OK {args.output} -> {info}")
 
 
 if __name__ == "__main__":
