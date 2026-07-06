@@ -9,6 +9,11 @@ class FakeArtifacts:
         # Set to an integer N to make the N-th wait_for_completion call raise
         # TimeoutError (models a real generation timeout for error-path tests).
         self.fail_wait_on = None
+        # Exception INSTANCE to raise on the fail_wait_on-th wait (defaults to a plain
+        # TimeoutError). Set to a real SDK exception (e.g. ArtifactPendingTimeoutError,
+        # whose constructor needs notebook_id/task_id/timeout) to prove the podcast
+        # error path preserves the concrete type instead of reconstructing it.
+        self.wait_exc = None
         self._wait_count = 0
         # When True, generate_audio returns a FAILED status (task_id="",
         # is_failed=True) — models a rate-limit/quota/refusal that the SDK reports
@@ -74,7 +79,9 @@ class FakeArtifacts:
         self.calls.append(("wait", dict(notebook_id=notebook_id, task_id=task_id, timeout=timeout)))
         self._wait_count += 1
         if self.fail_wait_on is not None and self._wait_count == self.fail_wait_on:
-            raise TimeoutError(f"simulated generation timeout on wait #{self._wait_count}")
+            raise self.wait_exc or TimeoutError(
+                f"simulated generation timeout on wait #{self._wait_count}"
+            )
         if self.fail_complete:
             return type(
                 "S", (), {"task_id": task_id, "is_failed": True, "status": "failed", "error": "simulated mid-poll failure"}

@@ -8,6 +8,14 @@ empty id (hang or garbage). These helpers fail fast with a clear message.
 from __future__ import annotations
 
 
+class TerminalGenerationError(RuntimeError):
+    """生成以「伺服器端終態」收場(failed / removed,如每日配額耗盡)。
+
+    是 RuntimeError 的子類(既有 `pytest.raises(RuntimeError)` / isinstance 判斷不變),
+    但獨立型別讓呼叫端能精準區分「終態、不可續跑」與「生成之後的可續跑失敗(逾時/
+    下載中斷)」——podcast 流程據此決定要不要提示 `podcast_episode_resume`。"""
+
+
 def ensure_started(status: object) -> str:
     """Return the task_id, raising RuntimeError if generation did not start."""
     task_id = getattr(status, "task_id", "") or ""
@@ -34,9 +42,9 @@ def ensure_completed(status: object) -> None:
     """
     if getattr(status, "is_failed", False):
         detail = getattr(status, "error", None) or getattr(status, "status", None) or "failed"
-        raise RuntimeError(f"Generation failed while waiting: {detail}")
+        raise TerminalGenerationError(f"Generation failed while waiting: {detail}")
     if getattr(status, "is_removed", False):
-        raise RuntimeError(
+        raise TerminalGenerationError(
             "Generation removed by server(通常是每日配額耗盡);稍後再試或換帳號。"
             f" status={getattr(status, 'status', 'removed')!r}"
         )

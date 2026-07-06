@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 from . import runtime
-from ._status import ensure_completed, ensure_started
+from ._status import TerminalGenerationError, ensure_completed, ensure_started
 from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
@@ -71,6 +71,57 @@ def _validate_episode_args(episode_n: int, title: str, prior_mp3_path: str | Non
         raise ValueError("prior_mp3_path requires episode_n >= 2 (there is no prior to episode 1)")
 
 
+async def _finalize_episode(
+    notebook_id: str,
+    episode_n: int,
+    title: str,
+    artifact_id: str,
+    output_dir: str,
+    wait_timeout: float,
+) -> dict:
+    """單集後半段(生成之後):等完成 → 命名 → 下載 → 自上傳回錄 → 回傳 manifest 列。
+
+    抽成獨立函式,讓 `podcast_episode_resume` 能拿一個「已在雲端啟動」的 artifact_id
+    直接續完,不重生、不燒 quota。artifact_id 就是 generate_audio 的 task_id
+    (task_id ≡ artifact id;GenerationStatus 無 artifact_id 欄位)。"""
+    client = runtime.get_client()
+    os.makedirs(output_dir, exist_ok=True)
+    label = _episode_label(episode_n, title)
+
+    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
+    ensure_completed(final)
+
+    # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so
+    # the notebook stays legible regardless of the download outcome, then pull the mp3.
+    # fire-and-forget:0.7.3 預設 return_object=True 會再抓全量清單驗證且可能
+    # raise not-found;顯式 False 保留 0.4.1 語意(RPC 層錯誤仍會 raise)。
+    await client.artifacts.rename(notebook_id, artifact_id, label, return_object=False)
+
+    mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
+    await client.artifacts.download_audio(notebook_id, mp3_path, artifact_id)
+
+    # Re-upload THIS episode's own mp3 as a source named IDENTICALLY to its Studio
+    # artifact ("EP02" artifact <-> "EP02" source — same string, no suffix). This is
+    # the heart of the sequential-feedback method AND keeps a complete record:
+    #  - EVERY episode (including the last) ends up in Sources, name-matched to Studio.
+    #  - the NEXT episode's generation automatically sees this source for continuity,
+    #    so podcast_series needs no separate prior-upload step.
+    own_src = await client.sources.add_file(
+        notebook_id, mp3_path, mime_type="audio/mpeg", wait=True, wait_timeout=600.0
+    )
+    await client.sources.rename(notebook_id, own_src.id, label, return_object=False)
+
+    return {
+        "episode": episode_n,
+        "title": title.strip(),
+        "label": label,
+        "task_id": artifact_id,
+        "artifact_id": artifact_id,
+        "mp3_path": mp3_path,
+        "published_at": format_datetime(datetime.now(_TZ)),  # 產出時間 → 進 manifest
+    }
+
+
 async def _run_episode(
     notebook_id: str,
     episode_n: int,
@@ -87,7 +138,6 @@ async def _run_episode(
     os.makedirs(output_dir, exist_ok=True)
 
     _validate_episode_args(episode_n, title, prior_mp3_path)
-    label = _episode_label(episode_n, title)
 
     # Standalone continuity: if the caller hands us a prior episode's mp3 that is
     # NOT yet in the notebook (one-off podcast_episode use), upload + name it so
@@ -119,38 +169,31 @@ async def _run_episode(
     # (otherwise download falls back to "latest" and rename targets None).
     # ensure_started guards the failed/empty-task_id case (rate limit / quota / refusal).
     artifact_id = ensure_started(status)
-    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
-    ensure_completed(final)
 
-    # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so
-    # the notebook stays legible regardless of the download outcome, then pull the mp3.
-    # fire-and-forget:0.7.3 預設 return_object=True 會再抓全量清單驗證且可能
-    # raise not-found;顯式 False 保留 0.4.1 語意(RPC 層錯誤仍會 raise)。
-    await client.artifacts.rename(notebook_id, artifact_id, label, return_object=False)
-
-    mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
-    await client.artifacts.download_audio(notebook_id, mp3_path, artifact_id)
-
-    # Re-upload THIS episode's own mp3 as a source named IDENTICALLY to its Studio
-    # artifact ("EP02" artifact <-> "EP02" source — same string, no suffix). This is
-    # the heart of the sequential-feedback method AND keeps a complete record:
-    #  - EVERY episode (including the last) ends up in Sources, name-matched to Studio.
-    #  - the NEXT episode's generation automatically sees this source for continuity,
-    #    so podcast_series needs no separate prior-upload step.
-    own_src = await client.sources.add_file(
-        notebook_id, mp3_path, mime_type="audio/mpeg", wait=True, wait_timeout=600.0
-    )
-    await client.sources.rename(notebook_id, own_src.id, label, return_object=False)
-
-    return {
-        "episode": episode_n,
-        "title": title.strip(),
-        "label": label,
-        "task_id": status.task_id,
-        "artifact_id": artifact_id,
-        "mp3_path": mp3_path,
-        "published_at": format_datetime(datetime.now(_TZ)),  # 首次生成時間 → 進 manifest
-    }
+    # 生成一旦送出,artifact 就在 NotebookLM 雲端建立並跑到完成,不靠本地連線活著。
+    try:
+        return await _finalize_episode(
+            notebook_id, episode_n, title, artifact_id, output_dir, wait_timeout
+        )
+    except TerminalGenerationError:
+        # 伺服器端終態(failed / removed,如每日配額耗盡):artifact 已被下架,resume
+        # 也救不回——原樣往上拋,不誤導成「可續跑」。用專屬型別而非 except RuntimeError,
+        # 才不會把下載/命名步驟意外的 RuntimeError 也當成不可續跑。
+        raise
+    except Exception as exc:
+        # 其餘失敗(本地 wait 超時、下載中斷、網路斷)發生在生成之後,artifact 仍在雲端
+        # 完好。就地改寫 exc.args 附上 artifact_id + 現成的 podcast_episode_resume 呼叫,
+        # 再原樣 re-raise —— 保留原例外「型別與結構化欄位」(SDK 的 ArtifactTimeoutError
+        # 等 constructor 需 notebook_id/task_id/timeout 多個必填參數,type(exc)(str) 會
+        # 反而 TypeError 吞掉真錯;改寫 args 對內建與 SDK 例外都能把 hint 帶進 str(exc))。
+        # 呼叫端據此續完(不重生、不燒 quota),不必再 artifact_list 撈 id。
+        exc.args = (
+            f"{exc}\n音檔已在雲端生成(artifact_id={artifact_id!r})但後續步驟失敗。"
+            f"用 podcast_episode_resume 續完(不會重新生成):"
+            f"podcast_episode_resume(notebook_id={notebook_id!r}, episode_n={episode_n}, "
+            f"title={title.strip()!r}, artifact_id={artifact_id!r}, output_dir={output_dir!r})",
+        )
+        raise
 
 
 @mcp.tool()
@@ -186,6 +229,42 @@ async def podcast_episode(
         audio_format,
         audio_length,
         wait_timeout,
+    )
+
+
+@mcp.tool()
+async def podcast_episode_resume(
+    notebook_id: str,
+    episode_n: int,
+    title: str,
+    artifact_id: str,
+    output_dir: str,
+    wait_timeout: float = 1200.0,
+) -> dict:
+    """接續一個「已在 NotebookLM 雲端啟動」的音檔生成,續完後半段而**不重新生成**。
+
+    用途:``podcast_episode`` 在「生成送出後、下載/命名/回錄前」因 MCP 呼叫超時或
+    連線中斷而斷掉時,音檔仍在雲端跑完 —— 拿那次的 ``artifact_id`` 呼叫這個工具,
+    等它完成→命名→下載→自上傳回錄,不燒 quota、不多生一個 artifact。
+
+    ``artifact_id`` 從哪來:斷掉那次若有回錯誤訊息,裡面已附上;否則用
+    ``artifact_list(notebook_id, kind="audio")`` 依 ``created_at`` 找出最新那個。
+    ``title`` 傳大綱裡該集的標題(決定命名鐵律 ``EP{n:02d} {title}``)。
+
+    注意:同一 ``artifact_id`` **只續一次**。重複續(或斷線後原呼叫其實已完成、又再續
+    一次)會重下載、並多上傳一筆同名 ``EP{n:02d} 標題`` 來源。發現重覆時用 ``source_list``
+    找出多餘那筆、``source_delete`` 刪掉即可(reject-then-delete 同一套)。
+    """
+    # ponytail: 去重靠「一集只續一次 + 事後 source_delete」,不加行內鎖——真正的重覆風險
+    # 是斷線後換 stdio process 再續(跨 process),行內 asyncio.Lock 擋不到、只給假安全感。
+    # 本地驗證先行(壞參數 ValueError 秒退),再認證預檢——與 podcast_episode 同一
+    # fail-fast 順序:認證錯誤不得蓋掉參數錯誤。
+    _validate_episode_args(episode_n, title, None)
+    if not isinstance(artifact_id, str) or not artifact_id.strip():
+        raise ValueError("artifact_id 必填(從斷掉那次的錯誤訊息或 artifact_list 取得)")
+    await probe_auth(runtime.get_client())
+    return await _finalize_episode(
+        notebook_id, episode_n, title, artifact_id.strip(), output_dir, wait_timeout
     )
 
 

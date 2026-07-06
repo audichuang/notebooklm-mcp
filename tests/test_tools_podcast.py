@@ -189,3 +189,87 @@ async def test_podcast_episode_rejects_non_positive_episode_n(fake_client, tmp_p
                 "nb-123", episode_n=bad, title="心法篇", brief="b", output_dir=str(tmp_path)
             )
     assert fake_client.artifacts.calls == []
+
+
+# ---- 容錯:超時後用既有 artifact_id 續完一集(不重生、不燒 quota)----
+
+async def test_resume_finishes_episode_without_regenerating(fake_client, tmp_path):
+    """podcast_episode_resume 拿既有 artifact_id 續完後半段:等完成→命名→下載→
+    自上傳回錄,回傳與正常生成相同形狀的 dict,但**完全不呼叫 generate_audio**。"""
+    out = await p.podcast_episode_resume(
+        "nb-1", episode_n=2, title="實戰篇", artifact_id="art-xyz", output_dir=str(tmp_path)
+    )
+    kinds = [c[0] for c in fake_client.artifacts.calls]
+    assert "generate_audio" not in kinds  # 核心:不重生
+    assert kinds == ["wait", "rename", "download"]  # 只做後半段
+    # 命名鐵律照舊:Studio artifact 與自上傳來源同名 EP02 實戰篇,且都指向傳入的 id。
+    assert next(c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename") == "EP02 實戰篇"
+    assert next(c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename") == "EP02 實戰篇"
+    assert next(c[1]["artifact_id"] for c in fake_client.artifacts.calls if c[0] == "download") == "art-xyz"
+    assert out["artifact_id"] == "art-xyz"
+    assert out["label"] == "EP02 實戰篇"
+    assert out["mp3_path"].endswith("ep02.mp3")
+
+
+async def test_resume_local_validation_beats_auth_probe(fake_client, tmp_path):
+    """resume 壞參數要在打任何 RPC 前 ValueError 秒退(認證錯誤不得蓋掉參數錯誤)。"""
+    fake_client.notebooks.fail_list = True  # 若先 probe 會變 RuntimeError → 抓不到 ValueError
+    with pytest.raises(ValueError, match="title"):
+        await p.podcast_episode_resume("nb-1", 1, "  ", "art-1", str(tmp_path))
+    with pytest.raises(ValueError, match="episode_n"):
+        await p.podcast_episode_resume("nb-1", 0, "心法篇", "art-1", str(tmp_path))
+    with pytest.raises(ValueError, match="artifact_id"):
+        await p.podcast_episode_resume("nb-1", 1, "心法篇", "   ", str(tmp_path))
+    assert fake_client.artifacts.calls == []  # 一個 RPC 都沒打
+
+
+async def test_resume_fails_fast_when_auth_dead(fake_client, tmp_path):
+    """合法參數但 cookie 死:resume 也要在 wait/download 前秒退。"""
+    fake_client.notebooks.fail_list = True
+    with pytest.raises(RuntimeError, match="sync-auth"):
+        await p.podcast_episode_resume("nb-1", 1, "心法篇", "art-1", str(tmp_path))
+    assert fake_client.artifacts.calls == []
+
+
+async def test_resume_reports_removed_artifact(fake_client, tmp_path):
+    """resume 不得把伺服器下架(配額耗盡)的 artifact 當成功放行——如實 raise。"""
+    fake_client.artifacts.fail_removed = True
+    with pytest.raises(RuntimeError, match="配額|removed"):
+        await p.podcast_episode_resume("nb-1", 1, "心法篇", "art-1", str(tmp_path))
+
+
+async def test_episode_timeout_error_carries_artifact_id_for_resume(fake_client, tmp_path):
+    """核心容錯:podcast_episode 在生成送出後 wait 超時,錯誤仍是 TimeoutError(既有
+    契約不變)但帶上 artifact_id 與 podcast_episode_resume 指引,呼叫端才能不重生地
+    續完(不必再 artifact_list 撈)。"""
+    fake_client.artifacts.fail_wait_on = 1  # 第一次 wait_for_completion 拋 TimeoutError
+    with pytest.raises(TimeoutError) as ei:  # 型別保留:逾時仍是 TimeoutError
+        await p.podcast_episode("nb-1", episode_n=2, title="實戰篇", brief="b", output_dir=str(tmp_path))
+    msg = str(ei.value)
+    assert "task-123" in msg  # generate_audio 回的 artifact_id 有被帶出來
+    assert "podcast_episode_resume" in msg
+    # 生成確實送出了(quota 已用),所以指引 resume 而非重生。
+    assert any(c[0] == "generate_audio" for c in fake_client.artifacts.calls)
+
+
+async def test_episode_error_preserves_real_sdk_exception_type(fake_client, tmp_path):
+    """回歸鎖:真實 SDK 逾時例外(ArtifactPendingTimeoutError,constructor 需
+    notebook_id/task_id/timeout 多個必填參數)不能用 type(exc)(str) 重建——那會
+    TypeError 吞掉真錯。改寫 exc.args 才對:原例外型別保留,且 hint 進入 str(exc)。"""
+    from notebooklm.exceptions import ArtifactPendingTimeoutError
+
+    fake_client.artifacts.fail_wait_on = 1
+    fake_client.artifacts.wait_exc = ArtifactPendingTimeoutError("nb-1", "task-123", 1200.0)
+    with pytest.raises(ArtifactPendingTimeoutError) as ei:  # 型別未被吞成 TypeError/RuntimeError
+        await p.podcast_episode("nb-1", episode_n=2, title="實戰篇", brief="b", output_dir=str(tmp_path))
+    msg = str(ei.value)
+    assert "task-123" in msg and "podcast_episode_resume" in msg
+
+
+async def test_episode_terminal_failure_not_labeled_resumable(fake_client, tmp_path):
+    """終態失敗(ensure_completed 判 failed/removed = 配額耗盡)不可續跑:artifact 已下架,
+    resume 救不回——錯誤原樣拋出、**不得**帶 podcast_episode_resume 指引誤導呼叫端。"""
+    fake_client.artifacts.fail_complete = True  # wait 回 failed status → TerminalGenerationError
+    with pytest.raises(RuntimeError) as ei:
+        await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path))
+    assert "podcast_episode_resume" not in str(ei.value)
