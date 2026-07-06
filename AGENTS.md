@@ -96,7 +96,10 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   真相來源;RotateCookies 會把新 cookie 留在單一 process 記憶體卻寫不回 Doppler,下一個
   stdio process 反而拿舊 cookie 啟動。`app.py` 在 inline auth 模式會暫時設
   `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`,連 `from_storage()` 冷啟動的 poke 一起關掉。
-  跨 session 老化照舊靠 GUI 機重登 + `sync-auth.sh`。
+  Doppler `notebooklm/dev` 也**常駐設了 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`**:0.4.1 起
+  fetch-token 路徑(`_auth/refresh.py` 的 `_fetch_tokens_with_jar`)無條件先打一次
+  RotateCookies、無函式參數可關,少了這顆連 `doppler run -- notebooklm <cmd>` 的 CLI
+  呼叫都會作廢一次共用 cookie。跨 session 老化照舊靠 GUI 機重登 + `sync-auth.sh`。
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
 - `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。
