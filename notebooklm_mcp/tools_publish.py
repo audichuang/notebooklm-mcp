@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
@@ -105,6 +107,33 @@ async def _put(client, base: str, token: str, upload_token: str, name: str, data
         raise ValueError(f"upload failed: PUT {name} -> {r.status_code} {r.text[:300]}")
 
 
+def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
+    """把單集封面內嵌進音檔的 MP4 `covr` atom,回內嵌後的 bytes。NotebookLM 音檔是
+    MPEG-4 容器(.mp3 副檔名),Apple/Spotify 顯示單集封面主要吃**內嵌圖**(feed 的
+    `<item>` itunes:image 只有部分 client 認)。決定性:同音檔 + 同封面 → 同 bytes
+    (mutagen 只加 atom,不重編音訊、不寫時間戳,已離線實測兩次 byte 相同)。這是可被
+    測試 monkeypatch 的 seam(測試用假 mp3 bytes 不是合法 MP4)。"""
+    from mutagen.mp4 import MP4, MP4Cover
+
+    with open(cover_path, "rb") as f:
+        cover = f.read()
+    fmt = MP4Cover.FORMAT_PNG if cover[:8] == b"\x89PNG\r\n\x1a\n" else MP4Cover.FORMAT_JPEG
+    fd, tmp = tempfile.mkstemp(suffix=".m4a")
+    os.close(fd)
+    try:
+        shutil.copyfile(mp3_path, tmp)
+        mp4 = MP4(tmp)
+        mp4["covr"] = [MP4Cover(cover, imageformat=fmt)]
+        mp4.save()
+        with open(tmp, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 @mcp.tool()
 async def publish_series(
     show_id: str,
@@ -140,9 +169,15 @@ async def publish_series(
     _require(owner_name, "owner_name")
     _require(owner_email, "owner_email")
     # Validate artwork up front (fail-fast before any upload). Extension follows
-    # the real format so a JPEG is never served as .png.
+    # the real format so a JPEG is never served as .png. Content-address the filename
+    # (artwork-<hash>.jpg) so a CHANGED show cover gets a NEW URL → bypasses the CDN
+    # cache: the old fixed "artwork.jpg" name made Cloudflare serve the stale cover up
+    # to its TTL (~4h). Same content -> same hash -> byte-stable feed across republish.
     art_info = artwork_mod.validate_artwork(artwork_path)
-    artwork_file = "artwork.jpg" if art_info["format"] == "JPEG" else "artwork.png"
+    with open(artwork_path, "rb") as f:
+        art_bytes = f.read()
+    art_ext = "jpg" if art_info["format"] == "JPEG" else "png"
+    artwork_file = f"artwork-{hashlib.sha256(art_bytes).hexdigest()[:8]}.{art_ext}"
 
     token = identity.make_token(show_id, salt)
 
@@ -190,9 +225,12 @@ async def publish_series(
         for ep in manifest_eps:                                    # 1) media: mp3
             n = int(ep["episode"])
             local = await _ensure_local_mp3(notebook_id, ep)
-            with open(local, "rb") as f:
-                mp3_bytes = f.read()
-            hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]      # hash bytes we already read
+            # 內嵌單集封面進音檔(covr):Apple/Spotify 顯示單集封面主要吃內嵌圖,不是 feed
+            # 的 <item> itunes:image。內嵌後 bytes 變 → content-hash/URL 變(預期一次性 churn,
+            # uploader 不刪舊 URL)。cover_path preflight 已驗存在 + 規格。
+            mp3_bytes = _embed_cover(local, ep["cover_path"])
+            mp3_len = len(mp3_bytes)                                # enclosure length 用內嵌後大小
+            hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]      # hash 內嵌後 bytes
             mfile = media_filename(n, hash8)
             await _put(client, upload_url, token, upload_token, mfile, mp3_bytes)
             del mp3_bytes
@@ -250,7 +288,7 @@ async def publish_series(
                 "guid": identity.episode_guid(show_id, n),
                 "pub_date": ep.get("published_at") or _fallback_pub_date(n),
                 "media_file": mfile,
-                "length": os.path.getsize(local),   # mp3_bytes 已 del,用檔案大小(同值)
+                "length": mp3_len,   # 內嵌封面後的大小(mp3_bytes 已 del)
             }
             new_eps[str(n)]["artwork_file"] = ep_artwork_file   # 每集必做,一定有單集封面
             published.append({
@@ -258,8 +296,8 @@ async def publish_series(
                 "url": f"{base_pub}/feeds/{token}/{mfile}",
             })
 
-        with open(artwork_path, "rb") as f:                        # 1) media: artwork
-            await _put(client, upload_url, token, upload_token, artwork_file, f.read())
+        await _put(client, upload_url, token, upload_token,         # 1) media: artwork
+                   artwork_file, art_bytes)                         # bytes 已在 preflight 讀好
 
         show = {
             "show_id": show_id, "token": token, "notebook_id": notebook_id,

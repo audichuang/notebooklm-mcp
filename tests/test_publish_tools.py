@@ -17,6 +17,14 @@ from notebooklm_mcp.publish import identity
 _NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
 
+@pytest.fixture(autouse=True)
+def _noop_embed(monkeypatch):
+    """測試用假 mp3 bytes 不是合法 MP4,不能真丟給 mutagen。把 _embed_cover seam 換成
+    「回原始 bytes」——publish 的 PUT/feed 邏輯照測,真內嵌另在 test_cover_embedded 鎖。"""
+    monkeypatch.setattr(tools_publish, "_embed_cover",
+                        lambda mp3_path, cover_path: open(mp3_path, "rb").read())
+
+
 @pytest.fixture
 def env(monkeypatch):
     monkeypatch.delenv("PODCAST_FEEDS_ROOT", raising=False)  # gone in the PUT model
@@ -127,7 +135,8 @@ async def test_puts_every_episode_artwork_state_and_derived(env, tmp_path, artwo
     names = [c["name"] for c in captured]
     mp3s = [n for n in names if n.endswith(".mp3")]
     assert len(mp3s) == 2 and mp3s[0].startswith("EP01-") and mp3s[1].startswith("EP02-")
-    assert {"artwork.png", "show.json", "feed.xml", "index.html"} <= set(names)
+    assert {"show.json", "feed.xml", "index.html"} <= set(names)
+    assert any(n.startswith("artwork-") and n.endswith(".png") for n in names)  # content-addressed
 
 
 async def test_commit_order_media_then_state_then_derived(env, tmp_path, artwork_png, monkeypatch):
@@ -139,7 +148,8 @@ async def test_commit_order_media_then_state_then_derived(env, tmp_path, artwork
     assert names[1].startswith("EP01-cover-") and names[1].endswith(".png")
     assert names[2].startswith("EP02-") and names[2].endswith(".mp3")
     assert names[3].startswith("EP02-cover-") and names[3].endswith(".png")
-    assert names[4:] == ["artwork.png", "show.json", "feed.xml", "index.html"]
+    assert names[4].startswith("artwork-") and names[4].endswith(".png")  # content-addressed
+    assert names[5:] == ["show.json", "feed.xml", "index.html"]
 
 
 async def test_auth_precheck_runs_before_any_put(env, tmp_path, artwork_png, monkeypatch):
@@ -390,3 +400,24 @@ async def test_bad_episode_cover_fails_fast(env, tmp_path, artwork_png, monkeypa
     }], "badcover.json")
     with pytest.raises(ValueError):
         await _publish(manifest, artwork_png)
+
+
+async def test_cover_embedded_into_published_mp3(env, tmp_path, artwork_png, monkeypatch):
+    """發布的 mp3 = _embed_cover 內嵌後的 bytes(不是原始檔),且 enclosure length 用內嵌後
+    大小、media_file hash 也算內嵌後 bytes。覆寫掉 autouse 的 no-op seam 來當 spy。"""
+    captured = _install_mock(monkeypatch)
+    monkeypatch.setattr(
+        tools_publish, "_embed_cover",
+        lambda mp3_path, cover_path: b"COVR:" + open(mp3_path, "rb").read())
+    manifest = _manifest(tmp_path, [{
+        "episode": 1, "title": "第1集", "description": "本集重點。",
+        "mp3_path": _write_mp3(tmp_path, "emb.mp3", b"RAWAUDIO"),
+        "cover_path": _valid_cover(tmp_path, "emb-cover.png"),
+    }], "emb.json")
+    await _publish(manifest, artwork_png)
+
+    mp3_put = next(c["content"] for c in captured
+                   if c["name"].startswith("EP01-") and c["name"].endswith(".mp3"))
+    assert mp3_put == b"COVR:RAWAUDIO"          # 上傳的是內嵌後 bytes,不是原始 mp3
+    show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
+    assert show["episodes"]["1"]["length"] == len(mp3_put)   # enclosure length = 內嵌後大小
