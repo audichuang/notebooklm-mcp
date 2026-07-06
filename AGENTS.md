@@ -63,7 +63,9 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `_status.py` — generation-status 防護:SDK 把失敗/限流回報成 `task_id=""` 而非丟例外,用前要先擋掉
   - `languages.py`(白名單 + `zh_Hant` 預設)、`enums.py`(字串→int-enum)、`runtime.py`(client holder)
   - `auth_cli.py` — 貼 storage_state JSON 建檔(headless 備援)
-  - `cover_cli.py` — `notebooklm-cover` console script(封面 CLI,PIL);原 `scripts/make_cover.py` 移進套件,才能隨 `uv tool install` 上 PATH
+  - `cover_cli.py` — `notebooklm-cover` console script(封面 CLI)。填 `assets/*.html` template
+    的佔位符 → headless Chrome 光柵化 → RGB JPEG → `validate_artwork`;template 由 agy 設計、已凍結
+  - `assets/cover_episode.html` / `cover_show.html` — agy 設計、固化的封面 HTML template(隨 wheel 打包)
 - `tests/test_contracts.py` — 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API,擋上游漂移(離線 tripwire)
 - `scripts/` — `check_skill_sync.py`(CI 用:MCP 工具名 ⟷ skill 文件同步硬檢查)、`sync-auth.sh`(登入機推 Doppler)
 - `docs/superpowers/` — 設計/計畫/findings。**`SKILL.md` 路由層 + `references/`(工具參考 + 連續性提示詞)已不在本 repo**,在 skill repo `audi-skill/notebooklm`(見 Cross-Repo Sync Checklist)
@@ -128,17 +130,32 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - **X 長文(Article)餵不進來**:貼文只是 t.co 短連結,文章本體在 `x.com/i/article/…`
   需登入,`source_add_url` / WebFetch 都回 402。存成 PDF(Read 讀得出全文)或直接貼全文
   用 `source_add_text`。
-- **封面圖用 `notebooklm-cover` 生**(console script,實作 `notebooklm_mcp/cover_cli.py`,PIL,
-  已固化排版 + 自帶 Apple 驗證器)。`agy` 之類 coding agent **不能直接出點陣圖**,只會幫你寫這種
-  PIL code;要「AI 生成圖」得另接影像模型(Imagen/DALL·E)。NotebookLM 下載的音檔是 MPEG-4 容器但
-  副檔名 `.mp3`、以 `audio/mpeg` 發布,Apple 可正常播(已實測訂閱+播放通過)。
-- **單集封面(每集各自封面)**:`notebooklm-cover` 加 `--episode EP0n` 走「集號決定性 HSL 配色」
-  (色相 `(n*77)%360`)+ 集標當大標 + EP 徽章 + 節目名副標;不給 `--episode` 則產出與舊版
-  **byte 完全一致的節目封面**(向後相容)。`notebooklm-cover --manifest <json> --show-name .. --tag .. --byline .. --output-dir <dir>`
-  批次讀 episodes 逐集生、把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>`
-  掛 `itunes:image`,沒給 fallback 節目封面)。**決定性鐵律**:發布端用封面 bytes 做 content-hash,
-  同一集必須永遠生同一張,所以配色只能是集號的函式,不可隨機。`.jpg`/`.png` uploader 白名單本來就放行,
+- **封面圖 = 凍結的 HTML template + headless Chrome 光柵化**(`notebooklm-cover`,實作
+  `cover_cli.py`)。設計固化在 `notebooklm_mcp/assets/cover_episode.html` / `cover_show.html`
+  (由 **agy/Gemini 設計、產出自包含 HTML**,已 commit 進 repo);**生封面時不叫 agy**——工具只做
+  「填佔位符 `__SHOW__`/`__EPNUM__`/`__TITLE__`/`__BYLINE__`/`__HUE__` → Chrome 截 3000² → RGB JPEG
+  → `validate_artwork`」,離線、決定性、無 LLM。要換整體設計才再叫一次 agy 重生 template(手動、很少)。
+  agy 這類 coding agent **仍不能直接吐點陣圖**,但**擅長出 HTML/CSS**,交給 Chrome 光柵化質感高一截、
+  改版只改 template。**需系統有 headless Chrome**(`google-chrome`/`chromium`;`--chrome` 或
+  `NOTEBOOKLM_COVER_CHROME` 指定)——只有「產封面的那台」需要,3 個認證 VM 不用。NotebookLM 下載的
+  音檔是 MPEG-4 容器但副檔名 `.mp3`、以 `audio/mpeg` 發布,Apple 可正常播(已實測訂閱+播放通過)。
+- **單集封面**:`notebooklm-cover --manifest <json> --show-name Audicast --byline audichuang [--output-dir <dir>]`
+  批次讀 episodes 逐集填 episode template(集號決定色相 `(n*77)%360`、集標當大標、EP 徽章)、
+  把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>` 掛 `itunes:image`,
+  缺 `cover_path` 直接 fail,不 fallback 節目封面)。**節目封面**:`--show --output assets/cover.jpg
+  --show-name Audicast --tagline "…" --byline audichuang`。單集一次性:`--output --episode EP0n --title "…"`。
+  **決定性鐵律**:發布端用封面 bytes 做 content-hash,同一集必須永遠生同一張——所以色相只能是集號的
+  函式(不可隨機);但 bytes 也吃 **Chrome/CJK 字型版本**,換版本會漂 → 固定在同一台機器產、產出的
+  JPEG 即事實來源(可版控;等同舊 PIL 的字型 caveat)。`.jpg`/`.png` uploader 白名單本來就放行,
   **不用重部署 NAS**(不像加 `.pdf`/`.html` 那次)。
+- **單集封面「app 讀不到」的真根因 = 音檔沒內嵌圖**:feed 的 `<item>` itunes:image 我方掛得對、
+  URL 也公網可達(實測 200),但 **Apple/Spotify 顯示單集封面主要吃音檔內嵌的 MP4 `covr` atom**,
+  只有部分 client(Overcast/Pocket Casts…)認 feed 的 item image。NotebookLM 音檔是 MPEG-4 容器
+  但**不含封面** → 只吃內嵌圖的 client 一片空白。故 `publish_series` 發布前用 `mutagen` 把該集
+  `cover_path` 內嵌進 mp3 的 `covr`(`_embed_cover` seam;決定性、不重編音訊)。**代價**:內嵌改 mp3
+  bytes → content-hash/enclosure URL 變,**切到內嵌的那次 republish 全集換新 mp3 URL**(舊 URL 因
+  uploader 不刪仍可用,訂閱者會重抓一次)。測試用假 mp3 bytes 不是合法 MP4,用 autouse fixture 把
+  `_embed_cover` 換成 no-op。
 
 ## Conventions
 
