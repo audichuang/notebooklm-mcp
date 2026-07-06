@@ -178,3 +178,14 @@ async def test_local_validation_beats_auth_probe(fake_client, tmp_path):
         await p.podcast_episode(
             "nb-123", episode_n=1, title="  ", brief="b", output_dir=str(tmp_path)
         )
+
+
+async def test_podcast_episode_rejects_non_positive_episode_n(fake_client, tmp_path):
+    """單集入口要擋 episode_n < 1(否則生出 EP00/負集號還燒 quota);且在 probe 前 fail。"""
+    fake_client.notebooks.fail_list = True  # 若先 probe 會變 RuntimeError → 這裡就抓不到 ValueError
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="episode_n"):
+            await p.podcast_episode(
+                "nb-123", episode_n=bad, title="心法篇", brief="b", output_dir=str(tmp_path)
+            )
+    assert fake_client.artifacts.calls == []

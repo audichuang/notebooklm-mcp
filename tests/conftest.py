@@ -65,8 +65,11 @@ class FakeArtifacts:
         return type("S", (), {"task_id": "task-123", "is_failed": False})()
 
     # Signature mirrors notebooklm-py 0.3.4 ArtifactsAPI.wait_for_completion.
+    # 簽名鏡射 notebooklm-py 0.7.3:0.4.x 的 poll_interval 已移除、尾端新增 on_status_change。
+    # 我方呼叫只用 (notebook_id, task_id, timeout=)。
     async def wait_for_completion(
-        self, notebook_id, task_id, initial_interval=2.0, max_interval=10.0, timeout=300.0, poll_interval=None
+        self, notebook_id, task_id, initial_interval=2.0, max_interval=10.0, timeout=300.0,
+        max_not_found=5, min_not_found_window=10.0, on_status_change=None
     ):
         self.calls.append(("wait", dict(notebook_id=notebook_id, task_id=task_id, timeout=timeout)))
         self._wait_count += 1

@@ -61,6 +61,10 @@ def _write_manifest(manifest_path: str, notebook_id: str, episodes: list[dict]) 
 def _validate_episode_args(episode_n: int, title: str, prior_mp3_path: str | None) -> None:
     """單集參數的純本地驗證(不打網路)。壞參數 ValueError 秒退——必須在
     auth 預檢之前跑,認證錯誤不得蓋掉參數錯誤。"""
+    # episode_n 必須是 >= 1 的整數(bool 是 int 子類,明確擋掉):否則會生出 EP00/
+    # 負集號、還燒掉一次生成 quota。podcast_series 有 start>=1 守衛,單集入口也要有。
+    if not isinstance(episode_n, int) or isinstance(episode_n, bool) or episode_n < 1:
+        raise ValueError(f"episode_n must be an int >= 1, got: {episode_n!r}")
     if not isinstance(title, str) or not title.strip():
         raise ValueError(f"episode {episode_n} requires a non-empty 'title'")
     if prior_mp3_path and episode_n <= 1:

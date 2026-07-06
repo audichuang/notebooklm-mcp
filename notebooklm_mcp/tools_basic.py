@@ -85,7 +85,11 @@ async def source_add_file(
 
 @mcp.tool()
 async def source_delete(notebook_id: str, source_id: str) -> dict:
-    """Delete a source, e.g. remove a rejected episode before regenerating."""
+    """Delete a source, e.g. remove a rejected episode before regenerating.
+
+    注意:0.7.x 起 SDK 的 delete 是 idempotent —— 刪不存在的 source 也「成功」不 raise。
+    因此 deleted 表示「呼叫後該 id 已不在筆記本」,不保證它先前存在(打錯 id 也回 deleted)。
+    需要確認確實刪掉某個既有來源時,先用 source_list 取得真實 source_id。"""
     await runtime.get_client().sources.delete(notebook_id, source_id)
     return {"deleted": source_id}
 

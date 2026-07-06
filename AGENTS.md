@@ -100,6 +100,9 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - **`status="removed"` ≠ `is_failed`(0.6.0 起)**:被伺服器下架的 artifact(NOT_FOUND
   輪詢耗盡,通常是每日配額)回 `status="removed"` 且 `is_failed=False`(0.4.x 是合成
   `"failed"`)。`ensure_completed` 一併擋 `is_removed` 才不會把配額下架當成功放行。
+- `sources.delete` 是 **idempotent**(0.7.0 起):刪不存在的 source 也「成功」不 raise。
+  `source_delete` 回的 `deleted` 只代表「呼叫後該 id 已不在筆記本」,**不保證它先前存在**
+  (打錯 id 也回 deleted)。要確認刪掉某既有來源,先用 `source_list` 拿真實 `source_id`。
 - `sources.add_file` 有 `title`(0.7.x),**但內部仍是 add→rename 兩步且改名失敗只 log 不
   raise** → podcast 流程維持顯式 add_file → rename 兩步(fail-loud);`source_add_file` 工具
   的 title= 有回傳後檢,未生效會 raise。

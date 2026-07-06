@@ -135,6 +135,9 @@ def test_rename_signatures_gained_return_object():
 
     assert _params(ArtifactsAPI.rename) == ["self", "notebook_id", "artifact_id", "new_title", "return_object"]
     assert _params(SourcesAPI.rename) == ["self", "notebook_id", "source_id", "new_title", "return_object"]
+    # return_object 是 keyword-only:鎖住它,擋未來有人寫成位置參數(我方一律 keyword 傳 False)。
+    for func in (ArtifactsAPI.rename, SourcesAPI.rename):
+        assert inspect.signature(func).parameters["return_object"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_audio_enum_members():
