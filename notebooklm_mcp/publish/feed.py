@@ -68,6 +68,9 @@ def build_feed_xml(show: dict, base_url: str) -> str:
         ep_art = ep.get("artwork_file")
         if ep_art:
             item.append(f'      <itunes:image href={quoteattr(base + "/" + ep_art)}/>')
+        duration = ep.get("duration")
+        if duration:
+            item.append(f"      <itunes:duration>{escape(str(duration))}</itunes:duration>")
         item += [
             f"      <pubDate>{escape(ep['pub_date'])}</pubDate>",
             f'      <guid isPermaLink="false">{escape(ep["guid"])}</guid>',

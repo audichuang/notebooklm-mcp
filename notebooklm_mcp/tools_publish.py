@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -132,6 +133,26 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
             os.unlink(tmp)
         except OSError:
             pass
+
+
+def _audio_duration_hms(path: str) -> str | None:
+    """Return HH:MM:SS from ffprobe. NotebookLM audio is MP4/DASH with a .mp3
+    suffix; mutagen currently reports length=0 for these files."""
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            text=True,
+            timeout=15,
+        ).strip()
+        seconds = max(0, int(round(float(out))))
+    except Exception:
+        return None
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
 @mcp.tool()
@@ -290,6 +311,9 @@ async def publish_series(
                 "media_file": mfile,
                 "length": mp3_len,   # 內嵌封面後的大小(mp3_bytes 已 del)
             }
+            duration = _audio_duration_hms(local)
+            if duration:
+                new_eps[str(n)]["duration"] = duration
             new_eps[str(n)]["artwork_file"] = ep_artwork_file   # 每集必做,一定有單集封面
             published.append({
                 "n": n, "title": ep["title"], "guid": new_eps[str(n)]["guid"],
