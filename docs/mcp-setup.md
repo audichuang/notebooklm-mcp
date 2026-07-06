@@ -3,8 +3,8 @@
 Install the tagged MCP package on each machine first:
 
 ```bash
-git ls-remote https://github.com/audichuang/notebooklm-mcp.git refs/tags/v0.2.0
-uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.0"
+git ls-remote https://github.com/audichuang/notebooklm-mcp.git refs/tags/v0.2.3
+uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.3"
 ```
 
 Register the MCP server with Claude Code using stdio transport and Doppler auth injection.
@@ -39,7 +39,9 @@ Project `.mcp.json` entries should use the same zero-path command:
 }
 ```
 
-Each VM runs its own local MCP server process. Doppler injects the same `NOTEBOOKLM_AUTH_JSON` value into each process, and `notebooklm-py` treats that env var as read-only storage state.
+Each VM runs its own local MCP server process. Doppler injects the same
+`NOTEBOOKLM_AUTH_JSON` value into each process, and the MCP server disables SDK
+RotateCookies/keepalive for that inline read-only auth source.
 
 For HTTP transport:
 

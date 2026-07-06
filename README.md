@@ -19,7 +19,7 @@ uv run pytest -q
 ## Tool install
 
 ```bash
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.3"
 ```
 
 The install exposes `notebooklm-mcp` and `notebooklm-cover` on PATH.
@@ -48,6 +48,9 @@ bash scripts/sync-auth.sh
 ```
 
 Headless machines consume the synced Doppler secret and do not run `notebooklm login`.
+The MCP server disables NotebookLM SDK cookie keepalive/RotateCookies when
+`NOTEBOOKLM_AUTH_JSON` is present, because that inline secret is read-only and
+shared across machines.
 
 ## Local smoke
 

@@ -23,6 +23,11 @@
 ### 認證：Doppler 為硬性需求（3 VM 同步）
 `notebooklm-py` 原生讀 `NOTEBOOKLM_AUTH_JSON`，且該變數存在時**跳過磁碟寫回**（唯讀）→ 多 VM 各自唯讀不漂移。登入在有 GUI 的機器做一次 → `sync-auth.sh` 推 Doppler → 所有無頭機消費。
 
+2026-07-06 修正：MCP 不再啟用 SDK `keepalive=`，且 inline auth 時會暫時設
+`NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`。原因是 `from_storage()` 冷啟動與背景
+keepalive 都會打 RotateCookies；env-var auth 沒有 storage path 可寫回,三台 VM / 多個
+stdio process 會各自輪替出只存在記憶體的新 cookie,讓 Doppler 裡的基準 cookie 變成舊狀態。
+
 ---
 
 ## 2. Live 驗證踩到的坑（0.3.4 實際行為 vs 最新文件）

@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.3"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -91,11 +91,12 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   語意、RPC schema 變動幾乎都最先出現在那),再對照 notebooklm-py 的 GitHub issues。
   **`_research/` 唯讀:連 `git pull` 都不做**,clone 更新請使用者自行決定。
 - `from_storage()` 是**同步函式**,回傳可直接 `async with` 的 context →
-  `async with NotebookLMClient.from_storage(keepalive=600)`(0.4.x「coroutine 必須 await」
-  已走入歷史)。`keepalive=600`:session 內背景 RotateCookies task(process-scoped,隨
-  server 生滅),長生成不因 `__Secure-1PSIDTS` 過期中途死;**env-var 唯讀模式只轉記憶體、
-  不落盤**,跨 session 老化照舊 2–4 週 GUI 機重登 + `sync-auth.sh`。網路擋
-  `accounts.google.com` 時設 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1` 關閉。
+  `async with NotebookLMClient.from_storage()`(0.4.x「coroutine 必須 await」慣用法已走入
+  歷史)。MCP **不傳 `keepalive=`**:Doppler `NOTEBOOKLM_AUTH_JSON` 是 3 VM 共用、唯讀
+  真相來源;RotateCookies 會把新 cookie 留在單一 process 記憶體卻寫不回 Doppler,下一個
+  stdio process 反而拿舊 cookie 啟動。`app.py` 在 inline auth 模式會暫時設
+  `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`,連 `from_storage()` 冷啟動的 poke 一起關掉。
+  跨 session 老化照舊靠 GUI 機重登 + `sync-auth.sh`。
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
 - `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。

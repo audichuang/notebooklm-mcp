@@ -232,7 +232,8 @@ async def podcast_series(
 
     # 所有本地驗證(episodes 形狀、start 邊界、manifest 載入)通過後才做認證
     # 預檢:整季動輒數小時,cookie 死了要在燒任何生成之前秒退。只在季開頭驗
-    # 一次;跑到一半的鮮度由 lifespan 的 keepalive=600 背景續命。
+    # 一次;Doppler inline auth 不做 RotateCookies,避免各 stdio process 輪替出
+    # Doppler 寫不回的新 cookie。
     await probe_auth(runtime.get_client())
 
     # No prior-mp3 threading: each episode self-uploads its mp3 as a named source

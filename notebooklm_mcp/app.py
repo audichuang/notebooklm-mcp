@@ -8,13 +8,14 @@ re-imports it as ``notebooklm_mcp.server``, creating TWO ``mcp`` objects: tools
 registered on one, ``run()`` served the other (zero tools exposed over the MCP
 protocol). Importing the app from a dedicated module avoids that duplication.
 
-Owns one long-lived NotebookLMClient so SDK keepalive state survives long
-generation tasks. Auth comes from NOTEBOOKLM_AUTH_JSON (typically Doppler).
+Owns one long-lived NotebookLMClient for each MCP process. Auth comes from
+NOTEBOOKLM_AUTH_JSON (typically Doppler).
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 from collections.abc import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
@@ -22,21 +23,35 @@ from notebooklm import NotebookLMClient
 
 from . import runtime
 
+_AUTH_JSON_ENV = "NOTEBOOKLM_AUTH_JSON"
+_DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
+
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
     # notebooklm-py 0.7.x:from_storage() 是同步函式,回傳可直接 async with 的
     # context(0.4.x「coroutine 必須 await」慣用法已走入歷史)。
-    # keepalive=600 開啟 session 內背景 RotateCookies task(Google 自宣告的輪替
-    # 週期即 600s):process-scoped、隨 server 生滅,讓跨小時長生成不因
-    # __Secure-1PSIDTS 過期中途死。env-var 唯讀模式下只轉記憶體、不落盤,
-    # 跨 session 的 cookie 老化仍靠 GUI 機重登 + sync-auth.sh。
-    async with NotebookLMClient.from_storage(keepalive=600) as client:
-        runtime.set_client(client)
-        try:
-            yield
-        finally:
-            runtime.set_client(None)
+    # Doppler 注入的 NOTEBOOKLM_AUTH_JSON 是唯讀真相來源:RotateCookies 會把
+    # 新 cookie 留在記憶體,卻寫不回 Doppler,下一個 stdio process 反而拿舊
+    # cookie 啟動。MCP 不開背景 keepalive;inline auth 還要關掉 from_storage()
+    # 冷啟動時的 poke。
+    inline_auth = _AUTH_JSON_ENV in os.environ
+    old_disable = os.environ.get(_DISABLE_KEEPALIVE_ENV)
+    if inline_auth:
+        os.environ[_DISABLE_KEEPALIVE_ENV] = "1"
+    try:
+        async with NotebookLMClient.from_storage() as client:
+            runtime.set_client(client)
+            try:
+                yield
+            finally:
+                runtime.set_client(None)
+    finally:
+        if inline_auth:
+            if old_disable is None:
+                os.environ.pop(_DISABLE_KEEPALIVE_ENV, None)
+            else:
+                os.environ[_DISABLE_KEEPALIVE_ENV] = old_disable
 
 
 mcp = FastMCP("notebooklm", lifespan=_lifespan)

@@ -9,16 +9,15 @@ def _params(func):
     return list(inspect.signature(func).parameters)
 
 
-def test_from_storage_is_sync_context_factory_with_keepalive():
+def test_from_storage_is_sync_context_factory():
     """0.7.3:from_storage 是同步函式,回傳可直接 `async with` 的 context
     (0.4.x「coroutine 必須 await」慣用法已走入歷史;app.py 用 no-await 寫法)。
-    keepalive= 是 session 內背景 RotateCookies 的開關,lifespan 依賴它。
     這裡紅了就要連同 app.py 的呼叫慣用法一起改。"""
     from notebooklm import NotebookLMClient
 
     assert not inspect.iscoroutinefunction(NotebookLMClient.from_storage)
     p = _params(NotebookLMClient.from_storage)
-    assert "keepalive" in p and "keepalive_min_interval" in p
+    assert p[:3] == ["path", "timeout", "profile"]
 
 
 def test_generate_audio_signature():

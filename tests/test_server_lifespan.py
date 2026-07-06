@@ -1,8 +1,8 @@
 """Regressions for the server app:
 
 1. notebooklm-py 0.7.x from_storage() 是同步函式,回傳可直接 async with 的
-   context(_FromStorageContext)。lifespan 必須用 no-await 慣用法,且必須帶
-   keepalive=600(session 內背景 RotateCookies;掉了會讓長生成中途認證死)。
+   context(_FromStorageContext)。lifespan 必須用 no-await 慣用法。MCP 不啟動
+   keepalive;Doppler NOTEBOOKLM_AUTH_JSON 是唯讀真相來源,不可觸發 RotateCookies。
 
 2. The canonical `mcp` must actually expose the tools. They were registered on a
    different instance than the one served when launched via `python -m
@@ -12,6 +12,9 @@
 import pytest
 
 from notebooklm_mcp import app, runtime
+
+
+DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
 
 
 class _FakeClientCM:
@@ -24,9 +27,36 @@ class _FakeClientCM:
 
 def _fake_from_storage(*args, **kwargs):
     # 鏡射 0.7.3:同步函式,回傳可直接 async with 的 context。
-    # lifespan 掉了 keepalive=600 這裡就紅(它是長生成不中途死的關鍵)。
-    assert kwargs.get("keepalive") == 600
     return _FakeClientCM()
+
+
+async def test_lifespan_does_not_enable_background_keepalive(monkeypatch):
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON", raising=False)
+    monkeypatch.delenv(DISABLE_KEEPALIVE_ENV, raising=False)
+
+    def fake_from_storage(*args, **kwargs):
+        assert kwargs.get("keepalive") is None
+        assert DISABLE_KEEPALIVE_ENV not in app.os.environ
+        return _FakeClientCM()
+
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", fake_from_storage)
+    async with app._lifespan(app.mcp):
+        assert isinstance(runtime.get_client(), _FakeClientCM)
+
+
+async def test_lifespan_with_inline_auth_disables_cookie_rotation(monkeypatch):
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", '{"cookies":[]}')
+    monkeypatch.delenv(DISABLE_KEEPALIVE_ENV, raising=False)
+
+    def fake_from_storage(*args, **kwargs):
+        assert kwargs.get("keepalive") is None
+        assert app.os.environ[DISABLE_KEEPALIVE_ENV] == "1"
+        return _FakeClientCM()
+
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", fake_from_storage)
+    async with app._lifespan(app.mcp):
+        assert isinstance(runtime.get_client(), _FakeClientCM)
+    assert DISABLE_KEEPALIVE_ENV not in app.os.environ
 
 
 async def test_lifespan_enters_from_storage_context(monkeypatch):
