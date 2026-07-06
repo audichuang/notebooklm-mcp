@@ -1,6 +1,6 @@
 [project]
 name = "notebooklm-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -29,8 +29,8 @@ testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["notebooklm_mcp"]
-# 封面 HTML template 是資料檔,明確帶進 wheel(消費端靠 uv tool install,沒有 template 就生不了封面)
-force-include = { "notebooklm_mcp/assets" = "notebooklm_mcp/assets" }
+# 註:assets/*.html(封面 template)在 notebooklm_mcp 套件目錄內,hatchling 預設就會打包進 wheel;
+# 別再加 force-include(會與預設收錄撞成「same path」build error)。
 
 [build-system]
 requires = ["hatchling"]
