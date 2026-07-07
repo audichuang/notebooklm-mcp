@@ -54,7 +54,31 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 os.environ[_DISABLE_KEEPALIVE_ENV] = old_disable
 
 
-mcp = FastMCP("notebooklm", lifespan=_lifespan)
+# Protocol-level server instructions: surfaced to ANY MCP client (even one
+# without our external skill). Deliberately a SKELETON — workflow order + env
+# vars + the few killer gotchas — with detail delegated to the skill, so it does
+# not drift from SKILL.md (see the Cross-Repo Sync Checklist in AGENTS.md).
+_INSTRUCTIONS = """\
+建在 notebooklm-py 之上的薄 MCP + 確定性 podcast 續集工具。認證由環境變數
+NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
+
+主流程(優先用高階工具,別自己拼低階步驟):
+- 整季/單集生成 → podcast_series(episodes 放一集即單集)。斷線續跑用
+  podcast_episode_resume。
+- 發布成 Apple RSS → publish_series(讀 series_manifest.json;需 env
+  PODCAST_PUBLIC_BASE_URL / PODCAST_TOKEN_SALT / PODCAST_UPLOAD_URL /
+  PODCAST_UPLOAD_TOKEN)。
+- 低階工具(notebook_* / source_* / artifact_* / chat_*)供救援與組裝,
+  一般流程不需逐個手動呼叫。
+
+鐵律:
+- 任何長跑前先 auth_check;cookie 死了秒退,別燒掉數小時。
+- streamable-http / sse 模式「無認證」——勿綁非 loopback host。
+
+完整路由與參數細節見 notebooklm skill(audi-skill/notebooklm)。
+"""
+
+mcp = FastMCP("notebooklm", instructions=_INSTRUCTIONS, lifespan=_lifespan)
 
 # Register tools. Each module imports `mcp` from here and calls @mcp.tool().
 from . import tools_artifacts, tools_basic, tools_podcast, tools_publish  # noqa: E402,F401
