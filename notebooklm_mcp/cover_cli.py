@@ -153,6 +153,8 @@ def main() -> None:
     ap.add_argument("--tagline", default="", help="節目封面副標(--show 模式)")
     ap.add_argument("--byline", default="", help="署名")
     ap.add_argument("--episode", default=None, help="集號如 EP05(單集一次性模式)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="批次模式:目標封面檔已存在就跳過 render(只生新集,仍寫回 cover_path)")
     ap.add_argument("--hue", type=int, default=None,
                     help="覆寫色相 0-360(預設:單集用集號決定、節目用品牌色)")
     ap.add_argument("--chrome", default=None,
@@ -180,6 +182,10 @@ def main() -> None:
         for ep in episodes:
             n = int(ep["episode"])                      # 已過 preflight,保證 int
             cover_path = os.path.abspath(os.path.join(out_dir, f"EP{n:02d}.jpg"))
+            if args.skip_existing and os.path.exists(cover_path):
+                ep["cover_path"] = cover_path               # 仍寫回,不遺漏
+                print(f"SKIP {cover_path} (exists)")
+                continue
             hue = args.hue if args.hue is not None else _episode_hue(n)
             info = _render(tpl, {
                 "__SHOW__": show_name,

@@ -17,12 +17,13 @@ uv run pytest -q
 #   註:fresh venv + uv pip install 後首次 uv run 可能撞暫時性 re-sync churn(ModuleNotFoundError),
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
-# 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.3"
+# 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.7"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
-#   HTTP 模式：--transport streamable-http --host 0.0.0.0 --port 8484
+#   HTTP 模式：--transport streamable-http --host 127.0.0.1 --port 8484
+#   ⚠️ streamable-http / sse「無認證」——勿綁非 loopback host(同網段可驅動帳號)。
 #   repo 內開發時亦可 uv run python -m notebooklm_mcp.server --transport stdio
 
 # 註冊進 Claude Code（細節見 docs/mcp-setup.md）。CLI 2.1.201 的 `claude mcp add … -- …`
@@ -46,7 +47,8 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
 
 - `notebooklm_mcp/`
   - `app.py` — 真正的 FastMCP app + 工具註冊 + lifespan(長駐單一 client,跨長生成不掉線)+ 多 transport
-    main。獨立模組以確保「唯一 mcp instance」,不論用什麼方式啟動。
+    main。獨立模組以確保「唯一 mcp instance」,不論用什麼方式啟動。帶 server-level `instructions`
+    (骨架:主流程+env+鐵律,指回 skill;**刻意不複製 SKILL.md 以免漂移**)供無 skill 的原生 client。
   - `server.py` — thin launcher,只 `from .app import _lifespan, main, mcp`(可被當 `__main__` 跑)
   - `tools_basic.py` — notebook / source / `generate_audio` / artifact / `chat_ask`(薄包,`zh_Hant` 預設)。
     含讀取/觀測面:`artifact_list`(列筆記本現有 artifact,救援/對帳用)、`source_list`、
@@ -54,7 +56,8 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `tools_artifacts.py` — `generate_slides`(簡報 PDF)/ `generate_report`(研讀 Markdown)按需生,
     路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
-  - `tools_podcast.py` — `podcast_episode`(單集 5 步)/ `podcast_series`(整季純程式碼迴圈)
+  - `tools_podcast.py` — `podcast_episode`(單集 5 步)/ `podcast_episode_resume`(斷線後續跑該集)/
+    `podcast_series`(整季純程式碼迴圈)
   - `tools_publish.py` — `publish_series` / `feed_info`(把整季發布成 Apple 合規
     RSS feed;薄 I/O 編排,內網 HTTP PUT 到 NAS uploader,提交順序:媒體檔→show.json→feed.xml/index.html)
   - `publish/` — 純邏輯(離線可測):`identity.py`(HMAC→base32 決定性 token + `episode_guid`,無 registry)、
@@ -62,6 +65,7 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     `artwork.py`(Apple Show Cover 規格驗證)、`rss_models.py` / `feed.py`(RSS+iTunes XML + index.html)
   - `_status.py` — generation-status 防護:SDK 把失敗/限流回報成 `task_id=""` 而非丟例外,用前要先擋掉
   - `languages.py`(白名單 + `zh_Hant` 預設)、`enums.py`(字串→int-enum)、`runtime.py`(client holder)
+  - `auth_probe.py` — `probe_auth` 輕量真 RPC 認證預檢(長跑前 fail-fast;`auth_check` 工具的底層)
   - `auth_cli.py` — 貼 storage_state JSON 建檔(headless 備援)
   - `cover_cli.py` — `notebooklm-cover` console script(封面 CLI)。填 `assets/*.html` template
     的佔位符 → headless Chrome 光柵化 → RGB JPEG → `validate_artwork`;template 由 agy 設計、已凍結
@@ -142,7 +146,8 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   agy 這類 coding agent **仍不能直接吐點陣圖**,但**擅長出 HTML/CSS**,交給 Chrome 光柵化質感高一截、
   改版只改 template。**需系統有 headless Chrome**(`google-chrome`/`chromium`;`--chrome` 或
   `NOTEBOOKLM_COVER_CHROME` 指定)——只有「產封面的那台」需要,3 個認證 VM 不用。NotebookLM 下載的
-  音檔是 MPEG-4 容器但副檔名 `.mp3`、以 `audio/mpeg` 發布,Apple 可正常播(已實測訂閱+播放通過)。
+  音檔是 **fragmented-MP4 / DASH**(AAC),副檔名 `.mp3`、以 `audio/mpeg` 發布——raw 檔**能播但整檔
+  下載完前不能 seek**(拖進度跳下一集);`_embed_cover` 發布前會無損 remux 去分段修掉(見下方 gotcha)。
 - **單集封面**:`notebooklm-cover --manifest <json> --show-name Audicast --byline audichuang [--output-dir <dir>]`
   批次讀 episodes 逐集填 episode template(集號決定色相 `(n*77)%360`、集標當大標、EP 徽章)、
   把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>` 掛 `itunes:image`,
@@ -155,11 +160,15 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - **單集封面「app 讀不到」的真根因 = 音檔沒內嵌圖**:feed 的 `<item>` itunes:image 我方掛得對、
   URL 也公網可達(實測 200),但 **Apple/Spotify 顯示單集封面主要吃音檔內嵌的 MP4 `covr` atom**,
   只有部分 client(Overcast/Pocket Casts…)認 feed 的 item image。NotebookLM 音檔是 MPEG-4 容器
-  但**不含封面** → 只吃內嵌圖的 client 一片空白。故 `publish_series` 發布前用 `mutagen` 把該集
-  `cover_path` 內嵌進 mp3 的 `covr`(`_embed_cover` seam;決定性、不重編音訊)。**代價**:內嵌改 mp3
-  bytes → content-hash/enclosure URL 變,**切到內嵌的那次 republish 全集換新 mp3 URL**(舊 URL 因
-  uploader 不刪仍可用,訂閱者會重抓一次)。測試用假 mp3 bytes 不是合法 MP4,用 autouse fixture 把
-  `_embed_cover` 換成 no-op。
+  但**不含封面** → 只吃內嵌圖的 client 一片空白。且 raw 檔是 **fragmented-MP4 / DASH**(moov 無
+  sample table)→ 播放器整檔下載完前**無法 seek**(拖進度跳下一集,三個 app 皆然)。故 `publish_series`
+  發布前經 `_embed_cover` seam **做兩件事,皆決定性、不重編音訊**:① ffmpeg `-c copy -movflags
+  +faststart -bitexact` 無損 remux 去分段成 moov-first 的 progressive MP4(可邊下邊 seek;**別移除這步
+  remux——拿掉就退回「拖進度跳下一集」的 bug**),② `mutagen` 把該集 `cover_path` 內嵌進 `covr`。
+  **代價**:remux+內嵌都改 mp3 bytes → content-hash/enclosure URL 變,**啟用 remux／內嵌的那兩次
+  republish 各讓全集換一次新 mp3 URL**(舊 URL 因 uploader 不刪仍可用,訂閱者會重抓一次)。測試用假
+  mp3 bytes 不是合法 MP4,autouse fixture 把 `_embed_cover` 換成 no-op;另有
+  `test_embed_cover_defragments_to_seekable_mp4` 用真分段檔鎖 remux 後 moov-first + 保留封面 + 決定性。
 
 ## Conventions
 

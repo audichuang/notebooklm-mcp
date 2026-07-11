@@ -5,6 +5,9 @@ episode here already has a local mp3_path, so _ensure_local_mp3's re-download
 branch, which needs fake_client, is never exercised)."""
 import json
 import os
+import shutil
+import struct
+import subprocess
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
@@ -14,7 +17,30 @@ import pytest
 from notebooklm_mcp import tools_publish
 from notebooklm_mcp.publish import identity
 
+# Bind the REAL _embed_cover at import time — the autouse no-op fixture below only
+# rebinds the module attribute, so this local name stays the un-patched function.
+from notebooklm_mcp.tools_publish import _embed_cover as _real_embed
+
 _NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+
+
+def _atoms(path):
+    """Top-level MP4 atom types in order (enough to check faststart / de-frag)."""
+    out = []
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        pos = 0
+        while pos < size and len(out) < 16:
+            f.seek(pos)
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                break
+            asize = struct.unpack(">I", hdr[:4])[0]
+            out.append(hdr[4:8].decode("latin1"))
+            if asize <= 1:
+                break
+            pos += asize
+    return out
 
 
 @pytest.fixture(autouse=True)
@@ -421,3 +447,33 @@ async def test_cover_embedded_into_published_mp3(env, tmp_path, artwork_png, mon
     assert mp3_put == b"COVR:RAWAUDIO"          # 上傳的是內嵌後 bytes,不是原始 mp3
     show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
     assert show["episodes"]["1"]["length"] == len(mp3_put)   # enclosure length = 內嵌後大小
+
+
+def test_embed_cover_defragments_to_seekable_mp4(tmp_path):
+    """真 _embed_cover:NotebookLM 音檔是 fragmented-MP4/DASH(moof/mdat 分段),moov 無
+    sample table → 播放器要整檔下載完才能 seek,拖進度就跳下一集。_embed_cover 必須把它
+    remux 成 moov-before-mdat 的 progressive MP4(可邊下邊 seek)、保留內嵌封面、且 byte
+    決定性(content-hash enclosure URL 不亂 churn)。沒 ffmpeg 就 skip。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("需要 ffmpeg")
+    # 造一個 fragmented AAC mp4,模擬 NotebookLM 的 DASH 檔(empty_moov + 分段)
+    src = tmp_path / "dash.mp3"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+         "-t", "1", "-c:a", "aac",
+         "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", str(src)],
+        check=True,
+    )
+    assert "moof" in _atoms(str(src))                    # 前置:輸入真的是分段檔
+    cover = _valid_cover(tmp_path, "c.png")
+
+    out = _real_embed(str(src), cover)
+    fixed = tmp_path / "fixed.m4a"
+    fixed.write_bytes(out)
+    atoms = _atoms(str(fixed))
+    assert "moof" not in atoms                            # 已去分段
+    assert atoms.index("moov") < atoms.index("mdat")     # faststart:moov 在前 → 可邊下邊 seek
+    from mutagen.mp4 import MP4
+    assert MP4(str(fixed)).get("covr")                   # 封面保留
+    assert _real_embed(str(src), cover) == out           # 決定性:同輸入同 bytes

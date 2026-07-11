@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -122,7 +121,18 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
     fd, tmp = tempfile.mkstemp(suffix=".m4a")
     os.close(fd)
     try:
-        shutil.copyfile(mp3_path, tmp)
+        # NotebookLM 下載的音檔是 fragmented-MP4 / DASH(ftyp brand=dash,moov+sidx+
+        # 一堆 moof/mdat 分段),moov 無傳統 sample table → 播放器在檔案下載完成前無法
+        # seek,拖進度就跳下一集(三個 app 皆然,因問題在檔案本身)。用 ffmpeg 無損
+        # remux 去分段成 moov-first 的 progressive MP4(-c copy 不重編音訊;-movflags
+        # +faststart 把 moov 放到 mdat 前),播放器就能邊下邊 seek。-bitexact 讓輸出
+        # byte 穩定 → content-hash enclosure URL 決定性,同音檔+同封面永遠同 bytes。
+        # (取代舊的 shutil.copyfile:當時只加 covr 不去分段,才留下這個 seek bug。)
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-bitexact", "-i", mp3_path,
+             "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp],
+            check=True,
+        )
         mp4 = MP4(tmp)
         mp4["covr"] = [MP4Cover(cover, imageformat=fmt)]
         mp4.save()
@@ -272,6 +282,8 @@ async def publish_series(
             base_pub = base_url.rstrip("/")
             desc_base = ep["description"].strip()   # preflight 已保證非空且不等於標題
             attachments: list[tuple[str, str, str]] = []   # (emoji, label, url)
+            pdf_url = None      # 回傳給呼叫端,免其事後逆向 content-hash 檔名
+            html_url = None
 
             spath = ep.get("slides_pdf_path")
             if spath:
@@ -280,8 +292,9 @@ async def publish_series(
                 with open(spath, "rb") as f:
                     pdf_bytes = f.read()
                 pfile = attachment_filename(n, hashlib.sha256(pdf_bytes).hexdigest()[:8], "pdf")
+                pdf_url = f"{base_pub}/feeds/{token}/{pfile}"
                 await _put(client, upload_url, token, upload_token, pfile, pdf_bytes)
-                attachments.append(("📄", "本集簡報 (PDF)", f"{base_pub}/feeds/{token}/{pfile}"))
+                attachments.append(("📄", "本集簡報 (PDF)", pdf_url))
                 del pdf_bytes
 
             rpath = ep.get("report_md_path")
@@ -291,9 +304,10 @@ async def publish_series(
                 with open(rpath, encoding="utf-8") as f:
                     html_bytes = notes_html.render_report_html(f.read(), ep["title"]).encode("utf-8")
                 hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
+                html_url = f"{base_pub}/feeds/{token}/{hfile}"
                 await _put(client, upload_url, token, upload_token, hfile, html_bytes)
                 del html_bytes                                     # 同 mp3/pdf:一次一 blob,傳完即釋放
-                attachments.append(("📖", "研讀講義", f"{base_pub}/feeds/{token}/{hfile}"))
+                attachments.append(("📖", "研讀講義", html_url))
 
             # 純文字 <description>(fallback,含裸 URL)+ 富文字 <content:encoded>
             # (Apple/Overcast/Pocket Casts 優先渲染:條列 + 具名連結,不裸露長 URL)。
@@ -318,6 +332,9 @@ async def publish_series(
             published.append({
                 "n": n, "title": ep["title"], "guid": new_eps[str(n)]["guid"],
                 "url": f"{base_pub}/feeds/{token}/{mfile}",
+                "cover_url": f"{base_pub}/feeds/{token}/{ep_artwork_file}",
+                "pdf_url": pdf_url,     # None 若該集無簡報
+                "html_url": html_url,   # None 若該集無講義
             })
 
         await _put(client, upload_url, token, upload_token,         # 1) media: artwork
