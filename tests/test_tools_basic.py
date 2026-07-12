@@ -161,3 +161,107 @@ async def test_source_add_file_title_whitespace_not_false_positive(fake_client, 
     call = next(c[1] for c in fake_client.sources.calls if c[0] == "add_file")
     assert call["title"] == "EP03 進階篇"  # 已 strip 後才下傳
     assert result["source_id"].startswith("src-")
+
+
+# ---- v0.2.9 token-diet:P1 source_fulltext 輕量對帳 ----------------------------
+
+async def test_source_fulltext_default_shape_unchanged(fake_client):
+    """不傳新參數 = 現行輸出(非破壞性硬約束)。"""
+    out = await t.source_fulltext("nb-1", "src-9")
+    assert out == {"source_id": "src-9", "title": "來源標題",
+                   "char_count": 4, "content": "來源全文"}
+
+
+async def test_source_fulltext_max_chars_truncates(fake_client):
+    fake_client.sources.fulltext_content = "零一二三四五六七八九" * 10   # 100 chars
+    out = await t.source_fulltext("nb-1", "src-9", max_chars=10)
+    assert out["content"] == "零一二三四五六七八九"
+    assert out["truncated"] is True
+    assert out["char_count"] == 100          # char_count 永遠是全文長度,不因截斷變小
+
+
+async def test_source_fulltext_contains_normalizes_cjk_spaces(fake_client):
+    # NotebookLM 對 CJK 會插空格;比對前兩邊都要 normalize
+    fake_client.sources.fulltext_content = "來 源 全 文 有 harness 工 程"
+    out = await t.source_fulltext("nb-1", "src-9", max_chars=0,
+                                  contains=["來源全文", "harness", "沒有的詞"])
+    assert out["hits"] == {"來源全文": True, "harness": True, "沒有的詞": False}
+    assert out["content"] == ""              # max_chars=0:對帳只要 char_count+hits,不灌全文
+
+
+async def test_source_fulltext_rejects_bad_args(fake_client):
+    with pytest.raises(ValueError):
+        await t.source_fulltext("nb-1", "src-9", max_chars=-1)
+    with pytest.raises(ValueError):
+        await t.source_fulltext("nb-1", "src-9", contains=["ok", "  "])   # 空關鍵詞永遠命中
+
+
+# ---- v0.2.9 token-diet:P2 add source 自帶落地驗證(best-effort probe)---------
+
+async def test_source_add_url_returns_char_count(fake_client):
+    fake_client.sources.fulltext_content = "文章正文" * 50
+    out = await t.source_add_url("nb-1", "https://example.com/post")
+    assert out["char_count"] == 200
+    assert "warning" not in out
+    assert any(c[0] == "get_fulltext" for c in fake_client.sources.calls)
+
+
+async def test_source_add_url_empty_extraction_warns_paywall(fake_client):
+    fake_client.sources.fulltext_content = ""
+    out = await t.source_add_url("nb-1", "https://medium.com/paywalled")
+    assert out["char_count"] == 0
+    assert "paywall" in out["warning"] or "空殼" in out["warning"]
+
+
+async def test_source_add_file_empty_extraction_warns_file_wording(fake_client, tmp_path):
+    # 檔案來源 char_count=0 不等於 paywall(可能是音檔/掃描 PDF),措辭必須不同
+    fake_client.sources.fulltext_content = ""
+    f = tmp_path / "scan.pdf"
+    f.write_bytes(b"x")
+    out = await t.source_add_file("nb-1", str(f))
+    assert out["char_count"] == 0
+    assert "paywall" not in out["warning"]
+
+
+async def test_source_add_no_probe_when_wait_false(fake_client):
+    out = await t.source_add_url("nb-1", "https://example.com", wait=False)
+    assert "char_count" not in out
+    assert not any(c[0] == "get_fulltext" for c in fake_client.sources.calls)
+
+
+async def test_source_add_probe_failure_is_best_effort(fake_client):
+    fake_client.sources.fulltext_raises = True
+    out = await t.source_add_url("nb-1", "https://example.com/post")
+    assert out["source_id"].startswith("src-")   # add 本身成功,probe 掛掉不連坐
+    assert out["char_count"] is None and "note" in out
+
+
+async def test_source_add_file_title_check_still_fails_loud_before_probe(fake_client, tmp_path):
+    # probe 是加法,不得吞掉既有的 title fail-loud 後檢
+    fake_client.sources.title_lands = False
+    f = tmp_path / "ep.mp3"
+    f.write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="title"):
+        await t.source_add_file("nb-1", str(f), title="EP03 進階篇")
+
+
+# ---- v0.2.9 token-diet:P4 chat_ask 清引用 + 可關 references --------------------
+
+async def test_chat_ask_default_keeps_citations_and_references(fake_client):
+    """預設不清標記、照回 references(非破壞性:既有 caller 靠標記對照引用)。"""
+    fake_client.chat.answer_override = "重點一 [1] 重點二 [3, 4]。"
+    out = await t.chat_ask("nb-1", "重點?")
+    assert out["answer"] == "重點一 [1] 重點二 [3, 4]。"
+    assert out["references"]
+
+
+async def test_chat_ask_strip_citations(fake_client):
+    fake_client.chat.answer_override = "重點一 [1] 重點二 [3, 4] 收尾 [2-5]。"
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+    assert "[" not in out["answer"] and "]" not in out["answer"]
+    assert "重點一" in out["answer"] and "重點二" in out["answer"]
+
+
+async def test_chat_ask_exclude_references(fake_client):
+    out = await t.chat_ask("nb-1", "重點?", include_references=False)
+    assert out["references"] == []   # show notes 路徑不需要 references,省 token

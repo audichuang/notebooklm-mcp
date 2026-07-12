@@ -54,8 +54,22 @@ def _load_prior_manifest_episodes(manifest_path: str, notebook_id: str, start: i
 
 
 def _write_manifest(manifest_path: str, notebook_id: str, episodes: list[dict]) -> None:
+    """整寫 notebook_id/episodes,但**保留其他頂層 key**(如 publish_series 存的
+    manifest["show"] 設定)——否則跑一次續集就把 show 七欄擦掉、下次發布得重打。
+    壞 JSON 維持舊行為:整寫重建(resume 路徑 _load_prior_manifest_episodes 會先擋)。"""
+    data: dict = {}
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except json.JSONDecodeError:
+            data = {}
+    data["notebook_id"] = notebook_id
+    data["episodes"] = episodes
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump({"notebook_id": notebook_id, "episodes": episodes}, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _upsert_manifest_stub(

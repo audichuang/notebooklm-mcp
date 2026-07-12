@@ -7,10 +7,34 @@ from __future__ import annotations
 
 from . import runtime
 from ._status import ensure_completed, ensure_started
+from ._text import _CITATION_RE, norm as _norm
 from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
+
+
+async def _probe_extraction(notebook_id: str, source_id: str, *, is_file: bool) -> dict:
+    """加來源後的 best-effort 落地驗證:只回 char_count(+空殼 warning),不回全文。
+
+    probe 失敗不連坐 add(來源已成功上傳),回 char_count=None + note。
+    措辭分流:URL 空殼多半是 paywall/動態頁;檔案空殼可能只是音檔/掃描 PDF,不能亂指控。"""
+    try:
+        ft = await runtime.get_client().sources.get_fulltext(notebook_id, source_id)
+        n = ft.char_count
+    except Exception as exc:  # noqa: BLE001 — probe 是加值檢查,任何失敗都不該讓 add 白做
+        return {"char_count": None,
+                "note": f"extraction probe failed (best-effort, source 已上傳): {exc}"}
+    out: dict = {"char_count": n}
+    if not n:
+        out["warning"] = (
+            "extracted text is empty — 檔案可能是音檔/掃描 PDF(無文字層)或壞檔;"
+            "若應為文字內容,請 source_delete 後改 source_add_text 貼全文"
+            if is_file else
+            "extracted text is empty — 疑似 paywall/登入牆/動態頁空殼;"
+            "請 source_delete 後抓全文改用 source_add_text/source_add_file"
+        )
+    return out
 
 
 @mcp.tool()
@@ -39,9 +63,14 @@ async def notebook_list() -> dict:
 
 @mcp.tool()
 async def source_add_url(notebook_id: str, url: str, wait: bool = True) -> dict:
-    """Add a URL or YouTube link as a source."""
+    """Add a URL or YouTube link as a source. wait=True(預設)時回傳附帶 best-effort
+    落地驗證:char_count(擷取字數;0 = 疑似 paywall/空殼,附 warning)——多數情況
+    看回傳即完成對帳,不用再跑 source_list + source_fulltext。"""
     src = await runtime.get_client().sources.add_url(notebook_id, url, wait=wait, wait_timeout=600.0)
-    return {"source_id": src.id}
+    out = {"source_id": src.id}
+    if wait:
+        out.update(await _probe_extraction(notebook_id, src.id, is_file=False))
+    return out
 
 
 @mcp.tool()
@@ -80,7 +109,11 @@ async def source_add_file(
             f"(期望 {title!r},實際 {getattr(src, 'title', None)!r});"
             f"請用 sources.rename 補命名或刪除重傳。"
         )
-    return {"source_id": src.id}
+    # probe 在 title 後檢之後:加值驗證不得吞掉既有 fail-loud 路徑。
+    out = {"source_id": src.id}
+    if wait:
+        out.update(await _probe_extraction(notebook_id, src.id, is_file=True))
+    return out
 
 
 @mcp.tool()
@@ -183,20 +216,27 @@ async def chat_ask(
     question: str,
     source_ids: list[str] | None = None,
     conversation_id: str | None = None,
+    strip_citations: bool = False,
+    include_references: bool = True,
 ) -> dict:
     """Ask a source-grounded question.
 
     Pass source_ids to focus on specific sources (e.g. one episode's article,
     excluding earlier episodes' audio) so show notes don't get polluted; pass
     conversation_id to continue a thread. Returns answer + citation references +
-    conversation_id. NOTE: answer carries citation markers like [1]/[3, 4]; strip
-    with regex `\\[[\\d,\\s\\-–]+\\]` before using as public text.
+    conversation_id. NOTE: answer carries citation markers like [1]/[3, 4].
+    產公開文案(show notes)時傳 strip_citations=True 由 server 清標記、
+    include_references=False 省掉引用清單——省 token 也免手動 regex;
+    預設兩者不動(既有 caller 依標記對照 references 的行為不變)。
     """
     res = await runtime.get_client().chat.ask(
         notebook_id, question, source_ids=source_ids, conversation_id=conversation_id
     )
+    answer = res.answer
+    if strip_citations:
+        answer = _CITATION_RE.sub("", answer)
     return {
-        "answer": res.answer,
+        "answer": answer,
         "conversation_id": getattr(res, "conversation_id", None),
         "references": [
             {
@@ -205,7 +245,7 @@ async def chat_ask(
                 "cited_text": getattr(r, "cited_text", None),
             }
             for r in getattr(res, "references", None) or []
-        ],
+        ] if include_references else [],
     }
 
 
@@ -230,18 +270,38 @@ async def source_list(notebook_id: str) -> dict:
 
 
 @mcp.tool()
-async def source_fulltext(notebook_id: str, source_id: str) -> dict:
+async def source_fulltext(
+    notebook_id: str,
+    source_id: str,
+    max_chars: int | None = None,
+    contains: list[str] | None = None,
+) -> dict:
     """Get a source's extracted full text — verify a PDF / Medium / pasted article
-    actually ingested its body, or read back an uploaded mp3's transcript. NOTE:
-    NotebookLM inserts spaces between CJK chars; `"".join(text.split())` before
-    keyword matching."""
+    actually ingested its body, or read back an uploaded mp3's transcript.
+
+    對帳省 token 姿勢:`max_chars=0, contains=["關鍵詞", …]` → 只回
+    {char_count, hits, content:""},不把全文灌進 host context(關鍵詞比對在
+    server 端做,已處理 NotebookLM 對 CJK 插空格的問題)。`max_chars` 截斷時回
+    truncated=True;char_count 永遠是全文長度。兩參數都不傳 = 照舊回全文。"""
+    if max_chars is not None and max_chars < 0:
+        raise ValueError("max_chars must be >= 0")
+    if contains is not None and any(not _norm(k) for k in contains):
+        raise ValueError("contains 的關鍵詞不可為空/純空白(normalize 後永遠命中)")
     ft = await runtime.get_client().sources.get_fulltext(notebook_id, source_id)
-    return {
+    out: dict = {
         "source_id": ft.source_id,
         "title": ft.title,
         "char_count": ft.char_count,
-        "content": ft.content,
     }
+    if contains is not None:
+        body = _norm(ft.content)
+        out["hits"] = {kw: _norm(kw) in body for kw in contains}
+    content = ft.content
+    if max_chars is not None and len(content) > max_chars:
+        content = content[:max_chars]
+        out["truncated"] = True
+    out["content"] = content
+    return out
 
 
 @mcp.tool()

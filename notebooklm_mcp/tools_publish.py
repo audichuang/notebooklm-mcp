@@ -44,12 +44,6 @@ def _require_env(name: str) -> str:
     return val
 
 
-def _require(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} is required and must be non-empty")
-    return value
-
-
 def _fallback_pub_date(n: int) -> str:
     return format_datetime(_FALLBACK_BASE + timedelta(days=n - 1))
 
@@ -177,16 +171,16 @@ def _audio_duration_hms(path: str) -> str | None:
 
 @mcp.tool()
 async def publish_series(
-    show_id: str,
     manifest_path: str,
-    show_title: str,
-    show_description: str,
-    author: str,
-    owner_name: str,
-    owner_email: str,
-    artwork_path: str,
-    category: str = "Technology",
-    explicit: bool = False,
+    show_id: str | None = None,
+    show_title: str | None = None,
+    show_description: str | None = None,
+    author: str | None = None,
+    owner_name: str | None = None,
+    owner_email: str | None = None,
+    artwork_path: str | None = None,
+    category: str | None = None,
+    explicit: bool | None = None,
     notebook_id: str | None = None,
     return_episodes: list[int] | None = None,
 ) -> dict:
@@ -199,6 +193,12 @@ async def publish_series(
     uploader lands each file atomically and never deletes, so a regenerated
     episode gets a NEW immutable mp3 URL while old cached URLs keep working.
 
+    **show 欄位存 manifest(v0.2.9 起)**:首次發布顯式傳齊 show 七欄,成功後自動
+    存進 manifest["show"];之後滾動加集只傳 ``manifest_path``(+``return_episodes``)
+    即沿用——不用重打、也不會打錯覆寫公開節目資訊。顯式參數永遠優先於 manifest
+    既存值,且新值會回寫沿用。``category``/``explicit`` 兩邊都沒給時維持舊預設
+    "Technology"/False。
+
     ``notebook_id`` 選填:只當某集 mp3 不在本機時的重抓 fallback,且**每集自己的
     manifest `notebook_id` 欄位優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
     ``return_episodes`` 選填:整季照常發布,但回傳的 ``episodes`` 只含指定集號——
@@ -208,12 +208,45 @@ async def publish_series(
     upload_url = _require_env("PODCAST_UPLOAD_URL").rstrip("/")
     upload_token = _require_env("PODCAST_UPLOAD_TOKEN")
 
+    # show 設定解析:顯式參數 > manifest["show"] 既存值;七欄缺一即 fail-fast。
+    # (manifest 先讀——show 設定在裡面;episodes preflight 沿用同一份。)
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    saved_show = manifest.get("show") or {}
+    show_cfg = {
+        "show_id": show_id or saved_show.get("show_id"),
+        "show_title": show_title or saved_show.get("show_title"),
+        "show_description": show_description or saved_show.get("show_description"),
+        "author": author or saved_show.get("author"),
+        "owner_name": owner_name or saved_show.get("owner_name"),
+        "owner_email": owner_email or saved_show.get("owner_email"),
+        "artwork_path": artwork_path or saved_show.get("artwork_path"),
+        # 布林/有預設的兩欄:None 才 fallback,避免 explicit=False 被誤判成「沒傳」。
+        "category": category if category is not None else saved_show.get("category", "Technology"),
+        "explicit": explicit if explicit is not None else bool(saved_show.get("explicit", False)),
+        # notebook_id(重抓 fallback,選填)也要一起解析:它會進上傳的 show.json,
+        # 不解析的話「首發有傳、之後沒傳」會讓 show.json bytes 不穩(null vs 值)。
+        "notebook_id": notebook_id or saved_show.get("notebook_id"),
+    }
+    missing = [k for k in ("show_id", "show_title", "show_description", "author",
+                           "owner_name", "owner_email", "artwork_path") if not show_cfg[k]]
+    if missing:
+        raise ValueError(
+            f"missing show fields: {', '.join(missing)} — 首次發布請顯式傳齊"
+            "(成功後自動存進 manifest['show'],之後只傳 manifest_path 即沿用)"
+        )
+    show_id = show_cfg["show_id"]
+    show_title = show_cfg["show_title"]
+    show_description = show_cfg["show_description"]
+    author = show_cfg["author"]
+    owner_name = show_cfg["owner_name"]
+    owner_email = show_cfg["owner_email"]
+    artwork_path = show_cfg["artwork_path"]
+    category = show_cfg["category"]
+    explicit = show_cfg["explicit"]
+    notebook_id = show_cfg["notebook_id"]
+
     identity.validate_show_id(show_id)
-    _require(show_title, "show_title")
-    _require(show_description, "show_description")
-    _require(author, "author")
-    _require(owner_name, "owner_name")
-    _require(owner_email, "owner_email")
     # Validate artwork up front (fail-fast before any upload). Extension follows
     # the real format so a JPEG is never served as .png. Content-address the filename
     # (artwork-<hash>.jpg) so a CHANGED show cover gets a NEW URL → bypasses the CDN
@@ -227,8 +260,6 @@ async def publish_series(
 
     token = identity.make_token(show_id, salt)
 
-    with open(manifest_path, encoding="utf-8") as f:
-        manifest = json.load(f)
     manifest_eps = manifest.get("episodes", [])
     if not manifest_eps:
         raise ValueError(f"manifest has no episodes: {manifest_path}")
@@ -350,6 +381,7 @@ async def publish_series(
                 "cover_url": f"{base_pub}/feeds/{token}/{ep_artwork_file}",
                 "pdf_url": pdf_url,     # None 若該集無簡報
                 "html_url": html_url,   # None 若該集無講義
+                "duration": duration,   # 對帳用(HH:MM:SS;ffprobe 失敗為 None),免再抓整份 feed
             })
 
         await _put(client, upload_url, token, upload_token,         # 1) media: artwork
@@ -369,6 +401,14 @@ async def publish_series(
                    "feed.xml", feed_mod.build_feed_xml(show, base_url).encode("utf-8"))
         await _put(client, upload_url, token, upload_token,
                    "index.html", feed_mod.build_index_html(show, base_url).encode("utf-8"))
+
+    # 發布成功才把 show 設定回寫 manifest(fresh 讀改寫、中間無 await,與同 process
+    # 的 slides/report/description 回寫不 interleave);失敗不留任何本地狀態變更。
+    with open(manifest_path, encoding="utf-8") as f:
+        m2 = json.load(f)
+    m2["show"] = {**show_cfg, "artwork_path": os.path.abspath(show_cfg["artwork_path"])}
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(m2, f, ensure_ascii=False, indent=2)
 
     episodes_out = sorted(published, key=lambda e: e["n"])
     if return_episodes is not None:

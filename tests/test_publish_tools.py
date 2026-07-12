@@ -198,6 +198,56 @@ async def test_publish_is_idempotent(env, tmp_path, artwork_png, monkeypatch):
         assert a["content"] == b["content"]  # byte-identical, incl. media filenames
 
 
+# ---- v0.2.9 token-diet:P3 show 欄位存 manifest,之後只傳 manifest_path ------------
+
+async def test_publish_persists_show_config_then_manifest_path_alone_suffices(
+        env, tmp_path, artwork_png, monkeypatch):
+    """首次顯式發布 → show 七欄寫進 manifest["show"];之後只傳 manifest_path,
+    feed 輸出 byte-identical(滾動 feed 加一集不用再重打七欄)。"""
+    captured = _install_mock(monkeypatch)
+    pub_at = {1: "Wed, 01 Jan 2020 09:00:00 +0800", 2: "Thu, 02 Jan 2020 09:00:00 +0800"}
+    manifest = _two_episode_manifest(tmp_path, published_at=pub_at)
+    await _publish(manifest, artwork_png)                       # 顯式傳齊(現行姿勢)
+
+    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    assert saved["show_id"] == "ai-news" and saved["show_title"] == "AI 新聞"
+    assert saved["owner_email"] == "audi@example.com"
+    assert saved["artwork_path"] == artwork_png
+    assert saved["category"] == "Technology" and saved["explicit"] is False
+
+    res2 = await tools_publish.publish_series(manifest_path=manifest)   # 只傳 manifest_path
+    assert res2["token"] == identity.make_token("ai-news", "s3cret")
+    first, second = captured[:8], captured[8:]
+    for a, b in zip(first, second):
+        assert a["name"] == b["name"] and a["content"] == b["content"]  # byte-identical
+
+
+async def test_publish_missing_show_config_raises_helpfully(env, tmp_path, artwork_png, monkeypatch):
+    _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)     # 無 manifest["show"]
+    with pytest.raises(ValueError, match="show_id"):
+        await tools_publish.publish_series(manifest_path=manifest)
+
+
+async def test_publish_explicit_param_overrides_manifest_show(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png)                                    # 寫入 show 區塊
+    await tools_publish.publish_series(manifest_path=manifest, show_title="改名後")  # 顯式覆蓋
+    show2 = json.loads([c["content"] for c in captured if c["name"] == "show.json"][-1])
+    assert show2["title"] == "改名後"
+    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    assert saved["show_title"] == "改名後"          # 覆蓋值也回寫,下次沿用
+
+
+async def test_publish_return_includes_duration(env, tmp_path, artwork_png, monkeypatch):
+    """step 8 對帳要 duration;publish 本來就算了,回傳帶上省一次 feed 抓取。"""
+    _install_mock(monkeypatch)
+    monkeypatch.setattr(tools_publish, "_audio_duration_hms", lambda p: "00:16:26")
+    res = await _publish(_two_episode_manifest(tmp_path), artwork_png)
+    assert all(e["duration"] == "00:16:26" for e in res["episodes"])
+
+
 async def test_new_mp3_bytes_new_url_stable_guid_and_pubdate(env, tmp_path, artwork_png, monkeypatch):
     pub_at = {1: "Wed, 01 Jan 2020 09:00:00 +0800", 2: "Thu, 02 Jan 2020 09:00:00 +0800"}
 

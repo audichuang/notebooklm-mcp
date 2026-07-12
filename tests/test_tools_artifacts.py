@@ -50,3 +50,32 @@ async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp
     data = json.loads(open(m, encoding="utf-8").read())
     assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
     assert data["episodes"][0]["report_format"] == "study_guide"
+
+
+# ---- v0.2.9 token-diet:P5 episode_set_description --------------------------------
+
+async def test_episode_set_description_writes_and_strips(tmp_path):
+    """回寫走 MCP server 同 process 的讀改寫;預設清引用標記(新工具,無相容包袱)。"""
+    m = _manifest(tmp_path, [{"episode": 21, "title": "EP21 標題"}])
+    res = await a.episode_set_description(m, 21, "重點整理 [1],結論 [3, 4]。")
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert data["episodes"][0]["description"] == "重點整理 ,結論 。"   # 標記清掉
+    assert "[" not in data["episodes"][0]["description"]
+    assert res["episode"] == 21 and res["description"] == data["episodes"][0]["description"]
+
+
+async def test_episode_set_description_keep_citations(tmp_path):
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    await a.episode_set_description(m, 1, "重點 [1]。", strip_citations=False)
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert data["episodes"][0]["description"] == "重點 [1]。"
+
+
+async def test_episode_set_description_validates(tmp_path):
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError):                      # 空(清完標記後也算)
+        await a.episode_set_description(m, 1, "  [1]  ")
+    with pytest.raises(ValueError):                      # 等於標題 = 假 show notes
+        await a.episode_set_description(m, 1, "EP01")
+    with pytest.raises(ValueError, match="episode 9 not found"):
+        await a.episode_set_description(m, 9, "真 show notes")

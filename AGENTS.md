@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.8"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.9"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -54,7 +54,8 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     含讀取/觀測面:`artifact_list`(列筆記本現有 artifact,救援/對帳用)、`source_list`、
     `source_fulltext`、`notebook_get`;`chat_ask` 吃 `source_ids`(聚焦單集原文)/`conversation_id`
   - `tools_artifacts.py` — `generate_slides`(簡報 PDF)/ `generate_report`(研讀 Markdown)按需生,
-    路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈
+    路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈。另含
+    `episode_set_description`(show notes 回寫 manifest,預設清引用標記;同 process 讀改寫)
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
   - `tools_podcast.py` — `podcast_episode`(單集 5 步)/ `podcast_episode_resume`(斷線後續跑該集)/
     `podcast_series`(整季純程式碼迴圈)

@@ -322,3 +322,19 @@ async def test_episode_without_manifest_path_writes_nothing(fake_client, tmp_pat
     await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b",
                             output_dir=str(tmp_path))
     assert not os.path.exists(tmp_path / "series_manifest.json")
+
+
+async def test_series_write_manifest_preserves_unknown_top_level_keys(fake_client, tmp_path):
+    """v0.2.9 起 publish_series 會把 show 七欄存進 manifest["show"];podcast_series 的
+    整寫不可把它(或其他未知頂層 key)擦掉,否則跑一次續集就得重打七欄。"""
+    import json
+    mpath = tmp_path / "series_manifest.json"
+    mpath.write_text(json.dumps({
+        "notebook_id": "nb-1", "episodes": [],
+        "show": {"show_id": "audicast", "show_title": "Audicast"},
+    }), encoding="utf-8")
+    await p.podcast_series("nb-1", [{"title": "心法篇", "brief": "b"}],
+                           output_dir=str(tmp_path))
+    data = json.loads(mpath.read_text(encoding="utf-8"))
+    assert data["show"] == {"show_id": "audicast", "show_title": "Audicast"}   # 沒被擦掉
+    assert data["episodes"]                                                     # 整季照寫

@@ -89,6 +89,7 @@ async def test_mcp_exposes_expected_tools():
         "source_fulltext",
         "notebook_get",
         "chat_ask",
+        "episode_set_description",
         "podcast_episode",
         "podcast_series",
     }

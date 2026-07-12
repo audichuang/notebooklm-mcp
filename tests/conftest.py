@@ -147,6 +147,10 @@ class FakeSources:
         # True(預設)= add_file(title=) 的內部改名成功;False 模擬 0.7.3 的
         # 靜默改名失敗(SDK 只 log,回傳舊 title)。
         self.title_lands = True
+        # get_fulltext 的可調內容:預設維持舊語意("來源全文", char_count=4)。
+        # 設 "" 模擬 paywall/空殼;fulltext_raises=True 模擬 probe RPC 失敗。
+        self.fulltext_content = "來源全文"
+        self.fulltext_raises = False
 
     def _add(self, title):
         self._counter += 1
@@ -201,8 +205,11 @@ class FakeSources:
 
     async def get_fulltext(self, notebook_id, source_id):
         self.calls.append(("get_fulltext", dict(source_id=source_id)))
+        if self.fulltext_raises:
+            raise RuntimeError("simulated fulltext RPC failure")
         return type("FT", (), {"source_id": source_id, "title": "來源標題",
-                               "content": "來源全文", "char_count": 4})()
+                               "content": self.fulltext_content,
+                               "char_count": len(self.fulltext_content)})()
 
     async def add_url(self, notebook_id, url, *, wait=False, wait_timeout=120.0):
         self.calls.append(("add_url", dict(notebook_id=notebook_id, url=url, wait=wait)))
@@ -240,6 +247,8 @@ class FakeNotebooks:
 class FakeChat:
     def __init__(self):
         self.calls = []
+        # 設定後蓋掉預設 answer——供 strip_citations 測試餵帶 [n] 標記的回答。
+        self.answer_override = None
 
     # Signature mirrors notebooklm-py 0.3.4 ChatAPI.ask (source_ids + conversation_id).
     async def ask(self, notebook_id, question, source_ids=None, conversation_id=None):
@@ -247,7 +256,7 @@ class FakeChat:
                                         conversation_id=conversation_id)))
         refs = [type("Ref", (), {"source_id": "src-1", "citation_number": 1,
                                  "cited_text": "引用片段"})()]
-        return type("R", (), {"answer": f"answer to {question}",
+        return type("R", (), {"answer": self.answer_override or f"answer to {question}",
                               "conversation_id": conversation_id or "conv-1",
                               "references": refs})()
 

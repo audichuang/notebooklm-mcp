@@ -10,6 +10,7 @@ from ._status import ensure_completed, ensure_started
 from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
 from .app import mcp
+from ._text import _CITATION_RE
 
 
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
@@ -26,6 +27,41 @@ def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     return ep
+
+
+@mcp.tool()
+async def episode_set_description(
+    manifest_path: str,
+    episode_n: int,
+    description: str,
+    strip_citations: bool = True,
+) -> dict:
+    """把單集 show notes 寫進 manifest 的 description(預設先清引用標記 [n])。
+
+    取代「host 開 bash 改 JSON」那步:本工具與 generate_slides/generate_report 的
+    回寫同在 server process 事件迴圈內同步讀改寫,天然不 interleave——chat_ask 產完
+    show notes 即可回寫,不用等三個生成到齊。注意這不是跨 process 檔案鎖,別再用
+    外部腳本同時改同一份 manifest。並前置驗 publish 的 preflight 條件(非空、
+    不等於標題),讓錯誤在寫入當下就爆,不留到發布才 fail。"""
+    desc = description.strip()
+    if strip_citations:
+        desc = _CITATION_RE.sub("", desc).strip()
+    if not desc:
+        raise ValueError("description is empty(清完引用標記後也不可為空)")
+    # 先讀該集驗 title,再走同一個讀改寫 helper;全程同步、中間無 await,不互蓋。
+    with open(manifest_path, encoding="utf-8") as f:
+        data = json.load(f)
+    ep = next(
+        (e for e in data.get("episodes", []) if isinstance(e, dict) and e.get("episode") == episode_n),
+        None,
+    )
+    if ep is None:
+        raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
+    title = (ep.get("title") or "").strip()
+    if title and desc == title:
+        raise ValueError("description must not equal title(需真 show notes,publish 會擋)")
+    _load_ep_and_write(manifest_path, episode_n, description=desc)
+    return {"episode": episode_n, "description": desc, "stripped": strip_citations}
 
 
 @mcp.tool()
