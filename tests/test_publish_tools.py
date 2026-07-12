@@ -477,3 +477,54 @@ def test_embed_cover_defragments_to_seekable_mp4(tmp_path):
     from mutagen.mp4 import MP4
     assert MP4(str(fixed)).get("covr")                   # 封面保留
     assert _real_embed(str(src), cover) == out           # 決定性:同輸入同 bytes
+
+
+# ── v0.2.8:notebook_id 選填 + return_episodes 回傳過濾 ──────────────────────────
+
+async def test_publish_without_notebook_id(env, tmp_path, artwork_png, monkeypatch):
+    """mp3 都在本機時 notebook_id 完全不需要(它只是重抓 fallback)。"""
+    _install_mock(monkeypatch)
+    res = await _publish(_two_episode_manifest(tmp_path), artwork_png, notebook_id=None)
+    assert res["episode_count"] == 2 and len(res["episodes"]) == 2
+
+
+async def test_missing_mp3_prefers_episode_notebook_id(env, tmp_path, artwork_png, monkeypatch, fake_client):
+    """掉檔重抓:該集自己的 manifest notebook_id 優先於呼叫端傳的 show 層 fallback
+    (每集獨立筆記本,單一 notebook_id 會抓錯本)。fake download 不落檔 → 以
+    「produced no file」錯誤證明 download 已對正確筆記本發出。"""
+    import json
+    _install_mock(monkeypatch)
+    mpath = _two_episode_manifest(tmp_path)
+    data = json.loads(open(mpath, encoding="utf-8").read())
+    ep1 = data["episodes"][0]
+    os.unlink(ep1["mp3_path"])                      # 模擬 output/ 被清掉
+    ep1["artifact_id"] = "a-1"
+    ep1["notebook_id"] = "nb-ep1"                   # 每集自己的筆記本
+    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    with pytest.raises(ValueError, match="produced no file"):
+        await _publish(mpath, artwork_png, notebook_id="nb-show-level")
+    dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download")
+    assert dl["notebook_id"] == "nb-ep1"            # 不是 nb-show-level
+
+
+async def test_missing_mp3_without_any_notebook_fails_clearly(env, tmp_path, artwork_png, monkeypatch):
+    import json
+    _install_mock(monkeypatch)
+    mpath = _two_episode_manifest(tmp_path)
+    data = json.loads(open(mpath, encoding="utf-8").read())
+    ep1 = data["episodes"][0]
+    os.unlink(ep1["mp3_path"])
+    ep1["artifact_id"] = "a-1"                      # 有 artifact 但無任何 notebook_id
+    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    with pytest.raises(ValueError, match="no notebook_id"):
+        await _publish(mpath, artwork_png, notebook_id=None)
+
+
+async def test_return_episodes_filters_response_only(env, tmp_path, artwork_png, monkeypatch):
+    """return_episodes 只縮回傳:整季照常 PUT(含未列的 EP01),episode_count 仍全季。"""
+    captured = _install_mock(monkeypatch)
+    res = await _publish(_two_episode_manifest(tmp_path), artwork_png, return_episodes=[2])
+    assert [e["n"] for e in res["episodes"]] == [2]
+    assert res["episode_count"] == 2
+    names = [c["name"] for c in captured]
+    assert any(n.startswith("EP01-") and n.endswith(".mp3") for n in names)

@@ -58,6 +58,55 @@ def _write_manifest(manifest_path: str, notebook_id: str, episodes: list[dict]) 
         json.dump({"notebook_id": notebook_id, "episodes": episodes}, f, ensure_ascii=False, indent=2)
 
 
+def _upsert_manifest_stub(
+    manifest_path: str,
+    notebook_id: str,
+    episode_n: int,
+    title: str,
+    output_dir: str,
+    artifact_id: str,
+) -> None:
+    """生成一送出就把該集 stub upsert 進 manifest(fill-if-missing,不覆蓋既有欄位)。
+
+    消滅滾動 feed 流程裡「發射前忘了手動補 stub → generate_slides/report 完成回寫時
+    raise」的固定漏步:mp3_path 決定性、published_at 取受理當下,寫入點在 generate_audio
+    受理之後、生成完成(數分鐘)之前,slides/report 完成回寫時這筆必已在。
+    既有欄位一律保留(手動 stub 先寫的 title/published_at 優先);頂層 notebook_id
+    不驗不動——滾動 feed 每集獨立筆記本,頂層那欄只是歷史遺留。stub 額外帶
+    每集自己的 notebook_id + artifact_id,掉檔重抓/發布 fallback 都認得到對的筆記本。
+    同 process 內與 slides/report 的回寫同為事件迴圈內同步讀改寫,無互蓋。
+    """
+    if os.path.exists(manifest_path):
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("episodes"), list):
+            raise ValueError(
+                f"series manifest is corrupt (expect {{notebook_id, episodes:[…]}}): {manifest_path}"
+            )
+    else:
+        data = {"notebook_id": notebook_id, "episodes": []}
+    stub = {
+        "episode": episode_n,
+        "title": title.strip(),
+        "label": _episode_label(episode_n, title),
+        "mp3_path": os.path.abspath(os.path.join(output_dir, f"ep{episode_n:02d}.mp3")),
+        "published_at": format_datetime(datetime.now(_TZ)),
+        "notebook_id": notebook_id,
+        "artifact_id": artifact_id,
+    }
+    ep = next(
+        (e for e in data["episodes"] if isinstance(e, dict) and e.get("episode") == episode_n),
+        None,
+    )
+    if ep is None:
+        data["episodes"].append(stub)
+    else:
+        for k, v in stub.items():
+            ep.setdefault(k, v)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def _validate_episode_args(episode_n: int, title: str, prior_mp3_path: str | None) -> None:
     """單集參數的純本地驗證(不打網路)。壞參數 ValueError 秒退——必須在
     auth 預檢之前跑,認證錯誤不得蓋掉參數錯誤。"""
@@ -133,6 +182,7 @@ async def _run_episode(
     audio_format: str | None,
     audio_length: str | None,
     wait_timeout: float,
+    manifest_path: str | None = None,
 ) -> dict:
     client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
@@ -172,6 +222,12 @@ async def _run_episode(
 
     # 生成一旦送出,artifact 就在 NotebookLM 雲端建立並跑到完成,不靠本地連線活著。
     try:
+        # stub 寫在生成受理之後(拿到 artifact_id)、完成之前:放 try 內,壞 manifest 的
+        # ValueError 也會被下方 except 附上 resume hint(生成已在雲端跑,不該無聲丟失)。
+        if manifest_path:
+            _upsert_manifest_stub(
+                manifest_path, notebook_id, episode_n, title, output_dir, artifact_id
+            )
         return await _finalize_episode(
             notebook_id, episode_n, title, artifact_id, output_dir, wait_timeout
         )
@@ -208,11 +264,17 @@ async def podcast_episode(
     audio_format: str | None = "deep-dive",
     audio_length: str | None = "long",
     wait_timeout: float = 1200.0,
+    manifest_path: str | None = None,
 ) -> dict:
     """Generate one podcast episode end-to-end.
 
     The Studio artifact and self-uploaded source are both named ``EP{n:02d} {title}``
     (e.g. ``EP02 實戰篇``), so pass the outline's episode title.
+
+    傳 ``manifest_path``(如 ``output/series_manifest.json``)= 生成一受理就把該集
+    stub(episode/title/label/mp3_path/published_at/notebook_id/artifact_id)upsert
+    進 manifest——滾動 feed 免手動補 stub,generate_slides/report 的回寫也保證找得到
+    這筆。既有欄位不覆蓋;不傳維持舊行為(只 return 不寫)。
     """
     # 本地驗證先行(壞參數 ValueError 秒退,不浪費 RPC),再做認證預檢:
     # 單集也要等最多 20 分鐘,cookie 死了先秒退(見 auth_probe docstring)。
@@ -229,6 +291,7 @@ async def podcast_episode(
         audio_format,
         audio_length,
         wait_timeout,
+        manifest_path=manifest_path,
     )
 
 
@@ -240,6 +303,7 @@ async def podcast_episode_resume(
     artifact_id: str,
     output_dir: str,
     wait_timeout: float = 1200.0,
+    manifest_path: str | None = None,
 ) -> dict:
     """接續一個「已在 NotebookLM 雲端啟動」的音檔生成,續完後半段而**不重新生成**。
 
@@ -263,6 +327,12 @@ async def podcast_episode_resume(
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id 必填(從斷掉那次的錯誤訊息或 artifact_list 取得)")
     await probe_auth(runtime.get_client())
+    # 原呼叫若死在 stub 寫入前,manifest 會缺這集——resume 傳 manifest_path 一併補上
+    # (upsert fill-if-missing,已存在則不動)。
+    if manifest_path:
+        _upsert_manifest_stub(
+            manifest_path, notebook_id, episode_n, title, output_dir, artifact_id.strip()
+        )
     return await _finalize_episode(
         notebook_id, episode_n, title, artifact_id.strip(), output_dir, wait_timeout
     )

@@ -273,3 +273,52 @@ async def test_episode_terminal_failure_not_labeled_resumable(fake_client, tmp_p
     with pytest.raises(RuntimeError) as ei:
         await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path))
     assert "podcast_episode_resume" not in str(ei.value)
+
+
+# ── manifest stub(v0.2.8:podcast_episode 傳 manifest_path 即自動 upsert)─────────
+
+async def test_episode_writes_manifest_stub(fake_client, tmp_path):
+    """傳 manifest_path:生成受理後 stub 立即進 manifest(fresh 檔自動建),帶
+    決定性 mp3_path + 每集自己的 notebook_id/artifact_id——滾動 feed 免手動補步。"""
+    import json, os
+    mpath = tmp_path / "series_manifest.json"
+    await p.podcast_episode(
+        "nb-9", episode_n=3, title="紀律篇", brief="b",
+        output_dir=str(tmp_path), manifest_path=str(mpath),
+    )
+    data = json.loads(mpath.read_text(encoding="utf-8"))
+    ep = next(e for e in data["episodes"] if e["episode"] == 3)
+    assert ep["label"] == "EP03 紀律篇"
+    assert ep["mp3_path"] == os.path.join(str(tmp_path), "ep03.mp3")
+    assert ep["notebook_id"] == "nb-9" and ep["artifact_id"] == "task-123"
+    assert isinstance(ep["published_at"], str) and ep["published_at"]
+
+
+async def test_episode_stub_preserves_manual_fields(fake_client, tmp_path):
+    """手動 stub 先在:upsert 只補缺欄(fill-if-missing),手動 title/published_at
+    與頂層 notebook_id(歷史遺留欄)都不動。"""
+    import json
+    mpath = tmp_path / "series_manifest.json"
+    manual = {"episode": 3, "title": "手動標題",
+              "published_at": "Wed, 01 Jan 2020 09:00:00 +0800"}
+    mpath.write_text(json.dumps({"notebook_id": "old-nb", "episodes": [manual]}),
+                     encoding="utf-8")
+    await p.podcast_episode(
+        "nb-9", episode_n=3, title="紀律篇", brief="b",
+        output_dir=str(tmp_path), manifest_path=str(mpath),
+    )
+    data = json.loads(mpath.read_text(encoding="utf-8"))
+    assert data["notebook_id"] == "old-nb"
+    ep = data["episodes"][0]
+    assert ep["title"] == "手動標題"
+    assert ep["published_at"] == "Wed, 01 Jan 2020 09:00:00 +0800"
+    assert ep["mp3_path"].endswith("ep03.mp3")      # 缺的欄補上
+    assert ep["notebook_id"] == "nb-9"
+
+
+async def test_episode_without_manifest_path_writes_nothing(fake_client, tmp_path):
+    """不傳 manifest_path = 舊行為:只 return,不產生任何 manifest 檔。"""
+    import os
+    await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b",
+                            output_dir=str(tmp_path))
+    assert not os.path.exists(tmp_path / "series_manifest.json")

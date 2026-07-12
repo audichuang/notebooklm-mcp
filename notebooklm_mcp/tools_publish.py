@@ -59,9 +59,13 @@ def _make_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_TIMEOUT)
 
 
-async def _ensure_local_mp3(notebook_id: str, ep: dict) -> str:
+async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None) -> str:
     """Local path to the episode mp3. If the manifest's mp3_path is gone
-    (output_dir cleaned), re-download via artifact_id; else fail-fast."""
+    (output_dir cleaned), re-download via artifact_id; else fail-fast.
+
+    重抓的筆記本**優先用該集自己的 `ep["notebook_id"]`**(podcast_episode 的
+    manifest stub 會寫入)——滾動 feed 每集獨立筆記本,單一 show 層 notebook_id
+    會抓錯本;沒有per-episode 欄位才退到呼叫端傳的 fallback。"""
     path = ep.get("mp3_path")
     if path and os.path.exists(path) and os.path.getsize(path) > 0:
         return path
@@ -69,6 +73,12 @@ async def _ensure_local_mp3(notebook_id: str, ep: dict) -> str:
     if not artifact_id:
         raise ValueError(
             f"episode {ep.get('episode')}: mp3_path missing and no artifact_id to re-download"
+        )
+    notebook_id = ep.get("notebook_id") or fallback_notebook_id
+    if not notebook_id:
+        raise ValueError(
+            f"episode {ep.get('episode')}: mp3_path missing and no notebook_id to re-download from "
+            "(add per-episode notebook_id to the manifest entry, or pass notebook_id to publish_series)"
         )
     staging = path or os.path.join(
         os.environ.get("TMPDIR", "/tmp"), f"ep{ep['episode']:02d}.mp3"
@@ -168,7 +178,6 @@ def _audio_duration_hms(path: str) -> str | None:
 @mcp.tool()
 async def publish_series(
     show_id: str,
-    notebook_id: str,
     manifest_path: str,
     show_title: str,
     show_description: str,
@@ -178,6 +187,8 @@ async def publish_series(
     artwork_path: str,
     category: str = "Technology",
     explicit: bool = False,
+    notebook_id: str | None = None,
+    return_episodes: list[int] | None = None,
 ) -> dict:
     """Publish a whole podcast series (one topic = one feed) as a static RSS feed.
 
@@ -186,14 +197,18 @@ async def publish_series(
     feed host's uploader. Deterministic: same show_id -> same URL/token; manifest
     published_at -> stable pubDates; mp3 content -> stable enclosure URL. The
     uploader lands each file atomically and never deletes, so a regenerated
-    episode gets a NEW immutable mp3 URL while old cached URLs keep working."""
+    episode gets a NEW immutable mp3 URL while old cached URLs keep working.
+
+    ``notebook_id`` 選填:只當某集 mp3 不在本機時的重抓 fallback,且**每集自己的
+    manifest `notebook_id` 欄位優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
+    ``return_episodes`` 選填:整季照常發布,但回傳的 ``episodes`` 只含指定集號——
+    滾動 feed 加一集時傳 ``[N]``,免得回傳隨集數線性膨脹(歷史集 URL 早已在案)。"""
     base_url = _require_env("PODCAST_PUBLIC_BASE_URL")
     salt = _require_env("PODCAST_TOKEN_SALT")
     upload_url = _require_env("PODCAST_UPLOAD_URL").rstrip("/")
     upload_token = _require_env("PODCAST_UPLOAD_TOKEN")
 
     identity.validate_show_id(show_id)
-    _require(notebook_id, "notebook_id")
     _require(show_title, "show_title")
     _require(show_description, "show_description")
     _require(author, "author")
@@ -255,7 +270,7 @@ async def publish_series(
 
         for ep in manifest_eps:                                    # 1) media: mp3
             n = int(ep["episode"])
-            local = await _ensure_local_mp3(notebook_id, ep)
+            local = await _ensure_local_mp3(ep, notebook_id)
             # 內嵌單集封面進音檔(covr):Apple/Spotify 顯示單集封面主要吃內嵌圖,不是 feed
             # 的 <item> itunes:image。內嵌後 bytes 變 → content-hash/URL 變(預期一次性 churn,
             # uploader 不刪舊 URL)。cover_path preflight 已驗存在 + 規格。
@@ -355,12 +370,17 @@ async def publish_series(
         await _put(client, upload_url, token, upload_token,
                    "index.html", feed_mod.build_index_html(show, base_url).encode("utf-8"))
 
+    episodes_out = sorted(published, key=lambda e: e["n"])
+    if return_episodes is not None:
+        # 只縮回傳、不縮發布:feed 仍是整季;episode_count 維持全季數,別誤讀成「只發了這些」。
+        want = set(return_episodes)
+        episodes_out = [e for e in episodes_out if e["n"] in want]
     return {
         "feed_url": f"{base_url.rstrip('/')}/feeds/{token}/feed.xml",
         "show_page_url": f"{base_url.rstrip('/')}/feeds/{token}/index.html",
         "token": token,
         "episode_count": len(new_eps),
-        "episodes": sorted(published, key=lambda e: e["n"]),
+        "episodes": episodes_out,
     }
 
 
