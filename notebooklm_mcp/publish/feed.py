@@ -54,6 +54,10 @@ def build_feed_xml(show: dict, base_url: str) -> str:
         item = [
             "    <item>",
             f"      <title>{escape(ep['title'])}</title>",
+            # 使用跨季續接的全域集號，讓 Pocket Casts / Apple 等客戶端能顯示
+            # 「第幾集」。刻意不輸出 itunes:season，避免 EP12 被重解讀成 S2E6。
+            f"      <itunes:episode>{n}</itunes:episode>",
+            "      <itunes:episodeType>full</itunes:episodeType>",
             # <description> = 純文字(fallback,含裸 URL);<content:encoded> = 富文字 HTML
             # (Apple/Overcast/Pocket Casts 優先渲染:條列 + 具名連結,不裸露長 URL)。
             f"      <description>{escape(ep.get('description', ep['title']))}</description>",

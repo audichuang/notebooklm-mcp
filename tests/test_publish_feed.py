@@ -77,6 +77,15 @@ def test_items_escape_xml():
     assert items[1].findtext("title") == "實戰篇 <重點>"
 
 
+def test_items_include_global_episode_number_without_season():
+    """節目跨季沿用全域 EP 編號；播放器應顯示 EP01、EP02，而不是季內編號。"""
+    items = _feed().find("channel").findall("item")
+    for n, item in enumerate(items, 1):
+        assert item.findtext("itunes:episode", namespaces=NS) == str(n)
+        assert item.findtext("itunes:episodeType", namespaces=NS) == "full"
+        assert item.find("itunes:season", NS) is None
+
+
 def test_namespaces_declared():
     raw = feed.build_feed_xml(SHOW, BASE)
     assert 'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"' in raw
