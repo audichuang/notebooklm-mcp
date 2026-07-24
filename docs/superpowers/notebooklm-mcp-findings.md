@@ -28,6 +28,25 @@
 keepalive 都會打 RotateCookies；env-var auth 沒有 storage path 可寫回,三台 VM / 多個
 stdio process 會各自輪替出只存在記憶體的新 cookie,讓 Doppler 裡的基準 cookie 變成舊狀態。
 
+### 2026-07-24 P0：可靠性靠 durable attempt，不靠長 request 活著
+
+- `attempt_id` 是 MCP 先持久化的本地產製身分；`artifact_id` 只是 NotebookLM 對該
+  attempt 的遠端映射。遠端受理不明時先 reconciliation，不能把 timeout 當失敗後重生。
+- FastMCP request 可能隨 client 斷線被取消；可靠性來自每個副作用前後的 manifest
+  checkpoint 與重呼。`podcast_series` 只在前集 postconditions 完成後推進下一集。
+- `start=N` 是 execution lower bound／caller trust boundary，不是 regenerate flag；
+  範圍內已完成集會 skip。要重生必須另走明確操作，P0 不把它塞進 `start`。
+- manifest-backed attempt 優先由 `podcast_series` auto-resume 或
+  `podcast_episode_reconcile` 補綁 artifact，再由 series／resume finalize；手帶
+  `artifact_id` 的 `podcast_episode_resume` 保留作 standalone／legacy fallback。
+- P0 fail-closed 拒絕 `manifest_path + prior_mp3_path`，避免未 checkpoint 的 continuity
+  upload；legacy completed output 必須保存並驗證明確 `feedback_source_id`，不能只靠同名。
+- completed finalize resume 仍會重新驗證遠端 feedback source 的 id、名稱、media kind
+  與 ready 狀態；本機檔案 hash 正確不代表 continuity 仍存在。
+- MCP 提供可靠生成 primitive，不強制人耳 QA、protected facts 或審批流程；host 可選用。
+- `<manifest>.lock` 是 advisory lock：外部 maintenance script 若直接覆寫 JSON 仍可能
+  lost update，必須改用 MCP tool 或同一 `ManifestStore`。
+
 ---
 
 ## 2. Live 驗證踩到的坑（0.3.4 實際行為 vs 最新文件）

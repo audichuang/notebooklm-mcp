@@ -26,14 +26,23 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
         {"title": "收尾篇", "brief": "3"},
     ]
 
-    with pytest.raises(TimeoutError):
-        await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=1)
+    out = await p.podcast_series(
+        "nb-1", episodes=eps, output_dir=str(tmp_path), start=1
+    )
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 2
+    assert out["observed_state"] == "pending"
+    assert out["safe_next_action"] == "retry_series"
 
-    # Manifest holds ONLY the completed episode 1 (no half-written 2/3).
+    # EP2 的 accepted attempt 必須留下，讓下次重呼 wait 同一 artifact；
+    # 只有 EP1 已 promotion，EP3 尚未產生任何 attempt。
     manifest = json.load(open(os.path.join(str(tmp_path), "series_manifest.json"), encoding="utf-8"))
-    assert [e["episode"] for e in manifest["episodes"]] == [1]
-    # Episode 1 fully recorded; episode 2 failed at wait (before rename/download/
-    # self-upload), so it left NO orphaned source.
+    assert [e["episode"] for e in manifest["episodes"]] == [1, 2]
+    assert manifest["episodes"][0]["output_attempt_id"]
+    assert "output_attempt_id" not in manifest["episodes"][1]
+    attempt = manifest["episodes"][1]["attempts"][0]
+    assert attempt["remote"]["artifact_id"] == "task-124"
+    assert attempt["remote"]["status"] == "pending"
     assert fake_client.sources.titles() == ["EP01 心法篇"]
 
 

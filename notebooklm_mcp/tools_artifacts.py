@@ -2,7 +2,6 @@
 不碰音檔迴圈;想幫哪集加就對哪集跑。產物只餵傳入的 source_ids(不傳則 SDK 用全部來源)。"""
 from __future__ import annotations
 
-import json
 import os
 
 from . import runtime
@@ -11,22 +10,30 @@ from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
 from .app import mcp
 from ._text import _CITATION_RE
+from .manifest_store import ManifestStore
 
 
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
-    """讀 manifest、找 episode==episode_n 的集、merge 欄位、寫回(沿用直接 json.dump)。"""
-    with open(manifest_path, encoding="utf-8") as f:
-        data = json.load(f)
-    ep = next(
-        (e for e in data.get("episodes", []) if isinstance(e, dict) and e.get("episode") == episode_n),
-        None,
-    )
-    if ep is None:
-        raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
-    ep.update(fields)
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    return ep
+    """在 locked fresh snapshot 上合併單集欄位，避免其他 writer 的更新被覆蓋。"""
+    def mutate(data):
+        ep = next(
+            (
+                e for e in data.get("episodes", [])
+                if isinstance(e, dict) and e.get("episode") == episode_n
+            ),
+            None,
+        )
+        if ep is None:
+            raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
+        if "description" in fields:
+            title = (ep.get("title") or "").strip()
+            if title and fields["description"] == title:
+                raise ValueError("description must not equal title(需真 show notes,publish 會擋)")
+        ep.update(fields)
+        return dict(ep)
+
+    _, episode = ManifestStore(manifest_path).update(mutate)
+    return episode
 
 
 @mcp.tool()
@@ -48,18 +55,6 @@ async def episode_set_description(
         desc = _CITATION_RE.sub("", desc).strip()
     if not desc:
         raise ValueError("description is empty(清完引用標記後也不可為空)")
-    # 先讀該集驗 title,再走同一個讀改寫 helper;全程同步、中間無 await,不互蓋。
-    with open(manifest_path, encoding="utf-8") as f:
-        data = json.load(f)
-    ep = next(
-        (e for e in data.get("episodes", []) if isinstance(e, dict) and e.get("episode") == episode_n),
-        None,
-    )
-    if ep is None:
-        raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
-    title = (ep.get("title") or "").strip()
-    if title and desc == title:
-        raise ValueError("description must not equal title(需真 show notes,publish 會擋)")
     _load_ep_and_write(manifest_path, episode_n, description=desc)
     return {"episode": episode_n, "description": desc, "stripped": strip_citations}
 

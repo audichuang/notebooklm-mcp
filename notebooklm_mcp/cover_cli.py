@@ -40,6 +40,7 @@ import tempfile
 from PIL import Image
 
 from notebooklm_mcp.publish.artwork import validate_artwork
+from notebooklm_mcp.manifest_store import ManifestStore
 
 _ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 _CHROME_CANDIDATES = ["google-chrome", "google-chrome-stable", "chromium",
@@ -120,24 +121,6 @@ def _preflight_episodes(episodes: list) -> None:
             raise ValueError(f"episode {n}: title 必填且非空")
 
 
-def _atomic_write_json(path: str, data: object) -> None:
-    """同目錄 temp + fsync + os.replace 原子覆寫,避免中斷把 manifest 截斷。"""
-    import json
-
-    d = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def main() -> None:
@@ -165,10 +148,18 @@ def main() -> None:
 
     # 1) 批次:整季單集封面
     if args.manifest:
-        import json
-
-        with open(args.manifest, encoding="utf-8") as f:
-            manifest = json.load(f)
+        store = ManifestStore(args.manifest)
+        try:
+            manifest = store.read()
+        except ValueError as error:
+            # ManifestStore 會比 cover 專用 preflight 更早擋 schema；CLI 仍維持
+            # argparse exit 2 + 既有中文提示，不把資料錯誤洩成 traceback。
+            message = str(error)
+            if "episode must be an integer" in message:
+                message = "episode 必須是 1..99 的整數"
+            elif "duplicate episode" in message:
+                message = "重複的 episode 集號"
+            ap.error(message)
         episodes = manifest.get("episodes", [])
         try:
             _preflight_episodes(episodes)   # 壞資料 fail-fast,絕不半途覆寫 manifest
@@ -179,11 +170,12 @@ def main() -> None:
         out_dir = args.output_dir or os.path.dirname(os.path.abspath(args.manifest))
         os.makedirs(out_dir, exist_ok=True)
         tpl = _load_template("cover_episode.html")
+        cover_updates: dict[int, tuple[str, str]] = {}
         for ep in episodes:
             n = int(ep["episode"])                      # 已過 preflight,保證 int
             cover_path = os.path.abspath(os.path.join(out_dir, f"EP{n:02d}.jpg"))
             if args.skip_existing and os.path.exists(cover_path):
-                ep["cover_path"] = cover_path               # 仍寫回,不遺漏
+                cover_updates[n] = (ep["title"], cover_path)
                 print(f"SKIP {cover_path} (exists)")
                 continue
             hue = args.hue if args.hue is not None else _episode_hue(n)
@@ -195,8 +187,24 @@ def main() -> None:
                 "__HUE__": hue,
             }, cover_path, chrome)
             print(f"OK {cover_path} -> {info}")
-            ep["cover_path"] = cover_path               # 寫回絕對路徑
-        _atomic_write_json(args.manifest, manifest)     # 原子覆寫,避免截斷
+            cover_updates[n] = (ep["title"], cover_path)
+
+        def attach_cover_paths(latest):
+            for episode_n, (expected_title, cover_path) in cover_updates.items():
+                current = next(
+                    (
+                        item for item in latest["episodes"]
+                        if item.get("episode") == episode_n
+                    ),
+                    None,
+                )
+                if current is None or current.get("title") != expected_title:
+                    raise ValueError(
+                        f"episode {episode_n} changed while rendering covers; retry batch"
+                    )
+                current["cover_path"] = cover_path
+
+        store.update(attach_cover_paths)
         print(f"Manifest updated: {args.manifest}")
         return
 

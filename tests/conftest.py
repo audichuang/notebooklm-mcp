@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pytest
 
 from notebooklm_mcp import runtime
@@ -6,6 +9,12 @@ from notebooklm_mcp import runtime
 class FakeArtifacts:
     def __init__(self):
         self.calls = []
+        self._generate_count = 0
+        # Optional test hook invoked at the exact external side-effect seam,
+        # before generate_audio records/returns anything.
+        self.generate_audio_exc = None
+        self.on_generate_audio = None
+        self.generate_remote_artifacts_before_raise: list = []
         # Set to an integer N to make the N-th wait_for_completion call raise
         # TimeoutError (models a real generation timeout for error-path tests).
         self.fail_wait_on = None
@@ -30,6 +39,12 @@ class FakeArtifacts:
         # Server-side artifact set — what artifacts.list() would return. Seed via
         # seed_artifacts() to model episodes/reports that already exist in the notebook.
         self.artifacts = []
+        # Download fault injection: on failure, an optional partial payload is
+        # written before the configured exception is raised. Durable finalize
+        # must target a temp file so this never replaces a prior successful mp3.
+        self.download_audio_exc = None
+        self.download_audio_partial_bytes: bytes | None = None
+        self.download_audio_bytes = b"fake mp3 bytes"
 
     def seed_artifacts(self, *arts):
         """Test helper: pre-populate the notebook's artifact set."""
@@ -51,6 +66,8 @@ class FakeArtifacts:
         audio_format=None,
         audio_length=None,
     ):
+        if self.on_generate_audio is not None:
+            self.on_generate_audio()
         self.calls.append(
             (
                 "generate_audio",
@@ -63,11 +80,16 @@ class FakeArtifacts:
                 ),
             )
         )
+        if self.generate_audio_exc is not None:
+            self.artifacts.extend(self.generate_remote_artifacts_before_raise)
+            raise self.generate_audio_exc
         # Faithful to the real SDK: GenerationStatus exposes ONLY task_id
         # (task_id IS the artifact id). No artifact_id attribute exists.
         if self.fail_generate:
             return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "simulated failure"})()
-        return type("S", (), {"task_id": "task-123", "is_failed": False})()
+        self._generate_count += 1
+        task_id = f"task-{122 + self._generate_count}"
+        return type("S", (), {"task_id": task_id, "is_failed": False})()
 
     # Signature mirrors notebooklm-py 0.3.4 ArtifactsAPI.wait_for_completion.
     # 簽名鏡射 notebooklm-py 0.7.3:0.4.x 的 poll_interval 已移除、尾端新增 on_status_change。
@@ -96,6 +118,13 @@ class FakeArtifacts:
         self.calls.append(
             ("download", dict(notebook_id=notebook_id, output_path=output_path, artifact_id=artifact_id))
         )
+        output = Path(output_path)
+        if self.download_audio_partial_bytes is not None:
+            output.write_bytes(self.download_audio_partial_bytes)
+        if self.download_audio_exc is not None:
+            raise self.download_audio_exc
+        if self.download_audio_bytes is not None:
+            output.write_bytes(self.download_audio_bytes)
         return output_path
 
     async def rename(self, notebook_id, artifact_id, new_title, *, return_object=True):
@@ -142,8 +171,13 @@ class FakeSources:
 
     def __init__(self):
         self.calls = []
-        self.sources = []  # [{"id", "title"}] — server-side persistent set
+        # Server-side persistent set. File uploads are ``media``; seeded/url/text
+        # sources stay ``web_page`` to preserve the existing source_list fixtures.
+        self.sources = []  # [{"id", "title", "kind", "created_at", "is_ready"}]
         self._counter = 0
+        # add_file first creates the remote source, then raises: a durable resume
+        # must reconcile that source rather than upload a duplicate.
+        self.add_file_exc_after_create = None
         # True(預設)= add_file(title=) 的內部改名成功;False 模擬 0.7.3 的
         # 靜默改名失敗(SDK 只 log,回傳舊 title)。
         self.title_lands = True
@@ -152,10 +186,25 @@ class FakeSources:
         self.fulltext_content = "來源全文"
         self.fulltext_raises = False
 
-    def _add(self, title):
+    def _add(
+        self,
+        title,
+        *,
+        kind="web_page",
+        created_at=None,
+        is_ready=True,
+    ):
         self._counter += 1
         sid = f"src-{self._counter}"
-        self.sources.append({"id": sid, "title": title})
+        self.sources.append(
+            {
+                "id": sid,
+                "title": title,
+                "kind": kind,
+                "created_at": created_at or datetime.now(timezone.utc),
+                "is_ready": is_ready,
+            }
+        )
         return sid
 
     def titles(self):
@@ -184,8 +233,23 @@ class FakeSources:
                 ),
             )
         )
-        landed = title if self.title_lands else None
-        return type("Src", (), {"id": self._add(landed), "title": landed})()
+        initial_title = Path(file_path).name
+        landed = title if title is not None and self.title_lands else initial_title
+        source_id = self._add(landed, kind="media")
+        if self.add_file_exc_after_create is not None:
+            raise self.add_file_exc_after_create
+        source = next(s for s in self.sources if s["id"] == source_id)
+        return type(
+            "Src",
+            (),
+            {
+                "id": source_id,
+                "title": landed,
+                "kind": source["kind"],
+                "created_at": source["created_at"],
+                "is_ready": source["is_ready"],
+            },
+        )()
 
     async def rename(self, notebook_id, source_id, new_title, *, return_object=True):
         self.calls.append(("rename", dict(source_id=source_id, new_title=new_title,
@@ -199,7 +263,8 @@ class FakeSources:
         self.calls.append(("list", dict(notebook_id=notebook_id)))
         return [
             type("Src", (), {"id": s["id"], "title": s["title"] or "",
-                             "kind": "web_page", "is_ready": True})()
+                             "kind": s["kind"], "created_at": s["created_at"],
+                             "is_ready": s["is_ready"]})()
             for s in self.sources
         ]
 

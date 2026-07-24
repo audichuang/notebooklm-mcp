@@ -45,8 +45,8 @@ def _atoms(path):
 
 @pytest.fixture(autouse=True)
 def _noop_embed(monkeypatch):
-    """測試用假 mp3 bytes 不是合法 MP4,不能真丟給 mutagen。把 _embed_cover seam 換成
-    「回原始 bytes」——publish 的 PUT/feed 邏輯照測,真內嵌另在 test_cover_embedded 鎖。"""
+    """多數 publish 測試用假 audio bytes，不適合真丟給 ffprobe/ffmpeg/mutagen。
+    把 _embed_cover seam 換成「回原始 bytes」；真媒體契約由檔案下方 regression tests 鎖住。"""
     monkeypatch.setattr(tools_publish, "_embed_cover",
                         lambda mp3_path, cover_path: open(mp3_path, "rb").read())
 
@@ -209,7 +209,10 @@ async def test_publish_persists_show_config_then_manifest_path_alone_suffices(
     manifest = _two_episode_manifest(tmp_path, published_at=pub_at)
     await _publish(manifest, artwork_png)                       # 顯式傳齊(現行姿勢)
 
-    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    assert stored["schema_version"] == 2
+    assert stored["revision"] == 1
+    saved = stored["show"]
     assert saved["show_id"] == "ai-news" and saved["show_title"] == "AI 新聞"
     assert saved["owner_email"] == "audi@example.com"
     assert saved["artwork_path"] == artwork_png
@@ -499,15 +502,13 @@ async def test_cover_embedded_into_published_mp3(env, tmp_path, artwork_png, mon
     assert show["episodes"]["1"]["length"] == len(mp3_put)   # enclosure length = 內嵌後大小
 
 
-def test_embed_cover_defragments_to_seekable_mp4(tmp_path):
-    """真 _embed_cover:NotebookLM 音檔是 fragmented-MP4/DASH(moof/mdat 分段),moov 無
-    sample table → 播放器要整檔下載完才能 seek,拖進度就跳下一集。_embed_cover 必須把它
-    remux 成 moov-before-mdat 的 progressive MP4(可邊下邊 seek)、保留內嵌封面、且 byte
-    決定性(content-hash enclosure URL 不亂 churn)。沒 ffmpeg 就 skip。"""
+def test_embed_cover_normalizes_notebooklm_mp4_to_real_mp3(tmp_path):
+    """NotebookLM 的 fragmented MP4/AAC 即使副檔名叫 .mp3，發布器也必須輸出真正
+    MP3 + ID3 APIC，讓副檔名與 RSS audio/mpeg 不再說謊；同輸入輸出必須決定性。"""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         pytest.skip("需要 ffmpeg")
-    # 造一個 fragmented AAC mp4,模擬 NotebookLM 的 DASH 檔(empty_moov + 分段)
+    # 造一個 fragmented AAC MP4，模擬 NotebookLM 的 DASH 下載檔。
     src = tmp_path / "dash.mp3"
     subprocess.run(
         [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
@@ -519,14 +520,132 @@ def test_embed_cover_defragments_to_seekable_mp4(tmp_path):
     cover = _valid_cover(tmp_path, "c.png")
 
     out = _real_embed(str(src), cover)
-    fixed = tmp_path / "fixed.m4a"
+    fixed = tmp_path / "fixed.mp3"
     fixed.write_bytes(out)
-    atoms = _atoms(str(fixed))
-    assert "moof" not in atoms                            # 已去分段
-    assert atoms.index("moov") < atoms.index("mdat")     # faststart:moov 在前 → 可邊下邊 seek
-    from mutagen.mp4 import MP4
-    assert MP4(str(fixed)).get("covr")                   # 封面保留
+    probe = json.loads(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "format=format_name:stream=codec_name,bit_rate,sample_rate,channels",
+         "-of", "json", str(fixed)],
+        text=True,
+    ))
+    stream = probe["streams"][0]
+    assert probe["format"]["format_name"] == "mp3"
+    assert stream["codec_name"] == "mp3"
+    assert stream["bit_rate"] == "256000"
+    assert stream["sample_rate"] == "44100"
+    assert stream["channels"] == 2
+    from mutagen.id3 import ID3
+    assert ID3(str(fixed)).getall("APIC")
     assert _real_embed(str(src), cover) == out           # 決定性:同輸入同 bytes
+
+
+def test_embed_cover_accepts_mp4_with_leading_free_box(tmp_path):
+    """MP4 不保證 ftyp 固定在 byte 4；leading free box 仍應由 ffprobe 正確辨識。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("需要 ffmpeg")
+    plain = tmp_path / "plain.m4a"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+         "-t", "1", "-c:a", "aac", str(plain)],
+        check=True,
+    )
+    prefixed = tmp_path / "prefixed.mp3"
+    prefixed.write_bytes(b"\x00\x00\x00\x08free" + plain.read_bytes())
+
+    out = _real_embed(str(prefixed), _valid_cover(tmp_path, "free-cover.jpg"))
+    fixed = tmp_path / "free-fixed.mp3"
+    fixed.write_bytes(out)
+    probe = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "format=format_name:stream=codec_name",
+         "-of", "default=nw=1", str(fixed)], text=True)
+    assert "format_name=mp3" in probe and "codec_name=mp3" in probe
+
+
+def test_embed_cover_preserves_real_mp3_and_adds_id3_artwork(tmp_path):
+    """若呼叫端已把 NotebookLM AAC 轉成真正 MP3，發布器不能再把它 remux 回 MP4
+    卻仍用 `.mp3`/`audio/mpeg` 宣告。輸出必須維持 MP3、內嵌 ID3 APIC，且 bytes 決定性。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("需要 ffmpeg")
+    src = tmp_path / "real.mp3"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+         "-t", "1", "-c:a", "libmp3lame", "-b:a", "128k", str(src)],
+        check=True,
+    )
+    cover = _valid_cover(tmp_path, "mp3-cover.jpg")
+
+    out = _real_embed(str(src), cover)
+    fixed = tmp_path / "fixed.mp3"
+    fixed.write_bytes(out)
+    codec = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(fixed)],
+        text=True,
+    ).strip()
+    assert codec == "mp3"
+    from mutagen.id3 import ID3
+    assert ID3(str(fixed)).getall("APIC")
+    assert _real_embed(str(src), cover) == out
+
+
+def test_embed_cover_rejects_unsupported_adts_aac(tmp_path):
+    """不是 MP3、也不是 NotebookLM MP4/AAC 的輸入必須 fail-closed，不能只因
+    bytes[4:8] != ftyp 就被當成 MP3 後以 audio/mpeg 發布。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("需要 ffmpeg")
+    src = tmp_path / "raw.aac"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+         "-t", "1", "-c:a", "aac", "-f", "adts", str(src)],
+        check=True,
+    )
+    with pytest.raises(ValueError, match="unsupported audio container/codec"):
+        _real_embed(str(src), _valid_cover(tmp_path, "unsupported-cover.jpg"))
+
+
+async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(
+        env, tmp_path, artwork_png, monkeypatch):
+    """端到端鎖住發布契約：真 NotebookLM-like MP4/AAC 經 publish_series 後，
+    上傳 bytes 必須是 MP3，且 enclosure 同時使用 .mp3 與 audio/mpeg。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("需要 ffmpeg")
+    captured = _install_mock(monkeypatch)
+    monkeypatch.setattr(tools_publish, "_embed_cover", _real_embed)
+    src = tmp_path / "notebooklm.mp3"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+         "-t", "1", "-c:a", "aac",
+         "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", str(src)],
+        check=True,
+    )
+    manifest = _manifest(tmp_path, [{
+        "episode": 1, "title": "第1集", "description": "本集重點。",
+        "mp3_path": str(src), "cover_path": _valid_cover(tmp_path, "e2e-cover.jpg"),
+    }], "real-media.json")
+
+    await _publish(manifest, artwork_png)
+    media = next(c for c in captured
+                 if c["name"].startswith("EP01-") and c["name"].endswith(".mp3"))
+    published = tmp_path / media["name"]
+    published.write_bytes(media["content"])
+    probe = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "format=format_name:stream=codec_name",
+         "-of", "default=nw=1", str(published)], text=True)
+    assert "format_name=mp3" in probe and "codec_name=mp3" in probe
+    feedxml = next(c["content"] for c in captured if c["name"] == "feed.xml")
+    enclosure = ET.fromstring(feedxml).find("channel/item/enclosure")
+    assert enclosure is not None
+    url = enclosure.get("url")
+    length = enclosure.get("length")
+    assert url is not None and url.endswith(media["name"])
+    assert enclosure.get("type") == "audio/mpeg"
+    assert length is not None and int(length) == len(media["content"])
 
 
 # ── v0.2.8:notebook_id 選填 + return_episodes 回傳過濾 ──────────────────────────
@@ -551,6 +670,7 @@ async def test_missing_mp3_prefers_episode_notebook_id(env, tmp_path, artwork_pn
     ep1["artifact_id"] = "a-1"
     ep1["notebook_id"] = "nb-ep1"                   # 每集自己的筆記本
     open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    fake_client.artifacts.download_audio_bytes = None  # 此案例刻意模擬 SDK 沒落檔
     with pytest.raises(ValueError, match="produced no file"):
         await _publish(mpath, artwork_png, notebook_id="nb-show-level")
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download")

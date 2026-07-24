@@ -63,8 +63,10 @@ _INSTRUCTIONS = """\
 NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
 
 主流程(優先用高階工具,別自己拼低階步驟):
-- 整季/單集生成 → podcast_series(episodes 放一集即單集)。斷線續跑用
-  podcast_episode_resume。
+- 整季/單集生成 → podcast_series(episodes 放一集即單集)。有 manifest-backed
+  attempt 時,斷線後重呼 podcast_series 自動續跑；podcast_episode_reconcile
+  只對帳並 adopt artifact，之後交回 series 或帶同一 manifest_path 的
+  podcast_episode_resume finalize。未傳 manifest_path 的 resume 才是 legacy fallback。
 - 發布成 Apple RSS → publish_series(讀 series_manifest.json;需 env
   PODCAST_PUBLIC_BASE_URL / PODCAST_TOKEN_SALT / PODCAST_UPLOAD_URL /
   PODCAST_UPLOAD_TOKEN)。
@@ -73,6 +75,13 @@ NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
 
 鐵律:
 - 任何長跑前先 auth_check;cookie 死了秒退,別燒掉數小時。
+- start=N 只是 execution lower bound/trust boundary,不會重生已完成集。
+- 長 MCP request 可能被 client cancellation 終止；可靠性來自 manifest checkpoint
+  與重呼,不保證 server 在背景跑完。未傳 manifest_path 的 standalone call 僅 best-effort。
+- P0 不接受 manifest_path + prior_mp3_path；legacy continuity 必須有可驗證的 source id。
+  即使 finalize 已完成，resume 仍會重新確認遠端 feedback source identity/status。
+- QA/protected facts 是可選 host workflow,不是 MCP lifecycle；外部 manifest writer
+  必須改用 MCP tool 或同一 ManifestStore,不能直接覆寫 JSON。
 - streamable-http / sse 模式「無認證」——勿綁非 loopback host。
 
 完整路由與參數細節見 notebooklm skill(audi-skill/notebooklm)。

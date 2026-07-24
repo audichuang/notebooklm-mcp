@@ -124,6 +124,29 @@ async def test_episode_rejects_prior_mp3_for_first_episode(fake_client, tmp_path
         )
 
 
+async def test_manifest_backed_episode_rejects_uncheckpointed_prior_upload(
+    fake_client, tmp_path
+):
+    prior = tmp_path / "prior.mp3"
+    prior.write_bytes(b"prior")
+    manifest_path = tmp_path / "series_manifest.json"
+
+    with pytest.raises(ValueError, match="prior_mp3_path.*manifest|checkpoint"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=2,
+            title="實戰篇",
+            brief="x",
+            output_dir=str(tmp_path),
+            prior_mp3_path=str(prior),
+            manifest_path=str(manifest_path),
+        )
+
+    assert not manifest_path.exists()
+    assert fake_client.sources.calls == []
+    assert fake_client.artifacts.calls == []
+
+
 async def test_series_start_offset(fake_client, tmp_path):
     eps = [
         {"title": "心法篇", "brief": "1"},
@@ -250,6 +273,29 @@ async def test_episode_timeout_error_carries_artifact_id_for_resume(fake_client,
     assert "podcast_episode_resume" in msg
     # 生成確實送出了(quota 已用),所以指引 resume 而非重生。
     assert any(c[0] == "generate_audio" for c in fake_client.artifacts.calls)
+
+
+async def test_manifest_backed_finalize_error_hint_keeps_durable_identity(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.fail_wait_on = 1
+
+    with pytest.raises(TimeoutError) as error:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=2,
+            title="實戰篇",
+            brief="b",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    message = str(error.value)
+    assert "attempt_id=" in message
+    assert f"manifest_path={str(manifest_path)!r}" in message
+    assert "podcast_episode_resume" in message
+    assert "artifact_id='task-123'" in message
 
 
 async def test_episode_error_preserves_real_sdk_exception_type(fake_client, tmp_path):

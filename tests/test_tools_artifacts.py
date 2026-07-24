@@ -28,6 +28,8 @@ async def test_generate_slides_downloads_and_writes_manifest(fake_client, tmp_pa
     # 路徑回寫進 manifest
     data = json.loads(open(m, encoding="utf-8").read())
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
+    assert data["schema_version"] == 2
+    assert data["revision"] == 1
 
 
 async def test_generate_slides_unknown_episode_errors(fake_client, tmp_path):

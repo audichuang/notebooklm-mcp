@@ -76,3 +76,33 @@ def test_batch_writes_cover_path(tmp_path, monkeypatch):
     for ep in m["episodes"]:
         assert ep["cover_path"].endswith(f"EP{ep['episode']:02d}.jpg")
         assert os.path.getsize(ep["cover_path"]) > 0
+
+def test_batch_manifest_update_uses_manifest_store(tmp_path, monkeypatch):
+    man = tmp_path / "m.json"
+    man.write_text(
+        json.dumps({
+            "unknown": {"keep": True},
+            "episodes": [{"episode": 1, "title": "甲集"}],
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_render(_template, _subs, output, _chrome):
+        with open(output, "wb") as image_file:
+            image_file.write(b"fake-cover")
+        return {"width": 3000, "height": 3000, "format": "JPEG"}
+
+    monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
+    monkeypatch.setattr(cover_cli, "_render", fake_render)
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover",
+        "--manifest", str(man),
+        "--show-name", "Audicast",
+        "--output-dir", str(tmp_path),
+    ])
+
+    cover_cli.main()
+
+    stored = json.loads(man.read_text(encoding="utf-8"))
+    assert stored["schema_version"] == 2
+    assert stored["revision"] == 1

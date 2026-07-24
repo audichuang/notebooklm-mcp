@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from email.utils import format_datetime
 import httpx
 
 from . import runtime
+from .manifest_store import ManifestStore
 from .app import mcp
 from .publish import artwork as artwork_mod
 from .publish import feed as feed_mod
@@ -112,34 +114,65 @@ async def _put(client, base: str, token: str, upload_token: str, name: str, data
 
 
 def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
-    """把單集封面內嵌進音檔的 MP4 `covr` atom,回內嵌後的 bytes。NotebookLM 音檔是
-    MPEG-4 容器(.mp3 副檔名),Apple/Spotify 顯示單集封面主要吃**內嵌圖**(feed 的
-    `<item>` itunes:image 只有部分 client 認)。決定性:同音檔 + 同封面 → 同 bytes
-    (mutagen 只加 atom,不重編音訊、不寫時間戳,已離線實測兩次 byte 相同)。這是可被
-    測試 monkeypatch 的 seam(測試用假 mp3 bytes 不是合法 MP4)。"""
-    from mutagen.mp4 import MP4, MP4Cover
+    """把支援的來源正規化成真正 MP3，內嵌 ID3 APIC，回傳決定性 bytes。
+
+    NotebookLM 原始下載常是偽裝成 ``.mp3`` 的 fragmented MP4/AAC；這裡直接轉成
+    256 kbps MP3，使實際 container/codec 與 enclosure 的 ``.mp3``/``audio/mpeg``
+    契約一致。既有 true MP3 不重編音訊，只重寫封面。其他格式一律 fail-closed。
+    這是可被測試 monkeypatch 的 seam(多數 publish 測試用假 audio bytes)。"""
+    from mutagen.id3 import APIC, ID3, ID3NoHeaderError
 
     with open(cover_path, "rb") as f:
         cover = f.read()
-    fmt = MP4Cover.FORMAT_PNG if cover[:8] == b"\x89PNG\r\n\x1a\n" else MP4Cover.FORMAT_JPEG
-    fd, tmp = tempfile.mkstemp(suffix=".m4a")
+    cover_mime = "image/png" if cover[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+
+    try:
+        probe = json.loads(subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "format=format_name:stream=codec_name",
+             "-of", "json", mp3_path],
+            text=True,
+            timeout=30,
+        ))
+        formats = set(probe["format"]["format_name"].split(","))
+        codec = probe["streams"][0]["codec_name"]
+    except (KeyError, IndexError, json.JSONDecodeError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"unsupported or unreadable audio: {mp3_path}") from exc
+
+    if formats == {"mp3"} and codec == "mp3":
+        source_kind = "mp3"
+    elif "mp4" in formats and codec == "aac":
+        source_kind = "mp4_aac"
+    else:
+        raise ValueError(
+            f"unsupported audio container/codec for publication: "
+            f"format={','.join(sorted(formats)) or 'unknown'} codec={codec or 'unknown'}"
+        )
+
+    fd, tmp = tempfile.mkstemp(suffix=".mp3")
     os.close(fd)
     try:
-        # NotebookLM 下載的音檔是 fragmented-MP4 / DASH(ftyp brand=dash,moov+sidx+
-        # 一堆 moof/mdat 分段),moov 無傳統 sample table → 播放器在檔案下載完成前無法
-        # seek,拖進度就跳下一集(三個 app 皆然,因問題在檔案本身)。用 ffmpeg 無損
-        # remux 去分段成 moov-first 的 progressive MP4(-c copy 不重編音訊;-movflags
-        # +faststart 把 moov 放到 mdat 前),播放器就能邊下邊 seek。-bitexact 讓輸出
-        # byte 穩定 → content-hash enclosure URL 決定性,同音檔+同封面永遠同 bytes。
-        # (取代舊的 shutil.copyfile:當時只加 covr 不去分段,才留下這個 seek bug。)
-        subprocess.run(
-            ["ffmpeg", "-v", "error", "-y", "-bitexact", "-i", mp3_path,
-             "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp],
-            check=True,
-        )
-        mp4 = MP4(tmp)
-        mp4["covr"] = [MP4Cover(cover, imageformat=fmt)]
-        mp4.save()
+        if source_kind == "mp3":
+            shutil.copyfile(mp3_path, tmp)
+        else:
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-i", mp3_path,
+                 "-map", "0:a:0", "-vn", "-map_metadata", "-1",
+                 "-c:a", "libmp3lame", "-b:a", "256k", "-ar", "44100", "-ac", "2",
+                 tmp],
+                check=True,
+            )
+
+        try:
+            tags = ID3(tmp)
+        except ID3NoHeaderError:
+            tags = ID3()
+        # 發布契約是一張 authoritative front cover；移除舊圖避免多 APIC frame 讓
+        # client 任選錯張，也讓同音檔＋同封面的輸出 bytes 決定性。
+        tags.delall("APIC")
+        tags.add(APIC(encoding=3, mime=cover_mime, type=3, desc="Cover", data=cover))
+        tags.save(tmp, v2_version=3, padding=lambda _info: 0)
         with open(tmp, "rb") as f:
             return f.read()
     finally:
@@ -210,8 +243,8 @@ async def publish_series(
 
     # show 設定解析:顯式參數 > manifest["show"] 既存值;七欄缺一即 fail-fast。
     # (manifest 先讀——show 設定在裡面;episodes preflight 沿用同一份。)
-    with open(manifest_path, encoding="utf-8") as f:
-        manifest = json.load(f)
+    store = ManifestStore(manifest_path)
+    manifest = store.read()
     saved_show = manifest.get("show") or {}
     show_cfg = {
         "show_id": show_id or saved_show.get("show_id"),
@@ -302,9 +335,9 @@ async def publish_series(
         for ep in manifest_eps:                                    # 1) media: mp3
             n = int(ep["episode"])
             local = await _ensure_local_mp3(ep, notebook_id)
-            # 內嵌單集封面進音檔(covr):Apple/Spotify 顯示單集封面主要吃內嵌圖,不是 feed
-            # 的 <item> itunes:image。內嵌後 bytes 變 → content-hash/URL 變(預期一次性 churn,
-            # uploader 不刪舊 URL)。cover_path preflight 已驗存在 + 規格。
+            # 正規化成 true MP3 並內嵌 ID3/APIC:Apple/Spotify 常優先吃音檔內嵌圖,
+            # 不是 feed 的 <item> itunes:image。正規化/內嵌後 bytes 變 → content-hash/URL
+            # 變(預期一次性 churn,uploader 不刪舊 URL)。cover_path 已 preflight。
             mp3_bytes = _embed_cover(local, ep["cover_path"])
             mp3_len = len(mp3_bytes)                                # enclosure length 用內嵌後大小
             hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]      # hash 內嵌後 bytes
@@ -402,13 +435,12 @@ async def publish_series(
         await _put(client, upload_url, token, upload_token,
                    "index.html", feed_mod.build_index_html(show, base_url).encode("utf-8"))
 
-    # 發布成功才把 show 設定回寫 manifest(fresh 讀改寫、中間無 await,與同 process
-    # 的 slides/report/description 回寫不 interleave);失敗不留任何本地狀態變更。
-    with open(manifest_path, encoding="utf-8") as f:
-        m2 = json.load(f)
-    m2["show"] = {**show_cfg, "artwork_path": os.path.abspath(show_cfg["artwork_path"])}
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(m2, f, ensure_ascii=False, indent=2)
+    # 發布成功才在最新 snapshot 上回寫 show；store lock 不跨上方任何 HTTP await。
+    persisted_show = {
+        **show_cfg,
+        "artwork_path": os.path.abspath(show_cfg["artwork_path"]),
+    }
+    store.update(lambda latest: latest.update({"show": persisted_show}))
 
     episodes_out = sorted(published, key=lambda e: e["n"])
     if return_episodes is not None:

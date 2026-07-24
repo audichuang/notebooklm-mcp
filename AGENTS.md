@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.2.9"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.0"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -147,8 +147,8 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   agy 這類 coding agent **仍不能直接吐點陣圖**,但**擅長出 HTML/CSS**,交給 Chrome 光柵化質感高一截、
   改版只改 template。**需系統有 headless Chrome**(`google-chrome`/`chromium`;`--chrome` 或
   `NOTEBOOKLM_COVER_CHROME` 指定)——只有「產封面的那台」需要,3 個認證 VM 不用。NotebookLM 下載的
-  音檔是 **fragmented-MP4 / DASH**(AAC),副檔名 `.mp3`、以 `audio/mpeg` 發布——raw 檔**能播但整檔
-  下載完前不能 seek**(拖進度跳下一集);`_embed_cover` 發布前會無損 remux 去分段修掉(見下方 gotcha)。
+  音檔是 **fragmented-MP4 / DASH**(AAC),雖常用 `.mp3` 副檔名卻不是 MP3；`_embed_cover`
+  發布前會正向辨識並轉成 256 kbps true MP3，再寫 ID3/APIC(見下方 gotcha)。
 - **單集封面**:`notebooklm-cover --manifest <json> --show-name Audicast --byline audichuang [--output-dir <dir>]`
   批次讀 episodes 逐集填 episode template(集號決定色相 `(n*77)%360`、集標當大標、EP 徽章)、
   把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>` 掛 `itunes:image`,
@@ -158,18 +158,16 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   函式(不可隨機);但 bytes 也吃 **Chrome/CJK 字型版本**,換版本會漂 → 固定在同一台機器產、產出的
   JPEG 即事實來源(可版控;等同舊 PIL 的字型 caveat)。`.jpg`/`.png` uploader 白名單本來就放行,
   **不用重部署 NAS**(不像加 `.pdf`/`.html` 那次)。
-- **單集封面「app 讀不到」的真根因 = 音檔沒內嵌圖**:feed 的 `<item>` itunes:image 我方掛得對、
-  URL 也公網可達(實測 200),但 **Apple/Spotify 顯示單集封面主要吃音檔內嵌的 MP4 `covr` atom**,
-  只有部分 client(Overcast/Pocket Casts…)認 feed 的 item image。NotebookLM 音檔是 MPEG-4 容器
-  但**不含封面** → 只吃內嵌圖的 client 一片空白。且 raw 檔是 **fragmented-MP4 / DASH**(moov 無
-  sample table)→ 播放器整檔下載完前**無法 seek**(拖進度跳下一集,三個 app 皆然)。故 `publish_series`
-  發布前經 `_embed_cover` seam **做兩件事,皆決定性、不重編音訊**:① ffmpeg `-c copy -movflags
-  +faststart -bitexact` 無損 remux 去分段成 moov-first 的 progressive MP4(可邊下邊 seek;**別移除這步
-  remux——拿掉就退回「拖進度跳下一集」的 bug**),② `mutagen` 把該集 `cover_path` 內嵌進 `covr`。
-  **代價**:remux+內嵌都改 mp3 bytes → content-hash/enclosure URL 變,**啟用 remux／內嵌的那兩次
-  republish 各讓全集換一次新 mp3 URL**(舊 URL 因 uploader 不刪仍可用,訂閱者會重抓一次)。測試用假
-  mp3 bytes 不是合法 MP4,autouse fixture 把 `_embed_cover` 換成 no-op;另有
-  `test_embed_cover_defragments_to_seekable_mp4` 用真分段檔鎖 remux 後 moov-first + 保留封面 + 決定性。
+- **單集封面「app 讀不到」的真根因 = 音檔沒內嵌圖 + 格式假標**:feed 的 `<item>`
+  itunes:image 我方掛得對、URL 也公網可達(實測 200),但 Apple/Spotify 常優先吃音檔內嵌圖。
+  NotebookLM raw 檔是 fragmented MP4/AAC、常偽裝成 `.mp3`;若仍以 `audio/mpeg` 發布，副檔名/MIME/
+  container/codec 四者矛盾。故 `publish_series` 的 `_embed_cover` seam 先用 ffprobe **正向辨識**:
+  MP4/AAC → ffmpeg 轉 256 kbps、44.1 kHz stereo true MP3；既有 true MP3 不重編音訊；其他格式
+  fail-closed。最後用 mutagen 寫單一 authoritative front-cover ID3/APIC。這讓公開 enclosure 的
+  `.mp3` + `audio/mpeg` 與實際 MP3 完全一致且可 HTTP range seek。**代價**:首次啟用正規化會讓
+  MP4 來源各集換一次 content-hash URL(舊 URL 因 uploader 不刪仍可用,訂閱者可能重抓)。測試用假
+  audio bytes 由 autouse fixture 把 `_embed_cover` 換成 no-op；真媒體 regression 鎖住 MP4→MP3、
+  MP3 保留、ADTS 拒絕、端到端 uploaded bytes/副檔名/RSS MIME 一致與決定性。
 
 ## Conventions
 
