@@ -160,7 +160,7 @@ async def test_reconcile_with_no_candidate_stays_unknown(fake_client, tmp_path):
     assert attempt["remote"]["artifact_id"] is None
     assert out["complete"] is False
     assert out["observed_state"] == "acceptance_unknown"
-    assert out["safe_next_action"] == "wait_and_reconcile"
+    assert out["safe_next_action"] == "podcast_episode_reconcile"
 
 
 async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(
@@ -301,6 +301,76 @@ async def test_reconcile_with_multiple_candidates_is_ambiguous(
         "remote-audio-1",
         "remote-audio-2",
     ]
+
+
+async def test_adopt_selects_one_ambiguous_artifact_without_remote_side_effects(
+    fake_client, tmp_path
+):
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client,
+        tmp_path,
+        [_remote_audio("remote-audio-1"), _remote_audio("remote-audio-2")],
+    )
+    reconciled = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id
+    )
+    assert reconciled["observed_state"] == "reconciliation_ambiguous"
+    artifact_boundary = len(fake_client.artifacts.calls)
+    source_boundary = len(fake_client.sources.calls)
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        artifact_id="remote-audio-2",
+    )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert adopted["artifact_id"] == "remote-audio-2"
+    assert adopted["observed_state"] == "accepted"
+    assert attempt["dispatch"]["status"] == "accepted"
+    assert attempt["remote"]["artifact_id"] == "remote-audio-2"
+    assert [
+        call
+        for call in fake_client.artifacts.calls[artifact_boundary:]
+        if call[0] in {"generate_audio", "rename", "download"}
+    ] == []
+    assert fake_client.sources.calls[source_boundary:] == []
+
+
+async def test_adopt_rejects_attempt_identity_drift_before_remote_lookup(
+    fake_client, tmp_path
+):
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client,
+        tmp_path,
+        [_remote_audio("remote-audio-1"), _remote_audio("remote-audio-2")],
+    )
+    await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id
+    )
+    store = p.ManifestStore(manifest_path)
+
+    def corrupt_identity(manifest):
+        episode, attempt = p._attempt_record(manifest, 1, attempt_id)
+        attempt["title"] = "另一集"
+        episode["notebook_id"] = "nb-other"
+
+    store.update(corrupt_identity)
+    artifact_boundary = len(fake_client.artifacts.calls)
+    source_boundary = len(fake_client.sources.calls)
+
+    with pytest.raises(ValueError, match="different notebook|title"):
+        await p.podcast_attempt_adopt(
+            str(manifest_path),
+            episode_n=1,
+            attempt_id=attempt_id,
+            artifact_id="remote-audio-1",
+        )
+
+    assert fake_client.artifacts.calls[artifact_boundary:] == []
+    assert fake_client.sources.calls[source_boundary:] == []
 
 
 async def test_sdk_failed_status_is_not_accepted_not_transport_unknown(

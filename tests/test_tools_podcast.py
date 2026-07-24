@@ -340,26 +340,25 @@ async def test_episode_writes_manifest_stub(fake_client, tmp_path):
     assert isinstance(ep["published_at"], str) and ep["published_at"]
 
 
-async def test_episode_stub_preserves_manual_fields(fake_client, tmp_path):
-    """手動 stub 先在:upsert 只補缺欄(fill-if-missing),手動 title/published_at
-    與頂層 notebook_id(歷史遺留欄)都不動。"""
+async def test_episode_stub_with_output_evidence_fails_closed(fake_client, tmp_path):
+    """舊 manifest 只要已有 published_at 等產出證據，就不能當成全新集重生。"""
     import json
     mpath = tmp_path / "series_manifest.json"
     manual = {"episode": 3, "title": "手動標題",
               "published_at": "Wed, 01 Jan 2020 09:00:00 +0800"}
     mpath.write_text(json.dumps({"notebook_id": "old-nb", "episodes": [manual]}),
                      encoding="utf-8")
-    await p.podcast_episode(
-        "nb-9", episode_n=3, title="紀律篇", brief="b",
-        output_dir=str(tmp_path), manifest_path=str(mpath),
-    )
+
+    with pytest.raises(ValueError, match="durable output"):
+        await p.podcast_episode(
+            "nb-9", episode_n=3, title="紀律篇", brief="b",
+            output_dir=str(tmp_path), manifest_path=str(mpath),
+        )
+
     data = json.loads(mpath.read_text(encoding="utf-8"))
     assert data["notebook_id"] == "old-nb"
-    ep = data["episodes"][0]
-    assert ep["title"] == "手動標題"
-    assert ep["published_at"] == "Wed, 01 Jan 2020 09:00:00 +0800"
-    assert ep["mp3_path"].endswith("ep03.mp3")      # 缺的欄補上
-    assert ep["notebook_id"] == "nb-9"
+    assert data["episodes"] == [manual]
+    assert not any(c[0] == "generate_audio" for c in fake_client.artifacts.calls)
 
 
 async def test_episode_without_manifest_path_writes_nothing(fake_client, tmp_path):

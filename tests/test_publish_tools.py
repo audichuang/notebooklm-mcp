@@ -49,6 +49,7 @@ def _noop_embed(monkeypatch):
     把 _embed_cover seam 換成「回原始 bytes」；真媒體契約由檔案下方 regression tests 鎖住。"""
     monkeypatch.setattr(tools_publish, "_embed_cover",
                         lambda mp3_path, cover_path: open(mp3_path, "rb").read())
+    monkeypatch.setattr(tools_publish, "_require_media_binaries", lambda: None)
 
 
 @pytest.fixture
@@ -134,6 +135,23 @@ async def _publish(manifest_path, artwork_png, **overrides):
     )
     kwargs.update(overrides)
     return await tools_publish.publish_series(**kwargs)
+
+
+async def test_missing_media_binary_fails_before_any_put(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+
+    def missing_binary():
+        raise ValueError("required podcast media tool is missing: ffmpeg")
+
+    monkeypatch.setattr(
+        tools_publish, "_require_media_binaries", missing_binary
+    )
+    with pytest.raises(ValueError, match="media tool.*ffmpeg"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
 
 
 async def test_posts_to_upload_url_not_feeds_root(env, tmp_path, artwork_png, monkeypatch):
@@ -605,6 +623,44 @@ def test_embed_cover_rejects_unsupported_adts_aac(tmp_path):
     )
     with pytest.raises(ValueError, match="unsupported audio container/codec"):
         _real_embed(str(src), _valid_cover(tmp_path, "unsupported-cover.jpg"))
+
+
+def test_embed_cover_reports_missing_ffprobe(tmp_path, monkeypatch):
+    src = tmp_path / "source.mp3"
+    src.write_bytes(b"audio")
+    cover = _valid_cover(tmp_path, "missing-ffprobe-cover.jpg")
+
+    def missing_ffprobe(*_args, **_kwargs):
+        raise FileNotFoundError("ffprobe")
+
+    monkeypatch.setattr(tools_publish.subprocess, "check_output", missing_ffprobe)
+
+    with pytest.raises(ValueError, match="ffprobe.*required"):
+        _real_embed(str(src), cover)
+
+
+def test_embed_cover_reports_missing_ffmpeg(tmp_path, monkeypatch):
+    src = tmp_path / "source.mp3"
+    src.write_bytes(b"audio")
+    cover = _valid_cover(tmp_path, "missing-ffmpeg-cover.jpg")
+    monkeypatch.setattr(
+        tools_publish.subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                "streams": [{"codec_name": "aac"}],
+            }
+        ),
+    )
+
+    def missing_ffmpeg(*_args, **_kwargs):
+        raise FileNotFoundError("ffmpeg")
+
+    monkeypatch.setattr(tools_publish.subprocess, "run", missing_ffmpeg)
+
+    with pytest.raises(ValueError, match="ffmpeg.*required"):
+        _real_embed(str(src), cover)
 
 
 async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(

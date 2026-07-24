@@ -47,6 +47,22 @@ stdio process 會各自輪替出只存在記憶體的新 cookie,讓 Doppler 裡�
 - `<manifest>.lock` 是 advisory lock：外部 maintenance script 若直接覆寫 JSON 仍可能
   lost update，必須改用 MCP tool 或同一 `ManifestStore`。
 
+### 2026-07-25 v0.3.1：「已產出」的判定不能是 conjunction
+
+- v0.3.0 用 `artifact_id **and** mp3_path` 判斷 legacy 已產出。真實 podcast-lab manifest
+  的 EP19 只有 `mp3_path`／`published_at`／`description`／`cover_path`,**沒有 artifact_id**
+  (34 集裡就這一集),於是三條分支全不成立、被當成「從未生成」→ `podcast_series` 靜默重生
+  並 `os.replace` 覆寫已發布的 `ep19.mp3`,下次 publish content-hash 一變,訂閱者就收到一集
+  內容不同的 EP19。這是整批可靠性工作裡唯一會傷到**已發布內容**的路徑。
+  根治:`has_hard_output_evidence` / `has_durable_output_evidence` 改成 disjunction——
+  任一產出證據存在就 fail-closed。欄位不完整是遷移常態,不是「沒跑過」。
+- 對照組:`removed`(每日配額)自動 supersede 會每次重呼 +1 attempt 並再燒一次生成。
+  行為是刻意的(明確重呼 = 授權重試),但 partial 必須回 `attempt_count` /
+  `superseded_attempt_count`,否則呼叫端看不出自己在原地打轉。**fail-closed 不夠,
+  停下來之後要能推進、而且要看得出有沒有在推進。**
+- 每個 `complete=false` 的 `safe_next_action` 都必須是真實存在的 tool 名。用 frozenset
+  白名單 + `partial()` runtime 檢查把「回傳走不通的建議」擋在測試層,比逐條人工比對可靠。
+
 ---
 
 ## 2. Live 驗證踩到的坑（0.3.4 實際行為 vs 最新文件）

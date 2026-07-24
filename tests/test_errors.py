@@ -32,7 +32,7 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 2
     assert out["observed_state"] == "pending"
-    assert out["safe_next_action"] == "retry_series"
+    assert out["safe_next_action"] == "podcast_series"
 
     # EP2 的 accepted attempt 必須留下，讓下次重呼 wait 同一 artifact；
     # 只有 EP1 已 promotion，EP3 尚未產生任何 attempt。
@@ -44,6 +44,36 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
     assert attempt["remote"]["artifact_id"] == "task-124"
     assert attempt["remote"]["status"] == "pending"
     assert fake_client.sources.titles() == ["EP01 心法篇"]
+
+
+async def test_series_resume_connection_error_returns_structured_partial(
+    fake_client, tmp_path
+):
+    fake_client.artifacts.fail_wait_on = 1
+    eps = [{"title": "心法篇", "brief": "1"}]
+
+    first = await p.podcast_series(
+        "nb-1", episodes=eps, output_dir=str(tmp_path)
+    )
+    assert first["complete"] is False
+    assert first["observed_state"] == "pending"
+
+    fake_client.artifacts.fail_wait_on = 2
+    fake_client.artifacts.wait_exc = ConnectionError("resume network down")
+    resumed = await p.podcast_series(
+        "nb-1", episodes=eps, output_dir=str(tmp_path)
+    )
+
+    assert resumed["complete"] is False
+    assert resumed["stopped_at_episode"] == 1
+    assert resumed["observed_state"] == "pending"
+    assert resumed["safe_next_action"] == "podcast_series"
+    stored = json.loads(
+        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
+    )
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert attempt["remote"]["artifact_id"] == "task-123"
+    assert attempt["remote"]["status"] == "pending"
 
 
 async def test_malformed_episodes_fail_fast_with_clear_error(fake_client, tmp_path):

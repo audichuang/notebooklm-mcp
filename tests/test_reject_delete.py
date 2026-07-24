@@ -1,9 +1,7 @@
-"""Coverage for the reject-then-delete flow (source_delete + regenerate).
+"""Coverage for generic source deletion plus fresh standalone generation.
 
-When an episode is rejected, the operator deletes its source so the bad episode
-does not poison the next episode's continuity, then regenerates. Because prior
-episodes are already server-side sources, the regen needs NO prior_mp3_path —
-generation sees the priors automatically, and the new episode self-uploads.
+This compatibility case has no prior manifest-backed completed episode and does
+not authorize implicit regeneration or replacement of durable output.
 """
 from notebooklm_mcp import tools_basic as t
 from notebooklm_mcp import tools_podcast as p
@@ -17,17 +15,16 @@ async def test_source_delete_removes_the_source(fake_client):
     assert fake_client.sources.titles() == []
 
 
-async def test_reject_episode_then_regenerate(fake_client, tmp_path):
-    # A finished notebook: Seed + EP01 + EP02 as server-side sources.
+async def test_delete_source_then_generate_fresh_standalone_episode(fake_client, tmp_path):
+    # Existing remote sources, but no manifest-backed EP02 output.
     fake_client.sources.seed("Seed", "EP01 心法篇", "EP02 實戰篇")
     ep02_id = next(s["id"] for s in fake_client.sources.sources if s["title"] == "EP02 實戰篇")
 
-    # Reject EP02: delete its source.
+    # Generic deletion and a separate fresh generation remain compatible.
     await t.source_delete("nb-1", ep02_id)
     assert fake_client.sources.titles() == ["EP01 心法篇", "Seed"]
 
-    # Regenerate EP02. EP01 is already a source (continuity automatic), so no
-    # prior_mp3_path is needed and EP01 must NOT be duplicated.
+    # EP01 is already a source and must not be duplicated.
     await p.podcast_episode("nb-1", episode_n=2, title="實戰篇", brief="重生第二集", output_dir=str(tmp_path))
 
     assert fake_client.sources.titles() == ["EP01 心法篇", "EP02 實戰篇", "Seed"]

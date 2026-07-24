@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import runtime
 
@@ -89,6 +91,14 @@ class FakeArtifacts:
             return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "simulated failure"})()
         self._generate_count += 1
         task_id = f"task-{122 + self._generate_count}"
+        self.artifacts.append(
+            SimpleNamespace(
+                id=task_id,
+                title="Audio Overview",
+                kind=ArtifactType.AUDIO,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
         return type("S", (), {"task_id": task_id, "is_failed": False})()
 
     # Signature mirrors notebooklm-py 0.3.4 ArtifactsAPI.wait_for_completion.
@@ -130,6 +140,10 @@ class FakeArtifacts:
     async def rename(self, notebook_id, artifact_id, new_title, *, return_object=True):
         self.calls.append(("rename", dict(artifact_id=artifact_id, new_title=new_title,
                                           return_object=return_object)))
+        for artifact in self.artifacts:
+            if artifact.id == artifact_id:
+                artifact.title = new_title
+                break
         return None
 
     async def generate_slide_deck(self, notebook_id, source_ids=None, language="en",
@@ -167,7 +181,7 @@ class FakeArtifacts:
 class FakeSources:
     """Models the NotebookLM notebook's SERVER-SIDE source set: `sources` persists
     independently of any process run, so it can model cross-process resume and the
-    reject-then-delete flow. `calls` still records every invocation for assertions."""
+    generic source-deletion flow. `calls` records invocations for assertions."""
 
     def __init__(self):
         self.calls = []

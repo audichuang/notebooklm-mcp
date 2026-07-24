@@ -16,7 +16,12 @@ from notebooklm.types import ArtifactType
 
 from . import runtime
 from ._status import TerminalGenerationError, ensure_completed, ensure_started
-from .audio_finalize import finalize_attempt, new_finalize_state
+from .audio_finalize import (
+    finalize_attempt,
+    has_durable_output_evidence,
+    has_hard_output_evidence,
+    new_finalize_state,
+)
 from .app import mcp
 from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
@@ -26,11 +31,19 @@ from .manifest_store import ManifestStore
 _TZ = timezone(timedelta(hours=8))
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
 
+ACTION_ADOPT = "podcast_attempt_adopt"
+ACTION_RECONCILE = "podcast_episode_reconcile"
+ACTION_RESUME = "podcast_episode_resume"
+ACTION_SERIES = "podcast_series"
+SAFE_NEXT_ACTIONS = frozenset(
+    {ACTION_ADOPT, ACTION_RECONCILE, ACTION_RESUME, ACTION_SERIES}
+)
+
 
 def _episode_label(episode_n: int, title: str) -> str:
     """Unified name for BOTH the Studio artifact and the self-uploaded source:
     ``EP{n:02d} {title}`` (e.g. ``EP01 心法篇``). The EP prefix keeps ordering /
-    resume / reject-then-delete addressable; the title makes it human-legible.
+    resume / reconciliation addressable; the title makes it human-legible.
     Both sides use this identical string (the unified-naming iron rule)."""
     return f"EP{episode_n:02d} {title.strip()}"
 
@@ -61,6 +74,7 @@ def _create_audio_attempt(
     language: str,
     audio_format: str | None,
     audio_length: str | None,
+    supersedes_attempt_id: str | None = None,
 ) -> str:
     attempt_id = str(uuid.uuid4())
     attempt = {
@@ -92,6 +106,8 @@ def _create_audio_attempt(
         "finalize": new_finalize_state(),
         "errors": [],
     }
+    if supersedes_attempt_id is not None:
+        attempt["supersedes_attempt_id"] = supersedes_attempt_id
 
     def mutate(manifest: dict) -> None:
         manifest.setdefault("notebook_id", notebook_id)
@@ -100,20 +116,42 @@ def _create_audio_attempt(
             None,
         )
         if episode is not None:
-            active_attempt_id = episode.get("active_attempt_id")
-            if active_attempt_id:
-                raise ValueError(
-                    f"episode {episode_n} already has durable active attempt "
-                    f"{active_attempt_id!r}; reconcile or resume it before creating "
-                    "another attempt"
-                )
-            if episode.get("output_attempt_id") or (
-                episode.get("artifact_id") and episode.get("mp3_path")
+            legacy_preparatory_output = (
+                not episode.get("attempts")
+                and has_durable_output_evidence(episode)
+            )
+            if (
+                episode.get("output_attempt_id")
+                or has_hard_output_evidence(episode)
+                or legacy_preparatory_output
             ):
                 raise ValueError(
                     f"episode {episode_n} already has a durable output; "
                     "P0 does not support implicit regeneration"
                 )
+            active_attempt_id = episode.get("active_attempt_id")
+            if active_attempt_id:
+                if supersedes_attempt_id != active_attempt_id:
+                    raise ValueError(
+                        f"episode {episode_n} already has durable active attempt "
+                        f"{active_attempt_id!r}; reconcile or resume it before "
+                        "creating another attempt"
+                    )
+                _, prior_attempt = _attempt_record(
+                    manifest, episode_n, active_attempt_id
+                )
+                if prior_attempt.get("remote", {}).get("status") not in (
+                    "failed",
+                    "removed",
+                ):
+                    raise ValueError(
+                        f"attempt {active_attempt_id!r} is not terminal and "
+                        "cannot be superseded"
+                    )
+            elif supersedes_attempt_id is not None:
+                raise ValueError("superseded attempt is no longer active")
+        elif supersedes_attempt_id is not None:
+            raise ValueError("cannot supersede an attempt from a missing episode")
         if episode is None:
             episode = {"episode": episode_n, "attempts": []}
             manifest["episodes"].append(episode)
@@ -199,6 +237,29 @@ def _ensure_resume_attempt(
             )
         attempt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        finalize = new_finalize_state()
+        legacy_artifact_id = (
+            episode.get("artifact_id") or episode.get("task_id")
+        )
+        adopted_source_id = episode.get("feedback_source_id")
+        adopted_at = episode.get("feedback_source_adopted_at")
+        if (
+            isinstance(adopted_source_id, str)
+            and adopted_source_id
+            and isinstance(adopted_at, str)
+            and adopted_at
+            and legacy_artifact_id == artifact_id
+        ):
+            finalize["feedback_source_upload"].update(
+                {
+                    "status": "completed",
+                    "source_id": adopted_source_id,
+                    "adopted_at": adopted_at,
+                }
+            )
+            finalize["feedback_source_rename"].update(
+                {"status": "completed", "adopted_at": adopted_at}
+            )
         attempt = {
             "attempt_id": attempt_id,
             "created_at": now,
@@ -221,7 +282,7 @@ def _ensure_resume_attempt(
                 "error": None,
                 "error_code": None,
             },
-            "finalize": new_finalize_state(),
+            "finalize": finalize,
             "errors": [],
         }
         episode.setdefault("title", title.strip())
@@ -317,6 +378,43 @@ def _mark_not_accepted(
 
     store.update(mutate)
 
+
+def _rearm_not_accepted_attempt(
+    store: ManifestStore,
+    episode_n: int,
+    attempt_id: str,
+) -> bool:
+    """只在下一次明確呼叫時，將未受理的同一 attempt 恢復為 prepared。"""
+
+    def mutate(manifest: dict) -> bool:
+        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
+        dispatch = attempt["dispatch"]
+        if dispatch["status"] != "not_accepted":
+            return False
+        if attempt["remote"].get("artifact_id") is not None:
+            raise ValueError("not_accepted attempt cannot have an artifact mapping")
+        dispatch.update(
+            {
+                "status": "prepared",
+                "artifact_ids_before": [],
+                "dispatched_at": None,
+                "accepted_at": None,
+            }
+        )
+        dispatch.pop("candidate_artifact_ids", None)
+        attempt["remote"].update(
+            {
+                "status": "unknown",
+                "status_origin": None,
+                "observed_at": None,
+                "error": None,
+                "error_code": None,
+            }
+        )
+        return True
+
+    _, rearmed = store.update(mutate)
+    return rearmed
 
 def _claimed_artifact_ids(manifest: dict, excluding_attempt_id: str) -> set[str]:
     claimed: set[str] = set()
@@ -477,6 +575,12 @@ def _promote_attempt_output(
         episode["output_attempt_id"] = attempt_id
         for key in ("title", "label", "published_at"):
             episode.setdefault(key, output[key])
+        # episode 級 continuity 證據:attempt 裡的 source_id 是主要真相,但 legacy
+        # projection 只認得 episode 級欄位。不寫 feedback_source_adopted_at——那是
+        # podcast_attempt_adopt 的人工驗證標記,resume 靠它判斷可否沿用舊 source。
+        source_id = output.get("feedback_source_id")
+        if isinstance(source_id, str) and source_id:
+            episode["feedback_source_id"] = source_id
 
     store.update(mutate)
 
@@ -775,7 +879,7 @@ async def podcast_episode_reconcile(
             "attempt_id": attempt_id,
             "observed_state": "accepted",
             "artifact_id": remote_artifact_id,
-            "safe_next_action": "resume",
+            "safe_next_action": ACTION_RESUME,
         }
     if dispatch_status == "dispatching":
         def mark_unknown(manifest: dict) -> None:
@@ -836,7 +940,7 @@ async def podcast_episode_reconcile(
             "attempt_id": attempt_id,
             "observed_state": "accepted",
             "artifact_id": artifact_id,
-            "safe_next_action": "resume",
+            "safe_next_action": ACTION_RESUME,
         }
     if len(candidate_ids) > 1:
         _mark_reconciliation_ambiguous(
@@ -848,7 +952,7 @@ async def podcast_episode_reconcile(
             "attempt_id": attempt_id,
             "observed_state": "reconciliation_ambiguous",
             "candidate_artifact_ids": candidate_ids,
-            "safe_next_action": "resolve_reconciliation_ambiguity",
+            "safe_next_action": ACTION_ADOPT,
         }
 
     latest = store.read()
@@ -863,7 +967,7 @@ async def podcast_episode_reconcile(
             "attempt_id": attempt_id,
             "observed_state": "accepted",
             "artifact_id": latest_artifact_id,
-            "safe_next_action": "resume",
+            "safe_next_action": ACTION_RESUME,
         }
     return {
         "complete": False,
@@ -871,7 +975,7 @@ async def podcast_episode_reconcile(
         "attempt_id": attempt_id,
         "observed_state": latest_attempt["dispatch"]["status"],
         "candidate_artifact_ids": [],
-        "safe_next_action": "wait_and_reconcile",
+        "safe_next_action": ACTION_RECONCILE,
     }
 
 
@@ -963,6 +1067,406 @@ async def _continuity_source_verified(
     return len(matches) == 1
 
 
+def _validate_adoption_identity(
+    manifest: dict,
+    episode: dict,
+    attempt: dict | None,
+    *,
+    notebook_id: str,
+    episode_n: int,
+    title: str,
+) -> None:
+    if manifest.get("notebook_id") not in (None, notebook_id):
+        raise ValueError("adoption subject belongs to a different notebook")
+    if episode.get("episode") != episode_n:
+        raise ValueError("adoption subject belongs to a different episode")
+    if episode.get("notebook_id") not in (None, notebook_id):
+        raise ValueError("adoption subject belongs to a different notebook")
+    current_title = episode.get("title")
+    if not isinstance(current_title, str) or current_title.strip() != title.strip():
+        raise ValueError("adoption subject title changed")
+    if attempt is None:
+        return
+    if attempt.get("notebook_id") != notebook_id:
+        raise ValueError("attempt belongs to a different notebook")
+    if attempt.get("episode") not in (None, episode_n):
+        raise ValueError("attempt belongs to a different episode")
+    attempt_title = attempt.get("title")
+    if (
+        not isinstance(attempt_title, str)
+        or attempt_title.strip() != title.strip()
+    ):
+        raise ValueError("attempt title does not match the episode")
+
+
+def _attempt_can_adopt_source(attempt: dict) -> bool:
+    remote = attempt.get("remote", {})
+    download = attempt.get("finalize", {}).get("download", {})
+    return (
+        isinstance(remote.get("artifact_id"), str)
+        and bool(remote["artifact_id"])
+        and remote.get("status") == "completed"
+        and download.get("status") == "completed"
+        and isinstance(download.get("path"), str)
+        and bool(download["path"])
+        and isinstance(download.get("bytes"), int)
+        and download["bytes"] > 0
+        and isinstance(download.get("sha256"), str)
+        and bool(download["sha256"])
+    )
+
+
+@mcp.tool()
+async def podcast_attempt_adopt(
+    manifest_path: str,
+    episode_n: int,
+    attempt_id: str | None = None,
+    artifact_id: str | None = None,
+    feedback_source_id: str | None = None,
+) -> dict:
+    """將 caller 明確選定且已驗證的遠端 identity 原子綁回既有產製記錄。
+
+    本工具只做 identity adoption，不會 generate、upload、rename 或 download。
+    """
+    if not isinstance(manifest_path, str) or not manifest_path:
+        raise ValueError("manifest_path must be a non-empty string")
+    if not isinstance(episode_n, int) or isinstance(episode_n, bool) or episode_n < 1:
+        raise ValueError("episode_n must be an int >= 1")
+    if attempt_id is not None and (
+        not isinstance(attempt_id, str) or not attempt_id
+    ):
+        raise ValueError("attempt_id must be a non-empty string when provided")
+
+    remote_ids = [
+        value
+        for value in (artifact_id, feedback_source_id)
+        if isinstance(value, str) and value
+    ]
+    if len(remote_ids) != 1 or (
+        artifact_id is not None
+        and (not isinstance(artifact_id, str) or not artifact_id)
+    ) or (
+        feedback_source_id is not None
+        and (
+            not isinstance(feedback_source_id, str)
+            or not feedback_source_id
+        )
+    ):
+        raise ValueError(
+            "provide exactly one non-empty artifact_id or feedback_source_id"
+        )
+
+    store = ManifestStore(manifest_path)
+    snapshot = store.read()
+    episode = next(
+        (
+            row
+            for row in snapshot["episodes"]
+            if row.get("episode") == episode_n
+        ),
+        None,
+    )
+    if episode is None:
+        raise ValueError(f"episode {episode_n} is missing from the manifest")
+    title = episode.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError(f"episode {episode_n} title is missing")
+    label = _episode_label(episode_n, title)
+
+    attempt = None
+    if attempt_id is not None:
+        _, attempt = _attempt_record(snapshot, episode_n, attempt_id)
+        notebook_id = attempt.get("notebook_id")
+    else:
+        notebook_id = episode.get("notebook_id", snapshot.get("notebook_id"))
+    if not isinstance(notebook_id, str) or not notebook_id:
+        raise ValueError("adoption subject has no notebook_id")
+
+    manifest_notebook_id = snapshot.get("notebook_id")
+    episode_notebook_id = episode.get("notebook_id")
+    if manifest_notebook_id not in (None, notebook_id):
+        raise ValueError("attempt belongs to a different notebook than the manifest")
+    if episode_notebook_id not in (None, notebook_id):
+        raise ValueError("attempt belongs to a different notebook than the episode")
+    if attempt is not None:
+        if attempt.get("episode") not in (None, episode_n):
+            raise ValueError("attempt episode identity does not match the manifest")
+        attempt_title = attempt.get("title")
+        if (
+            not isinstance(attempt_title, str)
+            or attempt_title.strip() != title.strip()
+        ):
+            raise ValueError("attempt title does not match the episode")
+
+    if (
+        feedback_source_id is not None
+        and attempt is not None
+        and not _attempt_can_adopt_source(attempt)
+    ):
+        raise ValueError("feedback source adoption requires completed audio download")
+
+    client = runtime.get_client()
+    await probe_auth(client)
+
+    if artifact_id is not None:
+        if attempt_id is None or attempt is None:
+            raise ValueError("artifact adoption requires attempt_id")
+        dispatch = attempt.get("dispatch", {})
+        dispatch_status = dispatch.get("status")
+        if dispatch_status not in (
+            "acceptance_unknown",
+            "reconciliation_ambiguous",
+        ):
+            raise ValueError(
+                "artifact adoption requires an unresolved reconciliation state"
+            )
+        candidate_ids = dispatch.get("candidate_artifact_ids", [])
+        if (
+            dispatch_status == "reconciliation_ambiguous"
+            and artifact_id not in candidate_ids
+        ):
+            raise ValueError(
+                f"artifact {artifact_id!r} is not an ambiguity candidate"
+            )
+        artifacts = await client.artifacts.list(
+            notebook_id, artifact_type=ArtifactType.AUDIO
+        )
+        matches = [
+            artifact
+            for artifact in artifacts
+            if getattr(artifact, "id", None) == artifact_id
+            and _source_value(getattr(artifact, "kind", None))
+            == ArtifactType.AUDIO.value
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"artifact {artifact_id!r} is not one unique audio artifact"
+            )
+
+        if dispatch_status == "acceptance_unknown":
+            _, _, baseline, dispatched_at = _reconciliation_subject(
+                snapshot, episode_n, attempt_id
+            )
+            created_at = getattr(matches[0], "created_at", None)
+            if (
+                artifact_id in baseline
+                or not isinstance(created_at, datetime)
+                or created_at.tzinfo is None
+            ):
+                raise ValueError(
+                    "explicit artifact is not a post-dispatch candidate"
+                )
+            observed_at = created_at.astimezone(timezone.utc)
+            if not (
+                dispatched_at - _RECONCILIATION_CLOCK_SKEW
+                <= observed_at
+                <= datetime.now(timezone.utc) + _RECONCILIATION_CLOCK_SKEW
+            ):
+                raise ValueError("explicit artifact is outside the dispatch window")
+
+        def adopt_artifact(manifest: dict) -> None:
+            current_episode, current = _attempt_record(
+                manifest, episode_n, attempt_id
+            )
+            _validate_adoption_identity(
+                manifest, current_episode, current,
+                notebook_id=notebook_id, episode_n=episode_n, title=title,
+            )
+            current_dispatch = current["dispatch"]
+            current_status = current_dispatch.get("status")
+            if current_status not in (
+                "acceptance_unknown",
+                "reconciliation_ambiguous",
+            ):
+                raise ValueError("attempt reconciliation state changed")
+            if (
+                current_status == "reconciliation_ambiguous"
+                and artifact_id not in current_dispatch.get(
+                    "candidate_artifact_ids", []
+                )
+            ):
+                raise ValueError("artifact is no longer an ambiguity candidate")
+            if (
+                current_status == "acceptance_unknown"
+                and artifact_id in current_dispatch.get("artifact_ids_before", [])
+            ):
+                raise ValueError("artifact was already present before dispatch")
+            if artifact_id in _claimed_artifact_ids(manifest, attempt_id):
+                raise ValueError(f"artifact {artifact_id!r} is already claimed")
+            if current["remote"].get("artifact_id") is not None:
+                raise ValueError("attempt already has a remote artifact mapping")
+            now = datetime.now(timezone.utc).isoformat()
+            current_dispatch["status"] = "accepted"
+            current_dispatch["accepted_at"] = now
+            current["remote"].update(
+                {
+                    "artifact_id": artifact_id,
+                    "status": "pending",
+                    "status_origin": "caller_verified",
+                    "observed_at": now,
+                    "error": None,
+                    "error_code": None,
+                }
+            )
+
+        store.update(adopt_artifact)
+        return {
+            "complete": False,
+            "episode_n": episode_n,
+            "attempt_id": attempt_id,
+            "artifact_id": artifact_id,
+            "observed_state": "accepted",
+            "safe_next_action": ACTION_RESUME,
+        }
+
+    assert feedback_source_id is not None
+    upload = (
+        attempt.get("finalize", {}).get("feedback_source_upload", {})
+        if attempt is not None
+        else {}
+    )
+    candidate_pending_rename = (
+        upload.get("status") == "reconciliation_ambiguous"
+        and feedback_source_id in upload.get("candidate_source_ids", [])
+    )
+    allowed_titles = {label}
+    expected_upload_title = upload.get("expected_title")
+    if (
+        candidate_pending_rename
+        and isinstance(expected_upload_title, str)
+        and expected_upload_title
+    ):
+        allowed_titles.add(expected_upload_title)
+    sources = await client.sources.list(notebook_id)
+    matches = [
+        source
+        for source in sources
+        if getattr(source, "id", None) == feedback_source_id
+        and getattr(source, "title", None) in allowed_titles
+        and _source_value(getattr(source, "kind", None)) == "media"
+        and _source_is_ready(source)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"feedback source {feedback_source_id!r} must uniquely match "
+            "a ready media source with the expected identity"
+        )
+    needs_rename = getattr(matches[0], "title", None) != label
+
+    def source_claimed_elsewhere(manifest: dict) -> bool:
+        for row in manifest["episodes"]:
+            if (
+                row.get("episode") != episode_n
+                and row.get("feedback_source_id") == feedback_source_id
+            ):
+                return True
+            for current in row.get("attempts", []):
+                if (
+                    current.get("attempt_id") == attempt_id
+                    and row.get("episode") == episode_n
+                ):
+                    continue
+                source_id = (
+                    current.get("finalize", {})
+                    .get("feedback_source_upload", {})
+                    .get("source_id")
+                )
+                if source_id == feedback_source_id:
+                    return True
+        return False
+
+    def adopt_source(manifest: dict) -> None:
+        current_episode = next(
+            row
+            for row in manifest["episodes"]
+            if row.get("episode") == episode_n
+        )
+        current_attempt = None
+        if attempt_id is not None:
+            _, current_attempt = _attempt_record(
+                manifest, episode_n, attempt_id
+            )
+        _validate_adoption_identity(
+            manifest, current_episode, current_attempt,
+            notebook_id=notebook_id, episode_n=episode_n, title=title,
+        )
+        if source_claimed_elsewhere(manifest):
+            raise ValueError(
+                f"feedback source {feedback_source_id!r} is already claimed"
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        if attempt_id is None:
+            if current_episode.get("attempts") or not has_durable_output_evidence(
+                current_episode
+            ):
+                raise ValueError(
+                    "attempt_id may be omitted only for legacy durable output"
+                )
+            previous = current_episode.get("feedback_source_id")
+            if previous not in (None, feedback_source_id):
+                history = current_episode.setdefault(
+                    "previous_feedback_source_ids", []
+                )
+                if previous not in history:
+                    history.append(previous)
+            current_episode["feedback_source_id"] = feedback_source_id
+            current_episode["feedback_source_adopted_at"] = now
+            return
+
+        assert current_attempt is not None
+        if not _attempt_can_adopt_source(current_attempt):
+            raise ValueError(
+                "feedback source adoption requires completed audio download"
+            )
+        current = current_attempt
+        upload = current["finalize"]["feedback_source_upload"]
+        if needs_rename and not (
+            upload.get("status") == "reconciliation_ambiguous"
+            and feedback_source_id
+            in upload.get("candidate_source_ids", [])
+            and upload.get("expected_title") == expected_upload_title
+        ):
+            raise ValueError(
+                "feedback source is no longer an ambiguity candidate"
+            )
+        previous = upload.get("source_id")
+        if previous not in (None, feedback_source_id):
+            history = upload.setdefault("previous_source_ids", [])
+            if previous not in history:
+                history.append(previous)
+        upload.update(
+            {
+                "status": "accepted" if needs_rename else "completed",
+                "source_id": feedback_source_id,
+                "adopted_at": now,
+                "candidate_source_ids": [],
+            }
+        )
+        rename = current["finalize"]["feedback_source_rename"]
+        if needs_rename:
+            rename.update(
+                {
+                    "status": "not_started",
+                    "source_name": None,
+                    "verified_at": None,
+                }
+            )
+        else:
+            rename.update({"status": "completed", "adopted_at": now})
+
+    store.update(adopt_source)
+    return {
+        "complete": not needs_rename,
+        "episode_n": episode_n,
+        "attempt_id": attempt_id,
+        "feedback_source_id": feedback_source_id,
+        "observed_state": (
+            "accepted" if needs_rename else "continuity_verified"
+        ),
+        "safe_next_action": ACTION_RESUME if needs_rename else ACTION_SERIES,
+    }
+
+
 @mcp.tool()
 async def podcast_series(
     notebook_id: str,
@@ -1014,6 +1518,22 @@ async def podcast_series(
         safe_next_action: str,
         **extra: object,
     ) -> dict:
+        if safe_next_action not in SAFE_NEXT_ACTIONS:
+            raise ValueError(
+                f"unknown safe_next_action {safe_next_action!r}"
+            )
+        # 每個安全停止都回報這一集已經燒掉幾個 attempt、其中幾個是自動 supersede。
+        # 配額耗盡(removed)時 safe_next_action 會一直指回 podcast_series;呼叫端靠
+        # 這兩個數字才看得出自己在原地打轉,而不是無限重呼再燒一次生成配額。
+        row = next(
+            (
+                item
+                for item in store.read()["episodes"]
+                if item.get("episode") == episode_n
+            ),
+            None,
+        )
+        attempts = row.get("attempts", []) if row else []
         return {
             "notebook_id": notebook_id,
             "episodes": run_results,
@@ -1023,6 +1543,10 @@ async def podcast_series(
             "attempt_id": attempt_id,
             "observed_state": observed_state,
             "safe_next_action": safe_next_action,
+            "attempt_count": len(attempts),
+            "superseded_attempt_count": sum(
+                1 for attempt in attempts if attempt.get("supersedes_attempt_id")
+            ),
             **extra,
         }
 
@@ -1061,51 +1585,74 @@ async def podcast_series(
                     raise ValueError(
                         f"episode {episode_n} brief differs from completed attempt"
                     )
-                upload = output_attempt.get("finalize", {}).get(
-                    "feedback_source_upload", {}
-                )
-                source_id = upload.get("source_id")
-                continuity_ok = (
-                    upload.get("status") == "completed"
-                    and isinstance(source_id, str)
-                    and await _continuity_source_verified(
+                try:
+                    repaired = await finalize_attempt(
                         client,
-                        notebook_id,
-                        _episode_label(episode_n, expected_title),
-                        source_id=source_id,
+                        store,
+                        episode_n=episode_n,
+                        attempt_id=output_attempt_id,
+                        output_dir=output_dir,
+                        wait_timeout=wait_timeout,
                     )
-                )
-                if not continuity_ok:
+                except RuntimeError:
+                    current = store.read()
+                    _, stopped_attempt = _attempt_record(
+                        current, episode_n, output_attempt_id
+                    )
+                    source_id = (
+                        stopped_attempt.get("finalize", {})
+                        .get("feedback_source_upload", {})
+                        .get("source_id")
+                    )
+                    if isinstance(source_id, str):
+                        sources = await client.sources.list(notebook_id)
+                        if not any(
+                            getattr(source, "id", None) == source_id
+                            for source in sources
+                        ):
+                            return partial(
+                                episode_n,
+                                output_attempt_id,
+                                "continuity_unverified",
+                                ACTION_ADOPT,
+                            )
+                    raise
+                except (TimeoutError, ConnectionError):
+                    # 已完成集的 drift 複驗途中傳輸失敗:manifest checkpoint 仍是真相,
+                    # 回結構化 partial 讓呼叫端重跑同一組 series,別裸拋掉整季進度回報
+                    # (與下方 active attempt 分支同一處置)。
                     return partial(
                         episode_n,
                         output_attempt_id,
-                        "continuity_unverified",
-                        "restore_feedback_source_explicitly",
+                        "verification_incomplete",
+                        ACTION_SERIES,
                     )
+                _promote_attempt_output(
+                    store, episode_n, output_attempt_id, repaired
+                )
                 continue
 
             is_legacy_output = (
                 not episode.get("attempts")
-                and isinstance(episode.get("artifact_id"), str)
-                and isinstance(episode.get("mp3_path"), str)
+                and has_durable_output_evidence(episode)
             )
             if is_legacy_output:
                 if episode.get("title") not in (None, expected_title):
                     raise ValueError(
                         f"episode {episode_n} title differs from legacy output"
                     )
-                legacy_path = episode["mp3_path"]
+                legacy_path = episode.get("mp3_path")
                 try:
                     local_audio_ok = (
-                        os.path.isfile(legacy_path)
+                        isinstance(legacy_path, str)
+                        and os.path.isfile(legacy_path)
                         and os.path.getsize(legacy_path) > 0
                     )
                 except OSError:
                     local_audio_ok = False
                 legacy_source_id = episode.get("feedback_source_id")
-                continuity_ok = (
-                    local_audio_ok
-                    and isinstance(legacy_source_id, str)
+                source_verified = (
+                    isinstance(legacy_source_id, str)
                     and await _continuity_source_verified(
                         client,
                         notebook_id,
@@ -1113,15 +1660,35 @@ async def podcast_series(
                         source_id=legacy_source_id,
                     )
                 )
-                if not continuity_ok:
+                if local_audio_ok and source_verified:
+                    continue
+
+                legacy_artifact_id = episode.get("artifact_id")
+                if not local_audio_ok and source_verified:
+                    if not isinstance(legacy_artifact_id, str):
+                        raise ValueError(
+                            f"episode {episode_n} local audio is missing and "
+                            "no legacy artifact_id can restore it"
+                        )
                     return partial(
                         episode_n,
                         None,
-                        "legacy_output_unverified",
-                        "resume_legacy_artifact_explicitly",
-                        artifact_id=episode["artifact_id"],
+                        "legacy_audio_missing",
+                        ACTION_RESUME,
+                        artifact_id=legacy_artifact_id,
                     )
-                continue
+
+                return partial(
+                    episode_n,
+                    None,
+                    "legacy_output_unverified",
+                    ACTION_ADOPT,
+                    **(
+                        {"artifact_id": legacy_artifact_id}
+                        if isinstance(legacy_artifact_id, str)
+                        else {}
+                    ),
+                )
 
             active_attempt_id = episode.get("active_attempt_id")
             if active_attempt_id is not None:
@@ -1143,19 +1710,49 @@ async def podcast_series(
                 remote_state = remote.get("status")
                 artifact_id = remote.get("artifact_id")
                 if dispatch_state == "not_accepted":
-                    return partial(
-                        episode_n,
-                        active_attempt_id,
-                        "not_accepted",
-                        "create_new_attempt_explicitly",
+                    rearmed = _rearm_not_accepted_attempt(
+                        store, episode_n, active_attempt_id
                     )
+                    if not rearmed:
+                        latest = store.read()
+                        _, latest_attempt = _attempt_record(
+                            latest, episode_n, active_attempt_id
+                        )
+                        return partial(
+                            episode_n,
+                            active_attempt_id,
+                            latest_attempt["dispatch"]["status"],
+                            ACTION_SERIES,
+                        )
+                    snapshot = store.read()
+                    _, attempt = _attempt_record(
+                        snapshot, episode_n, active_attempt_id
+                    )
+                    dispatch_state = attempt["dispatch"]["status"]
+                    remote = attempt["remote"]
+                    remote_state = remote["status"]
+                    artifact_id = remote["artifact_id"]
                 if remote_state in ("failed", "removed"):
-                    return partial(
-                        episode_n,
-                        active_attempt_id,
-                        remote_state,
-                        "create_new_attempt_explicitly",
+                    superseded_attempt_id = active_attempt_id
+                    active_attempt_id = _create_audio_attempt(
+                        store,
+                        notebook_id=notebook_id,
+                        episode_n=episode_n,
+                        title=expected_title,
+                        brief=plan["brief"],
+                        language=resolve_language(language),
+                        audio_format=audio_format,
+                        audio_length=audio_length,
+                        supersedes_attempt_id=superseded_attempt_id,
                     )
+                    snapshot = store.read()
+                    _, attempt = _attempt_record(
+                        snapshot, episode_n, active_attempt_id
+                    )
+                    dispatch_state = attempt["dispatch"]["status"]
+                    remote = attempt["remote"]
+                    remote_state = remote["status"]
+                    artifact_id = remote["artifact_id"]
 
                 if dispatch_state == "prepared":
                     expected_settings = {
@@ -1186,7 +1783,7 @@ async def podcast_series(
                             episode_n,
                             active_attempt_id,
                             latest_attempt["dispatch"]["status"],
-                            "retry_series",
+                            ACTION_SERIES,
                         )
                     try:
                         started = await client.artifacts.generate_audio(
@@ -1209,7 +1806,7 @@ async def podcast_series(
                             episode_n,
                             active_attempt_id,
                             "acceptance_unknown",
-                            "wait_and_reconcile",
+                            ACTION_RECONCILE,
                         )
                     try:
                         artifact_id = ensure_started(started)
@@ -1221,7 +1818,7 @@ async def podcast_series(
                             episode_n,
                             active_attempt_id,
                             "not_accepted",
-                            "create_new_attempt_explicitly",
+                            ACTION_SERIES,
                         )
                     _bind_accepted_artifact(
                         store, episode_n, active_attempt_id, artifact_id
@@ -1272,14 +1869,29 @@ async def podcast_series(
                         episode_n,
                         active_attempt_id,
                         failed_attempt["remote"]["status"],
-                        "create_new_attempt_explicitly",
+                        ACTION_SERIES,
                     )
-                except TimeoutError:
+                except (TimeoutError, ConnectionError):
+                    current = store.read()
+                    _, stopped_attempt = _attempt_record(
+                        current, episode_n, active_attempt_id
+                    )
+                    upload_state = stopped_attempt.get("finalize", {}).get(
+                        "feedback_source_upload", {}
+                    ).get("status")
+                    observed = (
+                        upload_state
+                        if upload_state in (
+                            "acceptance_unknown",
+                            "reconciliation_ambiguous",
+                        )
+                        else stopped_attempt["remote"]["status"]
+                    )
                     return partial(
                         episode_n,
                         active_attempt_id,
-                        "pending",
-                        "retry_series",
+                        observed,
+                        ACTION_SERIES,
                     )
                 except RuntimeError:
                     current = store.read()
@@ -1294,9 +1906,9 @@ async def podcast_series(
                         "reconciliation_ambiguous",
                     ):
                         action = (
-                            "resolve_reconciliation_ambiguity"
+                            ACTION_ADOPT
                             if upload_state == "reconciliation_ambiguous"
-                            else "retry_series"
+                            else ACTION_SERIES
                         )
                         return partial(
                             episode_n,
@@ -1342,7 +1954,7 @@ async def podcast_series(
                 episode_n,
                 attempt_id,
                 failed_attempt["remote"]["status"],
-                "create_new_attempt_explicitly",
+                ACTION_SERIES,
             )
         except RuntimeError:
             current = store.read()
@@ -1361,7 +1973,7 @@ async def podcast_series(
                 episode_n,
                 attempt_id,
                 "not_accepted",
-                "create_new_attempt_explicitly",
+                ACTION_SERIES,
             )
         except (TimeoutError, ConnectionError):
             current = store.read()
@@ -1388,11 +2000,11 @@ async def podcast_series(
                     )
                     else stopped_attempt["remote"]["status"]
                 )
-            action = (
-                "wait_and_reconcile"
-                if observed == "acceptance_unknown"
-                else "retry_series"
+            needs_artifact_reconcile = (
+                stopped_attempt["remote"].get("artifact_id") is None
+                and observed == "acceptance_unknown"
             )
+            action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
             return partial(
                 episode_n,
                 attempt_id,

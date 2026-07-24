@@ -118,8 +118,9 @@ async def source_add_file(
 
 @mcp.tool()
 async def source_delete(notebook_id: str, source_id: str) -> dict:
-    """Delete a source, e.g. remove a rejected episode before regenerating.
+    """Delete a caller-selected source that is no longer needed.
 
+    這是 generic source 管理能力，不代表可覆寫 manifest-backed completed episode。
     注意:0.7.x 起 SDK 的 delete 是 idempotent —— 刪不存在的 source 也「成功」不 raise。
     因此 deleted 表示「呼叫後該 id 已不在筆記本」,不保證它先前存在(打錯 id 也回 deleted)。
     需要確認確實刪掉某個既有來源時,先用 source_list 取得真實 source_id。"""
@@ -251,9 +252,9 @@ async def chat_ask(
 
 @mcp.tool()
 async def source_list(notebook_id: str) -> dict:
-    """List a notebook's sources — find a source_id (e.g. to rename or delete a
-    rejected episode's mp3 source, or feed generate_slides/report a focused
-    source_ids set) and confirm uploads landed. Each entry has ready=True once
+    """List a notebook's sources — find a source_id for explicit source
+    management or a focused generate_slides/report source_ids set, and confirm
+    uploads landed. Each entry has ready=True once
     NotebookLM finished ingesting it."""
     srcs = await runtime.get_client().sources.list(notebook_id)
     return {

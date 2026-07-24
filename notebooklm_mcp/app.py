@@ -64,9 +64,10 @@ NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
 
 主流程(優先用高階工具,別自己拼低階步驟):
 - 整季/單集生成 → podcast_series(episodes 放一集即單集)。有 manifest-backed
-  attempt 時,斷線後重呼 podcast_series 自動續跑；podcast_episode_reconcile
-  只對帳並 adopt artifact，之後交回 series 或帶同一 manifest_path 的
-  podcast_episode_resume finalize。未傳 manifest_path 的 resume 才是 legacy fallback。
+  attempt 時，優先重呼 podcast_series 自動續跑；acceptance_unknown 用
+  podcast_episode_reconcile 對帳，ambiguous／legacy／feedback source restore 用
+  podcast_attempt_adopt 綁定明確且已驗證的遠端 ID。podcast_episode_resume 是鎖定
+  accepted artifact finalize 或未傳 manifest 的 standalone／legacy fallback。
 - 發布成 Apple RSS → publish_series(讀 series_manifest.json;需 env
   PODCAST_PUBLIC_BASE_URL / PODCAST_TOKEN_SALT / PODCAST_UPLOAD_URL /
   PODCAST_UPLOAD_TOKEN)。

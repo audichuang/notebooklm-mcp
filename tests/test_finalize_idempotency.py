@@ -6,6 +6,18 @@ import pytest
 from notebooklm_mcp import tools_podcast as p
 
 
+def _visible_audio(artifact_id: str, title: str):
+    return type(
+        "Artifact",
+        (),
+        {
+            "id": artifact_id,
+            "title": title,
+            "kind": p.ArtifactType.AUDIO,
+        },
+    )()
+
+
 async def test_manifest_backed_resume_of_completed_attempt_is_side_effect_free(
     fake_client, tmp_path
 ):
@@ -40,6 +52,84 @@ async def test_manifest_backed_resume_of_completed_attempt_is_side_effect_free(
     assert [
         call
         for call in fake_client.sources.calls[len(before_sources) :]
+        if call[0] in {"add_file", "rename"}
+    ] == []
+
+
+async def test_completed_resume_repairs_feedback_source_title_drift(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    source = next(
+        row
+        for row in fake_client.sources.sources
+        if row["id"] == first["feedback_source_id"]
+    )
+    source["title"] = "人手誤改的名字"
+    source_boundary = len(fake_client.sources.calls)
+
+    resumed = await p.podcast_episode_resume(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        artifact_id=first["artifact_id"],
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+
+    assert resumed["attempt_id"] == first["attempt_id"]
+    assert source["title"] == "EP01 心法篇"
+    repair_calls = fake_client.sources.calls[source_boundary:]
+    assert len([call for call in repair_calls if call[0] == "rename"]) == 1
+    assert [call for call in repair_calls if call[0] == "add_file"] == []
+
+
+async def test_completed_resume_repairs_artifact_title_drift(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    artifact = next(
+        row
+        for row in fake_client.artifacts.artifacts
+        if row.id == first["artifact_id"]
+    )
+    artifact.title = "人手誤改的名字"
+    artifact_boundary = len(fake_client.artifacts.calls)
+    source_boundary = len(fake_client.sources.calls)
+
+    resumed = await p.podcast_episode_resume(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        artifact_id=first["artifact_id"],
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+
+    assert resumed["attempt_id"] == first["attempt_id"]
+    assert artifact.title == "EP01 心法篇"
+    repair_calls = fake_client.artifacts.calls[artifact_boundary:]
+    assert len([call for call in repair_calls if call[0] == "rename"]) == 1
+    assert [call for call in repair_calls if call[0] == "download"] == []
+    assert [
+        call
+        for call in fake_client.sources.calls[source_boundary:]
         if call[0] in {"add_file", "rename"}
     ] == []
 
@@ -200,6 +290,9 @@ async def test_unpromoted_new_attempt_does_not_replace_prior_output_bytes(
     old_path = tmp_path / "ep01.mp3"
     old_bytes = old_path.read_bytes()
     fake_client.artifacts.download_audio_bytes = b"new-attempt-audio"
+    fake_client.artifacts.artifacts.append(
+        _visible_audio("task-new", "Audio Overview")
+    )
 
     async def fail_after_download(_notebook_id):
         raise ConnectionError("stop before new source upload")
@@ -234,6 +327,65 @@ async def test_unpromoted_new_attempt_does_not_replace_prior_output_bytes(
     assert candidate_path.endswith(f"{active_attempt_id}/ep01.mp3")
     with open(candidate_path, "rb") as candidate:
         assert candidate.read() == b"new-attempt-audio"
+
+
+async def test_legacy_partial_output_isolated_before_explicit_resume_promotion(
+    fake_client, tmp_path, monkeypatch
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    old_path = tmp_path / "ep19.mp3"
+    old_bytes = b"already published EP19"
+    old_path.write_bytes(old_bytes)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 19,
+                        "title": "既有第十九集",
+                        "label": "EP19 既有第十九集",
+                        "mp3_path": str(old_path),
+                        "published_at": "Fri, 24 Jul 2026 09:00:00 +0800",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client.artifacts.download_audio_bytes = b"replacement audio"
+    fake_client.artifacts.artifacts.append(
+        _visible_audio("replacement-artifact", "Audio Overview")
+    )
+
+    async def fail_after_download(_notebook_id):
+        raise ConnectionError("stop before replacement source upload")
+
+    monkeypatch.setattr(fake_client.sources, "list", fail_after_download)
+    with pytest.raises(ConnectionError, match="replacement source upload"):
+        await p.podcast_episode_resume(
+            "nb-1",
+            episode_n=19,
+            title="既有第十九集",
+            artifact_id="replacement-artifact",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    assert old_path.read_bytes() == old_bytes
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    episode = stored["episodes"][0]
+    assert episode["mp3_path"] == str(old_path)
+    active_attempt_id = episode["active_attempt_id"]
+    active = next(
+        row
+        for row in episode["attempts"]
+        if row["attempt_id"] == active_attempt_id
+    )
+    candidate_path = active["finalize"]["download"]["path"]
+    assert candidate_path != str(old_path)
+    assert candidate_path.endswith(f"{active_attempt_id}/ep19.mp3")
 
 
 async def test_interrupted_download_does_not_replace_prior_successful_mp3(
@@ -291,6 +443,61 @@ async def test_completed_attempt_with_missing_mp3_only_redownloads(
         for call in fake_client.artifacts.calls[artifact_boundary:]
         if call[0] in {"rename", "download"}
     ] == ["download"]
+    assert [
+        call
+        for call in fake_client.sources.calls[source_boundary:]
+        if call[0] in {"add_file", "rename"}
+    ] == []
+
+
+async def test_adopt_replacement_feedback_source_without_uploading_again(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    old_source_id = first["feedback_source_id"]
+    fake_client.sources.sources.clear()
+    replacement_source_id = fake_client.sources._add(
+        "EP01 心法篇", kind="media"
+    )
+    source_boundary = len(fake_client.sources.calls)
+    artifact_boundary = len(fake_client.artifacts.calls)
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=first["attempt_id"],
+        feedback_source_id=replacement_source_id,
+    )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = stored["episodes"][0]["attempts"][0]
+    upload = attempt["finalize"]["feedback_source_upload"]
+    assert adopted["feedback_source_id"] == replacement_source_id
+    assert adopted["safe_next_action"] == "podcast_series"
+    assert upload["source_id"] == replacement_source_id
+    assert upload["status"] == "completed"
+    assert upload["previous_source_ids"] == [old_source_id]
+    assert attempt["finalize"]["feedback_source_rename"]["status"] == "completed"
+
+    resumed = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+    assert resumed["complete"] is True
+    assert [
+        call
+        for call in fake_client.artifacts.calls[artifact_boundary:]
+        if call[0] in {"generate_audio", "rename", "download"}
+    ] == []
     assert [
         call
         for call in fake_client.sources.calls[source_boundary:]

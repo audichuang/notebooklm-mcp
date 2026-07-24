@@ -23,6 +23,30 @@ _SOURCE_DISPATCH_WINDOW = timedelta(minutes=11)
 _TZ = timezone(timedelta(hours=8))
 
 
+def has_hard_output_evidence(episode: dict) -> bool:
+    """已生成或發布的 legacy 證據；即使後來出現 attempt 也不可隱式覆寫。"""
+    hard_fields = ("artifact_id", "task_id", "mp3_path", "published_at")
+    return any(
+        isinstance(episode.get(field), str) and episode[field].strip()
+        for field in hard_fields
+    )
+
+
+def has_durable_output_evidence(episode: dict) -> bool:
+    """既有輸出留下任一耐久證據時，不得覆寫相容路徑。"""
+    if has_hard_output_evidence(episode):
+        return True
+    cover = episode.get("cover_path")
+    if isinstance(cover, str) and cover.strip():
+        return True
+    label = episode.get("label")
+    return (
+        not episode.get("attempts")
+        and isinstance(label, str)
+        and bool(label.strip())
+    )
+
+
 def new_finalize_state() -> dict:
     """回傳每個 attempt 各自擁有的 finalize 初始狀態。"""
     return {
@@ -293,6 +317,30 @@ async def _feedback_source_verified(
     return len(matches) == 1
 
 
+async def _artifact_title_state(
+    client: object,
+    notebook_id: str,
+    artifact_id: str,
+    label: str,
+) -> bool | None:
+    """回傳精確 postcondition；list 暫時看不到 ID 時回 None。
+
+    呼叫端將 None 視為無法證實 remote identity，並 fail-closed。
+    """
+    artifacts = await client.artifacts.list(notebook_id)
+    matches = [
+        artifact
+        for artifact in artifacts
+        if getattr(artifact, "id", None) == artifact_id
+    ]
+    if not matches:
+        return None
+    return len(matches) == 1 and (
+        _kind_value(getattr(matches[0], "kind", None)) == ArtifactType.AUDIO.value
+        and getattr(matches[0], "title", None) == label
+    )
+
+
 async def finalize_attempt(
     client: object,
     store: ManifestStore,
@@ -330,8 +378,12 @@ async def finalize_attempt(
             source_id = attempt["finalize"]["feedback_source_upload"].get(
                 "source_id"
             )
+            artifact_title_state = await _artifact_title_state(
+                client, notebook_id, artifact_id, label
+            )
             if (
-                isinstance(source_id, str)
+                artifact_title_state is True
+                and isinstance(source_id, str)
                 and await _feedback_source_verified(
                     client, notebook_id, source_id, label
                 )
@@ -345,9 +397,7 @@ async def finalize_attempt(
     else:
         prior_output_attempt_id = episode.get("output_attempt_id")
         has_prior_output = prior_output_attempt_id not in (None, attempt_id) or (
-            prior_output_attempt_id is None
-            and isinstance(episode.get("artifact_id"), str)
-            and isinstance(episode.get("mp3_path"), str)
+            prior_output_attempt_id is None and has_durable_output_evidence(episode)
         )
         if has_prior_output:
             if os.path.basename(attempt_id) != attempt_id or attempt_id in (".", ".."):
@@ -399,21 +449,15 @@ async def finalize_attempt(
 
     _, attempt = _subject(store, episode_n, attempt_id)
     rename = attempt["finalize"]["artifact_rename"]
-    if rename["status"] in ("dispatching", "outcome_unknown"):
-        artifacts = await client.artifacts.list(
-            notebook_id, artifact_type=ArtifactType.AUDIO
+    artifact_title_state = await _artifact_title_state(
+        client, notebook_id, artifact_id, label
+    )
+    if artifact_title_state is None:
+        raise RuntimeError(
+            f"artifact {artifact_id!r} cannot be verified in the remote list"
         )
-        landed = any(
-            getattr(artifact, "id", None) == artifact_id
-            and getattr(artifact, "title", None) == label
-            for artifact in artifacts
-        )
-        if not landed:
-            raise RuntimeError(
-                f"artifact rename outcome is unknown for {artifact_id!r}; "
-                "remote title postcondition is not satisfied"
-            )
 
+    if artifact_title_state is True and rename["status"] != "completed":
         def adopt_rename(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "completed"
 
@@ -421,21 +465,35 @@ async def finalize_attempt(
         _, attempt = _subject(store, episode_n, attempt_id)
         rename = attempt["finalize"]["artifact_rename"]
 
-    if rename["status"] != "completed":
+    if rename["status"] != "completed" or artifact_title_state is False:
         def rename_dispatching(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "dispatching"
 
         _mutate(store, episode_n, attempt_id, rename_dispatching)
+
+        def rename_unknown(_episode: dict, current: dict) -> None:
+            current["finalize"]["artifact_rename"]["status"] = "outcome_unknown"
+
         try:
             await client.artifacts.rename(
                 notebook_id, artifact_id, label, return_object=False
             )
         except Exception:
-            def rename_unknown(_episode: dict, current: dict) -> None:
-                current["finalize"]["artifact_rename"]["status"] = "outcome_unknown"
-
-            _mutate(store, episode_n, attempt_id, rename_unknown)
-            raise
+            landed = await _artifact_title_state(
+                client, notebook_id, artifact_id, label
+            )
+            if landed is not True:
+                _mutate(store, episode_n, attempt_id, rename_unknown)
+                raise
+        else:
+            landed = await _artifact_title_state(
+                client, notebook_id, artifact_id, label
+            )
+            if landed is not True:
+                _mutate(store, episode_n, attempt_id, rename_unknown)
+                raise RuntimeError(
+                    f"artifact {artifact_id!r} rename postcondition failed"
+                )
 
         def rename_completed(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "completed"
@@ -584,7 +642,7 @@ async def finalize_attempt(
     if source is None:
         raise RuntimeError(f"feedback source {source_id!r} cannot be verified")
     already_named = getattr(source, "title", None) == label and _source_ready(source)
-    if source_rename["status"] != "completed" and not already_named:
+    if not already_named:
         def source_rename_dispatching(_episode: dict, current: dict) -> None:
             current["finalize"]["feedback_source_rename"][
                 "status"

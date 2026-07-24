@@ -46,6 +46,15 @@ def _require_env(name: str) -> str:
     return val
 
 
+def _require_media_binaries() -> None:
+    missing = [
+        binary for binary in ("ffprobe", "ffmpeg")
+        if shutil.which(binary) is None
+    ]
+    if missing:
+        raise ValueError(f"required podcast media tool is missing: {', '.join(missing)}")
+
+
 def _fallback_pub_date(n: int) -> str:
     return format_datetime(_FALLBACK_BASE + timedelta(days=n - 1))
 
@@ -136,6 +145,8 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
         ))
         formats = set(probe["format"]["format_name"].split(","))
         codec = probe["streams"][0]["codec_name"]
+    except FileNotFoundError as exc:
+        raise ValueError("ffprobe is required to inspect podcast audio") from exc
     except (KeyError, IndexError, json.JSONDecodeError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired) as exc:
         raise ValueError(f"unsupported or unreadable audio: {mp3_path}") from exc
@@ -156,13 +167,16 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
         if source_kind == "mp3":
             shutil.copyfile(mp3_path, tmp)
         else:
-            subprocess.run(
-                ["ffmpeg", "-v", "error", "-y", "-i", mp3_path,
-                 "-map", "0:a:0", "-vn", "-map_metadata", "-1",
-                 "-c:a", "libmp3lame", "-b:a", "256k", "-ar", "44100", "-ac", "2",
-                 tmp],
-                check=True,
-            )
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-v", "error", "-y", "-i", mp3_path,
+                     "-map", "0:a:0", "-vn", "-map_metadata", "-1",
+                     "-c:a", "libmp3lame", "-b:a", "256k", "-ar", "44100", "-ac", "2",
+                     tmp],
+                    check=True,
+                )
+            except FileNotFoundError as exc:
+                raise ValueError("ffmpeg is required to normalize podcast audio") from exc
 
         try:
             tags = ID3(tmp)
@@ -323,6 +337,7 @@ async def publish_series(
         if desc == ep["title"].strip():
             raise ValueError(f"episode {n}: description must not equal title (需真 show notes)")
 
+    _require_media_binaries()
     # One mp3 in RAM at a time: read -> hash -> PUT -> drop. NEVER accumulate the
     # whole season (8-12 episodes x tens of MB = 300-600MB resident on a possibly
     # small VM). Commit order still holds: every mp3 + artwork is PUT inside this

@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.1"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -57,8 +57,8 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈。另含
     `episode_set_description`(show notes 回寫 manifest,預設清引用標記;同 process 讀改寫)
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
-  - `tools_podcast.py` — `podcast_episode`(單集 5 步)/ `podcast_episode_resume`(斷線後續跑該集)/
-    `podcast_series`(整季純程式碼迴圈)
+  - `tools_podcast.py` — manifest-backed audio attempt 的 durable generate／reconcile／explicit adopt／
+    checkpointed finalize；`podcast_series` 只越過已完成 postconditions，standalone resume 是 fallback
   - `tools_publish.py` — `publish_series` / `feed_info`(把整季發布成 Apple 合規
     RSS feed;薄 I/O 編排,內網 HTTP PUT 到 NAS uploader,提交順序:媒體檔→show.json→feed.xml/index.html)
   - `publish/` — 純邏輯(離線可測):`identity.py`(HMAC→base32 決定性 token + `episode_guid`,無 registry)、
@@ -165,8 +165,10 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   MP4/AAC → ffmpeg 轉 256 kbps、44.1 kHz stereo true MP3；既有 true MP3 不重編音訊；其他格式
   fail-closed。最後用 mutagen 寫單一 authoritative front-cover ID3/APIC。這讓公開 enclosure 的
   `.mp3` + `audio/mpeg` 與實際 MP3 完全一致且可 HTTP range seek。**代價**:首次啟用正規化會讓
-  MP4 來源各集換一次 content-hash URL(舊 URL 因 uploader 不刪仍可用,訂閱者可能重抓)。測試用假
-  audio bytes 由 autouse fixture 把 `_embed_cover` 換成 no-op；真媒體 regression 鎖住 MP4→MP3、
+  MP4 來源各集換一次 content-hash URL(舊 URL 因 uploader 不刪仍可用,訂閱者可能重抓)。
+  exact output bytes/hash 只在相同 ffmpeg/libmp3lame 工具鏈穩定；升級會再次 churn enclosure URL，
+  故產製環境要固定版本，計畫升級時要預期重驗。測試用假 audio bytes 由 autouse fixture 把
+  `_embed_cover` 換成 no-op；真媒體 regression 鎖住 MP4→MP3、
   MP3 保留、ADTS 拒絕、端到端 uploaded bytes/副檔名/RSS MIME 一致與決定性。
 
 ## Conventions

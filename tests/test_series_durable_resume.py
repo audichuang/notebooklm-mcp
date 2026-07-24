@@ -22,6 +22,19 @@ def _generate_briefs(fake_client, start: int = 0) -> list[str]:
     ]
 
 
+
+def test_safe_next_action_vocabulary_names_public_mcp_tools():
+    assert p.SAFE_NEXT_ACTIONS == {
+        "podcast_attempt_adopt",
+        "podcast_episode_reconcile",
+        "podcast_episode_resume",
+        "podcast_series",
+    }
+    for action in p.SAFE_NEXT_ACTIONS:
+        assert callable(getattr(p, action, None))
+
+
+
 async def _complete_episode(fake_client, tmp_path, episode_n: int) -> None:
     episode = EPS3[episode_n - 1]
     await p.podcast_episode(
@@ -77,7 +90,7 @@ async def test_completed_episode_with_missing_feedback_source_stops_series(
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 1
     assert out["observed_state"] == "continuity_unverified"
-    assert out["safe_next_action"] == "restore_feedback_source_explicitly"
+    assert out["safe_next_action"] == "podcast_attempt_adopt"
     assert _generate_briefs(fake_client, call_boundary) == []
 
 
@@ -167,9 +180,58 @@ async def test_unverified_legacy_stub_stops_before_next_episode(
     assert out["stopped_at_episode"] == 1
     assert out["attempt_id"] is None
     assert out["observed_state"] == "legacy_output_unverified"
-    assert out["safe_next_action"] == "resume_legacy_artifact_explicitly"
+    assert out["safe_next_action"] == "podcast_attempt_adopt"
     assert out["artifact_id"] == "legacy-artifact"
     assert _generate_briefs(fake_client) == []
+
+
+async def test_partial_legacy_output_never_regenerates_or_overwrites_audio(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    mp3_path = tmp_path / "ep19.mp3"
+    original_audio = b"already published EP19"
+    mp3_path.write_bytes(original_audio)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 19,
+                        "title": "既有第十九集",
+                        "label": "EP19 既有第十九集",
+                        "mp3_path": str(mp3_path),
+                        "published_at": "Fri, 24 Jul 2026 09:00:00 +0800",
+                        "description": "已發布過的 show notes",
+                        "cover_path": str(tmp_path / "ep19.jpg"),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    episodes = [None] * 18 + [
+        {"title": "既有第十九集", "brief": "不得靜默重生"}
+    ]
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=episodes,
+        output_dir=str(tmp_path),
+        start=19,
+    )
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 19
+    assert out["observed_state"] == "legacy_output_unverified"
+    assert out["safe_next_action"] == "podcast_attempt_adopt"
+    assert _generate_briefs(fake_client) == []
+    assert mp3_path.read_bytes() == original_audio
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["description"] == "已發布過的 show notes"
+    assert stored["episodes"][0].get("attempts", []) == []
 
 
 async def test_acceptance_unknown_stops_series_without_generating_ep2_or_ep3(
@@ -200,7 +262,7 @@ async def test_acceptance_unknown_stops_series_without_generating_ep2_or_ep3(
     assert out["stopped_at_episode"] == 2
     assert out["attempt_id"] == attempt_id
     assert out["observed_state"] == "acceptance_unknown"
-    assert out["safe_next_action"] == "wait_and_reconcile"
+    assert out["safe_next_action"] == "podcast_episode_reconcile"
 
 
 async def test_first_call_not_accepted_returns_structured_safe_stop(
@@ -215,11 +277,32 @@ async def test_first_call_not_accepted_returns_structured_safe_stop(
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 1
     assert out["observed_state"] == "not_accepted"
-    assert out["safe_next_action"] == "create_new_attempt_explicitly"
+    assert out["safe_next_action"] == "podcast_series"
     stored = json.loads(
         (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
     )
     assert stored["episodes"][0]["attempts"][0]["dispatch"]["status"] == "not_accepted"
+    attempt = stored["episodes"][0]["attempts"][0]
+    attempt_id = attempt["attempt_id"]
+    errors = list(attempt["errors"])
+    assert len(_generate_briefs(fake_client)) == 1
+
+    fake_client.artifacts.fail_generate = False
+    resumed = await p.podcast_series(
+        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
+    )
+
+    final = json.loads(
+        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
+    )
+    episode = final["episodes"][0]
+    assert resumed["complete"] is True
+    assert episode["output_attempt_id"] == attempt_id
+    assert len(episode["attempts"]) == 1
+    assert episode["attempts"][0]["attempt_id"] == attempt_id
+    assert episode["attempts"][0]["dispatch"]["status"] == "accepted"
+    assert episode["attempts"][0]["errors"] == errors
+    assert len(_generate_briefs(fake_client)) == 2
 
 
 async def test_series_retries_same_prepared_attempt_after_pre_dispatch_crash(
@@ -260,6 +343,90 @@ async def test_series_retries_same_prepared_attempt_after_pre_dispatch_crash(
     assert _generate_briefs(fake_client) == ["1"]
 
 
+async def test_terminal_failed_attempt_is_superseded_on_next_series_call(
+    fake_client, tmp_path
+):
+    fake_client.artifacts.fail_complete = True
+    first = await p.podcast_series(
+        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
+    )
+    assert first["complete"] is False
+    assert first["observed_state"] == "failed"
+    assert first["safe_next_action"] == "podcast_series"
+    assert len(_generate_briefs(fake_client)) == 1
+
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(manifest_path)
+    store.update(
+        lambda manifest: manifest["episodes"][0].update(
+            {"cover_path": "/existing/episode-cover.png"}
+        )
+    )
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    old_attempt_id = stored["episodes"][0]["active_attempt_id"]
+
+    fake_client.artifacts.fail_complete = False
+    resumed = await p.podcast_series(
+        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
+    )
+
+    final = json.loads(manifest_path.read_text(encoding="utf-8"))
+    episode = final["episodes"][0]
+    assert resumed["complete"] is True
+    assert len(episode["attempts"]) == 2
+    old_attempt, new_attempt = episode["attempts"]
+    assert old_attempt["attempt_id"] == old_attempt_id
+    assert old_attempt["remote"]["status"] == "failed"
+    assert new_attempt["attempt_id"] != old_attempt_id
+    assert new_attempt["supersedes_attempt_id"] == old_attempt_id
+    assert episode["output_attempt_id"] == new_attempt["attempt_id"]
+    assert len(_generate_briefs(fake_client)) == 2
+
+
+async def test_series_repairs_completed_artifact_and_source_title_drift(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="1",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    artifact = next(
+        row
+        for row in fake_client.artifacts.artifacts
+        if row.id == first["artifact_id"]
+    )
+    source = next(
+        row
+        for row in fake_client.sources.sources
+        if row["id"] == first["feedback_source_id"]
+    )
+    artifact.title = "被改掉的 artifact 名稱"
+    source["title"] = "被改掉的 source 名稱"
+    artifact_boundary = len(fake_client.artifacts.calls)
+    source_boundary = len(fake_client.sources.calls)
+
+    resumed = await p.podcast_series(
+        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
+    )
+
+    assert resumed["complete"] is True
+    assert artifact.title == "EP01 心法篇"
+    assert source["title"] == "EP01 心法篇"
+    assert [call[0] for call in fake_client.artifacts.calls[artifact_boundary:]].count(
+        "rename"
+    ) == 1
+    assert [
+        call
+        for call in fake_client.sources.calls[source_boundary:]
+        if call[0] == "add_file"
+    ] == []
+
+
 async def test_series_rejects_manifest_from_another_notebook(
     fake_client, tmp_path
 ):
@@ -279,3 +446,53 @@ async def test_series_rejects_manifest_from_another_notebook(
         (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["notebook_id"] == "nb-1"
+
+
+async def test_adopt_explicit_source_id_migrates_legacy_output_without_upload(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    mp3_path = tmp_path / "legacy-ep01.mp3"
+    mp3_path.write_bytes(b"legacy audio")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "title": "心法篇",
+                        "artifact_id": "legacy-artifact",
+                        "mp3_path": str(mp3_path),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    source_id = fake_client.sources._add("EP01 心法篇", kind="media")
+    source_boundary = len(fake_client.sources.calls)
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path),
+        episode_n=1,
+        feedback_source_id=source_id,
+    )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert adopted["feedback_source_id"] == source_id
+    assert stored["episodes"][0]["feedback_source_id"] == source_id
+    assert stored["episodes"][0].get("attempts", []) == []
+
+    out = await p.podcast_series(
+        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
+    )
+    assert out["complete"] is True
+    assert _generate_briefs(fake_client) == []
+    assert [
+        call
+        for call in fake_client.sources.calls[source_boundary:]
+        if call[0] in {"add_file", "rename"}
+    ] == []
