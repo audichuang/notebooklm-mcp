@@ -59,6 +59,29 @@ async def episode_set_description(
     return {"episode": episode_n, "description": desc, "stripped": strip_citations}
 
 
+def _require_artifact_id(artifact_id: str) -> str:
+    if not isinstance(artifact_id, str) or not artifact_id.strip():
+        raise ValueError("artifact_id must be a non-empty string")
+    return artifact_id.strip()
+
+
+async def _finish_slides(
+    notebook_id: str, manifest_path: str, episode_n: int, artifact_id: str, wait_timeout: float
+) -> dict:
+    """生成之後的共用尾段:等完成→下載→回寫 manifest。
+
+    抽出來是為了讓「已經生好、但 client 端斷線／timeout 丟掉結果」的 artifact 能只走
+    這段救回來(`artifact_download_slides`),而不必重生一次燒配額。"""
+    client = runtime.get_client()
+    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
+    ensure_completed(final)
+
+    out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-slides.pdf")
+    await client.artifacts.download_slide_deck(notebook_id, out, artifact_id=artifact_id, output_format="pdf")
+    _load_ep_and_write(manifest_path, episode_n, slides_pdf_path=out)
+    return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
+
+
 @mcp.tool()
 async def generate_slides(
     notebook_id: str,
@@ -82,13 +105,45 @@ async def generate_slides(
         slide_length=to_slide_length(slide_length),
     )
     artifact_id = ensure_started(status)
+    return await _finish_slides(notebook_id, manifest_path, episode_n, artifact_id, wait_timeout)
+
+
+@mcp.tool()
+async def artifact_download_slides(
+    notebook_id: str,
+    manifest_path: str,
+    episode_n: int,
+    artifact_id: str,
+    wait_timeout: float = 1800.0,
+) -> dict:
+    """把**已經生成**的簡報用 artifact_id 下載並回寫 manifest,不重新生成。
+
+    救援用:client 端 timeout(例如 mcporter 預設 60s)砍掉 `generate_slides` 時,雲端
+    那份簡報其實生完了,只是 artifact_id 沒回到呼叫端。用
+    `artifact_list(kind="slide_deck")` 找回 ID 後跑本工具,省下一次生成配額。
+    不確定是哪一筆就別猜——重生比綁錯便宜。"""
+    return await _finish_slides(
+        notebook_id, manifest_path, episode_n, _require_artifact_id(artifact_id), wait_timeout
+    )
+
+
+async def _finish_report(
+    notebook_id: str,
+    manifest_path: str,
+    episode_n: int,
+    artifact_id: str,
+    report_format: str,
+    wait_timeout: float,
+) -> dict:
+    """生成之後的共用尾段(同 `_finish_slides` 的理由)。"""
+    client = runtime.get_client()
     final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
 
-    out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-slides.pdf")
-    await client.artifacts.download_slide_deck(notebook_id, out, artifact_id=artifact_id, output_format="pdf")
-    _load_ep_and_write(manifest_path, episode_n, slides_pdf_path=out)
-    return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
+    out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-report.md")
+    await client.artifacts.download_report(notebook_id, out, artifact_id=artifact_id)
+    _load_ep_and_write(manifest_path, episode_n, report_md_path=out, report_format=report_format)
+    return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}
 
 
 @mcp.tool()
@@ -112,10 +167,29 @@ async def generate_report(
         extra_instructions=extra_instructions,
     )
     artifact_id = ensure_started(status)
-    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
-    ensure_completed(final)
+    return await _finish_report(
+        notebook_id, manifest_path, episode_n, artifact_id, report_format, wait_timeout
+    )
 
-    out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-report.md")
-    await client.artifacts.download_report(notebook_id, out, artifact_id=artifact_id)
-    _load_ep_and_write(manifest_path, episode_n, report_md_path=out, report_format=report_format)
-    return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}
+
+@mcp.tool()
+async def artifact_download_report(
+    notebook_id: str,
+    manifest_path: str,
+    episode_n: int,
+    artifact_id: str,
+    report_format: str = "study_guide",
+    wait_timeout: float = 1800.0,
+) -> dict:
+    """把**已經生成**的講義用 artifact_id 下載並回寫 manifest,不重新生成。
+
+    救援用,同 `artifact_download_slides`(client timeout 丟掉結果時省一次配額)。
+    `report_format` 只影響回寫 manifest 的標記,傳當初生成用的那個值。"""
+    return await _finish_report(
+        notebook_id,
+        manifest_path,
+        episode_n,
+        _require_artifact_id(artifact_id),
+        report_format,
+        wait_timeout,
+    )

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from notebooklm.types import ArtifactType
 
+from notebooklm_mcp import tools_basic as b
 from notebooklm_mcp import tools_podcast as p
 
 
@@ -188,9 +189,15 @@ async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(
     assert episode["attempts"][0]["remote"]["artifact_id"] is None
 
 
-async def test_claimed_artifact_resume_cannot_hide_another_active_attempt(
+async def test_resume_refuses_another_artifact_while_a_durable_output_exists(
     fake_client, tmp_path
 ):
+    """已有 durable output 時,resume 不得為「另一個 artifact」開新 attempt。
+
+    舊行為放行(只要 active == output),而當時的 `_promote_attempt_output` 沒有歸屬檢查
+    ——finalize 成功就把 output 指標換掉,等於從 resume 後門做了一次無審計的取代:
+    沒有 retract、沒有理由、舊紀錄不留。這是 durability guard 想擋的同一件事,只是走
+    另一條路。現在必須先 `podcast_attempt_retract` 才有取代版。"""
     manifest_path = tmp_path / "series_manifest.json"
     first = await p.podcast_episode(
         "nb-1",
@@ -201,6 +208,42 @@ async def test_claimed_artifact_resume_cannot_hide_another_active_attempt(
         manifest_path=str(manifest_path),
     )
     store = p.ManifestStore(manifest_path)
+
+    with pytest.raises(ValueError, match="already has durable output"):
+        p._ensure_resume_attempt(
+            store,
+            notebook_id="nb-1",
+            episode_n=1,
+            title="心法篇",
+            artifact_id="newer-artifact",
+        )
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["output_attempt_id"] == first["attempt_id"]
+    assert len(stored["episodes"][0]["attempts"]) == 1
+
+
+async def test_claimed_artifact_resume_cannot_hide_another_active_attempt(
+    fake_client, tmp_path
+):
+    """有 attempt 在飛時,resume 不得改抓另一個 artifact —— 包含**已被別的 attempt claim**
+    的那筆(claimed 分支是 `_ensure_resume_attempt` 裡另一條建立路徑,兩條都要驗)。
+
+    狀態經合法的 retract 造出:已有 durable output 時 resume 換 artifact 本身已被禁止。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    retraction = await p.podcast_attempt_retract(
+        str(manifest_path), 1, first["attempt_id"], reason="QA 拒收"
+    )
+    await b.source_delete("nb-1", retraction["stale_source_id"])
+
+    store = p.ManifestStore(manifest_path)
     newer_attempt_id = p._ensure_resume_attempt(
         store,
         notebook_id="nb-1",
@@ -209,7 +252,17 @@ async def test_claimed_artifact_resume_cannot_hide_another_active_attempt(
         artifact_id="newer-artifact",
     )
 
-    with pytest.raises(ValueError, match="another active attempt|另一個.*attempt"):
+    # (a) 全新、未被 claim 的第三個 artifact
+    with pytest.raises(ValueError, match="has active attempt|another active attempt"):
+        p._ensure_resume_attempt(
+            store,
+            notebook_id="nb-1",
+            episode_n=1,
+            title="心法篇",
+            artifact_id="second-newer-artifact",
+        )
+    # (b) 被作廢的那個 attempt 所 claim 的 artifact:tombstone 擋在最前面
+    with pytest.raises(ValueError, match="was retracted"):
         p._ensure_resume_attempt(
             store,
             notebook_id="nb-1",

@@ -35,8 +35,15 @@ ACTION_ADOPT = "podcast_attempt_adopt"
 ACTION_RECONCILE = "podcast_episode_reconcile"
 ACTION_RESUME = "podcast_episode_resume"
 ACTION_SERIES = "podcast_series"
+ACTION_SOURCE_DELETE = "source_delete"
 SAFE_NEXT_ACTIONS = frozenset(
-    {ACTION_ADOPT, ACTION_RECONCILE, ACTION_RESUME, ACTION_SERIES}
+    {
+        ACTION_ADOPT,
+        ACTION_RECONCILE,
+        ACTION_RESUME,
+        ACTION_SERIES,
+        ACTION_SOURCE_DELETE,
+    }
 )
 
 
@@ -48,7 +55,13 @@ def _episode_label(episode_n: int, title: str) -> str:
     return f"EP{episode_n:02d} {title.strip()}"
 
 
-def _attempt_record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[dict, dict]:
+def _attempt_record(
+    manifest: dict,
+    episode_n: int,
+    attempt_id: str,
+    *,
+    allow_retracted: bool = False,
+) -> tuple[dict, dict]:
     episode = next(
         (ep for ep in manifest["episodes"] if ep.get("episode") == episode_n),
         None,
@@ -61,6 +74,15 @@ def _attempt_record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[di
     )
     if attempt is None:
         raise ValueError(f"attempt {attempt_id!r} is missing from episode {episode_n}")
+    # Tombstone,default-deny:被 retract 的 attempt 是歷史紀錄,任何 attempt 級操作
+    # (reconcile／adopt／resume／promote／supersede)都不得再改它——否則 adopt 之類的
+    # 工具可以改寫它的 finalize checkpoint,讓已結案的清理義務指向錯的 source。
+    # 唯一的例外是 `podcast_attempt_retract` 自己(冪等重呼要讀得到它)。
+    if attempt.get("retraction") and not allow_retracted:
+        raise ValueError(
+            f"attempt {attempt_id!r} was retracted (episode {episode_n}); "
+            "it is history — work on the replacement attempt instead"
+        )
     return episode, attempt
 
 
@@ -150,6 +172,18 @@ def _create_audio_attempt(
                     )
             elif supersedes_attempt_id is not None:
                 raise ValueError("superseded attempt is no longer active")
+            # 取代版不得改標題:episode 級 title／label 與 cover_path 都是 setdefault
+            # 或既有值,改了會留著舊標題的 label 與封面去發布。標題綁 label／工作室
+            # artifact 名／回錄來源名／發布標題,是另一件事,不能夾在重生裡做。
+            if (
+                episode.get("retracted_attempt_ids")
+                and episode.get("title") not in (None, title.strip())
+            ):
+                raise ValueError(
+                    f"episode {episode_n} title cannot change in a retract "
+                    f"replacement (manifest has {episode['title']!r}); keep the "
+                    "title or rebuild the episode explicitly"
+                )
         elif supersedes_attempt_id is not None:
             raise ValueError("cannot supersede an attempt from a missing episode")
         if episode is None:
@@ -188,11 +222,16 @@ def _ensure_resume_attempt(
                 f"artifact {artifact_id!r} is claimed by multiple attempts"
             )
         if claimed:
-            episode, attempt = claimed[0]
+            episode, discovered = claimed[0]
             if episode.get("episode") != episode_n:
                 raise ValueError(
                     f"artifact {artifact_id!r} belongs to another episode"
                 )
+            # 走 `_attempt_record` 而不是直接用掃到的那筆:tombstone 的 default-deny 在
+            # 那裡,這條 claimed 分支曾是唯一繞過它的路。
+            episode, attempt = _attempt_record(
+                manifest, episode_n, discovered["attempt_id"]
+            )
             if attempt.get("notebook_id") != notebook_id:
                 raise ValueError(
                     f"artifact {artifact_id!r} belongs to another notebook"
@@ -201,11 +240,30 @@ def _ensure_resume_attempt(
                 raise ValueError(
                     f"artifact {artifact_id!r} belongs to another title"
                 )
+            # 與新建分支同樣的兩道 gate。少了它們,一筆「歷史上曾被 claim 過」的 artifact
+            # 就能把 active 從現任 output 手上搶走(active=B／output=A 的死鎖),或用不同
+            # 標題把 episode 身分拆成兩半。
+            output_attempt_id = episode.get("output_attempt_id")
+            if output_attempt_id not in (None, attempt["attempt_id"]):
+                raise ValueError(
+                    f"episode {episode_n} already has durable output "
+                    f"{output_attempt_id!r}; retract it (podcast_attempt_retract) and "
+                    "delete the stale feedback source before resuming another artifact"
+                )
+            existing_title = episode.get("title")
+            if (
+                isinstance(existing_title, str)
+                and existing_title.strip() != title.strip()
+            ):
+                raise ValueError(
+                    f"episode {episode_n} title does not match the manifest "
+                    f"({existing_title!r}); resume cannot rename an episode"
+                )
             current_active_id = episode.get("active_attempt_id")
             if (
                 current_active_id
                 and current_active_id != attempt["attempt_id"]
-                and current_active_id != episode.get("output_attempt_id")
+                and current_active_id != output_attempt_id
             ):
                 raise ValueError(
                     f"episode {episode_n} has another active attempt "
@@ -222,10 +280,20 @@ def _ensure_resume_attempt(
         if episode is None:
             episode = {"episode": episode_n, "attempts": []}
             manifest["episodes"].append(episode)
+        # 已經有 durable output 時,不得為「另一個 artifact」開新 attempt。舊行為允許
+        # (active == output 就放行),結果是:resume 把 B 下載、回錄上傳完,promotion 才
+        # 因為 output 仍屬 A 而失敗,manifest 卡在 active=B／output=A —— retract A 被
+        # active 檢查擋、retract B 不是 output 也被擋、resume B 重複同樣錯誤,series 又
+        # 只看 A。取代版的唯一合法順序是 retract → 刪舊 source → 再生／resume。
+        output_attempt_id = episode.get("output_attempt_id")
+        if output_attempt_id is not None:
+            raise ValueError(
+                f"episode {episode_n} already has durable output "
+                f"{output_attempt_id!r}; retract it (podcast_attempt_retract) and "
+                "delete the stale feedback source before resuming another artifact"
+            )
         active_attempt_id = episode.get("active_attempt_id")
-        if active_attempt_id and active_attempt_id != episode.get(
-            "output_attempt_id"
-        ):
+        if active_attempt_id:
             raise ValueError(
                 f"episode {episode_n} has active attempt {active_attempt_id!r}; "
                 "reconcile or resume that attempt before supplying another artifact"
@@ -234,6 +302,16 @@ def _ensure_resume_attempt(
         if existing_notebook not in (None, notebook_id):
             raise ValueError(
                 f"episode {episode_n} belongs to another notebook"
+            )
+        # 標題必須對得上 manifest。episode 級 title／label 是 setdefault 寫的,resume 帶一個
+        # 不同標題只會讓 artifact／回錄 source 改名成新 label,而 episode 與發布仍用舊標題
+        # ——身分就此分岔。既有 claimed 分支本來就擋「belongs to another title」,這裡補齊
+        # 新建分支(retract 之後改標題重生就是走這條)。
+        existing_title = episode.get("title")
+        if isinstance(existing_title, str) and existing_title.strip() != title.strip():
+            raise ValueError(
+                f"episode {episode_n} title does not match the manifest "
+                f"({existing_title!r}); resume cannot rename an episode"
             )
         attempt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -568,6 +646,18 @@ def _promote_attempt_output(
 ) -> None:
     def mutate(manifest: dict) -> None:
         episode, attempt = _attempt_record(manifest, episode_n, attempt_id)
+        # 一個 retract 之前就啟動的 finalizer 不得把被拒收的那版重新掛回 output——
+        # promotion 是它最後一個寫入點,也是唯一會復活 episode 級投影欄位的地方。
+        if attempt.get("retraction"):
+            raise ValueError(
+                f"attempt {attempt_id!r} was retracted; it cannot be promoted to "
+                f"episode {episode_n}'s output"
+            )
+        if episode.get("output_attempt_id") not in (None, attempt_id):
+            raise ValueError(
+                f"episode {episode_n} output is owned by "
+                f"{episode['output_attempt_id']!r}; refusing to promote {attempt_id!r}"
+            )
         attempt["remote"]["status"] = "completed"
         attempt["remote"]["observed_at"] = datetime.now(timezone.utc).isoformat()
         episode["artifact_id"] = output["artifact_id"]
@@ -649,6 +739,67 @@ async def _finalize_episode(
     }
 
 
+async def _assert_source_cleanup_done(
+    client: object, store: ManifestStore, notebook_id: str, episode_n: int
+) -> None:
+    """`podcast_attempt_retract` 留下的清理義務,在下一次生成前強制結案。
+
+    retract 不打 RPC(刻意),所以刪舊回錄 source 是呼叫端的動作;但「靠文件提醒」等於
+    沒有防護——finalize 是按 source_id 驗的,漏刪會靜默留下兩筆同名 media,之後每次
+    生成都把兩份逐字稿餵進 context。故把它變成生成的 precondition:真的去 notebook
+    查,還在就 fail-closed;已經不在才清掉義務、放行。"""
+    snapshot = store.read()
+    episode = next(
+        (row for row in snapshot["episodes"] if row.get("episode") == episode_n), None
+    )
+    pending = (episode or {}).get("pending_source_cleanup") or []
+    if not pending:
+        return
+    # 先驗 notebook 身分,再拿它查。`notebook_id` 是呼叫端給的,而清理義務是綁在
+    # manifest 那個 notebook 上——拿一個空的別的 notebook 來查,會「查無此 source」
+    # 而把義務誤判成已結案(舊來源其實還躺在真正的筆記本裡)。
+    canonical = (episode or {}).get("notebook_id") or snapshot.get("notebook_id")
+    if canonical is not None and canonical != notebook_id:
+        raise ValueError(
+            f"episode {episode_n} belongs to notebook {canonical!r}, not "
+            f"{notebook_id!r}; cannot discharge its source cleanup from another notebook"
+        )
+    live = {
+        getattr(source, "id", None) for source in await client.sources.list(notebook_id)
+    }
+    remaining = [source_id for source_id in pending if source_id in live]
+    if remaining:
+        raise ValueError(
+            f"episode {episode_n} has retracted feedback sources still in the "
+            f"notebook: {', '.join(remaining)}. Delete them first — "
+            f"source_delete(notebook_id={notebook_id!r}, source_id=...) — then retry; "
+            "leaving them creates two identically named sources."
+        )
+
+    checked_absent = set(pending)
+
+    def clear(manifest: dict) -> None:
+        row = next(
+            (item for item in manifest["episodes"] if item.get("episode") == episode_n),
+            None,
+        )
+        if row is None:
+            return
+        # 只清「這次真的查過、確認不在」的那幾筆:await 期間可能又有一次 retract 追加
+        # 新義務,無條件 pop 整個欄位會把它一起吞掉。
+        left = [
+            source_id
+            for source_id in row.get("pending_source_cleanup", [])
+            if source_id not in checked_absent
+        ]
+        if left:
+            row["pending_source_cleanup"] = left
+        else:
+            row.pop("pending_source_cleanup", None)
+
+    store.update(clear)
+
+
 async def _run_episode(
     notebook_id: str,
     episode_n: int,
@@ -673,6 +824,8 @@ async def _run_episode(
     store = ManifestStore(manifest_path) if manifest_path else None
     attempt_id = None
     if store is not None:
+        # 生成是不可逆的副作用(燒配額),所以清理義務在建 attempt 之前就要結案。
+        await _assert_source_cleanup_done(client, store, notebook_id, episode_n)
         attempt_id = _create_audio_attempt(
             store,
             notebook_id=notebook_id,
@@ -1005,6 +1158,11 @@ async def podcast_episode_resume(
     await probe_auth(runtime.get_client())
     if manifest_path:
         store = ManifestStore(manifest_path)
+        # 與 `_run_episode` 同一道 gate:retract 留下的清理義務未結案前不得繼續產出。
+        # resume 也會 upload 回錄 source,漏這道就等於留一條繞過去的路(舊版真的漏了)。
+        await _assert_source_cleanup_done(
+            runtime.get_client(), store, notebook_id, episode_n
+        )
         attempt_id = _ensure_resume_attempt(
             store,
             notebook_id=notebook_id,
@@ -1468,6 +1626,170 @@ async def podcast_attempt_adopt(
 
 
 @mcp.tool()
+async def podcast_attempt_retract(
+    manifest_path: str,
+    episode_n: int,
+    attempt_id: str,
+    reason: str,
+) -> dict:
+    """明確作廢某集「已完成但被拒收」的輸出 attempt，讓下一次生成合法產生取代版。
+
+    這是 durability guard 的正門:沒有它,QA 拒收後唯一的出路是手改 manifest JSON,
+    而手改繞過 artifact claim 唯一性、dispatch baseline 與 finalize checkpoint 的全部
+    驗證——guard 沒保護 manifest,只是把寫入趕到工具外(EP35 實例)。
+
+    純本機 manifest mutation:不打任何 RPC、不刪遠端 artifact／source、不動本機檔案。
+    被作廢的 attempt 保留完整 finalize 紀錄,只加上 ``retraction``;清掉的 episode 級
+    輸出證據原值一併存進 ``retraction.retracted_output`` 供對帳。
+
+    可作廢的只有兩種 attempt:(1) episode 的 ``output_attempt_id``;(2) 掛在
+    ``active_attempt_id`` 但**從未 promote** 的未授權 candidate —— 作廢它是「受審計的
+    abandon」,用來解開舊版工具或手改留下的 active／output 分岔(那個狀態否則無路可走),
+    而且**不動現任 output 的任何欄位**。其他狀態(生成中的 attempt)請照
+    ``safe_next_action`` 走 reconcile／resume。
+
+    **retract 之後必須先刪掉舊的回錄 source**:它仍在筆記本裡、且與取代版同名,而
+    continuity 複驗要求同名 media 恰好一筆。回傳的 ``stale_source_id`` 就是它,
+    ``safe_next_action`` 就是 ``source_delete``——而且這不只是提示:id 會存進 episode 的
+    ``pending_source_cleanup``,下一次生成前會真的去 notebook 驗它已不在,還在就
+    fail-closed(finalize 是按 source_id 驗的,不擋同名,漏刪會靜默留兩筆同名來源污染
+    後續生成的 context)。
+
+    拒收版的本機 mp3 **不會被覆寫**:``retracted_attempt_ids`` 本身就算 durable evidence
+    (``has_durable_output_evidence``),所以取代版一律下載到
+    ``output_dir/attempts/<attempt_id>/ep{n:02d}.mp3``——不再取決於當下剛好有沒有
+    ``cover_path``。原檔路徑記在回傳的 ``retracted_mp3_path``。
+
+    標題不可在取代時改(``_create_audio_attempt`` 與 ``_ensure_resume_attempt`` 兩個入口
+    都擋)——label／封面／工作室 artifact 名／回錄來源名／發布標題全綁同一字串,改標題是
+    另一件事,不是重生。作廢後那個 attempt 是 tombstone:``_attempt_record`` default-deny,
+    reconcile／adopt／resume／promote 一律拒絕再動它(只有本工具冪等重呼讀得到)。
+    """
+    if not isinstance(manifest_path, str) or not manifest_path:
+        raise ValueError("manifest_path must be a non-empty string")
+    if not isinstance(episode_n, int) or isinstance(episode_n, bool) or episode_n < 1:
+        raise ValueError("episode_n must be an int >= 1")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise ValueError("attempt_id must be a non-empty string")
+    if not isinstance(reason, str) or not reason.strip():
+        # retract 是審計事件:沒有理由的作廢等於無聲覆寫,正是本工具要取代的東西。
+        raise ValueError("reason must be a non-empty string")
+
+    _RETRACTED_EPISODE_KEYS = (
+        "output_attempt_id",
+        "artifact_id",
+        "task_id",
+        "mp3_path",
+        "published_at",
+        "feedback_source_id",
+        "feedback_source_adopted_at",
+    )
+
+    def mutate(manifest: dict) -> dict:
+        episode, attempt = _attempt_record(
+            manifest, episode_n, attempt_id, allow_retracted=True
+        )
+        existing = attempt.get("retraction")
+        if existing is not None:
+            # 冪等,但**只對自己的殘留值**:此時 output 可能已經是取代版 B,無條件重跑
+            # pop 會把 B 的 artifact_id／mp3_path／published_at 全清掉(等於毀掉取代版)。
+            # 所以只在「output 還是自己或空」時,清掉值仍等於當初被作廢那份的欄位。
+            if episode.get("output_attempt_id") in (None, attempt_id):
+                for key, value in existing.get("retracted_output", {}).items():
+                    if key in episode and episode[key] == value:
+                        del episode[key]
+                if episode.get("active_attempt_id") == attempt_id:
+                    del episode["active_attempt_id"]
+            return dict(existing)  # 不重寫 retracted_at／reason
+
+        output_attempt_id = episode.get("output_attempt_id")
+        active_attempt_id = episode.get("active_attempt_id")
+        # 受審計的 abandon:active=B／output=A 的分岔狀態(舊版工具或手改造出的——現在
+        # `_ensure_resume_attempt` 兩條分支都擋掉了)否則無路可走:retract A 被 active B
+        # 卡、retract B 不是 output 也被卡、promote B 因歸屬失敗、series 只看 A。允許作廢
+        # 那個「從未 promote、無人授權」的 candidate 就是唯一出口,而且留下理由。
+        abandons_unauthorized_candidate = (
+            attempt_id == active_attempt_id
+            and output_attempt_id is not None
+            and output_attempt_id != attempt_id
+        )
+        if output_attempt_id != attempt_id and not abandons_unauthorized_candidate:
+            raise ValueError(
+                f"attempt {attempt_id!r} is not episode {episode_n}'s durable "
+                "output; only a promoted output attempt can be retracted"
+            )
+        if not abandons_unauthorized_candidate and active_attempt_id not in (
+            None,
+            attempt_id,
+        ):
+            raise ValueError(
+                f"episode {episode_n} still has active attempt "
+                f"{active_attempt_id!r}; retract that unauthorized candidate first "
+                "(it was never promoted), then retract the output"
+            )
+        if abandons_unauthorized_candidate:
+            # episode 級投影屬於現任 output(A),一個字都不能動。
+            retracted_output: dict = {}
+            del episode["active_attempt_id"]
+        else:
+            # pop 而非設 None:_promote_attempt_output 用 setdefault 寫 published_at,
+            # 留一個 None 值會讓取代版補不回真正的產製時間(publish 有 fallback、不會爆,
+            # 只會靜默發出假日期,而 podcast-lab 的完成門會先擋下來)。
+            retracted_output = {
+                key: episode.pop(key) for key in _RETRACTED_EPISODE_KEYS if key in episode
+            }
+            if episode.get("active_attempt_id") == attempt_id:
+                del episode["active_attempt_id"]
+        # 清理義務要以 attempt 的 finalize checkpoint 為準,不能只信 episode 級投影:
+        # 投影是 legacy 相容欄位,可能缺、可能被 adopt 改寫,而真正上傳了哪一筆 source
+        # 只有 checkpoint 知道。
+        upload = attempt.get("finalize", {}).get("feedback_source_upload", {})
+        stale_source_ids = [
+            source_id
+            for source_id in dict.fromkeys(
+                [retracted_output.get("feedback_source_id"), upload.get("source_id")]
+            )
+            if isinstance(source_id, str) and source_id
+        ]
+        if stale_source_ids:
+            # 沿用 adopt 既有的 episode 級歷史欄位,呼叫端忽略回傳值時仍留得住。
+            history = episode.setdefault("previous_feedback_source_ids", [])
+            # 未完成的清理義務。這不只是提示:下一次生成／resume 前會真的去 notebook
+            # 驗它已經不在(見 `_assert_source_cleanup_done`),還在就 fail-closed。
+            pending = episode.setdefault("pending_source_cleanup", [])
+            for source_id in stale_source_ids:
+                if source_id not in history:
+                    history.append(source_id)
+                if source_id not in pending:
+                    pending.append(source_id)
+        retraction = {
+            "episode": episode_n,
+            "attempt_id": attempt_id,
+            "retracted_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason.strip(),
+            "retracted_output": retracted_output,
+            "stale_artifact_id": retracted_output.get("artifact_id")
+            or attempt.get("remote", {}).get("artifact_id"),
+            "stale_source_id": stale_source_ids[0] if stale_source_ids else None,
+            "stale_source_ids": stale_source_ids,
+            "retracted_mp3_path": retracted_output.get("mp3_path")
+            or attempt.get("finalize", {}).get("download", {}).get("path"),
+        }
+        attempt["retraction"] = retraction
+        episode.setdefault("retracted_attempt_ids", []).append(attempt_id)
+        return dict(retraction)
+
+    _, retraction = ManifestStore(manifest_path).update(mutate)
+    return {
+        **retraction,
+        "observed_state": "retracted",
+        "safe_next_action": (
+            ACTION_SOURCE_DELETE if retraction.get("stale_source_id") else ACTION_SERIES
+        ),
+    }
+
+
+@mcp.tool()
 async def podcast_series(
     notebook_id: str,
     episodes: list[dict],
@@ -1560,6 +1882,9 @@ async def podcast_series(
         expected_brief_hash = hashlib.sha256(
             plan["brief"].encode("utf-8")
         ).hexdigest()
+        # retract 留下的清理義務先結案,才輪到這一集的任何分支(finalize 續跑、prepared
+        # 重送、supersede 重生都會產出或上傳)。只在真的有義務時才打 RPC。
+        await _assert_source_cleanup_done(client, store, notebook_id, episode_n)
         snapshot = store.read()
         episode = next(
             (

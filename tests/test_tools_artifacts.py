@@ -54,6 +54,52 @@ async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp
     assert data["episodes"][0]["report_format"] == "study_guide"
 
 
+# ---- 救援下載:client 端 timeout 丟掉結果時,別重生一次燒配額 ----------------------
+
+async def test_artifact_download_slides_downloads_without_generating(fake_client, tmp_path):
+    """雲端已生好、artifact_id 是呼叫端自己找回來的 → 只走下載 + 回寫,不碰生成。"""
+    m = _manifest(tmp_path, [{"episode": 7, "title": "EP07"}])
+    res = await a.artifact_download_slides("nb-1", m, 7, "slide-rescued")
+
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_slide_deck"]
+    dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
+    assert dl["artifact_id"] == "slide-rescued"
+    assert res["slides_pdf_path"].endswith("ep07-slides.pdf")
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
+
+
+async def test_artifact_download_report_downloads_without_generating(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 7, "title": "EP07"}])
+    res = await a.artifact_download_report("nb-1", m, 7, "report-rescued")
+
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_report"]
+    dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_report")
+    assert dl["artifact_id"] == "report-rescued"
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
+    assert data["episodes"][0]["report_format"] == "study_guide"
+
+
+async def test_artifact_download_rescue_requires_an_explicit_artifact_id(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 7, "title": "EP07"}])
+    for bad in ("", "   "):
+        with pytest.raises(ValueError, match="artifact_id"):
+            await a.artifact_download_slides("nb-1", m, 7, bad)
+        with pytest.raises(ValueError, match="artifact_id"):
+            await a.artifact_download_report("nb-1", m, 7, bad)
+    assert not fake_client.artifacts.calls
+
+
+async def test_artifact_download_slides_fails_closed_on_a_removed_artifact(fake_client, tmp_path):
+    """配額下架(status="removed"、is_failed=False)不得被當成救援成功。"""
+    m = _manifest(tmp_path, [{"episode": 7, "title": "EP07"}])
+    fake_client.artifacts.fail_removed = True
+    with pytest.raises(RuntimeError, match="removed"):
+        await a.artifact_download_slides("nb-1", m, 7, "slide-rescued")
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "download_slide_deck"]
+
+
 # ---- v0.2.9 token-diet:P5 episode_set_description --------------------------------
 
 async def test_episode_set_description_writes_and_strips(tmp_path):

@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.1"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.2"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -54,11 +54,45 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     含讀取/觀測面:`artifact_list`(列筆記本現有 artifact,救援/對帳用)、`source_list`、
     `source_fulltext`、`notebook_get`;`chat_ask` 吃 `source_ids`(聚焦單集原文)/`conversation_id`
   - `tools_artifacts.py` — `generate_slides`(簡報 PDF)/ `generate_report`(研讀 Markdown)按需生,
-    路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈。另含
+    路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈。生成之後的尾段
+    (等完成→下載→回寫)抽成 `_finish_slides`/`_finish_report`,讓
+    `artifact_download_slides`/`artifact_download_report` 能只走這段——外層 client timeout
+    (`mcporter call` 預設 60s)砍掉生成呼叫時,雲端那份已生完,拿 `artifact_id` 救回來就好,
+    別重生燒配額。另含
     `episode_set_description`(show notes 回寫 manifest,預設清引用標記;同 process 讀改寫)
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
   - `tools_podcast.py` — manifest-backed audio attempt 的 durable generate／reconcile／explicit adopt／
-    checkpointed finalize；`podcast_series` 只越過已完成 postconditions，standalone resume 是 fallback
+    checkpointed finalize；`podcast_series` 只越過已完成 postconditions，standalone resume 是 fallback。
+    `podcast_attempt_retract` 是 QA 拒收的受控 supersede(純本機、不打 RPC):作廢 output attempt
+    並 pop 掉 episode 級輸出證據,讓取代版能合法生成。**沒有它,唯一出路是手改 manifest,而手改
+    繞過 artifact claim 唯一性／dispatch baseline／finalize checkpoint 的全部驗證**(EP35 真實事故:
+    手寫 attempt 五個時間戳同一微秒、`artifact_ids_before` 填自己的 artifact_id)。
+    四個容易踩的不變式(都有測試鎖):**(1)** pop 而非設 None——`_promote_attempt_output` 用
+    setdefault 寫 `published_at`,留 None 會讓取代版補不回真正的產製時間(publish 有
+    `_fallback_pub_date` 不會爆,只會靜默發假日期,`podcast-lab/scripts/check_episode.py` 會先擋);
+    **(2)** 作廢的 attempt 是 tombstone——`_attempt_record` default-deny(reconcile／adopt／
+    promote／supersede 全拒絕,只有 retract 自己 `allow_retracted=True`)、
+    `audio_finalize._record`(所有 finalize checkpoint 讀寫的單一入口)、`ManifestStore._validate`
+    (指標指回作廢 attempt 的寫入直接失敗)三層都擋,retract 之前就啟動的 in-flight finalizer
+    不可能把被拒收那版復活;**(3)** 舊回錄 source 的刪除是**生成與 resume 兩條路的
+    precondition**(`pending_source_cleanup` + `_assert_source_cleanup_done`),不是文件提醒——
+    finalize 按 source_id 驗、不擋同名,漏刪會靜默留兩筆同名 media 污染後續 context。
+    清理義務取自 attempt 的 finalize checkpoint 而非 episode 級投影(投影是 legacy 相容欄位,
+    可能缺、可能被 adopt 改寫);**(4)** 取代版不得改標題(`_create_audio_attempt` 與
+    `_ensure_resume_attempt` 兩個 attempt 建立入口都擋),本機 mp3 一律下到
+    `attempts/<attempt_id>/`(靠 `has_durable_output_evidence` 認 `retracted_attempt_ids`,
+    不再取決於剛好有沒有 `cover_path`),不覆寫拒收版證據。
+    **另外**:已有 durable output 時 `_ensure_resume_attempt` 不再接受「另一個 artifact」——
+    舊行為讓 resume 成為無審計取代的後門(promotion 當時沒有歸屬檢查,finalize 一成功就換掉
+    output 指標);兩個既有測試曾把那個行為寫成規格,已改成走 retract 合法路徑驗同一性質。
+    **這道 gate 兩條建立路徑都要有**:`_ensure_resume_attempt` 有 claimed(artifact 已被某個
+    attempt claim)與新建兩個分支,只補新建那條等於沒補——claimed 分支曾是第三個入口,
+    也是唯一繞過 `_attempt_record` tombstone 的讀寫點。清理義務同理要蓋住三個入口
+    (`_run_episode`／`podcast_episode_resume`／`podcast_series` 每集開頭),且
+    `_assert_source_cleanup_done` 必須先驗 notebook 身分才查(拿別的空 notebook 查會把義務
+    誤判成結案)、只清「這次真的查過不在」的那幾筆(await 期間可能又追加新義務)。
+    冪等重呼 retract 只清「自己留下的殘留值」,已有取代版接手 output 則整個 no-op。
+    active／output 分岔(舊版或手改造出)靠 retract 那個未授權 candidate 解開
   - `tools_publish.py` — `publish_series` / `feed_info`(把整季發布成 Apple 合規
     RSS feed;薄 I/O 編排,內網 HTTP PUT 到 NAS uploader,提交順序:媒體檔→show.json→feed.xml/index.html)
   - `publish/` — 純邏輯(離線可測):`identity.py`(HMAC→base32 決定性 token + `episode_guid`,無 registry)、

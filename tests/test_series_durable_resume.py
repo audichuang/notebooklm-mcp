@@ -23,15 +23,20 @@ def _generate_briefs(fake_client, start: int = 0) -> list[str]:
 
 
 
-def test_safe_next_action_vocabulary_names_public_mcp_tools():
+async def test_safe_next_action_vocabulary_names_public_mcp_tools():
     assert p.SAFE_NEXT_ACTIONS == {
         "podcast_attempt_adopt",
         "podcast_episode_reconcile",
         "podcast_episode_resume",
         "podcast_series",
+        "source_delete",
     }
-    for action in p.SAFE_NEXT_ACTIONS:
-        assert callable(getattr(p, action, None))
+    # 白名單的意義是「一定是真的 MCP 工具名」,不是「一定在本模組」——source_delete 住在
+    # tools_basic,所以對真正的工具註冊表驗,而不是對模組屬性。
+    from notebooklm_mcp import app
+
+    registered = {tool.name for tool in await app.mcp.list_tools()}
+    assert p.SAFE_NEXT_ACTIONS <= registered
 
 
 

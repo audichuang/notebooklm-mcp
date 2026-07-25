@@ -171,6 +171,11 @@ def _validate(manifest: Any, path: Path) -> None:
             attempt_ids.add(attempt_id)
             local_attempt_ids.add(attempt_id)
 
+        retracted_ids = {
+            attempt["attempt_id"]
+            for attempt in attempts
+            if isinstance(attempt, dict) and attempt.get("retraction")
+        }
         for pointer in ("active_attempt_id", "output_attempt_id"):
             value = episode.get(pointer)
             if value is not None and (
@@ -178,4 +183,10 @@ def _validate(manifest: Any, path: Path) -> None:
             ):
                 raise ValueError(
                     f"manifest is corrupt: {pointer} does not reference this episode: {path}"
+                )
+            # 寫入時的最後一道背壩:任何 writer(含手改)把指標指回已作廢的 attempt
+            # 就是把被拒收的輸出復活,寧可讓那次寫入失敗。
+            if value in retracted_ids:
+                raise ValueError(
+                    f"manifest is corrupt: {pointer} points at retracted attempt {value}: {path}"
                 )

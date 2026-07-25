@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from notebooklm_mcp import tools_basic as b
 from notebooklm_mcp import tools_podcast as p
 
 
@@ -278,6 +279,12 @@ async def test_concurrent_resume_only_one_caller_uploads_feedback_source(
 async def test_unpromoted_new_attempt_does_not_replace_prior_output_bytes(
     fake_client, tmp_path, monkeypatch
 ):
+    """取代版的下載不得蓋掉前一版的 bytes。
+
+    狀態經**合法路徑**造出:已有 durable output 時 resume 另一個 artifact 已被禁止
+    (那是無審計取代的後門),所以先 `podcast_attempt_retract` + 刪舊 source,再 resume。
+    被作廢那版的 mp3 仍必須完好——`retracted_attempt_ids` 讓取代版一律下到
+    attempts/<attempt_id>/,不再取決於當下剛好有沒有 cover_path。"""
     manifest_path = tmp_path / "series_manifest.json"
     first = await p.podcast_episode(
         "nb-1",
@@ -289,12 +296,25 @@ async def test_unpromoted_new_attempt_does_not_replace_prior_output_bytes(
     )
     old_path = tmp_path / "ep01.mp3"
     old_bytes = old_path.read_bytes()
+    retraction = await p.podcast_attempt_retract(
+        str(manifest_path), 1, first["attempt_id"], reason="QA 拒收"
+    )
+    assert retraction["retracted_mp3_path"] == str(old_path)
+    await b.source_delete("nb-1", retraction["stale_source_id"])
+
     fake_client.artifacts.download_audio_bytes = b"new-attempt-audio"
     fake_client.artifacts.artifacts.append(
         _visible_audio("task-new", "Audio Overview")
     )
 
-    async def fail_after_download(_notebook_id):
+    real_source_list = fake_client.sources.list
+    calls = {"n": 0}
+
+    async def fail_after_download(notebook_id):
+        # 第一次是 cleanup gate 的查詢(必須放行),第二次才是 finalize 的回錄上傳前檢查
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await real_source_list(notebook_id)
         raise ConnectionError("stop before new source upload")
 
     monkeypatch.setattr(fake_client.sources, "list", fail_after_download)
@@ -311,9 +331,10 @@ async def test_unpromoted_new_attempt_does_not_replace_prior_output_bytes(
     assert old_path.read_bytes() == old_bytes
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     episode = stored["episodes"][0]
-    assert episode["artifact_id"] == first["artifact_id"]
-    assert episode["mp3_path"] == str(old_path)
-    assert episode["output_attempt_id"] == first["attempt_id"]
+    # 作廢後 episode 級投影已清空,取代版尚未 promote → 不得有任何輸出證據回來
+    assert "artifact_id" not in episode
+    assert "mp3_path" not in episode
+    assert "output_attempt_id" not in episode
 
     active_attempt_id = episode["active_attempt_id"]
     assert active_attempt_id != first["attempt_id"]

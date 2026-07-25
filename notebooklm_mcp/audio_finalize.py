@@ -36,6 +36,11 @@ def has_durable_output_evidence(episode: dict) -> bool:
     """既有輸出留下任一耐久證據時，不得覆寫相容路徑。"""
     if has_hard_output_evidence(episode):
         return True
+    # 被 retract 的那版本機 mp3 就是拒收證據,不能讓取代版蓋掉它——否則同一集有沒有
+    # 保留證據會取決於「那時剛好生過封面沒有」,不可預測。取代版一律走
+    # attempts/<attempt_id>/ 子目錄(見下方 finalize 的 mp3_path 選擇)。
+    if episode.get("retracted_attempt_ids"):
+        return True
     cover = episode.get("cover_path")
     if isinstance(cover, str) and cover.strip():
         return True
@@ -91,6 +96,14 @@ def _record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[dict, dict
     )
     if attempt is None:
         raise ValueError(f"attempt {attempt_id!r} is missing from episode {episode_n}")
+    # Tombstone。`podcast_attempt_retract` 作廢的 attempt 不得再被 finalize:所有 finalize
+    # checkpoint 的讀寫都走這裡,所以一個 in-flight finalizer 在 retract 之後的第一次
+    # manifest 觸碰就會停住,不會繼續 upload／rename／promote 把被拒收的那版復活。
+    if attempt.get("retraction"):
+        raise ValueError(
+            f"attempt {attempt_id!r} was retracted (episode {episode_n}); "
+            "generate a replacement instead of finalizing it"
+        )
     return episode, attempt
 
 
