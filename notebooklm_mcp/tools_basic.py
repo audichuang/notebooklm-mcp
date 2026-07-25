@@ -5,6 +5,10 @@ baked in. Each tool returns a plain JSON-able dict.
 """
 from __future__ import annotations
 
+import asyncio
+import tempfile
+from pathlib import Path
+
 from . import runtime
 from ._status import ensure_completed, ensure_started
 from ._text import _CITATION_RE, norm as _norm
@@ -12,6 +16,57 @@ from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
+
+
+# 不該「只改成 .md」就送上去的副檔名。三類、三個理由,合成一份是因為行為相同
+# (原樣交給 SDK):
+#  (a) 文件/表格 —— 官方或實測可直接上傳的格式;包成 Markdown 會丟掉 NotebookLM 對
+#      表格(CSV/TSV)、簡報(PPTX)等來源的原生處理語意。
+#  (b) 圖片/音訊/影片 —— 實裝 SDK 有 SourceType.IMAGE / MEDIA;小圖片可能碰巧解得開
+#      UTF-8,不能讓它進自動包裝。
+#  (c) HTML family —— 上游 _source/upload.py:262 的 _HTML_UPLOAD_SUFFIXES 刻意
+#      ValidationError 擋掉,要求 caller 先轉成乾淨文字;只改副檔名會把 script/style/
+#      導覽 markup 偷渡進去並繞過那道驗證,所以原樣送、保留上游自己的清楚錯誤。
+# 這份清單**不是** endpoint support allowlist(我們無法從外部證明那件事),語意只有
+# 「這些格式不適合用改副檔名來處理」。也刻意不用 mimetypes.guess_type():它會讀
+# /etc/mime.types,同一支 .ts 在有/無該檔的機器上分類不同,3 VM + podcast-lab 會得到
+# 不決定性的轉換行為。
+_NO_AUTO_WRAP_SUFFIXES = {
+    ".pdf", ".txt", ".md", ".markdown", ".doc", ".docx", ".rtf", ".odt",
+    ".csv", ".tsv", ".epub", ".pptx",                                       # (a)
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg",                       # (b) 圖片
+    ".mp3", ".m4a", ".wav", ".aac", ".mp4", ".mov", ".webm",                # (b) 音訊/影片
+    ".html", ".htm", ".xhtml", ".xht",                                      # (c)
+}
+_MAX_CONVERT_BYTES = 25 * 1024 * 1024
+
+
+def _as_uploadable_text(file_path: str, tmpdir: str) -> tuple[str, str | None]:
+    """回傳 (實際上傳路徑, converted_from)。
+
+    NotebookLM 的 upload endpoint 對 `.json`/`.ts`/`.py`/`.yaml` 這類副檔名直接回
+    400,而每次新檔案的副檔名都不同——靠文件提醒等於每次都要有人先踩一次(EP36 的
+    fixture-output.json)。所以在唯一的 caller-facing 檔案入口自動繞過:非上列副檔名
+    且讀得開的小 UTF-8 文字檔複製成 `<原檔名>.md`(保留原副檔名做出處,`a.ts` 與
+    `a.json` 不會撞成同名),交給 SDK 從 `.md` 推導 text/markdown。
+
+    caller 顯式傳 `mime_type` 時呼叫端根本不會進來——它比我們清楚那是什麼。
+    ponytail: 天花板是「不傳 mime_type 的小 ASCII .bin 會被包成 .md」——結果是上傳
+              成功而不是 400,可接受;要更嚴格再加 magic-byte 嗅探。"""
+    p = Path(file_path)
+    if p.suffix.lower() in _NO_AUTO_WRAP_SUFFIXES:
+        return file_path, None
+    try:
+        if p.stat().st_size > _MAX_CONVERT_BYTES:
+            return file_path, None
+        text = p.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return file_path, None
+    if "\x00" in text:      # NUL 是合法 UTF-8;二進位常見,decode 擋不掉
+        return file_path, None
+    dest = Path(tmpdir) / (p.name + ".md")
+    dest.write_text(text, encoding="utf-8")
+    return str(dest), p.name
 
 
 async def _probe_extraction(notebook_id: str, source_id: str, *, is_file: bool) -> dict:
@@ -89,18 +144,32 @@ async def source_add_file(
     title: str | None = None,
 ) -> dict:
     """Add a local file as a source. mp3 回饋來源用 mime_type="audio/mpeg";
-    title 可直接命名(如手動補一集時傳 "EP03 標題",與 Studio artifact 同名)。"""
+    title 可直接命名(如手動補一集時傳 "EP03 標題",與 Studio artifact 同名)。
+
+    endpoint 不吃的副檔名(`.json`/`.ts`/`.py`/`.yaml`…)若是純文字會自動包成
+    `<原檔名>.md` 上傳,回傳帶 `converted_from`——caller 不必自己先改名。傳了
+    `mime_type` 就照傳入值原樣送(顯式宣告優先);HTML 維持上游的 fail-loud。
+    注意這是 caller-facing 的通用檔案入口;podcast finalize 的已知 mp3 路徑
+    直接走 SDK,不經過這裡。"""
     # SDK 會 strip title 後才落地;先在這裡 strip,後檢比較基準才會一致,
     # 否則呼叫端傳前後空白會被誤判成「title 未生效」而 raise(明明成功了)。
     title = title.strip() if title is not None else None
-    src = await runtime.get_client().sources.add_file(
-        notebook_id,
-        file_path,
-        mime_type=mime_type,
-        wait=wait,
-        wait_timeout=600.0,
-        title=title,
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 判定 + 複製最多 _MAX_CONVERT_BYTES 的同步 I/O 丟到 thread:直接跑在事件迴圈上
+        # 會卡住整個 MCP server(其他 request、取消、長跑狀態查詢全停,外層 client 可能
+        # 先 timeout),而這個 process 是常駐、跨長生成共用的。
+        upload_path, converted_from = (
+            (file_path, None) if mime_type is not None       # 顯式宣告優先,不猜
+            else await asyncio.to_thread(_as_uploadable_text, file_path, tmpdir)
+        )
+        src = await runtime.get_client().sources.add_file(
+            notebook_id,
+            upload_path,
+            mime_type=mime_type,
+            wait=wait,
+            wait_timeout=600.0,
+            title=title,
+        )
     # 0.7.3 的 title= 內部是 add→rename,改名失敗只 log 不 raise(回傳舊 title)。
     # 命名是鐵律的一部分,靜默破功不可接受 → 後檢 fail-loud。
     if title is not None and getattr(src, "title", None) != title:
@@ -111,6 +180,9 @@ async def source_add_file(
         )
     # probe 在 title 後檢之後:加值驗證不得吞掉既有 fail-loud 路徑。
     out = {"source_id": src.id}
+    if converted_from is not None:
+        # 只有真的轉換過才出現;未傳 title 時來源會以 `<原檔名>.md` 落地,對帳看得到。
+        out["converted_from"] = converted_from
     if wait:
         out.update(await _probe_extraction(notebook_id, src.id, is_file=True))
     return out

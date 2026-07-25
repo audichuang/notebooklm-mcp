@@ -47,6 +47,12 @@ class FakeArtifacts:
         self.download_audio_exc = None
         self.download_audio_partial_bytes: bytes | None = None
         self.download_audio_bytes = b"fake mp3 bytes"
+        # 同樣的 fault injection 給簡報/講義:bytes 先落地、再拋錯 = torn write。
+        # 原子換檔必須讓既有的完整檔案毫髮無傷(v0.3.3)。
+        self.download_slides_bytes = b"%PDF-1.4 fake"
+        self.download_slides_exc = None
+        self.download_report_bytes = "# 假講義\n\n- 重點一\n".encode("utf-8")
+        self.download_report_exc = None
 
     def seed_artifacts(self, *arts):
         """Test helper: pre-populate the notebook's artifact set."""
@@ -159,7 +165,9 @@ class FakeArtifacts:
         self.calls.append(("download_slide_deck", dict(output_path=output_path,
                           artifact_id=artifact_id, output_format=output_format)))
         with open(output_path, "wb") as f:      # 落一個非空檔,讓 publish 的存在性檢查過
-            f.write(b"%PDF-1.4 fake")
+            f.write(self.download_slides_bytes)
+        if self.download_slides_exc is not None:
+            raise self.download_slides_exc
         return output_path
 
     async def generate_report(self, notebook_id, report_format=None, source_ids=None,
@@ -173,8 +181,10 @@ class FakeArtifacts:
 
     async def download_report(self, notebook_id, output_path, artifact_id=None):
         self.calls.append(("download_report", dict(output_path=output_path, artifact_id=artifact_id)))
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("# 假講義\n\n- 重點一\n")
+        with open(output_path, "wb") as f:
+            f.write(self.download_report_bytes)
+        if self.download_report_exc is not None:
+            raise self.download_report_exc
         return output_path
 
 
@@ -234,12 +244,16 @@ class FakeSources:
         # 鏡射 notebooklm-py 0.7.3:mime_type 之後的參數 keyword-only;title= 內部
         # 其實是 add→rename 兩步,rename 失敗只 log 不 raise(回傳舊 title 的 Source)。
         # title_lands=False 模擬那個靜默失敗,供 source_add_file 後檢的紅路徑測試。
+        # bytes 也記下來:source_add_file 的自動包裝會把內容複製到 TemporaryDirectory,
+        # 工具回傳前那個目錄就被清掉了,只記路徑字串沒辦法驗「內容一字不差」。
+        source_path = Path(file_path)
         self.calls.append(
             (
                 "add_file",
                 dict(
                     notebook_id=notebook_id,
                     file_path=str(file_path),
+                    file_bytes=source_path.read_bytes() if source_path.exists() else None,
                     mime_type=mime_type,
                     wait=wait,
                     wait_timeout=wait_timeout,

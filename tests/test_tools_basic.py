@@ -245,6 +245,93 @@ async def test_source_add_file_title_check_still_fails_loud_before_probe(fake_cl
         await t.source_add_file("nb-1", str(f), title="EP03 進階篇")
 
 
+# ---- v0.3.3:source_add_file 對非原生副檔名自動包成 .md -------------------------
+# EP36:fixture-output.json 直接 400 Bad Request。endpoint 不吃的副檔名每次都不同,
+# 靠文件提醒等於每次都要有人先踩一次,所以在唯一 caller-facing 入口自動繞過。
+
+
+def _add_file_call(fake_client):
+    return next(c[1] for c in fake_client.sources.calls if c[0] == "add_file")
+
+
+async def test_source_add_file_wraps_unsupported_text_as_markdown(fake_client, tmp_path):
+    f = tmp_path / "fixture-output.json"
+    f.write_text('{"ok": true}\n', encoding="utf-8")
+    out = await t.source_add_file("nb-1", str(f))
+
+    call = _add_file_call(fake_client)
+    # 保留原副檔名做出處:a.ts 與 a.json 不會撞成同一個 a.md。
+    assert call["file_path"].endswith("fixture-output.json.md")
+    assert call["file_bytes"] == b'{"ok": true}\n'      # 內容一字不差
+    assert call["mime_type"] is None                    # 讓 SDK 從 .md 推 text/markdown
+    assert out["converted_from"] == "fixture-output.json"
+
+
+async def test_source_add_file_explicit_mime_wins_over_wrapping(fake_client, tmp_path):
+    """第二道閘:caller 顯式宣告 mime_type 就照它送,不自動包裝。
+
+    這條必須用「會被包裝的副檔名」測 —— 用 .mp3 測證明不了任何事,它早就被第一道
+    suffix 閘放行了,mime 判斷被刪掉測試照樣綠。"""
+    f = tmp_path / "fixture.json"
+    f.write_text('{"ok": true}', encoding="utf-8")
+    out = await t.source_add_file("nb-1", str(f), mime_type="application/json")
+
+    call = _add_file_call(fake_client)
+    assert call["file_path"] == str(f)                  # 原樣,沒被改名
+    assert call["mime_type"] == "application/json"
+    assert "converted_from" not in out
+
+
+@pytest.mark.parametrize(
+    "name, content",
+    [
+        ("notes.md", b"# already markdown\n"),          # 原生格式
+        ("table.csv", b"a,b\n1,2\n"),                   # 表格:包成 .md 會丟掉原生語意
+        ("deck.pptx", b"PK\x03\x04binary"),             # 官方列為可上傳來源
+        ("ep03.mp3", b"x"),                             # 不傳 mime 的假 mp3:仍不得包裝
+        ("shot.png", b"\x89PNG\r\n\x1a\nIHDR"),         # 圖片(SourceType.IMAGE)
+        ("diagram.svg", b"<svg xmlns='http://www.w3.org/2000/svg'/>"),  # 合法 UTF-8 的圖片
+        ("page.html", b"<html><script>x</script></html>"),  # 上游刻意 fail-loud,不偽轉換
+        ("blob.bin", b"\xff\xfe\x00binary"),            # 無效 UTF-8
+        ("nulls.dat", b"abc\x00def"),                   # NUL 是合法 UTF-8,decode 擋不掉
+    ],
+)
+async def test_source_add_file_passes_through_untouched(fake_client, tmp_path, name, content):
+    f = tmp_path / name
+    f.write_bytes(content)
+    out = await t.source_add_file("nb-1", str(f))
+
+    call = _add_file_call(fake_client)
+    assert call["file_path"] == str(f)
+    assert call["file_bytes"] == content
+    assert "converted_from" not in out
+
+
+async def test_source_add_file_wrap_size_cap_is_exclusive(fake_client, tmp_path, monkeypatch):
+    """鎖 `>` 邊界語意:等於上限仍轉換,超過一 byte 就原樣送。
+
+    用 monkeypatch 把上限縮小來測,不建 25MiB 檔也不 mock stat/read_text——sparse file
+    測不了這件事(全 NUL,會先被 NUL guard 放行,兩個分支都 passthrough 卻理由不同)。"""
+    monkeypatch.setattr(t, "_MAX_CONVERT_BYTES", 4)
+
+    at_cap = tmp_path / "at.json"
+    at_cap.write_bytes(b"abcd")
+    out = await t.source_add_file("nb-1", str(at_cap))
+    assert out["converted_from"] == "at.json"
+
+    over_cap = tmp_path / "over.json"
+    over_cap.write_bytes(b"abcde")
+    out = await t.source_add_file("nb-1", str(over_cap))
+    assert "converted_from" not in out
+    last = [c[1] for c in fake_client.sources.calls if c[0] == "add_file"][-1]
+    assert last["file_path"] == str(over_cap)        # 超過上限:原樣送,沒進包裝
+
+
+def test_max_convert_bytes_value_is_locked():
+    # 邊界語意由上面那個測試鎖;這裡只鎖住實際門檻值不被無聲調動。
+    assert t._MAX_CONVERT_BYTES == 25 * 1024 * 1024
+
+
 # ---- v0.2.9 token-diet:P4 chat_ask 清引用 + 可關 references --------------------
 
 async def test_chat_ask_default_keeps_citations_and_references(fake_client):
@@ -265,3 +352,29 @@ async def test_chat_ask_strip_citations(fake_client):
 async def test_chat_ask_exclude_references(fake_client):
     out = await t.chat_ask("nb-1", "重點?", include_references=False)
     assert out["references"] == []   # show notes 路徑不需要 references,省 token
+
+
+async def test_source_add_file_wrapping_does_not_block_the_event_loop(fake_client, tmp_path, monkeypatch):
+    """包裝會做 stat + 最多 25 MiB 的 read/write。同步跑在 async 工具裡會卡住整個 MCP
+    event loop——其他 request、取消、長跑狀態查詢全被凍住,外層 client 可能先 timeout。"""
+    import asyncio, time
+
+    def slow_wrap(file_path, tmpdir):
+        time.sleep(0.2)                      # 模擬慢速掛載上的大檔 I/O
+        return file_path, None
+
+    monkeypatch.setattr(t, "_as_uploadable_text", slow_wrap)
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    beat = asyncio.create_task(heartbeat())
+    f = tmp_path / "payload.json"
+    f.write_text('{"ok": true}', encoding="utf-8")
+    await t.source_add_file("nb-1", str(f))
+    beat.cancel()
+    assert ticks >= 5                        # 慢 I/O 期間 event loop 仍在轉
