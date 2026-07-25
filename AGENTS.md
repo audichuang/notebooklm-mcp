@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.2"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.3"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -125,6 +125,10 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 
 ## Gotchas(notebooklm-py 0.7.3,pin `>=0.7.3,<0.8`;與 GitHub HEAD 不同,以**實裝版本**為準)
 
+- **`mcp[cli]` 必須有上界(`>=1.27,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端
+  每次安裝都自由解析成當下最新——曾經因為寫成 `>=1.0.0` 而出現「dev venv 鎖 1.27.2、四台
+  生產實裝 1.28.1」的落差(測試與實跑不同版),且 mcp 2.0 一出就會被靜默吃進去。改版本時
+  **對 lock 版本與消費端實裝版本各跑一次全套**,再更新這裡的下界。
 - **上游/NotebookLM 行為突變時的情報站**:讀 `_research/notebooklm-mcp-cli` 既有 clone 的
   CHANGELOG.md 與 docs/KNOWN_ISSUES.md(jacob-bd,全生態追 Google 改版最快;bl 漂移、cookie
   語意、RPC schema 變動幾乎都最先出現在那),再對照 notebooklm-py 的 GitHub issues。
@@ -148,6 +152,23 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - `sources.delete` 是 **idempotent**(0.7.0 起):刪不存在的 source 也「成功」不 raise。
   `source_delete` 回的 `deleted` 只代表「呼叫後該 id 已不在筆記本」,**不保證它先前存在**
   (打錯 id 也回 deleted)。要確認刪掉某既有來源,先用 `source_list` 拿真實 `source_id`。
+- **upload endpoint 的副檔名地雷**:`.json`/`.ts`/`.py`/`.yaml` 直接 400 Bad Request(上游只
+  提前擋 HTML family:`_source/upload.py:262` 的 `_HTML_UPLOAD_SUFFIXES`)。v0.3.3 起
+  `source_add_file` 自動把讀得開的小 UTF-8 文字檔複製成 `<原檔名>.md` 上傳並回
+  `converted_from`(EP36 的 fixture-output.json 事故:每次新檔案副檔名都不同,pitfall 文件
+  救不了)。`_NO_AUTO_WRAP_SUFFIXES` **不是** endpoint support allowlist——我們無法從外部
+  證明那件事,它的語意只有「這些格式不該用改副檔名來處理」(文件/表格/圖片/媒體會丟掉
+  原生語意;HTML 要保留上游的 ValidationError)。**刻意不用 `mimetypes.guess_type()`**:它讀
+  `/etc/mime.types`,同一支 `.ts` 在有/無該檔的機器上分類不同,3 VM + podcast-lab 會不決定性。
+  另外 **NUL byte 是合法 UTF-8**,`read_text()` 只擋掉無效序列的那一半 → 需要獨立的
+  `"\x00" in text` guard。顯式 `mime_type` 一律優先(呼叫端比我們清楚那是什麼)。
+  注意 `source_add_file` 只是 caller-facing 通用入口;`tools_podcast.py:726/845` 與
+  `audio_finalize.py:623` 的已知 mp3 直接打 SDK,不經過它。
+- **固定檔名的下載一律原子換檔**(`_atomic.download_atomically`):`ep{n:02d}-slides.pdf` /
+  `-report.md` 原本直接寫最終路徑,重生中斷會讓 partial file 頂替上一版完整產物,而 manifest
+  仍指向同一路徑、`publish_series` 的「存在且非空」檢查也抓不到。temp → 驗(非空 + PDF
+  magic / UTF-8 可讀)→ fsync → `os.replace` → fsync parent,與音檔 finalize 同一 pattern
+  (`fsync_parent` 已抽到 `_atomic.py`,兩邊共用)。
 - `sources.add_file` 有 `title`(0.7.x),**但內部仍是 add→rename 兩步且改名失敗只 log 不
   raise** → podcast 流程維持顯式 add_file → rename 兩步(fail-loud);`source_add_file` 工具
   的 title= 有回傳後檢,未生效會 raise。
@@ -163,6 +184,17 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`。
 - **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`);要當公開文字(如單集 show notes)
   前用 regex `\[[\d,\s\-–]+\]` 清掉。單集簡介 = manifest 該集加 `description`(見 skill repo `audi-skill/notebooklm` 的 SKILL §Publish)。
+- **發布的 preflight 是硬契約,且一定在第一個 PUT 之前**(v0.3.3):`require_slides` /
+  `require_report` 預設 True——manifest 沒回寫附件路徑就 raise。理由是三個生成是獨立背景
+  呼叫、完成訊號分散,manifest 是唯一匯流點,舊行為「缺路徑靜默不附」讓「還在生成」與
+  「使用者不要」無從區分(EP36 發布早於交付完成)。兩個獨立旗標,對齊 skill「能略過的只有
+  簡報/研讀講義」。同一輪把附件檔案存在性、**每集 mp3 的 `_ensure_local_mp3` resolve**、
+  **講義 HTML 預渲染**全部提前——舊版都在上傳迴圈內,後面某集失敗會讓前面幾集的
+  mp3/封面已經落在 NAS 上(違反該迴圈上方註解自己宣告的不變式)。**只驗 `artifact_id` 不夠**:
+  resolve 還要 `notebook_id`,且遠端下載本身可能失敗。**這叫 required-deliverable preflight
+  gate,不是 await barrier**(分不出「manifest 有舊路徑、新版正在重生」),也**不保證零 orphan
+  blob**(網路/ffmpeg/uploader 階段失敗仍會留未引用的 immutable blob,那是 media-first 發布
+  的已知代價)。
 - **附加簡報/講義**:`generate_slides`/`generate_report` 只吃**傳入的 `source_ids`**才聚焦原文;
   不傳則 SDK 用全部來源(v1 不自動排除音檔來源)。附件缺檔時 `publish_series` **fail-fast**。
   **順序鐵律**:uploader 白名單放寬 `.pdf`/`.html` 後**要先重部署 NAS**,再跑帶附件的發布,否則附件 PUT 404。

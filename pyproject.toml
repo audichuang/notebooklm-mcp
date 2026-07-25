@@ -1,11 +1,14 @@
 [project]
 name = "notebooklm-mcp"
-version = "0.3.2"
+version = "0.3.3"
 description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "notebooklm-py>=0.7.3,<0.8",
-    "mcp[cli]>=1.0.0",
+    # 上界是硬需求:`uv tool install git+…` **不讀 uv.lock**,消費端每次安裝都自由解析成
+    # 當下最新,所以無上界的話 mcp 2.0 一出來,四台機器下一次重裝就靜默吃到 breaking 版本。
+    # 下界 1.27 = 實測過的最舊版(1.27.2 為 lock、1.28.1 為生產實裝,兩者全套測試皆綠)。
+    "mcp[cli]>=1.27,<2",
     "Pillow>=10,<12",
     "httpx>=0.27,<1",
     "markdown>=3.5",
