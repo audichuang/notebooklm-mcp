@@ -127,12 +127,27 @@ def _two_episode_manifest(tmp_path, *, published_at=None, contents=None, filenam
     return _manifest(tmp_path, episodes, filename)
 
 
-async def _publish(manifest_path, artwork_png, **overrides):
-    kwargs = dict(
+def _show_kwargs(manifest_path, artwork_png):
+    return dict(
         show_id="ai-news", notebook_id="nb1", manifest_path=manifest_path,
         show_title="AI 新聞", show_description="每日 AI 摘要", author="Audi",
         owner_name="Audi", owner_email="audi@example.com", artwork_path=artwork_png,
     )
+
+
+async def _publish(manifest_path, artwork_png, **overrides):
+    # v0.3.3 起附件 fail-closed(require_slides/require_report 未傳 = 視為 True)。這裡的
+    # fixture 都不帶附件,而這些測試驗的是上傳機制/feed 內容,不是附件政策——所以 helper
+    # 顯式關掉。要測 production defaults 的請用 _publish_with_defaults。
+    kwargs = _show_kwargs(manifest_path, artwork_png)
+    kwargs.update(require_slides=False, require_report=False)
+    kwargs.update(overrides)
+    return await tools_publish.publish_series(**kwargs)
+
+
+async def _publish_with_defaults(manifest_path, artwork_png, **overrides):
+    """完全不傳 require_*,讓 production 預設值自己生效——把預設改掉,呼叫這個的測試才會紅。"""
+    kwargs = _show_kwargs(manifest_path, artwork_png)
     kwargs.update(overrides)
     return await tools_publish.publish_series(**kwargs)
 
@@ -236,7 +251,8 @@ async def test_publish_persists_show_config_then_manifest_path_alone_suffices(
     assert saved["artwork_path"] == artwork_png
     assert saved["category"] == "Technology" and saved["explicit"] is False
 
-    res2 = await tools_publish.publish_series(manifest_path=manifest)   # 只傳 manifest_path
+    # 真的只傳 manifest_path —— show 七欄與附件政策都必須從 manifest 沿用。
+    res2 = await tools_publish.publish_series(manifest_path=manifest)
     assert res2["token"] == identity.make_token("ai-news", "s3cret")
     first, second = captured[:8], captured[8:]
     for a, b in zip(first, second):
@@ -254,7 +270,10 @@ async def test_publish_explicit_param_overrides_manifest_show(env, tmp_path, art
     captured = _install_mock(monkeypatch)
     manifest = _two_episode_manifest(tmp_path)
     await _publish(manifest, artwork_png)                                    # 寫入 show 區塊
-    await tools_publish.publish_series(manifest_path=manifest, show_title="改名後")  # 顯式覆蓋
+    await tools_publish.publish_series(                                          # 顯式覆蓋
+        manifest_path=manifest, show_title="改名後",
+        require_slides=False, require_report=False,
+    )
     show2 = json.loads([c["content"] for c in captured if c["name"] == "show.json"][-1])
     assert show2["title"] == "改名後"
     saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
@@ -433,6 +452,7 @@ async def test_attachments_hosted_and_linked(env, tmp_path, artwork_png, monkeyp
 
 
 async def test_missing_attachment_file_fails_fast(env, tmp_path, artwork_png, monkeypatch):
+    """已填路徑但檔案不存在:即使 require_* 關掉也要擋,而且在任何 PUT 之前。"""
     captured = _install_mock(monkeypatch)
     manifest = _manifest(tmp_path, [{
         "episode": 1, "title": "第1集", "description": "本集重點。",
@@ -442,6 +462,100 @@ async def test_missing_attachment_file_fails_fast(env, tmp_path, artwork_png, mo
     }], "att_missing.json")
     with pytest.raises(ValueError, match="slides_pdf_path"):
         await _publish(manifest, artwork_png)
+    assert captured == []            # 檢查已提前,不再是「跑到那一集才爆」
+
+
+# ---- v0.3.3:fail-closed required-deliverable preflight gate --------------------
+# EP36:三個生成(音檔/簡報/講義)是獨立背景呼叫,完成訊號分散,manifest 是唯一匯流點。
+# 舊行為「缺路徑就靜默不附」讓「還在生成」與「使用者不要」長得一樣,於是發布早於交付完成。
+
+
+def _ep_with(tmp_path, tag, **extra):
+    ep = {
+        "episode": 1, "title": "第1集", "description": "本集重點整理。",
+        "mp3_path": _write_mp3(tmp_path, f"{tag}.mp3", b"a"),
+        "cover_path": _valid_cover(tmp_path, f"{tag}-cover.png"),
+    }
+    ep.update(extra)
+    return _manifest(tmp_path, [ep], f"{tag}.json")
+
+
+def _slides(tmp_path, tag="gate"):
+    return _write_mp3(tmp_path, f"{tag}-slides.pdf", b"%PDF-1.4 x")
+
+
+def _report(tmp_path, tag="gate"):
+    md = tmp_path / f"{tag}-report.md"
+    md.write_text("# 講義\n\n- 重點", encoding="utf-8")
+    return str(md)
+
+
+async def test_missing_slides_path_blocks_publish_before_any_put(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    manifest = _ep_with(tmp_path, "no_slides", report_md_path=_report(tmp_path, "no_slides"))
+    with pytest.raises(ValueError, match="slides_pdf_path 未回寫"):
+        await _publish(manifest, artwork_png, require_slides=True, require_report=True)
+    assert captured == []
+
+
+async def test_missing_report_path_blocks_publish_before_any_put(env, tmp_path, artwork_png, monkeypatch):
+    captured = _install_mock(monkeypatch)
+    manifest = _ep_with(tmp_path, "no_report", slides_pdf_path=_slides(tmp_path, "no_report"))
+    with pytest.raises(ValueError, match="report_md_path 未回寫"):
+        await _publish(manifest, artwork_png, require_slides=True, require_report=True)
+    assert captured == []
+
+
+async def test_require_slides_false_still_requires_report(env, tmp_path, artwork_png, monkeypatch):
+    """兩個旗標必須各自獨立——被錯接成同一條件時這個測試會紅。"""
+    _install_mock(monkeypatch)
+    # 缺簡報但關掉了 → 放行
+    ok = _ep_with(tmp_path, "slides_off_ok", report_md_path=_report(tmp_path, "slides_off_ok"))
+    await _publish(ok, artwork_png, require_slides=False, require_report=True)
+    # 缺講義而 require_report 仍開 → 擋
+    bad = _ep_with(tmp_path, "slides_off_bad", slides_pdf_path=_slides(tmp_path, "slides_off_bad"))
+    with pytest.raises(ValueError, match="report_md_path 未回寫"):
+        await _publish(bad, artwork_png, require_slides=False, require_report=True)
+
+
+async def test_require_report_false_still_requires_slides(env, tmp_path, artwork_png, monkeypatch):
+    _install_mock(monkeypatch)
+    ok = _ep_with(tmp_path, "report_off_ok", slides_pdf_path=_slides(tmp_path, "report_off_ok"))
+    await _publish(ok, artwork_png, require_slides=True, require_report=False)
+    bad = _ep_with(tmp_path, "report_off_bad", report_md_path=_report(tmp_path, "report_off_bad"))
+    with pytest.raises(ValueError, match="slides_pdf_path 未回寫"):
+        await _publish(bad, artwork_png, require_slides=True, require_report=False)
+
+
+async def test_both_attachments_present_passes_default_gate(env, tmp_path, artwork_png, monkeypatch):
+    """兩附件齊備時,**production 預設**必須正常發布——刻意不傳 require_*,否則把預設改成
+    False 這個測試還會綠,就鎖不住「預設 fail-closed」。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _ep_with(
+        tmp_path, "both",
+        slides_pdf_path=_slides(tmp_path, "both"),
+        report_md_path=_report(tmp_path, "both"),
+    )
+    res = await _publish_with_defaults(manifest, artwork_png)
+    assert res["episode_count"] == 1
+    names = [c["name"] for c in captured]
+    assert any(n.endswith(".pdf") for n in names) and any(n.endswith(".html") for n in names)
+
+
+async def test_unresolvable_mp3_blocks_publish_before_any_put(env, tmp_path, artwork_png, monkeypatch):
+    """MP3 在任何 PUT 之前就 resolve:EP02 抓不到時,EP01 的 mp3/封面不該已經上傳。
+
+    只檢查 artifact_id 存在不夠——_ensure_local_mp3 還要 notebook_id,而且遠端下載
+    本身可能失敗;所以整季一律先 resolve 成真正存在的本機檔。"""
+    import json
+    captured = _install_mock(monkeypatch)
+    mpath = _two_episode_manifest(tmp_path, filename="mp3_gate.json")
+    data = json.loads(open(mpath, encoding="utf-8").read())
+    os.unlink(data["episodes"][1]["mp3_path"])          # EP02 音檔不見、也沒有 artifact_id
+    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    with pytest.raises(ValueError, match="no artifact_id"):
+        await _publish(mpath, artwork_png)
+    assert captured == []                               # EP01 一個 blob 都沒落地
 
 
 def _valid_cover(tmp_path, name):
@@ -754,3 +868,71 @@ async def test_return_episodes_filters_response_only(env, tmp_path, artwork_png,
     assert res["episode_count"] == 2
     names = [c["name"] for c in captured]
     assert any(n.startswith("EP01-") and n.endswith(".mp3") for n in names)
+
+
+# ---- v0.3.3 review fixes:附件政策要沿用,preflight 要真的擋在第一個 PUT 前 -----------
+
+
+async def test_attachment_policy_persists_for_rolling_publish(env, tmp_path, artwork_png, monkeypatch):
+    """季級政策必須存進 manifest。否則首發合法地用 require_slides=False 發完之後,照文件
+    只傳 manifest_path 做滾動加集,新呼叫會回到預設 True、掃到缺簡報的舊集直接 raise。"""
+    _install_mock(monkeypatch)
+    manifest = _ep_with(tmp_path, "policy", report_md_path=_report(tmp_path, "policy"))
+
+    await _publish(manifest, artwork_png, require_slides=False, require_report=True)
+
+    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    assert saved["require_slides"] is False and saved["require_report"] is True
+
+    # 滾動加集:照文件只傳 manifest_path,必須沿用而不是回到預設 True
+    res = await tools_publish.publish_series(manifest_path=manifest)
+    assert res["episode_count"] == 1
+
+
+async def test_explicit_policy_overrides_and_rewrites_saved_value(env, tmp_path, artwork_png, monkeypatch):
+    """顯式參數永遠優先並回寫(與 show 七欄同一套沿用規則)。"""
+    _install_mock(monkeypatch)
+    manifest = _ep_with(tmp_path, "policy2", report_md_path=_report(tmp_path, "policy2"))
+    await _publish(manifest, artwork_png, require_slides=False, require_report=True)
+
+    with pytest.raises(ValueError, match="slides_pdf_path 未回寫"):
+        await tools_publish.publish_series(manifest_path=manifest, require_slides=True)
+
+
+async def test_later_episode_report_render_failure_uploads_nothing(env, tmp_path, artwork_png, monkeypatch):
+    """render_report_html 對 script/外部資源 fail-closed,那是本機可預判的失敗。若它留在
+    上傳迴圈內,EP01 的 mp3/封面會先落到 NAS 上才輪到 EP02 爆掉。"""
+    captured = _install_mock(monkeypatch)
+    eps = []
+    for n in (1, 2):
+        md = tmp_path / f"render{n}-report.md"
+        md.write_text("# 講義\n\n<script>alert(1)</script>\n" if n == 2 else "# 講義\n\n- 重點",
+                      encoding="utf-8")
+        eps.append({
+            "episode": n, "title": f"第{n}集", "description": f"第{n}集重點整理。",
+            "mp3_path": _write_mp3(tmp_path, f"render{n}.mp3", f"audio-{n}".encode()),
+            "cover_path": _valid_cover(tmp_path, f"render{n}-cover.png"),
+            "slides_pdf_path": _slides(tmp_path, f"render{n}"),
+            "report_md_path": str(md),
+        })
+    manifest = _manifest(tmp_path, eps, "render.json")
+
+    with pytest.raises(Exception):
+        await _publish(manifest, artwork_png, require_slides=True, require_report=True)
+    assert captured == []            # EP01 一個 blob 都沒落地
+
+
+async def test_defaults_are_fail_closed(env, tmp_path, artwork_png, monkeypatch):
+    """鎖住「預設就是 fail-closed」本身。前一個測試兩附件齊備,預設翻成 False 也會綠,
+    所以真正把預設值釘住的是這個:缺附件 + 完全不傳 require_*,必須擋。"""
+    captured = _install_mock(monkeypatch)
+
+    only_report = _ep_with(tmp_path, "defclosed_s", report_md_path=_report(tmp_path, "defclosed_s"))
+    with pytest.raises(ValueError, match="slides_pdf_path 未回寫"):
+        await _publish_with_defaults(only_report, artwork_png)
+
+    only_slides = _ep_with(tmp_path, "defclosed_r", slides_pdf_path=_slides(tmp_path, "defclosed_r"))
+    with pytest.raises(ValueError, match="report_md_path 未回寫"):
+        await _publish_with_defaults(only_slides, artwork_png)
+
+    assert captured == []

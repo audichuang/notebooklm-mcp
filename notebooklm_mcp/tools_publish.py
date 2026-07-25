@@ -230,6 +230,8 @@ async def publish_series(
     explicit: bool | None = None,
     notebook_id: str | None = None,
     return_episodes: list[int] | None = None,
+    require_slides: bool | None = None,
+    require_report: bool | None = None,
 ) -> dict:
     """Publish a whole podcast series (one topic = one feed) as a static RSS feed.
 
@@ -249,7 +251,18 @@ async def publish_series(
     ``notebook_id`` 選填:只當某集 mp3 不在本機時的重抓 fallback,且**每集自己的
     manifest `notebook_id` 欄位優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
     ``return_episodes`` 選填:整季照常發布,但回傳的 ``episodes`` 只含指定集號——
-    滾動 feed 加一集時傳 ``[N]``,免得回傳隨集數線性膨脹(歷史集 URL 早已在案)。"""
+    滾動 feed 加一集時傳 ``[N]``,免得回傳隨集數線性膨脹(歷史集 URL 早已在案)。
+
+    ``require_slides`` / ``require_report`` 是**季級政策**,沿用規則同 show 七欄:``None``
+    (預設)= 沿用 ``manifest["show"]``、首發視為 True;顯式傳值永遠優先並回寫。
+    要求為 True 時,manifest 未回寫該附件路徑就
+    拒絕發布。這是 **fail-closed required-deliverable preflight gate**——音檔/簡報/
+    講義是三個獨立背景呼叫、完成訊號分散,manifest 是唯一匯流點,舊行為「缺路徑就
+    靜默不附」讓「還在生成」與「使用者不要」長得一樣(EP36 事故)。使用者明講整季
+    不做某一項時才把對應那個關掉(兩個獨立旗標,對齊 skill「能略過的只有簡報/研讀
+    講義」的既有語意)。**注意這不是 await barrier**:它只擋「路徑未回寫」,無法辨識
+    「manifest 有上一版路徑、新版正在背景重生」;真正的 in-flight 偵測要等 manifest
+    記錄 generation state,不在本版範圍。"""
     base_url = _require_env("PODCAST_PUBLIC_BASE_URL")
     salt = _require_env("PODCAST_TOKEN_SALT")
     upload_url = _require_env("PODCAST_UPLOAD_URL").rstrip("/")
@@ -274,6 +287,17 @@ async def publish_series(
         # notebook_id(重抓 fallback,選填)也要一起解析:它會進上傳的 show.json,
         # 不解析的話「首發有傳、之後沒傳」會讓 show.json bytes 不穩(null vs 值)。
         "notebook_id": notebook_id or saved_show.get("notebook_id"),
+        # 附件政策是**季級**的,所以跟 show 七欄一樣沿用:None = 沿用 manifest、首發預設
+        # True。不沿用的話,首發合法地用 require_slides=False 發完之後,照文件只傳
+        # manifest_path 做滾動加集會回到 True、掃到缺簡報的舊集直接 raise。
+        "require_slides": (
+            require_slides if require_slides is not None
+            else bool(saved_show.get("require_slides", True))
+        ),
+        "require_report": (
+            require_report if require_report is not None
+            else bool(saved_show.get("require_report", True))
+        ),
     }
     missing = [k for k in ("show_id", "show_title", "show_description", "author",
                            "owner_name", "owner_email", "artwork_path") if not show_cfg[k]]
@@ -336,12 +360,49 @@ async def publish_series(
             raise ValueError(f"episode {n}: description is required (真 show notes,不可空白)")
         if desc == ep["title"].strip():
             raise ValueError(f"episode {n}: description must not equal title (需真 show notes)")
+        # 附件 requirement + 已填路徑的存在性都在這裡驗完。存在性檢查原本在上傳迴圈
+        # 內(舊 :385/:397),後面某集缺檔會讓前面幾集的 mp3/封面已經 PUT 到 NAS,
+        # 違反本迴圈上方註解自己宣告的「任何 upload 之前驗完」不變式。
+        for key, required, why in (
+            ("slides_pdf_path", show_cfg["require_slides"], "簡報"),
+            ("report_md_path", show_cfg["require_report"], "研讀講義"),
+        ):
+            path = ep.get(key)
+            if required and not path:
+                raise ValueError(
+                    f"episode {n}: {key} 未回寫({why}可能還在生成中)。等 generate_slides/"
+                    f"generate_report 回寫後再發布;使用者明講整季不做這項才傳 "
+                    f"require_{'slides' if key.startswith('slides') else 'report'}=False"
+                )
+            if path and not (os.path.exists(path) and os.path.getsize(path) > 0):
+                raise ValueError(f"episode {n}: {key} missing file: {path}")
 
     _require_media_binaries()
+
+    # 每集 mp3 在任何 PUT 之前 resolve 成真正存在的本機檔(缺檔就在這裡完成 NotebookLM
+    # 重抓)。只驗 artifact_id 不夠:_ensure_local_mp3 還要 notebook_id,而且遠端下載
+    # 本身可能失敗——舊版在上傳迴圈內才 resolve,EP05 重抓失敗會讓 EP01–04 的
+    # mp3/封面已經落在 NAS 上。dict 只存路徑,不把整季音訊載進 RAM。
+    resolved_mp3: dict[int, str] = {}
+    for ep in manifest_eps:
+        resolved_mp3[int(ep["episode"])] = await _ensure_local_mp3(ep, notebook_id)
+
+    # 講義 HTML 也預先渲染:render_report_html 命中 script/外部資源會 fail-closed,
+    # 那是本機可預判的 deterministic 失敗,不該等到前幾集 PUT 完才爆。Markdown 渲染
+    # 後通常幾十 KB,整季加總遠小於單一 mp3,不構成 RAM 壓力。
+    rendered_reports: dict[int, bytes] = {}
+    for ep in manifest_eps:
+        rpath = ep.get("report_md_path")
+        if rpath:
+            with open(rpath, encoding="utf-8") as f:
+                rendered_reports[int(ep["episode"])] = notes_html.render_report_html(
+                    f.read(), ep["title"]
+                ).encode("utf-8")
     # One mp3 in RAM at a time: read -> hash -> PUT -> drop. NEVER accumulate the
     # whole season (8-12 episodes x tens of MB = 300-600MB resident on a possibly
-    # small VM). Commit order still holds: every mp3 + artwork is PUT inside this
-    # loop, and show.json/feed.xml are rendered and PUT only AFTER it.
+    # small VM). 講義 HTML 是刻意的例外(整季幾百 KB,見上方預渲染)。Commit order
+    # still holds: every mp3 + artwork is PUT inside this loop, and
+    # show.json/feed.xml are rendered and PUT only AFTER it.
     new_eps: dict[str, dict] = {}
     published = []
     async with _make_client() as client:
@@ -349,7 +410,7 @@ async def publish_series(
 
         for ep in manifest_eps:                                    # 1) media: mp3
             n = int(ep["episode"])
-            local = await _ensure_local_mp3(ep, notebook_id)
+            local = resolved_mp3[n]                                # preflight 已 resolve
             # 正規化成 true MP3 並內嵌 ID3/APIC:Apple/Spotify 常優先吃音檔內嵌圖,
             # 不是 feed 的 <item> itunes:image。正規化/內嵌後 bytes 變 → content-hash/URL
             # 變(預期一次性 churn,uploader 不刪舊 URL)。cover_path 已 preflight。
@@ -371,8 +432,9 @@ async def publish_series(
             await _put(client, upload_url, token, upload_token, ep_artwork_file, cover_bytes)
             del cover_bytes
 
-            # 1b) media: 選填附件(簡報 PDF / 研讀講義 HTML),content-addressed,
-            #     公開 URL append 到單集 description。缺檔 fail-fast(不 re-download)。
+            # 1b) media: 附件(簡報 PDF / 研讀講義 HTML),content-addressed,公開 URL
+            #     append 到單集 description。requirement 與缺檔都已在 preflight 擋掉;
+            #     這裡的檢查留作 defensive assertion(不 re-download)。
             base_pub = base_url.rstrip("/")
             desc_base = ep["description"].strip()   # preflight 已保證非空且不等於標題
             attachments: list[tuple[str, str, str]] = []   # (emoji, label, url)
@@ -395,12 +457,11 @@ async def publish_series(
             if rpath:
                 if not (os.path.exists(rpath) and os.path.getsize(rpath) > 0):
                     raise ValueError(f"episode {n}: report_md_path missing file: {rpath}")
-                with open(rpath, encoding="utf-8") as f:
-                    html_bytes = notes_html.render_report_html(f.read(), ep["title"]).encode("utf-8")
+                html_bytes = rendered_reports[n]                    # preflight 已渲染 + 驗過
                 hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
                 html_url = f"{base_pub}/feeds/{token}/{hfile}"
                 await _put(client, upload_url, token, upload_token, hfile, html_bytes)
-                del html_bytes                                     # 同 mp3/pdf:一次一 blob,傳完即釋放
+                del html_bytes                                     # 只放掉區域名稱(正本在 rendered_reports)
                 attachments.append(("📖", "研讀講義", html_url))
 
             # 純文字 <description>(fallback,含裸 URL)+ 富文字 <content:encoded>
