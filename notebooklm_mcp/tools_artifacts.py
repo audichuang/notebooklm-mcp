@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from . import runtime
+from ._atomic import download_atomically
 from ._status import ensure_completed, ensure_started
 from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
@@ -59,6 +60,24 @@ async def episode_set_description(
     return {"episode": episode_n, "description": desc, "stripped": strip_citations}
 
 
+def _validate_pdf(path: str) -> None:
+    """簡報必須真的是 PDF。torn write 的 partial 檔常常前幾 byte 還在、尾巴沒了,
+    但「非空」檢查會放行——magic 只是最便宜的一層,擋掉完全不成形的那種。"""
+    with open(path, "rb") as handle:
+        magic = handle.read(5)
+    if magic != b"%PDF-":
+        raise ValueError(f"downloaded slides are not a PDF (magic={magic!r}): {path}")
+
+
+def _validate_utf8_text(path: str) -> None:
+    """講義是 Markdown;截在多位元組字元中間的半份檔會在這裡被抓到。"""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            handle.read()
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"downloaded report is not valid UTF-8 text: {path}") from exc
+
+
 def _require_artifact_id(artifact_id: str) -> str:
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id must be a non-empty string")
@@ -77,7 +96,14 @@ async def _finish_slides(
     ensure_completed(final)
 
     out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-slides.pdf")
-    await client.artifacts.download_slide_deck(notebook_id, out, artifact_id=artifact_id, output_format="pdf")
+    # 固定檔名 → 重生就是就地覆寫。原子換檔,失敗時舊那份完整簡報原封不動。
+    await download_atomically(
+        out,
+        lambda dest: client.artifacts.download_slide_deck(
+            notebook_id, dest, artifact_id=artifact_id, output_format="pdf"
+        ),
+        _validate_pdf,
+    )
     _load_ep_and_write(manifest_path, episode_n, slides_pdf_path=out)
     return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
 
@@ -141,7 +167,12 @@ async def _finish_report(
     ensure_completed(final)
 
     out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-report.md")
-    await client.artifacts.download_report(notebook_id, out, artifact_id=artifact_id)
+    # 同 _finish_slides:固定檔名的就地覆寫換成原子換檔。
+    await download_atomically(
+        out,
+        lambda dest: client.artifacts.download_report(notebook_id, dest, artifact_id=artifact_id),
+        _validate_utf8_text,
+    )
     _load_ep_and_write(manifest_path, episode_n, report_md_path=out, report_format=report_format)
     return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}
 

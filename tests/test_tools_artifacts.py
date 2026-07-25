@@ -127,3 +127,143 @@ async def test_episode_set_description_validates(tmp_path):
         await a.episode_set_description(m, 1, "EP01")
     with pytest.raises(ValueError, match="episode 9 not found"):
         await a.episode_set_description(m, 9, "真 show notes")
+
+
+# ---- v0.3.3:簡報/講義原子換檔(torn write regression)---------------------------
+# 固定檔名 ep{n:02d}-slides.pdf / -report.md 的就地覆寫:重生中斷會讓 partial file 頂替
+# 原本完整的產物,而 manifest 仍指向同一路徑,publish 的「存在且非空」檢查抓不到。
+
+
+def _episode_with_existing(tmp_path, name, content):
+    """manifest 同目錄先放一份「上一版完整產物」,模擬重生前的現狀。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    existing = tmp_path / name
+    existing.write_bytes(content)
+    return m, existing
+
+
+def _part_files(tmp_path):
+    return [p.name for p in tmp_path.iterdir() if p.name.endswith(".part")]
+
+
+async def test_slides_download_failure_leaves_previous_pdf_intact(fake_client, tmp_path):
+    m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 GOOD OLD")
+    fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 half"     # partial 先落地
+    fake_client.artifacts.download_slides_exc = RuntimeError("connection reset")
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await a.generate_slides("nb-1", m, 1)
+
+    assert existing.read_bytes() == b"%PDF-1.4 GOOD OLD"               # 舊那份毫髮無傷
+    assert _part_files(tmp_path) == []                                 # temp 清乾淨
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert "slides_pdf_path" not in data["episodes"][0]                # 失敗不回寫 manifest
+
+
+async def test_report_download_failure_leaves_previous_markdown_intact(fake_client, tmp_path):
+    m, existing = _episode_with_existing(tmp_path, "ep01-report.md", "# 舊講義\n完整\n".encode())
+    fake_client.artifacts.download_report_bytes = "# 半份".encode()
+    fake_client.artifacts.download_report_exc = RuntimeError("connection reset")
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await a.generate_report("nb-1", m, 1)
+
+    assert existing.read_bytes() == "# 舊講義\n完整\n".encode()
+    assert _part_files(tmp_path) == []
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert "report_md_path" not in data["episodes"][0]
+
+
+async def test_slides_replaced_atomically_on_success(fake_client, tmp_path):
+    m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 GOOD OLD")
+    fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 BRAND NEW"
+    res = await a.generate_slides("nb-1", m, 1)
+
+    assert existing.read_bytes() == b"%PDF-1.4 BRAND NEW"              # 一次性換上
+    assert res["slides_pdf_path"] == str(existing)
+    assert _part_files(tmp_path) == []
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert data["episodes"][0]["slides_pdf_path"] == str(existing)
+
+
+async def test_empty_download_is_rejected_and_old_file_kept(fake_client, tmp_path):
+    m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 GOOD OLD")
+    fake_client.artifacts.download_slides_bytes = b""                  # 零位元組
+    with pytest.raises(ValueError, match="empty"):
+        await a.generate_slides("nb-1", m, 1)
+    assert existing.read_bytes() == b"%PDF-1.4 GOOD OLD"
+    assert _part_files(tmp_path) == []
+
+
+async def test_non_pdf_download_is_rejected_and_old_file_kept(fake_client, tmp_path):
+    """非空但不成形:magic 檢查是 torn write 的第二層,非空檢查放行的那種。"""
+    m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 GOOD OLD")
+    fake_client.artifacts.download_slides_bytes = b"<html>error page</html>"
+    with pytest.raises(ValueError, match="not a PDF"):
+        await a.generate_slides("nb-1", m, 1)
+    assert existing.read_bytes() == b"%PDF-1.4 GOOD OLD"
+    assert _part_files(tmp_path) == []
+
+
+async def test_invalid_utf8_report_is_rejected_and_old_file_kept(fake_client, tmp_path):
+    m, existing = _episode_with_existing(tmp_path, "ep01-report.md", "# 舊講義\n".encode())
+    fake_client.artifacts.download_report_bytes = b"\xff\xfe truncated multibyte"
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        await a.generate_report("nb-1", m, 1)
+    assert existing.read_bytes() == "# 舊講義\n".encode()
+    assert _part_files(tmp_path) == []
+
+
+# ---- v0.3.3 review fixes:原子換檔的權限與 commit point ---------------------------
+
+
+async def test_atomic_replace_preserves_existing_file_mode(fake_client, tmp_path):
+    """mkstemp 建的 temp 是 0600,os.replace 會把它帶到最終檔——既有 0644 的講義被重生後
+    別人就讀不到了(下一次 publish_series 拿到 PermissionError)。換檔要保留原 mode。"""
+    import os, stat
+    m, existing = _episode_with_existing(tmp_path, "ep01-report.md", "# 舊\n".encode())
+    os.chmod(existing, 0o644)
+    await a.generate_report("nb-1", m, 1)
+    assert stat.S_IMODE(os.stat(existing).st_mode) == 0o644
+
+
+async def test_atomic_replace_new_file_is_not_private(fake_client, tmp_path):
+    """首次生成沒有舊檔可繼承 mode,也不該落成 mkstemp 的 0600。"""
+    import os, stat
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    res = await a.generate_slides("nb-1", m, 1)
+    assert stat.S_IMODE(os.stat(res["slides_pdf_path"]).st_mode) == 0o644
+
+
+async def test_unsupported_directory_fsync_does_not_fail_the_download(fake_client, tmp_path, monkeypatch):
+    """os.replace 之後就是 commit point。有些 filesystem 不支援 directory fsync
+    (EINVAL/ENOTSUP)——那不是失敗,不該讓已經成功的換檔回報成錯誤。"""
+    import errno
+    from notebooklm_mcp import _atomic
+    m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 OLD")
+    fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 NEW"
+
+    def unsupported(path):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    monkeypatch.setattr(_atomic, "fsync_parent", unsupported)
+    res = await a.generate_slides("nb-1", m, 1)          # 不該 raise
+    assert existing.read_bytes() == b"%PDF-1.4 NEW"
+    assert res["slides_pdf_path"] == str(existing)
+
+
+async def test_post_commit_failure_says_the_file_was_already_replaced(fake_client, tmp_path, monkeypatch):
+    """真正的 IO 錯誤仍要 raise,但訊息必須講明「檔案已經換掉了」——否則呼叫端會照
+    docstring 以為舊檔還在,做出錯誤的復原決定。"""
+    import errno
+    from notebooklm_mcp import _atomic
+    m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 OLD")
+    fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 NEW"
+
+    def io_error(path):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(_atomic, "fsync_parent", io_error)
+    with pytest.raises(OSError, match="already replaced"):
+        await a.generate_slides("nb-1", m, 1)
+    assert existing.read_bytes() == b"%PDF-1.4 NEW"      # commit 已發生,誠實反映

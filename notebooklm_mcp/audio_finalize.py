@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from notebooklm.types import ArtifactType
 
+from ._atomic import fsync_parent as _fsync_parent
 from ._status import TerminalGenerationError, ensure_completed
 from .manifest_store import ManifestStore
 
@@ -184,14 +185,6 @@ def _file_matches(path: str, expected_size: int, expected_sha256: str) -> bool:
     except OSError:
         return False
     return digest == expected_sha256
-
-
-def _fsync_parent(path: str) -> None:
-    directory_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
 
 
 def _completed_output(
