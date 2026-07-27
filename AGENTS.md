@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.3.3"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.4.0"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -60,39 +60,24 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     (`mcporter call` 預設 60s)砍掉生成呼叫時,雲端那份已生完,拿 `artifact_id` 救回來就好,
     別重生燒配額。另含
     `episode_set_description`(show notes 回寫 manifest,預設清引用標記;同 process 讀改寫)
+  - `tools_research.py` — NotebookLM 內建 Web / Deep Research 的薄包:`research_start`(回
+    `task_id` 就走)/ `research_wait`(可重入,回候選 + 報告)/ `research_import`(只匯入
+    host 指名的 URL)。**三支分開不是為了彈性,是為了跟 ADR-0001 的 attempt/resume 紀律
+    一致**:deep 動輒數十分鐘,start+wait 合一保證踩到外層 client timeout,而重跑合一版
+    會再起一個新 task 燒配額;分開之後斷線只要重跑 `research_wait`。
+    候選與匯入刻意分離(ADR-0008):`research_wait` 不匯入任何東西,`cited` 只是本地算出的
+    事實標記(URL 有沒有出現在報告引用裡),cited-only / provenance / 去重等**篩選政策留在
+    host**。指名了不在候選清單裡的 URL 直接 raise——靜默少匯入幾筆比爆掉危險。
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
   - `tools_podcast.py` — manifest-backed audio attempt 的 durable generate／reconcile／explicit adopt／
-    checkpointed finalize；`podcast_series` 只越過已完成 postconditions，standalone resume 是 fallback。
-    `podcast_attempt_retract` 是 QA 拒收的受控 supersede(純本機、不打 RPC):作廢 output attempt
-    並 pop 掉 episode 級輸出證據,讓取代版能合法生成。**沒有它,唯一出路是手改 manifest,而手改
-    繞過 artifact claim 唯一性／dispatch baseline／finalize checkpoint 的全部驗證**(EP35 真實事故:
-    手寫 attempt 五個時間戳同一微秒、`artifact_ids_before` 填自己的 artifact_id)。
-    四個容易踩的不變式(都有測試鎖):**(1)** pop 而非設 None——`_promote_attempt_output` 用
-    setdefault 寫 `published_at`,留 None 會讓取代版補不回真正的產製時間(publish 有
-    `_fallback_pub_date` 不會爆,只會靜默發假日期,`podcast-lab/scripts/check_episode.py` 會先擋);
-    **(2)** 作廢的 attempt 是 tombstone——`_attempt_record` default-deny(reconcile／adopt／
-    promote／supersede 全拒絕,只有 retract 自己 `allow_retracted=True`)、
-    `audio_finalize._record`(所有 finalize checkpoint 讀寫的單一入口)、`ManifestStore._validate`
-    (指標指回作廢 attempt 的寫入直接失敗)三層都擋,retract 之前就啟動的 in-flight finalizer
-    不可能把被拒收那版復活;**(3)** 舊回錄 source 的刪除是**生成與 resume 兩條路的
-    precondition**(`pending_source_cleanup` + `_assert_source_cleanup_done`),不是文件提醒——
-    finalize 按 source_id 驗、不擋同名,漏刪會靜默留兩筆同名 media 污染後續 context。
-    清理義務取自 attempt 的 finalize checkpoint 而非 episode 級投影(投影是 legacy 相容欄位,
-    可能缺、可能被 adopt 改寫);**(4)** 取代版不得改標題(`_create_audio_attempt` 與
-    `_ensure_resume_attempt` 兩個 attempt 建立入口都擋),本機 mp3 一律下到
-    `attempts/<attempt_id>/`(靠 `has_durable_output_evidence` 認 `retracted_attempt_ids`,
-    不再取決於剛好有沒有 `cover_path`),不覆寫拒收版證據。
-    **另外**:已有 durable output 時 `_ensure_resume_attempt` 不再接受「另一個 artifact」——
-    舊行為讓 resume 成為無審計取代的後門(promotion 當時沒有歸屬檢查,finalize 一成功就換掉
-    output 指標);兩個既有測試曾把那個行為寫成規格,已改成走 retract 合法路徑驗同一性質。
-    **這道 gate 兩條建立路徑都要有**:`_ensure_resume_attempt` 有 claimed(artifact 已被某個
-    attempt claim)與新建兩個分支,只補新建那條等於沒補——claimed 分支曾是第三個入口,
-    也是唯一繞過 `_attempt_record` tombstone 的讀寫點。清理義務同理要蓋住三個入口
-    (`_run_episode`／`podcast_episode_resume`／`podcast_series` 每集開頭),且
-    `_assert_source_cleanup_done` 必須先驗 notebook 身分才查(拿別的空 notebook 查會把義務
-    誤判成結案)、只清「這次真的查過不在」的那幾筆(await 期間可能又追加新義務)。
-    冪等重呼 retract 只清「自己留下的殘留值」,已有取代版接手 output 則整個 no-op。
-    active／output 分岔(舊版或手改造出)靠 retract 那個未授權 candidate 解開
+    checkpointed finalize;`podcast_series` 只越過已完成 postconditions,standalone resume 是 fallback。
+    `podcast_attempt_retract` 是 QA 拒收的受控 supersede(純本機、不打 RPC),**手改 manifest 不是
+    替代方案**(EP35 真實事故:手寫 attempt 五個時間戳同一微秒、`artifact_ids_before` 填自己的
+    artifact_id)。動這個模組前**先讀 [ADR-0009](docs/adr/0009-retracted-attempts-are-tombstones.md)**
+    ——四個都有測試鎖、且各自被真實事故驗證過的不變式:證據要 pop 不能設 None、作廢 attempt 是
+    三層 default-deny 的 tombstone、舊回錄 source 的刪除是生成與 resume 兩條路的 precondition、
+    取代版不得改標題且下到 `attempts/<attempt_id>/`。**踩過的坑是「只補一條路徑」**:
+    attempt 建立有兩個分支、清理義務有三個入口,補一半等於沒補。
   - `tools_publish.py` — `publish_series` / `feed_info`(把整季發布成 Apple 合規
     RSS feed;薄 I/O 編排,內網 HTTP PUT 到 NAS uploader,提交順序:媒體檔→show.json→feed.xml/index.html)
   - `publish/` — 純邏輯(離線可測):`identity.py`(HMAC→base32 決定性 token + `episode_guid`,無 registry)、
@@ -107,6 +92,9 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `assets/cover_episode.html` / `cover_show.html` — agy 設計、固化的封面 HTML template(隨 wheel 打包)
 - `tests/test_contracts.py` — 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API,擋上游漂移(離線 tripwire)
 - `scripts/` — `check_skill_sync.py`(CI 用:MCP 工具名 ⟷ skill 文件同步硬檢查)、`sync-auth.sh`(登入機推 Doppler)
+- `docs/adr/` — 能力邊界決策。**砍掉已規劃的 scope 也要留一支**:2026-06-07 redesign design doc
+  的工具清單裡本來就有 `research_start` / `research_wait_import`,實作時掉了、沒有任何決策記錄,
+  結果整個 research namespace 隱形了 38 集(ADR-0008 補記)
 - `docs/superpowers/` — 設計/計畫/findings。**`SKILL.md` 路由層 + `references/`(工具參考 + 連續性提示詞)已不在本 repo**,在 skill repo `audi-skill/notebooklm`(見 Cross-Repo Sync Checklist)
 
 **判斷只在「大綱」前置點**(Opus 規劃每集 brief,人核可);大綱定稿後是確定性腳本,迴圈內無 LLM。
@@ -178,12 +166,13 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   位置呼叫直接 TypeError(contract 測試有鎖)。
 - `wait_for_completion` 的 `poll_interval` 已移除(0.7.x);呼叫只用 `timeout=`。
 - 改 contract 測試時對「**實裝版本**」跑,別信 `_research/` 的 HEAD clone。
-- 改 podcast 流程務必對照鐵律:**每集(含最後一集)都要上傳自己的 mp3 回筆記本並命名**
-  `EP{n:02d} 標題`(例 `EP01 心法篇`,標題來自大綱的 `title`,必填非空)——與該集的工作室
-  artifact **完全同名**(同一字串),讓兩區命名一致、記錄完整。命名邏輯集中在 `_episode_label()`。
-- `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`。
-- **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`);要當公開文字(如單集 show notes)
-  前用 regex `\[[\d,\s\-–]+\]` 清掉。單集簡介 = manifest 該集加 `description`(見 skill repo `audi-skill/notebooklm` 的 SKILL §Publish)。
+- 命名鐵律(每集 mp3 回錄 + 工作室 artifact **完全同名** `EP{n:02d} 標題`)的正本在 skill
+  §Episodic;**實作上唯一要記的是命名邏輯集中在 `_episode_label()`**,改流程時對照那裡,別各處自己拼字串。
+- `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`
+  (`_text.norm` 已封裝)。
+- **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`)。工具已內建
+  `strip_citations` 由 server 端清(`_text._CITATION_RE`),`episode_set_description` 也預設再清一次
+  ——**新程式碼別再自己寫 regex**,要改清理規則改 `_CITATION_RE` 一處。
 - **發布的 preflight 是硬契約,且一定在第一個 PUT 之前**(v0.3.3):`require_slides` /
   `require_report` 預設 True——manifest 沒回寫附件路徑就 raise。理由是三個生成是獨立背景
   呼叫、完成訊號分散,manifest 是唯一匯流點,舊行為「缺路徑靜默不附」讓「還在生成」與
@@ -199,12 +188,41 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   不傳則 SDK 用全部來源(v1 不自動排除音檔來源)。附件缺檔時 `publish_series` **fail-fast**。
   **順序鐵律**:uploader 白名單放寬 `.pdf`/`.html` 後**要先重部署 NAS**,再跑帶附件的發布,否則附件 PUT 404。
   講義是 Markdown(`download_report`),`notes_html` 渲染成 HTML 才 host;`.md` 只留本機。
-- quiz/flashcards 無 `--language`(在 brief 內指定);mind-map 無法指定語言。
-- **發布單集也走 `podcast_series`**(episodes 放一集):`publish_series` 只吃
-  `series_manifest.json`,`podcast_episode` 純單集不產 manifest。
-- **X 長文(Article)餵不進來**:貼文只是 t.co 短連結,文章本體在 `x.com/i/article/…`
-  需登入,`source_add_url` / WebFetch 都回 402。存成 PDF(Read 讀得出全文)或直接貼全文
-  用 `source_add_text`。
+- **`research.start` 只送 `[query, source_type] + notebook_id`**(`_research.py:374-379`):
+  筆記本裡已有的來源**對搜尋內容毫無影響**,notebook_id 只決定 task 掛在哪、import 進哪。
+  種子只能寫進 query 字串——這條 API 事實推導出的 caller 政策(scratch notebook、query
+  recipe)正本在 skill `references/research.md`,別在這裡重抄。
+  `mode="deep"` 只支援 `source="web"`;`wait_for_completion` 對 timeout 丟
+  `ResearchTimeoutError`(TimeoutError 子類),對 **FAILED 是回傳而非 raise** → 工具端自己擋。
+  匯入一律走 `import_sources_with_verification`:`IMPORT_RESEARCH` 在 deep 負載下常超過 30 秒、
+  client 先 timeout 但伺服器已 commit,它用 source list 對帳只補送缺的那幾筆。
+- **`select_cited_sources` 不是 `ResearchAPI` 的方法**,是 `notebooklm/research.py` 的
+  module-level 純函式(不打 RPC)。ResearchAPI 本體只有 5 個 RPC 方法。cited 判定因此是純本地
+  計算,我們只用 `extract_report_urls` / `normalize_citation_url` 算出事實標記回傳,不把
+  cited-only 做成 MCP 參數(那會把選擇政策塞進 capability layer,違反 ADR-0007)。
+- **兩顆 URL normalizer 不可混用**(SDK docstring 自己寫明 distinct,contract 測試有鎖):
+  `research.normalize_citation_url` 給「報告 markdown 裡的引用」比對——strip 尾端標點、
+  **保留 fragment**;`_research._normalize_import_verification_url` 給 import identity——
+  **丟掉 fragment**(伺服器存的時候剝掉)、不 strip 標點。`research_import` 選來源必須用
+  **後者**,否則 `#a`/`#b` 兩個候選在我們眼中是兩筆、在 SDK 的 timeout readback 對帳中是
+  同一筆,筆數就對不起來。**兩顆都不 strip 前後空白**,呼叫端傳進來的 URL 要自己先 strip。
+  後者是私有 API,靠 `test_import_identity_differs_from_citation_identity` 當 tripwire。
+- **`research_import` 必須自己驗 `status == completed`**:SDK 的 importer **完全不做**
+  lifecycle 檢查,而 `failed` 的 task 仍可能留著已解析的 `sources` —— 少了這道 gate 就能
+  繞過 `research_wait` 匯入半套或作廢的候選。同理,同一 import identity 的兩筆候選要 raise
+  而不是先到先贏(標題可能一個是官方 spec、一個是轉載)。
+- **`generate_report` 的三種靜默吞噬**(`_artifact/payloads.py:219,538`):`custom` 沒給
+  `custom_prompt` 會套通用預設句、靜態格式給了 `custom_prompt` 會被丟掉、`custom` 的
+  `extra_instructions` 不串接。SDK 全都不 raise,要燒完一次配額拿到錯的講義才發現 →
+  `_validate_report_prompt` 在打 RPC 前擋掉三種。
+- **`retry_failed` 與其他 generate 的錯誤契約不同**:它對伺服器端同步拒絕(rate limit /
+  配額)是 **raise**,不像 `generate_*` / `revise_slide` 吞成 `status="failed"`(SDK 說明是
+  ADR-0019「async kickoff」,新方法born on the right side)。`artifact_retry_failed` 因此
+  不必為拒絕設計回傳碼,但仍保留 `ensure_started` 擋空 task_id。
+- **未暴露的 artifact 型別是產品決策**:video / cinematic_video / infographic / quiz /
+  flashcards / data_table / mind_map 的 `generate_*` 都**刻意不做**成 MCP tool(不出 YouTube 版;
+  封面走 `notebooklm-cover` 的 HTML+Chrome 決定性管線,不能換成 infographic——發布端拿封面
+  bytes 做 content-hash)。`artifact_list(kind=…)` 仍可列出它們,那只是讀取面。
 - **封面圖 = 凍結的 HTML template + headless Chrome 光柵化**(`notebooklm-cover`,實作
   `cover_cli.py`)。設計固化在 `notebooklm_mcp/assets/cover_episode.html` / `cover_show.html`
   (由 **agy/Gemini 設計、產出自包含 HTML**,已 commit 進 repo);**生封面時不叫 agy**——工具只做
@@ -252,3 +270,19 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 **推送順序:先推 audi-skill、再推本 repo**(v0.2.9 教訓):CI 的 sync check 會 clone
 **遠端** audi-skill 來驗——skill 只同步在本機、還沒推,MCP 先推就 CI 紅(missing 新工具名)。
 反序踩到時把 audi-skill 推上去後 `gh run rerun <id>` 即綠,不用改 code。
+
+### Release Pin Sites(發 tag 時**六處**一起改)
+
+`uv tool install …@vX.Y.Z` 的版本號散在五個檔(加 `pyproject.toml` 共六處),
+沒有單一來源可推導——曾漂成
+podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一次改完:
+
+1. `pyproject.toml` 的 `version`(正本)
+2. 本檔 §Commands 的安裝指令
+3. `README.md`
+4. `docs/mcp-setup.md`
+5. `audi-skill/notebooklm/SKILL.md` §Auth
+6. `../podcast-lab/AGENTS.md` §更新 notebooklm-mcp
+
+驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab ../../audi-skill | grep -v docs/superpowers`
+(`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實)。
