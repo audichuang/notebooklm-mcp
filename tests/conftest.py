@@ -3,6 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from notebooklm._types.research import (
+    RESEARCH_RESULT_TYPE_REPORT,
+    ResearchSource,
+    ResearchStart,
+    ResearchStatus,
+    ResearchTask,
+)
 from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import runtime
@@ -53,6 +60,11 @@ class FakeArtifacts:
         self.download_slides_exc = None
         self.download_report_bytes = "# 假講義\n\n- 重點一\n".encode("utf-8")
         self.download_report_exc = None
+        # 設成別的字串,模擬 REVISE_SLIDE 回一個「不等於傳入 artifact_id」的 id
+        # (SDK 沒有保證相等,只是 parse 回傳值)。
+        self.revise_slide_returns_id = None
+        # retry_failed 的真實拒絕形狀:exception INSTANCE(rate limit / 配額 / 不可重試)。
+        self.retry_exc = None
 
     def seed_artifacts(self, *arts):
         """Test helper: pre-populate the notebook's artifact set."""
@@ -174,10 +186,34 @@ class FakeArtifacts:
                               language="en", custom_prompt=None, extra_instructions=None):
         self.calls.append(("generate_report", dict(
             notebook_id=notebook_id, report_format=report_format, source_ids=source_ids,
-            language=language, extra_instructions=extra_instructions)))
+            language=language, custom_prompt=custom_prompt,
+            extra_instructions=extra_instructions)))
         if self.fail_generate:
             return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"})()
         return type("S", (), {"task_id": "report-task", "is_failed": False})()
+
+    async def revise_slide(self, notebook_id, artifact_id, slide_index, prompt):
+        # REVISE_SLIDE 只吃 artifact_id(notebook_id 只設 source_path header)。0.7.3 觀察到
+        # 回傳的 task_id 就是同一個 artifact,但 **SDK 並未強制**——它只是 parse RPC 回來的
+        # 那個 id。所以工具端一律用回傳值,不假設相等;revise_slide_returns_id 讓測試能餵
+        # 一個不同的 id,證明實作沒有依賴這個假設。
+        self.calls.append(("revise_slide", dict(
+            notebook_id=notebook_id, artifact_id=artifact_id,
+            slide_index=slide_index, prompt=prompt)))
+        if self.fail_generate:
+            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"})()
+        return type("S", (), {"task_id": self.revise_slide_returns_id or artifact_id,
+                              "is_failed": False})()
+
+    async def retry_failed(self, notebook_id, artifact_id):
+        # 0.7.3:同一個 artifact_id 原地重跑,回 status="in_progress"。**與 generate_* 不同**,
+        # 伺服器端的同步拒絕(rate limit / 配額 / 不可重試)是 raise,而且 parse 出空 id 時
+        # SDK 自己就丟 ArtifactFeatureUnavailableError —— 所以 task_id="" 這個回傳在真 SDK
+        # 不可能發生(retry_exc 才是真實的拒絕形狀;fail_generate 分支僅為對稱保留)。
+        self.calls.append(("retry_failed", dict(notebook_id=notebook_id, artifact_id=artifact_id)))
+        if self.retry_exc is not None:
+            raise self.retry_exc
+        return type("S", (), {"task_id": artifact_id, "is_failed": False, "status": "in_progress"})()
 
     async def download_report(self, notebook_id, output_path, artifact_id=None):
         self.calls.append(("download_report", dict(output_path=output_path, artifact_id=artifact_id)))
@@ -354,12 +390,81 @@ class FakeChat:
                               "references": refs})()
 
 
+class FakeResearch:
+    """鏡射 notebooklm-py 0.7.3 的 ResearchAPI。
+
+    刻意用**真的** ResearchTask / ResearchSource / ResearchStart dataclass(純資料、
+    離線可 import),這樣 is_report / result_type 這些判斷跟實裝完全同一份邏輯,
+    fake 不會自己長出一套語意。"""
+
+    def __init__(self):
+        self.calls = []
+        # True 時 start() 回 None —— 模擬「後端沒建出 task」(SDK 不 raise)。
+        self.start_returns_none = False
+        self.status = ResearchStatus.COMPLETED
+        # 報告只引用 A 與 B;C 是 NotebookLM 找到但報告沒用到的邊緣命中。
+        self.report = (
+            "## 研究地圖\n\n見 [來源A](https://a.example/post) 與 https://b.example/spec 。\n"
+        )
+        self.sources = (
+            ResearchSource(url="https://a.example/post", title="來源A"),
+            ResearchSource(url="https://b.example/spec", title="來源B"),
+            ResearchSource(url="https://c.example/blog", title="來源C(未被引用)"),
+            ResearchSource(
+                url="", title="Deep Research Report",
+                result_type=RESEARCH_RESULT_TYPE_REPORT, report_markdown="## 研究地圖\n",
+            ),
+        )
+        self.imported = [{"id": "src-r1", "title": "來源A"}]
+        # 真 SDK 的 wait_for_completion 會**持續輪詢** in_progress / pinned no_research,
+        # 逾時丟 ResearchTimeoutError(TimeoutError 子類)。這個 fake 立刻回傳,所以
+        # timeout 語意要靠這顆注入:設成 exception INSTANCE 讓 wait 直接擲。
+        self.wait_exc = None
+
+    def _task(self, task_id="res-1"):
+        return ResearchTask(
+            task_id=task_id, status=self.status, query="advisor tool history forwarding",
+            sources=self.sources, summary="摘要", report=self.report,
+        )
+
+    async def start(self, notebook_id, query, source="web", mode="fast"):
+        self.calls.append(("start", dict(notebook_id=notebook_id, query=query,
+                                         source=source, mode=mode)))
+        if self.start_returns_none:
+            return None
+        return ResearchStart(task_id="res-1", report_id="rep-1", notebook_id=notebook_id,
+                             query=query, mode=mode)
+
+    async def poll(self, notebook_id, task_id=None):
+        self.calls.append(("poll", dict(notebook_id=notebook_id, task_id=task_id)))
+        return self._task(task_id or "res-1")
+
+    async def wait_for_completion(self, notebook_id, task_id=None, *, timeout=1800,
+                                  interval=5, initial_interval=None):
+        self.calls.append(("wait", dict(notebook_id=notebook_id, task_id=task_id,
+                                        timeout=timeout)))
+        if self.wait_exc is not None:
+            raise self.wait_exc
+        return self._task(task_id or "res-1")
+
+    async def import_sources_with_verification(self, notebook_id, task_id, sources, *,
+                                               max_elapsed=1800, initial_delay=5,
+                                               backoff_factor=2, max_delay=60):
+        self.calls.append(("import", dict(
+            notebook_id=notebook_id, task_id=task_id, max_elapsed=max_elapsed,
+            # 記標題而非物件:斷言看得懂,也證明「傳過去的就是候選裡那幾筆」。
+            titles=[s.title for s in sources],
+            is_report=[s.is_report for s in sources])))
+        return list(self.imported)
+
+
 class FakeClient:
     def __init__(self):
         self.artifacts = FakeArtifacts()
         self.sources = FakeSources()
         self.notebooks = FakeNotebooks()
         self.chat = FakeChat()
+        self.research = FakeResearch()
 
 
 @pytest.fixture

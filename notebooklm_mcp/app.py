@@ -91,7 +91,13 @@ NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
 mcp = FastMCP("notebooklm", instructions=_INSTRUCTIONS, lifespan=_lifespan)
 
 # Register tools. Each module imports `mcp` from here and calls @mcp.tool().
-from . import tools_artifacts, tools_basic, tools_podcast, tools_publish  # noqa: E402,F401
+from . import (  # noqa: E402,F401
+    tools_artifacts,
+    tools_basic,
+    tools_podcast,
+    tools_publish,
+    tools_research,
+)
 
 
 def main() -> None:

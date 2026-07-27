@@ -24,7 +24,13 @@ async def _tool_names() -> list[str]:
 #: 新回傳欄位——原本完全逃得過本 checker:v0.3.3 加了 `converted_from` /
 #: `require_slides` / `require_report`,忘記寫文件 CI 照樣綠。這裡只硬性要求
 #: tool-reference 提到這幾個字,不做 signature 解析。加新參數時把它加進來。
-REQUIRED_CONTRACT_TERMS = ("converted_from", "require_slides", "require_report")
+REQUIRED_CONTRACT_TERMS = (
+    "converted_from",
+    "require_slides",
+    "require_report",
+    "custom_prompt",     # generate_report 的 custom 格式;工具名沒變,只有新參數
+    "include_report",    # research_import:報告 entry 沒有 URL,只能靠這個旗標指名
+)
 
 
 def _missing(tool_names: list[str], path: Path) -> list[str]:

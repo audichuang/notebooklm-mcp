@@ -46,3 +46,12 @@ def test_to_report_format():
     assert to_report_format(None) is None
     with pytest.raises(ValueError, match="report format"):
         to_report_format("bogus")
+
+
+def test_to_report_format_supports_custom():
+    """ReportFormat 有第四個成員 CUSTOM(配 custom_prompt 完全自訂講義結構),
+    白名單漏了它等於整個能力對呼叫端不存在。"""
+    from notebooklm.types import ReportFormat
+    from notebooklm_mcp.enums import to_report_format
+
+    assert to_report_format("custom") == ReportFormat.CUSTOM

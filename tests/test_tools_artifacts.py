@@ -54,6 +54,52 @@ async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp
     assert data["episodes"][0]["report_format"] == "study_guide"
 
 
+# ---- custom report:ReportFormat.CUSTOM + custom_prompt --------------------------
+# SDK 的 _report_config 對 CUSTOM 是 `custom_prompt or "Create a report based on…"`,
+# 且 CUSTOM 分支**直接忽略** extra_instructions。兩種誤用都會靜默生出一份不是你要的
+# 講義(燒一次配額才發現),所以三道 guard 全在本地 fail loud。
+
+
+async def test_generate_report_custom_passes_prompt_to_sdk(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    res = await a.generate_report(
+        "nb-1", m, 1, report_format="custom", custom_prompt="用時間軸列出每個 claim 的第一方出處"
+    )
+
+    from notebooklm.types import ReportFormat
+    gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_report")
+    assert gen["report_format"] == ReportFormat.CUSTOM
+    assert gen["custom_prompt"] == "用時間軸列出每個 claim 的第一方出處"
+    assert res["report_format"] == "custom"
+
+
+async def test_generate_report_custom_requires_a_prompt(fake_client, tmp_path):
+    """沒有 prompt 的 custom 會靜默套用 SDK 的通用預設句,等於白燒一次配額。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    for bad in (None, "", "   "):
+        with pytest.raises(ValueError, match="custom_prompt"):
+            await a.generate_report("nb-1", m, 1, report_format="custom", custom_prompt=bad)
+    assert not fake_client.artifacts.calls
+
+
+async def test_custom_prompt_rejected_for_static_formats(fake_client, tmp_path):
+    """非 CUSTOM 格式的 custom_prompt 會被 SDK 丟掉(套靜態 config),不能靜默通過。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError, match="custom_prompt"):
+        await a.generate_report("nb-1", m, 1, report_format="study_guide", custom_prompt="x")
+    assert not fake_client.artifacts.calls
+
+
+async def test_custom_format_rejects_extra_instructions(fake_client, tmp_path):
+    """payloads.py:219 對 CUSTOM 不串接 extra_instructions —— 傳了會靜默消失。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError, match="extra_instructions"):
+        await a.generate_report(
+            "nb-1", m, 1, report_format="custom", custom_prompt="p", extra_instructions="q"
+        )
+    assert not fake_client.artifacts.calls
+
+
 # ---- 救援下載:client 端 timeout 丟掉結果時,別重生一次燒配額 ----------------------
 
 async def test_artifact_download_slides_downloads_without_generating(fake_client, tmp_path):
@@ -97,6 +143,56 @@ async def test_artifact_download_slides_fails_closed_on_a_removed_artifact(fake_
     fake_client.artifacts.fail_removed = True
     with pytest.raises(RuntimeError, match="removed"):
         await a.artifact_download_slides("nb-1", m, 7, "slide-rescued")
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "download_slide_deck"]
+
+
+# ---- 改一張投影片,不重生整份 ------------------------------------------------------
+
+
+async def test_revise_slide_revises_then_redownloads_without_regenerating(fake_client, tmp_path):
+    """就地改第 3 張 → 重新下載同一份 deck 並回寫 manifest,完全不碰 generate。"""
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    res = await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 2, "把這頁的數字改成 2026-05 的版本")
+
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_slide_deck"]
+    rev = next(c[1] for c in fake_client.artifacts.calls if c[0] == "revise_slide")
+    assert rev == {"notebook_id": "nb-1", "artifact_id": "deck-1", "slide_index": 2,
+                   "prompt": "把這頁的數字改成 2026-05 的版本"}
+    dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
+    assert dl["artifact_id"] == "deck-1"
+    assert res["slides_pdf_path"].endswith("ep05-slides.pdf")
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
+
+
+async def test_revise_slide_follows_the_returned_id_not_the_input(fake_client, tmp_path):
+    """SDK **沒有保證** REVISE_SLIDE 回傳的 task_id 等於傳入的 artifact_id(它只是 parse
+    RPC 回來的那個 id)。實作因此一律用回傳值——餵一個不同的 id 證明沒有依賴那個假設。"""
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.revise_slide_returns_id = "deck-2"
+    res = await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
+
+    dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
+    assert dl["artifact_id"] == "deck-2"          # 下載改版後那份,不是原 id
+    assert res["artifact_id"] == "deck-2"
+
+
+async def test_revise_slide_requires_artifact_id_and_prompt(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    for bad in ("", "   "):
+        with pytest.raises(ValueError, match="artifact_id"):
+            await a.artifact_revise_slide("nb-1", m, 5, bad, 0, "改這頁")
+        with pytest.raises(ValueError, match="prompt"):
+            await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, bad)
+    assert not fake_client.artifacts.calls
+
+
+async def test_revise_slide_fails_closed_on_removed_deck(fake_client, tmp_path):
+    """配額下架的 deck 不得被當成改版成功(改完還會覆寫本機那份完整 PDF)。"""
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.fail_removed = True
+    with pytest.raises(RuntimeError, match="removed"):
+        await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
     assert not [c for c in fake_client.artifacts.calls if c[0] == "download_slide_deck"]
 
 

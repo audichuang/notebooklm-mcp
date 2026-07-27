@@ -48,6 +48,9 @@ _REPORT_FORMAT = {
     "study_guide": ReportFormat.STUDY_GUIDE,
     "briefing_doc": ReportFormat.BRIEFING_DOC,
     "blog_post": ReportFormat.BLOG_POST,
+    # CUSTOM 走 generate_report(custom_prompt=…) 完全自訂結構;沒有它,三種靜態模板
+    # 以外的講義形狀對呼叫端等於不存在(SDK 一直有這個成員,只是白名單漏了)。
+    "custom": ReportFormat.CUSTOM,
 }
 
 

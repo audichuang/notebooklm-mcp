@@ -140,6 +140,33 @@ async def test_artifact_rename_is_fire_and_forget(fake_client):
     assert call["return_object"] is False
 
 
+async def test_artifact_retry_failed_reuses_the_same_artifact_id(fake_client):
+    """失敗的 artifact 原地重試(UI 的 Retry)——artifact_id 不變,省掉重生一次配額。
+    薄包不等待:呼叫端接 artifact_wait + 對應的 download 工具。"""
+    out = await t.artifact_retry_failed("nb-123", "deck-1")
+    call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "retry_failed")
+    assert call == {"notebook_id": "nb-123", "artifact_id": "deck-1"}
+    assert out == {"task_id": "deck-1", "artifact_id": "deck-1"}
+
+
+async def test_artifact_retry_failed_requires_an_artifact_id(fake_client):
+    for bad in ("", "   "):
+        with pytest.raises(ValueError, match="artifact_id"):
+            await t.artifact_retry_failed("nb-123", bad)
+    assert not fake_client.artifacts.calls
+
+
+async def test_artifact_retry_failed_propagates_a_refusal(fake_client):
+    """**與 generate_* 不同**:retry_failed 對伺服器端同步拒絕(rate limit / 配額)是
+    raise,不吞成 failed status(SDK 說明是 ADR-0019 async-kickoff 契約)。工具是薄包,
+    要原樣讓那個型別冒出去,呼叫端才分得出「配額爆了」與「生成中途失敗」。"""
+    from notebooklm.exceptions import RateLimitError
+
+    fake_client.artifacts.retry_exc = RateLimitError("daily quota exhausted")
+    with pytest.raises(RateLimitError):
+        await t.artifact_retry_failed("nb-123", "deck-1")
+
+
 async def test_auth_check_ok(fake_client):
     """認證活著:輕量真 RPC 成功,回 ok + 筆記本數。"""
     result = await t.auth_check()

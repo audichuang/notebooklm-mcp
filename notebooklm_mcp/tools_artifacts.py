@@ -153,6 +153,38 @@ async def artifact_download_slides(
     )
 
 
+@mcp.tool()
+async def artifact_revise_slide(
+    notebook_id: str,
+    manifest_path: str,
+    episode_n: int,
+    artifact_id: str,
+    slide_index: int,
+    prompt: str,
+    wait_timeout: float = 1800.0,
+) -> dict:
+    """改**已生成簡報中的單一頁**(0-based `slide_index`),再重新下載回寫 manifest。
+
+    省配額用:一頁的數字錯了、一句話要改語氣,舊路徑是重跑 `generate_slides` 整份重生
+    (燒一次生成配額,而且其他頁也會跟著變)。這裡走 SDK 的就地改版,artifact 不變、
+    其餘頁面不動,結束後仍走與生成相同的尾段(等完成→原子換檔下載→回寫
+    `slides_pdf_path`),所以本機那份 PDF 與 publish 看到的一定是改版後的。
+
+    `artifact_id` 用 `artifact_list(kind="slide_deck")` 找。"""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")
+    artifact_id = _require_artifact_id(artifact_id)
+    status = await runtime.get_client().artifacts.revise_slide(
+        notebook_id, artifact_id, slide_index, prompt.strip()
+    )
+    # REVISE_SLIDE 是就地改版,回傳的 task_id 應該就是同一個 artifact;仍以回傳值為準
+    # (真的換了 id 也照樣下載得到對的那份),不自己假設。
+    revised_id = ensure_started(status)
+    out = await _finish_slides(notebook_id, manifest_path, episode_n, revised_id, wait_timeout)
+    out["slide_index"] = slide_index
+    return out
+
+
 async def _finish_report(
     notebook_id: str,
     manifest_path: str,
@@ -177,6 +209,37 @@ async def _finish_report(
     return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}
 
 
+def _validate_report_prompt(
+    report_format: str, custom_prompt: str | None, extra_instructions: str | None
+) -> str | None:
+    """`custom` 與 `custom_prompt` 必須成對,且 custom 不吃 extra_instructions。
+
+    三種誤用 SDK 全都**靜默吞掉**,要燒完一次配額、拿到一份不是你要的講義才會發現:
+      - `custom` 無 prompt → `_report_config` 套 "Create a report based on the
+        provided sources."(payloads.py:538)
+      - 靜態格式帶 prompt → `_report_config` 走 `_STATIC_REPORT_CONFIGS`,prompt 丟掉
+      - `custom` 帶 extra_instructions → `payloads.py:219` 明確跳過串接
+    """
+    prompt = custom_prompt.strip() if isinstance(custom_prompt, str) else None
+    if report_format == "custom":
+        if not prompt:
+            raise ValueError(
+                "report_format='custom' 需要非空的 custom_prompt"
+                "(否則 SDK 靜默套用通用預設句,白燒一次配額)"
+            )
+        if extra_instructions:
+            raise ValueError(
+                "report_format='custom' 不吃 extra_instructions(SDK 不串接,會靜默消失);"
+                "把要求併進 custom_prompt"
+            )
+    elif prompt:
+        raise ValueError(
+            f"custom_prompt 只在 report_format='custom' 有效"
+            f"(現在是 {report_format!r},SDK 會套靜態模板並丟掉 prompt)"
+        )
+    return prompt
+
+
 @mcp.tool()
 async def generate_report(
     notebook_id: str,
@@ -186,15 +249,22 @@ async def generate_report(
     source_ids: list[str] | None = None,
     language: str | None = None,
     extra_instructions: str | None = None,
+    custom_prompt: str | None = None,
     wait_timeout: float = 1800.0,
 ) -> dict:
-    """生成該集研讀文件(預設 study_guide)並下載 Markdown,路徑回寫 report_md_path。"""
+    """生成該集研讀文件(預設 study_guide)並下載 Markdown,路徑回寫 report_md_path。
+
+    `report_format="custom"` + `custom_prompt` = 完全自訂講義結構(三種靜態模板
+    study_guide / briefing_doc / blog_post 之外的形狀)。兩者必須成對,且 custom
+    格式不吃 `extra_instructions`——要求併進 `custom_prompt`。"""
+    custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
     client = runtime.get_client()
     status = await client.artifacts.generate_report(
         notebook_id,
         report_format=to_report_format(report_format),
         source_ids=source_ids,
         language=resolve_language(language),
+        custom_prompt=custom_prompt,
         extra_instructions=extra_instructions,
     )
     artifact_id = ensure_started(status)

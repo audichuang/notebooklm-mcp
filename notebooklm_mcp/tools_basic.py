@@ -284,6 +284,23 @@ async def artifact_rename(notebook_id: str, artifact_id: str, new_title: str) ->
 
 
 @mcp.tool()
+async def artifact_retry_failed(notebook_id: str, artifact_id: str) -> dict:
+    """把**失敗的** artifact 原地重跑(UI 的 Retry),artifact_id 不變。
+
+    省配額用:舊路徑是刪掉重生,等於再花一次生成配額;這裡重用同一個 artifact。
+    用 `artifact_list` 找出 completed=False 的那筆,retry 後接 `artifact_wait`,
+    再用對應的 download 工具。
+
+    注意 SDK 對伺服器端的同步拒絕(rate limit / 配額 / 不可重試的 artifact)是
+    **raise**(不像 generate_* 吞成 failed status),所以拒絕會直接冒出來。"""
+    if not isinstance(artifact_id, str) or not artifact_id.strip():
+        raise ValueError("artifact_id must be a non-empty string")
+    status = await runtime.get_client().artifacts.retry_failed(notebook_id, artifact_id.strip())
+    task_id = ensure_started(status)
+    return {"task_id": task_id, "artifact_id": task_id}
+
+
+@mcp.tool()
 async def chat_ask(
     notebook_id: str,
     question: str,

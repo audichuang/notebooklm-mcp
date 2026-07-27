@@ -255,3 +255,74 @@ def test_slide_and_report_enum_members():
     assert ReportFormat.STUDY_GUIDE.value == "study_guide"
     assert ReportFormat.BRIEFING_DOC.value == "briefing_doc"
     assert ReportFormat.BLOG_POST.value == "blog_post"
+    # CUSTOM 是 generate_report(custom_prompt=…) 的前提;它消失就要回頭改 enums 白名單。
+    assert ReportFormat.CUSTOM.value == "custom"
+
+
+def test_quota_rescue_signatures():
+    """artifact_revise_slide / artifact_retry_failed 依賴這兩支省配額 API。"""
+    from notebooklm._artifacts import ArtifactsAPI
+
+    assert _params(ArtifactsAPI.revise_slide) == [
+        "self", "notebook_id", "artifact_id", "slide_index", "prompt",
+    ]
+    assert _params(ArtifactsAPI.retry_failed) == ["self", "notebook_id", "artifact_id"]
+
+
+def test_research_api_surface():
+    """research_start / research_wait / research_import 依賴的 ResearchAPI 契約。
+
+    注意 `select_cited_sources` **不在** ResearchAPI 上——它是 notebooklm.research 的
+    module-level 純函式(不打 RPC)。cited 判定因此是本地計算,MCP 只回事實標記,
+    要不要 cited-only 由 host 決定(見 ADR-0008)。"""
+    from notebooklm._research import ResearchAPI
+    from notebooklm.research import extract_report_urls, normalize_citation_url
+
+    assert _params(ResearchAPI.start) == ["self", "notebook_id", "query", "source", "mode"]
+    assert _params(ResearchAPI.poll) == ["self", "notebook_id", "task_id"]
+    p = _params(ResearchAPI.wait_for_completion)
+    assert p[:3] == ["self", "notebook_id", "task_id"] and "timeout" in p
+    p = _params(ResearchAPI.import_sources_with_verification)
+    assert p[:4] == ["self", "notebook_id", "task_id", "sources"] and "max_elapsed" in p
+    # 純函式,不是 API 方法——MCP 用它們算 cited 標記。
+    assert callable(extract_report_urls) and callable(normalize_citation_url)
+
+
+def test_import_identity_differs_from_citation_identity():
+    """`research_import` 的選取 key 必須用 **import** normalizer,不是 citation 的那顆。
+
+    SDK 自己的 docstring 就寫明兩者 distinct:citation 版 strip 尾端標點、保留 fragment;
+    import 版丟掉 fragment(伺服器存的時候剝掉)、不 strip 標點。用錯會讓 `#a`/`#b` 兩個
+    候選在我們眼中是兩筆、在 SDK 的 timeout readback 對帳中是同一筆。
+
+    `_normalize_import_verification_url` 是私有 API —— 這個測試就是它的 tripwire:
+    上游改名時這裡先紅,而不是等到 production 匯入時 ImportError。"""
+    from notebooklm._research import _normalize_import_verification_url as import_key
+    from notebooklm.research import normalize_citation_url as cite_key
+
+    frag = "https://Example.com/a/#section"
+    assert import_key(frag) == "https://example.com/a"        # fragment 丟掉
+    assert cite_key(frag) == "https://example.com/a#section"  # fragment 保留
+    dotted = "https://example.com/a."
+    assert import_key(dotted) == "https://example.com/a."     # 標點保留
+    assert cite_key(dotted) == "https://example.com/a"        # 標點 strip
+    # 兩顆都不 strip 前後空白 —— 呼叫端傳進來的 URL 必須自己先 strip。
+    assert import_key(" https://example.com/a ") != import_key("https://example.com/a")
+
+
+def test_research_task_and_source_fields():
+    import dataclasses
+
+    from notebooklm._types.research import ResearchSource, ResearchStart, ResearchStatus, ResearchTask
+
+    assert {"task_id", "status", "query", "sources", "summary", "report"} <= {
+        f.name for f in dataclasses.fields(ResearchTask)
+    }
+    assert {"url", "title", "result_type", "research_task_id"} <= {
+        f.name for f in dataclasses.fields(ResearchSource)
+    }
+    assert {"task_id", "report_id", "mode"} <= {f.name for f in dataclasses.fields(ResearchStart)}
+    # research_wait 依 status 決定成功/fail-loud;這四個值都要在。
+    assert {ResearchStatus.COMPLETED, ResearchStatus.IN_PROGRESS,
+            ResearchStatus.FAILED, ResearchStatus.NOT_FOUND} <= set(ResearchStatus)
+    assert ResearchSource(url="u", title="t").is_report is False
