@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.4.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.4.1"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -68,6 +68,22 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     候選與匯入刻意分離(ADR-0008):`research_wait` 不匯入任何東西,`cited` 只是本地算出的
     事實標記(URL 有沒有出現在報告引用裡),cited-only / provenance / 去重等**篩選政策留在
     host**。指名了不在候選清單裡的 URL 直接 raise——靜默少匯入幾筆比爆掉危險。
+  - `generation_input.py` — frozen generation-input bundle:把 runtime-brief / coverage-ledger /
+    evidence-manifest 三份 bytes 連同 SHA-256 凍結,`podcast_episode(brief=null,
+    input_bundle_path=…)` 逐檔驗雜湊後**只用凍結的 bytes 當 brief**,再寫
+    `attempt-binding.json` sidecar 把 bundle 綁到 attempt。回答的是「哪一份 brief 產出了
+    哪一集」。**驗證與綁定都在第一個遠端副作用之前**(ADR-0001),雜湊不符就在寫 manifest、
+    打 RPC 之前 raise。重跑冪等:`read_attempt_binding` 讀回既有綁定沿用同一 attempt_id
+    (`_reuse_frozen_input_attempt` 走 `_attempt_record` 這個 tombstone gate、且擋
+    `output_attempt_id` 已存在),所以斷線重跑不會重複建 attempt 或重燒配額;取代版要凍新
+    bundle。`rollback_attempt_binding` 只刪「這次自己寫的那份 bytes」,清理失敗回 note 掛上
+    原例外而**不 raise**(在 except handler 裡再拋會蓋掉真正該讀的錯誤)。
+    **`input_bundle_path` 是相對於 workspace 的路徑**(workspace = manifest 的祖父目錄),
+    絕對路徑、`..`、路徑上任何 symlink 一律拒。**manifest 的父目錄刻意不限定名稱**——
+    三個 podcast 專案分別用 `manifest/`(network-podcast)、`output/`(podcast-lab)、
+    `season-01/output/`(data-structure-podcast),曾經寫死 `manifest/` 讓功能只有一個專案
+    能用,而那個專案根本還沒有 bundle;containment 由 `relative_to(workspace)` 保證,
+    目錄**名字不是安全邊界**。目前只有 `podcast_episode` 支援,`podcast_series` 尚未接。
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
   - `tools_podcast.py` — manifest-backed audio attempt 的 durable generate／reconcile／explicit adopt／
     checkpointed finalize;`podcast_series` 只越過已完成 postconditions,standalone resume 是 fallback。
@@ -209,8 +225,24 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   後者是私有 API,靠 `test_import_identity_differs_from_citation_identity` 當 tripwire。
 - **`research_import` 必須自己驗 `status == completed`**:SDK 的 importer **完全不做**
   lifecycle 檢查,而 `failed` 的 task 仍可能留著已解析的 `sources` —— 少了這道 gate 就能
-  繞過 `research_wait` 匯入半套或作廢的候選。同理,同一 import identity 的兩筆候選要 raise
-  而不是先到先贏(標題可能一個是官方 spec、一個是轉載)。
+  繞過 `research_wait` 匯入半套或作廢的候選。identity 碰撞則**只檢查被選取的那些**:
+  候選清單裡兩筆不相干的來源剛好 canonical 相同,不該讓一次合法 selection 整批失敗
+  (v0.4.0 曾這樣過度 fail-closed)。
+- **`import_sources_with_verification` 的 readback 只涵蓋 SDK 自己的 `RPCTimeoutError`**,
+  **不涵蓋**外層 MCP client timeout / coroutine cancellation / server 被砍。外層結果不明時
+  重呼 `research_import` 會重複匯入 —— 先 `source_list` 對帳。之所以只算 P2 而非 P1,是因為
+  ADR-0008 把 research 綁在拋棄式 scratch notebook:對不清楚就丟掉整個 notebook,
+  episode notebook 不受影響。
+- **遠端 mutation 前要有便宜 preflight,但那不是 durable attempt**:`artifact_revise_slide`
+  與 `artifact_retry_failed` 改的是**遠端狀態**(不像 download 類救援只寫本機檔),而兩支
+  RPC 都只靠 `artifact_id` 定位、`notebook_id` 只是 routing header,錯配 ID 伺服器不會擋 →
+  用 `artifacts.get_or_none`(它是 list 後比對 id,一次同時驗存在與歸屬)先驗 kind/status。
+  `generate_slides` / `generate_report` / `revise_slide` 也在生成前先驗 `episode_n` 存在,
+  免得打錯集號要燒完一次配額才 raise。
+  **仍未解的是重入**:外層在 mutation 成功後、回寫前斷線,重跑會再 mutate 一次。這是整個
+  slides/report 家族共有的架構債(`generate_slides` 逐字同形),要修得做成涵蓋 generate 與
+  revise 的 attachment attempt(含 manifest 存 `slides_artifact_id` 才能驗 episode binding),
+  不是替 revise 單獨拆 kickoff/finalize。
 - **`generate_report` 的三種靜默吞噬**(`_artifact/payloads.py:219,538`):`custom` 沒給
   `custom_prompt` 會套通用預設句、靜態格式給了 `custom_prompt` 會被丟掉、`custom` 的
   `extra_instructions` 不串接。SDK 全都不 raise,要燒完一次配額拿到錯的講義才發現 →

@@ -30,6 +30,8 @@ REQUIRED_CONTRACT_TERMS = (
     "require_report",
     "custom_prompt",     # generate_report 的 custom 格式;工具名沒變,只有新參數
     "include_report",    # research_import:報告 entry 沒有 URL,只能靠這個旗標指名
+    "input_bundle_path", # podcast_episode 的凍結輸入;相對路徑契約呼叫端猜不到
+    "max_report_chars",  # research_wait 預設不回報告本文
 )
 
 
