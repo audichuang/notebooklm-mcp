@@ -5,9 +5,15 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# 重用 v0.3.3 為簡報/講義原子換檔抽出來的那組工具,別再寫第二份:那條路上學到的三件事
+# (temp 的 0600 會被帶到最終檔、commit point 之後的 fsync 不得回滾、有些 filesystem
+# 不支援 directory fsync)都已經編進這裡,自己重寫就等於重踩一次。
+from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE, fsync_parent
 
 _BUNDLE_FILES = {
     "runtime_brief": "runtime-brief.md",
@@ -38,6 +44,20 @@ def _strict_json(data: bytes, label: str) -> Any:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _discard(path: Path) -> None:
+    """Best-effort temp removal.
+
+    Cleanup runs inside ``except`` handlers; a permission error while deleting a temp
+    file must never replace the exception the caller actually needs to read (same rule
+    as ``_atomic.download_atomically``'s cleanup). After the publish point it must not
+    raise either — a stray hidden temp is harmless, undoing a committed binding is not.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def load_frozen_generation_input(
@@ -170,10 +190,27 @@ def write_attempt_binding(
     }
     encoded = (json.dumps(binding, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     path = bundle / "attempt-binding.json"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".attempt-binding.", suffix=".tmp", dir=bundle
+    )
+    temporary = Path(temporary_name)
     try:
-        fd = os.open(path, flags, 0o644)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            # **chmod 要在 fsync 之前**:mkstemp 給 0600,而 os.link 會把 temp 的 mode
+            # 帶到最終檔。順序反過來的話,斷電可能持久化「0600 的 inode + 新 dirent」,
+            # 只有 mode 沒落地——sidecar 是給人稽核的證據檔,不該只有本人讀得到。
+            # 用 fchmod 而非 chmod(path):對已開啟的 fd 動作,沒有 TOCTOU。
+            os.fchmod(handle.fileno(), _NEW_FILE_MODE)
+            os.fsync(handle.fileno())
+        # ← 這行是本函式的原子發布點:link 只在 path 不存在時成功,保留 O_EXCL 的
+        #   「一個 bundle 只綁一次」語義(os.replace 會靜默蓋掉,不能用)。
+        #   注意它**不是整筆業務交易的不可逆 commit**——呼叫端在 manifest 寫入失敗時
+        #   仍會走 rollback_attempt_binding 做補償,那發生在遠端生成之前,符合 ADR-0001。
+        os.link(temporary, path)
     except FileExistsError as error:
+        _discard(temporary)
         # 呼叫端一律先 read_attempt_binding;走到這裡代表**併發**——sidecar 在那次讀取
         # 之後才出現。裸的 errno 17 在這條路上讀不出原因,所以講清楚並給下一步。
         raise ValueError(
@@ -181,14 +218,25 @@ def write_attempt_binding(
             "同一個 bundle 有另一個 dispatch 併發搶先綁定。重跑一次即可——"
             "重跑會讀回既有綁定並沿用同一個 attempt,不會重複燒配額"
         ) from error
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
     except BaseException:
-        path.unlink(missing_ok=True)
+        _discard(temporary)
         raise
+
+    # ---- 發布之後 --------------------------------------------------------------
+    # 綁定已經在磁碟上了。這之後的清理失敗都**不得回滾** —— 把成功的綁定刪掉,會讓
+    # 下一次重跑誤以為沒綁過而重建 attempt。
+    _discard(temporary)             # 殘留一個隱藏 temp 檔無害,不值得炸掉已成功的綁定
+    try:
+        fsync_parent(str(path))
+    except OSError as exc:
+        if exc.errno in _DIR_FSYNC_UNSUPPORTED:
+            pass                    # 有些 filesystem 不支援 directory fsync,那不是失敗
+        else:
+            raise OSError(
+                exc.errno,
+                f"attempt-binding.json 已經建立在 {path};只有 directory fsync 失敗"
+                f"({exc.strerror})——綁定是有效的,別當成「沒綁到」而重試",
+            ) from exc
     record = dict(record_base)
     record["attempt_binding_sha256"] = _sha(encoded)
     return record, encoded
@@ -240,9 +288,13 @@ def rollback_attempt_binding(prepared: dict[str, Any], encoded: bytes) -> str | 
     """Remove only the exact sidecar created by this failed local transaction.
 
     Returns a note when the sidecar could NOT be removed, so the caller can attach it
-    to the original exception instead of losing it. Never raises: this runs inside an
-    ``except`` handler, and a permission error here must not replace the real failure
-    (that error is the one worth reading).
+    to the original exception instead of losing it.
+
+    **Does not raise on filesystem errors** — it runs inside an ``except`` handler, and
+    a permission error here must not replace the real failure (that error is the one
+    worth reading). It is deliberately *not* a blanket never-raises: a malformed
+    ``prepared`` (KeyError) is a programming bug that should surface, and
+    ``KeyboardInterrupt`` must stay interruptible.
     """
     path = prepared["bundle"] / "attempt-binding.json"
     try:
@@ -256,4 +308,10 @@ def rollback_attempt_binding(prepared: dict[str, Any], encoded: bytes) -> str | 
             f"attempt-binding.json 殘留在 {path}(清理失敗:{error})——"
             "下次用同一個 bundle 重跑會讀回這份綁定,先確認它指的 attempt 是否真的沒建立"
         )
+    # 刪除本身已經成功;目錄項沒刷下去不影響正確性(重跑會重新讀,讀不到就重建),
+    # 所以這裡不回 note、也不 raise。
+    try:
+        fsync_parent(str(path))
+    except OSError:
+        pass
     return None

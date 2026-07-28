@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -75,6 +77,7 @@ async def test_manifest_episode_dispatches_exact_frozen_brief_and_binds_before_r
     assert attempt["input_bundle"]["attempt_binding_sha256"] == hashlib.sha256(
         (bundle / "attempt-binding.json").read_bytes()
     ).hexdigest()
+    assert list(bundle.glob(".attempt-binding.*.tmp")) == []
 
 
 async def test_frozen_bundle_rejects_competing_inline_brief_before_rpc(fake_client, tmp_path):
@@ -306,3 +309,132 @@ async def test_rebinding_the_same_bundle_reuses_the_attempt(fake_client, tmp_pat
     first = manifest["episodes"][0]["attempts"][0]["attempt_id"]
     binding = json.loads((bundle / "attempt-binding.json").read_text(encoding="utf-8"))
     assert binding["attempt_id"] == first
+
+
+# ---- v0.4.2:sidecar 沿用 _atomic 的 commit-point 紀律 -----------------------------
+# 這兩條 repo 早就為簡報/講義學過(test_atomic_replace_preserves_existing_file_mode /
+# test_unsupported_directory_fsync_does_not_fail_the_download),但 sidecar 這條路自己
+# 重寫了一份 fsync,於是又漏了一次。改成重用 _atomic.fsync_parent 並在此鎖住。
+
+
+def _prepared(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    return {
+        "bundle": bundle,
+        "episode_id": "ep01",
+        "record_base": {
+            "generation_request_id": "request-1", "path": "bundle",
+            "generation_request_sha256": "x",
+            "runtime_brief_sha256": "y", "runtime_brief_bytes": 1,
+        },
+    }
+
+
+def test_binding_sidecar_is_group_readable(tmp_path):
+    """mkstemp 給 0600,而 os.link 會把 temp 的 mode 帶到最終檔——證據檔不該悄悄
+    變成只有本人讀得到(同 _atomic 的教訓,那邊用 chmod 修掉)。"""
+    import stat
+    from notebooklm_mcp.generation_input import write_attempt_binding
+
+    prepared = _prepared(tmp_path)
+    write_attempt_binding(prepared, attempt_id="a1")
+    mode = stat.S_IMODE((prepared["bundle"] / "attempt-binding.json").stat().st_mode)
+    assert mode == 0o644
+
+
+def test_unsupported_directory_fsync_does_not_undo_the_binding(tmp_path, monkeypatch):
+    """有些 filesystem 不支援 directory fsync(EINVAL/ENOTSUP)。那不是失敗——
+    舊版把 fsync 放在 try 裡,一拋就把剛建立的綁定刪掉,整個 dispatch 陪葬。"""
+    import errno
+    from notebooklm_mcp import generation_input as gi
+
+    prepared = _prepared(tmp_path)
+    monkeypatch.setattr(
+        gi, "fsync_parent",
+        lambda path: (_ for _ in ()).throw(OSError(errno.EINVAL, "Invalid argument")),
+    )
+    record, encoded = gi.write_attempt_binding(prepared, attempt_id="a1")
+    binding_path = prepared["bundle"] / "attempt-binding.json"
+    assert binding_path.read_bytes() == encoded          # 綁定還在
+    assert record["attempt_binding_sha256"]
+    assert list(prepared["bundle"].glob(".attempt-binding.*.tmp")) == []
+
+
+def test_real_directory_fsync_error_says_the_binding_already_exists(tmp_path, monkeypatch):
+    """真 IO 錯誤仍要 raise,但訊息必須講明綁定已經建立——否則呼叫端會當成
+    「沒綁到」而重試,結果撞上 FileExistsError。"""
+    import errno
+    from notebooklm_mcp import generation_input as gi
+
+    prepared = _prepared(tmp_path)
+    monkeypatch.setattr(
+        gi, "fsync_parent",
+        lambda path: (_ for _ in ()).throw(OSError(errno.EIO, "I/O error")),
+    )
+    with pytest.raises(OSError, match="已經建立"):
+        gi.write_attempt_binding(prepared, attempt_id="a1")
+    assert (prepared["bundle"] / "attempt-binding.json").exists()   # 誠實反映:沒回滾
+    assert list(prepared["bundle"].glob(".attempt-binding.*.tmp")) == []
+
+
+def test_mode_is_persisted_before_the_file_fsync(tmp_path, monkeypatch):
+    """chmod 必須在 fsync **之前**(_atomic 的順序)。順序反過來時,斷電可能持久化
+    「0600 的 inode + 新 dirent」而 mode 沒落地——只驗最終 mode 抓不到這個。"""
+    from notebooklm_mcp import generation_input as gi
+
+    order = []
+    real_fchmod, real_fsync, real_link = os.fchmod, os.fsync, os.link
+    monkeypatch.setattr(os, "fchmod", lambda fd, m: (order.append("chmod"), real_fchmod(fd, m))[1])
+    monkeypatch.setattr(os, "fsync", lambda fd: (order.append("fsync"), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "link", lambda s, d: (order.append("link"), real_link(s, d))[1])
+
+    gi.write_attempt_binding(_prepared(tmp_path), attempt_id="a1")
+    # 完整序列:chmod → 檔案 fsync → link(發布點)→ 目錄 fsync。
+    assert order == ["chmod", "fsync", "link", "fsync"]
+
+
+def test_cleanup_failure_does_not_mask_the_real_error(tmp_path, monkeypatch):
+    """pre-commit 清 temp 失敗時,呼叫端要看到的是原本那個有操作指引的錯誤,
+    不是 unlink 的 PermissionError。"""
+    import errno
+    from notebooklm_mcp import generation_input as gi
+
+    prepared = _prepared(tmp_path)
+    gi.write_attempt_binding(prepared, attempt_id="a1")      # 先佔住 → 第二次會撞 link
+
+    def refuse(self, missing_ok=False):
+        raise PermissionError(errno.EACCES, "read-only filesystem")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with pytest.raises(ValueError, match="併發搶先綁定"):     # 不是 PermissionError
+        gi.write_attempt_binding(prepared, attempt_id="a2")
+
+
+def test_second_write_never_overwrites_an_existing_binding(tmp_path):
+    """O_EXCL 語義:一個 bundle 只綁一次,既有綁定的 bytes 不得被換掉。"""
+    from notebooklm_mcp import generation_input as gi
+
+    prepared = _prepared(tmp_path)
+    _, first = gi.write_attempt_binding(prepared, attempt_id="a1")
+    with pytest.raises(ValueError):
+        gi.write_attempt_binding(prepared, attempt_id="a2")
+    assert (prepared["bundle"] / "attempt-binding.json").read_bytes() == first
+
+
+def test_post_publish_temp_cleanup_failure_keeps_the_binding(tmp_path, monkeypatch):
+    """發布之後清 temp 失敗不得回滾 —— 刪掉成功的綁定會讓重跑誤以為沒綁過而重建 attempt。"""
+    import errno
+    from notebooklm_mcp import generation_input as gi
+
+    prepared = _prepared(tmp_path)
+    real_unlink = Path.unlink
+
+    def refuse_temp(self, missing_ok=False):
+        if self.name.startswith(".attempt-binding."):
+            raise PermissionError(errno.EACCES, "read-only filesystem")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_temp)
+    _, encoded = gi.write_attempt_binding(prepared, attempt_id="a1")
+    assert (prepared["bundle"] / "attempt-binding.json").read_bytes() == encoded
