@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.4.1"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.4.2"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -168,6 +168,13 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   `"\x00" in text` guard。顯式 `mime_type` 一律優先(呼叫端比我們清楚那是什麼)。
   注意 `source_add_file` 只是 caller-facing 通用入口;`tools_podcast.py:726/845` 與
   `audio_finalize.py:623` 的已知 mp3 直接打 SDK,不經過它。
+- **任何新的原子寫入一律重用 `_atomic`,別自己再寫一份**。`generation_input` 的 sidecar
+  曾經自帶一個 `_fsync_directory`,結果把 v0.3.3 學過的三件事全漏了:mkstemp 的 0600 被帶到
+  最終檔、commit point 之後的 fsync 放在 try 裡(一拋就把剛建立的綁定刪掉)、沒容忍
+  `_DIR_FSYNC_UNSUPPORTED`。三件事都有測試鎖著——但鎖在簡報/講義那條路上,新路徑照樣漏。
+  `fsync_parent` / `_NEW_FILE_MODE` / `_DIR_FSYNC_UNSUPPORTED` 是 package 內共用的。
+  **注意 sidecar 用 `os.link` 而不是 `os.replace`**:它要的是「只在不存在時建立」
+  (原本的 `O_EXCL` 語義,一個 bundle 只綁一次),`os.replace` 會靜默蓋掉既有綁定。
 - **固定檔名的下載一律原子換檔**(`_atomic.download_atomically`):`ep{n:02d}-slides.pdf` /
   `-report.md` 原本直接寫最終路徑,重生中斷會讓 partial file 頂替上一版完整產物,而 manifest
   仍指向同一路徑、`publish_series` 的「存在且非空」檢查也抓不到。temp → 驗(非空 + PDF
