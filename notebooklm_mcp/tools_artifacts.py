@@ -84,6 +84,48 @@ def _require_artifact_id(artifact_id: str) -> str:
     return artifact_id.strip()
 
 
+def _require_episode(manifest_path: str, episode_n: int) -> None:
+    """在**第一個遠端副作用之前**確認該集存在於 manifest。
+
+    原本這個檢查只在 `_load_ep_and_write` —— 也就是生成/改版跑完、下載完之後才驗:
+    `episode_n` 打錯就是燒完一次配額才 raise,而遠端那份 artifact 已經產生了。
+    這裡不驗 artifact ↔ episode 的 binding(manifest 目前沒存 `slides_artifact_id`),
+    只擋掉打錯集號這種可預判的錯。"""
+    data = ManifestStore(manifest_path).read()
+    if not any(
+        isinstance(e, dict) and e.get("episode") == episode_n
+        for e in data.get("episodes", [])
+    ):
+        raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
+
+
+async def _require_completed_slide_deck(notebook_id: str, artifact_id: str):
+    """遠端 mutation 前驗 artifact:存在、屬於這個 notebook、是簡報、已完成。
+
+    `get_or_none` 是「list 一次再比對 id」,所以一次呼叫同時回答「存不存在」與
+    「屬不屬於這個 notebook」——`revise_slide` 的 RPC 只靠 artifact_id 定位,
+    notebook_id 只是 routing header,錯配的 ID 不會被伺服器擋下來。
+    (`get()` 在 0.8.0 會改成 raise,故用 sanctioned 的 `get_or_none`。)"""
+    art = await runtime.get_client().artifacts.get_or_none(notebook_id, artifact_id)
+    if art is None:
+        raise ValueError(
+            f"artifact {artifact_id} 不在 notebook {notebook_id}"
+            "(用 artifact_list 確認 ID 與筆記本)"
+        )
+    kind = getattr(art.kind, "value", str(art.kind))
+    if kind != "slide_deck":
+        raise ValueError(
+            f"artifact {artifact_id} 的 kind 是 {kind!r},不是 slide_deck —— "
+            "artifact_revise_slide 只能改簡報"
+        )
+    if not art.is_completed:
+        raise ValueError(
+            f"artifact {artifact_id} 尚未完成(status={art.status_str!r}),不能改版;"
+            "先 artifact_wait 等它完成"
+        )
+    return art
+
+
 async def _finish_slides(
     notebook_id: str, manifest_path: str, episode_n: int, artifact_id: str, wait_timeout: float
 ) -> dict:
@@ -121,6 +163,7 @@ async def generate_slides(
     wait_timeout: float = 1800.0,
 ) -> dict:
     """生成該集簡報並下載 PDF,路徑回寫 manifest 的 slides_pdf_path。"""
+    _require_episode(manifest_path, episode_n)      # 打錯集號別燒一次生成配額
     client = runtime.get_client()
     status = await client.artifacts.generate_slide_deck(
         notebook_id,
@@ -174,6 +217,12 @@ async def artifact_revise_slide(
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")
     artifact_id = _require_artifact_id(artifact_id)
+    # 所有可預判的錯都擋在第一個遠端副作用之前。**注意這不是 durable attempt**:
+    # 外層 client 在 revise 成功之後、下載回寫之前斷線,重跑仍會再 revise 一次
+    # ——那是整個 slides/report 家族共有的架構債(generate_slides 逐字同形),
+    # 要修得連同 generate 一起做成 attachment attempt,不在本工具的範圍。
+    _require_episode(manifest_path, episode_n)
+    await _require_completed_slide_deck(notebook_id, artifact_id)
     status = await runtime.get_client().artifacts.revise_slide(
         notebook_id, artifact_id, slide_index, prompt.strip()
     )
@@ -258,6 +307,7 @@ async def generate_report(
     study_guide / briefing_doc / blog_post 之外的形狀)。兩者必須成對,且 custom
     格式不吃 `extra_instructions`——要求併進 `custom_prompt`。"""
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
+    _require_episode(manifest_path, episode_n)      # 同上
     client = runtime.get_client()
     status = await client.artifacts.generate_report(
         notebook_id,

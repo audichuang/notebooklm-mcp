@@ -90,6 +90,7 @@ async def research_wait(
     notebook_id: str,
     task_id: str,
     timeout: float = 1800.0,
+    max_report_chars: int = 0,
 ) -> dict:
     """等 research 完成,回**候選來源 + 報告**。不匯入任何東西。
 
@@ -97,9 +98,19 @@ async def research_wait(
     `candidates` 每筆有 `url` / `title` / `cited`(該 URL 是否被報告引用)。挑完之後把
     URL 交給 `research_import`。
 
+    `max_report_chars` 預設 **0 = 不回報告本文**,只回 `report_chars` 讓你知道有多長
+    ——deep research 報告動輒上萬字,預設灌回 context 太貴,而你真正要挑的是
+    `candidates`。要讀報告就傳一個上限(例如 4000);task 已完成時重呼本工具會立刻回,
+    不會重等也不燒配額。`include_report=True` 的匯入**不需要**先把報告讀回來
+    (`research_import` 會在 server 端重新 poll 取得完整報告)。
+
     `report_importable=True` 表示這次(deep)research 產出了一份報告,可以在 import 時用
     `include_report=True` 一併收進筆記本。"""
     task_id = _require(task_id, "task_id")
+    if not isinstance(max_report_chars, int) or isinstance(max_report_chars, bool):
+        raise ValueError("max_report_chars must be an int")
+    if max_report_chars < 0:
+        raise ValueError("max_report_chars must be >= 0(0 = 只回字數,不回本文)")
     task = await runtime.get_client().research.wait_for_completion(
         notebook_id, task_id, timeout=timeout
     )
@@ -123,15 +134,16 @@ async def research_wait(
     candidates = [
         _candidate(s, cited_urls) for s in sources if not getattr(s, "is_report", False)
     ]
+    body = report[:max_report_chars] if max_report_chars else ""
     return {
         "status": status_str,
         "task_id": getattr(task, "task_id", task_id),
         "query": getattr(task, "query", ""),
         "summary": getattr(task, "summary", ""),
-        # ponytail: 報告全文直接回。deep research 報告可能上萬字,真的咬到再比照
-        #           source_fulltext 加 max_report_chars。
-        "report": report,
+        "report": body,
+        # 永遠是**全文**長度,不受 max_report_chars 影響——這是你決定要不要調高上限的依據。
         "report_chars": len(report),
+        "report_truncated": len(body) < len(report),
         "report_importable": report_importable,
         "cited_url_count": len(cited_urls),
         "candidates": candidates,
@@ -190,22 +202,14 @@ async def research_import(
             "task_id 打錯、跑錯 notebook,或該次 research 真的沒找到東西"
         )
 
-    by_url: dict[str, object] = {}
+    # identity 碰撞**只看被選取的**:候選清單裡兩筆不相干的來源剛好 canonical 相同,
+    # 不該讓一次合法的 selection 整批失敗(那是過度 fail-closed)。
+    by_url: dict[str, list] = {}
     for s in sources:
         url = getattr(s, "url", "") or ""
         if not url or getattr(s, "is_report", False):
             continue
-        key = _import_url_key(url)
-        prior = by_url.get(key)
-        if prior is not None:
-            # 同一個 import identity 兩筆候選(通常是只差 fragment)。標題可能完全不同,
-            # 先到先贏會讓 host 挑了「官方 spec」卻匯入「轉載」——這正是本工具要防的那類錯。
-            raise RuntimeError(
-                f"task {task_id} 有兩筆候選的匯入 identity 相同({key!r}):"
-                f"{getattr(prior, 'title', '')!r} 與 {getattr(s, 'title', '')!r};"
-                "伺服器會把它們視為同一個來源,請直接用 source_add_url 指定你要的那份"
-            )
-        by_url[key] = s
+        by_url.setdefault(_import_url_key(url), []).append(s)
 
     selected: list[object] = []
     unknown: list[str] = []
@@ -215,15 +219,24 @@ async def research_import(
         if key in seen:      # 呼叫端重複指名同一筆,去重(不是錯誤)
             continue
         seen.add(key)
-        match = by_url.get(key)
-        if match is None:
+        matches = by_url.get(key) or []
+        if not matches:
             unknown.append(url)
+        elif len(matches) > 1:
+            # 被選中的 identity 一對多才拒絕。標題可能完全不同,先到先贏會讓 host
+            # 挑了「官方 spec」卻匯入「轉載」——正是本工具要防的那類靜默錯誤。
+            titles = [getattr(m, "title", "") for m in matches]
+            raise RuntimeError(
+                f"選中的 {url!r} 對應到 task {task_id} 的多筆候選(canonical={key!r}):"
+                f"{titles};伺服器會把它們視為同一個來源,"
+                "請直接用 source_add_url 指定你要的那份"
+            )
         else:
-            selected.append(match)
+            selected.append(matches[0])
     if unknown:
         raise ValueError(
             f"這些 URL 不在 task {task_id} 的候選清單裡:{unknown}"
-            f"(候選共 {len(by_url)} 筆;請用 research_wait 回的 url 原樣傳)"
+            f"(候選共 {len(by_url)} 個 identity;請用 research_wait 回的 url 原樣傳)"
         )
 
     if include_report:

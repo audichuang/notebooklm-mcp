@@ -143,6 +143,7 @@ async def test_artifact_rename_is_fire_and_forget(fake_client):
 async def test_artifact_retry_failed_reuses_the_same_artifact_id(fake_client):
     """失敗的 artifact 原地重試(UI 的 Retry)——artifact_id 不變,省掉重生一次配額。
     薄包不等待:呼叫端接 artifact_wait + 對應的 download 工具。"""
+    fake_client.artifacts.seed_artifact("deck-1", completed=False, failed=True)
     out = await t.artifact_retry_failed("nb-123", "deck-1")
     call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "retry_failed")
     assert call == {"notebook_id": "nb-123", "artifact_id": "deck-1"}
@@ -162,6 +163,7 @@ async def test_artifact_retry_failed_propagates_a_refusal(fake_client):
     要原樣讓那個型別冒出去,呼叫端才分得出「配額爆了」與「生成中途失敗」。"""
     from notebooklm.exceptions import RateLimitError
 
+    fake_client.artifacts.seed_artifact("deck-1", completed=False, failed=True)
     fake_client.artifacts.retry_exc = RateLimitError("daily quota exhausted")
     with pytest.raises(RateLimitError):
         await t.artifact_retry_failed("nb-123", "deck-1")
@@ -405,3 +407,19 @@ async def test_source_add_file_wrapping_does_not_block_the_event_loop(fake_clien
     await t.source_add_file("nb-1", str(f))
     beat.cancel()
     assert ticks >= 5                        # 慢 I/O 期間 event loop 仍在轉
+
+
+async def test_artifact_retry_failed_rejects_an_artifact_from_another_notebook(fake_client):
+    """RETRY_ARTIFACT 也只靠 artifact_id 定位;錯配的 ID 會 mutate 到別人的 artifact。"""
+    with pytest.raises(ValueError, match="不在 notebook nb-123"):
+        await t.artifact_retry_failed("nb-123", "somewhere-else")
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "retry_failed"]
+
+
+async def test_artifact_retry_failed_refuses_a_healthy_artifact(fake_client):
+    """retry 一個已完成的 artifact 會在遠端就地重跑,可能把一份好的產物換掉。
+    刻意不限制 kind —— retry_failed 本來就是跨 artifact 種類的通用能力。"""
+    fake_client.artifacts.seed_artifact("deck-1")           # completed、非 failed
+    with pytest.raises(ValueError, match="不是 failed 狀態"):
+        await t.artifact_retry_failed("nb-123", "deck-1")
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "retry_failed"]

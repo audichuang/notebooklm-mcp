@@ -70,6 +70,27 @@ class FakeArtifacts:
         """Test helper: pre-populate the notebook's artifact set."""
         self.artifacts.extend(arts)
 
+    def seed_artifact(self, artifact_id, *, kind=ArtifactType.SLIDE_DECK, title="art",
+                      completed=True, failed=False, status=None):
+        """建一筆帶完整 preflight 欄位的 artifact(kind / is_completed / is_failed /
+        status_str)——`get_or_none` 的 preflight 靠這四個判斷。"""
+        art = SimpleNamespace(
+            id=artifact_id, title=title, kind=kind,
+            is_completed=completed, is_failed=failed,
+            status_str=status or ("failed" if failed else
+                                  "completed" if completed else "processing"),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.artifacts.append(art)
+        return art
+
+    async def get_or_none(self, notebook_id, artifact_id):
+        # 鏡射真 SDK:「list 一次再比對 id」——所以它同時回答「存不存在」與
+        # 「屬不屬於這個 notebook」。找不到回 None(sanctioned,不發 DeprecationWarning)。
+        self.calls.append(("get_or_none", dict(notebook_id=notebook_id,
+                                               artifact_id=artifact_id)))
+        return next((a for a in self.artifacts if a.id == artifact_id), None)
+
     # Signature mirrors notebooklm-py 0.3.4 ArtifactsAPI.list (filter by .kind).
     async def list(self, notebook_id, artifact_type=None):
         self.calls.append(("list", dict(notebook_id=notebook_id, artifact_type=artifact_type)))

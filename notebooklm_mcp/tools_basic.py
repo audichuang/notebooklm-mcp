@@ -295,7 +295,24 @@ async def artifact_retry_failed(notebook_id: str, artifact_id: str) -> dict:
     **raise**(不像 generate_* 吞成 failed status),所以拒絕會直接冒出來。"""
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id must be a non-empty string")
-    status = await runtime.get_client().artifacts.retry_failed(notebook_id, artifact_id.strip())
+    artifact_id = artifact_id.strip()
+    client = runtime.get_client()
+    # 遠端 mutation 前 preflight。RETRY_ARTIFACT 只靠 artifact_id 定位(notebook_id 是
+    # routing header),錯配的 ID 伺服器不會擋——而這支跟 download 類工具不同,它改的是
+    # 遠端狀態,不是本機檔案。`get_or_none` 列表後比對 id,同時驗了存在與歸屬。
+    # 刻意**不限制 kind**:retry_failed 本來就是跨 artifact 種類的通用能力。
+    art = await client.artifacts.get_or_none(notebook_id, artifact_id)
+    if art is None:
+        raise ValueError(
+            f"artifact {artifact_id} 不在 notebook {notebook_id}(用 artifact_list 確認)"
+        )
+    if not art.is_failed:
+        raise ValueError(
+            f"artifact {artifact_id} 不是 failed 狀態"
+            f"(kind={getattr(art.kind, 'value', art.kind)!r} status={art.status_str!r});"
+            "retry 只用於失敗的 artifact,要重生請用對應的 generate_* 工具"
+        )
+    status = await client.artifacts.retry_failed(notebook_id, artifact_id)
     task_id = ensure_started(status)
     return {"task_id": task_id, "artifact_id": task_id}
 

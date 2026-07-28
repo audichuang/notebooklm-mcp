@@ -48,7 +48,9 @@ async def test_research_wait_returns_candidates_and_never_imports(fake_client):
         "https://a.example/post", "https://b.example/spec", "https://c.example/blog",
     ]
     assert out["report_importable"] is True
-    assert out["report_chars"] == len(out["report"])
+    # 預設不回報告本文,但字數是**全文**長度(決定要不要調高上限的依據)。
+    assert out["report"] == "" and out["report_truncated"] is True
+    assert out["report_chars"] == len(fake_client.research.report)
     # 沒有任何匯入發生。
     assert not [c for c in fake_client.research.calls if c[0] == "import"]
 
@@ -202,7 +204,7 @@ async def test_research_import_refuses_ambiguous_candidates(fake_client):
         ResearchSource(url="https://a.example/spec#v1", title="官方 spec"),
         ResearchSource(url="https://a.example/spec#v2", title="轉載"),
     )
-    with pytest.raises(RuntimeError, match="匯入 identity 相同"):
+    with pytest.raises(RuntimeError, match="對應到 task res-1 的多筆候選"):
         await r.research_import("nb-1", "res-1", urls=["https://a.example/spec#v1"])
     assert not [c for c in fake_client.research.calls if c[0] == "import"]
 
@@ -212,3 +214,35 @@ async def test_research_import_forwards_max_elapsed(fake_client):
     await r.research_import("nb-1", "res-1", urls=["https://a.example/post"], max_elapsed=60.0)
     call = next(c[1] for c in fake_client.research.calls if c[0] == "import")
     assert call["max_elapsed"] == 60.0
+
+
+async def test_collision_on_an_unselected_candidate_does_not_block(fake_client):
+    """碰撞只看**被選取的** identity。候選清單裡兩筆不相干的來源剛好 canonical 相同,
+    不該讓一次合法的 selection 整批失敗(那是過度 fail-closed)。"""
+    from notebooklm._types.research import ResearchSource
+
+    fake_client.research.sources = (
+        ResearchSource(url="https://a.example/spec#v1", title="碰撞 A1"),
+        ResearchSource(url="https://a.example/spec#v2", title="碰撞 A2"),
+        ResearchSource(url="https://b.example/only", title="乾淨的 B"),
+    )
+    await r.research_import("nb-1", "res-1", urls=["https://b.example/only"])
+    call = next(c[1] for c in fake_client.research.calls if c[0] == "import")
+    assert call["titles"] == ["乾淨的 B"]
+
+
+async def test_research_wait_report_cap(fake_client):
+    """預設 0 = 只回字數不回本文;傳上限才截斷,report_chars 永遠是全文長度。"""
+    full = fake_client.research.report
+    out = await r.research_wait("nb-1", "res-1", max_report_chars=10)
+    assert out["report"] == full[:10]
+    assert out["report_chars"] == len(full) and out["report_truncated"] is True
+
+    out = await r.research_wait("nb-1", "res-1", max_report_chars=len(full) + 50)
+    assert out["report"] == full and out["report_truncated"] is False
+
+
+async def test_research_wait_rejects_a_negative_cap(fake_client):
+    with pytest.raises(ValueError, match="max_report_chars"):
+        await r.research_wait("nb-1", "res-1", max_report_chars=-1)
+    assert not fake_client.research.calls

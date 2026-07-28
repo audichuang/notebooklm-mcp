@@ -25,6 +25,12 @@ from .audio_finalize import (
 from .app import mcp
 from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
+from .generation_input import (
+    load_frozen_generation_input,
+    read_attempt_binding,
+    rollback_attempt_binding,
+    write_attempt_binding,
+)
 from .languages import resolve_language
 from .manifest_store import ManifestStore
 
@@ -97,8 +103,10 @@ def _create_audio_attempt(
     audio_format: str | None,
     audio_length: str | None,
     supersedes_attempt_id: str | None = None,
+    attempt_id: str | None = None,
+    input_bundle: dict | None = None,
 ) -> str:
-    attempt_id = str(uuid.uuid4())
+    attempt_id = attempt_id or str(uuid.uuid4())
     attempt = {
         "attempt_id": attempt_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -130,6 +138,8 @@ def _create_audio_attempt(
     }
     if supersedes_attempt_id is not None:
         attempt["supersedes_attempt_id"] = supersedes_attempt_id
+    if input_bundle is not None:
+        attempt["input_bundle"] = dict(input_bundle)
 
     def mutate(manifest: dict) -> None:
         manifest.setdefault("notebook_id", notebook_id)
@@ -800,6 +810,54 @@ async def _assert_source_cleanup_done(
     store.update(clear)
 
 
+def _reuse_frozen_input_attempt(
+    store: ManifestStore,
+    *,
+    notebook_id: str,
+    episode_n: int,
+    title: str,
+    brief: str,
+    attempt_id: str,
+    input_bundle: dict,
+) -> bool:
+    """Reuse a locally bound attempt only when its whole identity is unchanged."""
+    snapshot = store.read()
+    episode = next(
+        (row for row in snapshot["episodes"] if row.get("episode") == episode_n),
+        None,
+    )
+    if episode is None:
+        return False
+    attempts = [
+        row for row in episode.get("attempts", []) if row.get("attempt_id") == attempt_id
+    ]
+    if not attempts:
+        return False
+    if len(attempts) != 1:
+        raise ValueError("frozen generation attempt identity is duplicated")
+    _, attempt = _attempt_record(snapshot, episode_n, attempt_id)
+    if (
+        episode.get("active_attempt_id") != attempt_id
+        or episode.get("output_attempt_id") is not None
+        or attempt.get("notebook_id") != notebook_id
+        or attempt.get("title") != title.strip()
+        or attempt.get("brief_sha256")
+        != hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        or attempt.get("input_bundle") != input_bundle
+    ):
+        raise ValueError("existing attempt does not match frozen generation input")
+    status = attempt.get("dispatch", {}).get("status")
+    if status == "prepared":
+        return True
+    if status == "not_accepted":
+        if not _rearm_not_accepted_attempt(store, episode_n, attempt_id):
+            raise RuntimeError("frozen attempt changed while being rearmed")
+        return True
+    raise ValueError(
+        f"frozen attempt is {status!r}; reconcile or resume it instead of redispatching"
+    )
+
+
 async def _run_episode(
     notebook_id: str,
     episode_n: int,
@@ -812,6 +870,7 @@ async def _run_episode(
     audio_length: str | None,
     wait_timeout: float,
     manifest_path: str | None = None,
+    prepared_generation_input: dict | None = None,
 ) -> dict:
     client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
@@ -826,16 +885,62 @@ async def _run_episode(
     if store is not None:
         # 生成是不可逆的副作用(燒配額),所以清理義務在建 attempt 之前就要結案。
         await _assert_source_cleanup_done(client, store, notebook_id, episode_n)
-        attempt_id = _create_audio_attempt(
-            store,
-            notebook_id=notebook_id,
-            episode_n=episode_n,
-            title=title,
-            brief=brief,
-            language=resolved_language,
-            audio_format=audio_format,
-            audio_length=audio_length,
-        )
+        fixed_attempt_id = None
+        binding_bytes = None
+        binding_created = False
+        input_bundle = None
+        if prepared_generation_input is not None:
+            existing_binding = read_attempt_binding(prepared_generation_input)
+            if existing_binding is None:
+                fixed_attempt_id = str(uuid.uuid4())
+                input_bundle, binding_bytes = write_attempt_binding(
+                    prepared_generation_input, attempt_id=fixed_attempt_id
+                )
+                binding_created = True
+            else:
+                fixed_attempt_id, input_bundle, binding_bytes = existing_binding
+        try:
+            reused = (
+                prepared_generation_input is not None
+                and fixed_attempt_id is not None
+                and input_bundle is not None
+                and _reuse_frozen_input_attempt(
+                    store,
+                    notebook_id=notebook_id,
+                    episode_n=episode_n,
+                    title=title,
+                    brief=brief,
+                    attempt_id=fixed_attempt_id,
+                    input_bundle=input_bundle,
+                )
+            )
+            if reused:
+                attempt_id = fixed_attempt_id
+            else:
+                attempt_id = _create_audio_attempt(
+                    store,
+                    notebook_id=notebook_id,
+                    episode_n=episode_n,
+                    title=title,
+                    brief=brief,
+                    language=resolved_language,
+                    audio_format=audio_format,
+                    audio_length=audio_length,
+                    attempt_id=fixed_attempt_id,
+                    input_bundle=input_bundle,
+                )
+        except BaseException as error:
+            if (
+                binding_created
+                and prepared_generation_input is not None
+                and binding_bytes is not None
+            ):
+                # 清理失敗只回一則 note、絕不 raise —— 在 except handler 裡再拋會把
+                # 真正該讀的那個錯誤蓋掉。把殘留訊息掛回原例外,兩件事都看得到。
+                note = rollback_attempt_binding(prepared_generation_input, binding_bytes)
+                if note:
+                    error.add_note(note)
+            raise
 
     # Standalone continuity: if the caller hands us a prior episode's mp3 that is
     # NOT yet in the notebook (one-off podcast_episode use), upload + name it so
@@ -949,7 +1054,7 @@ async def podcast_episode(
     notebook_id: str,
     episode_n: int,
     title: str,
-    brief: str,
+    brief: str | None,
     output_dir: str,
     prior_mp3_path: str | None = None,
     language: str | None = None,
@@ -957,15 +1062,19 @@ async def podcast_episode(
     audio_length: str | None = "long",
     wait_timeout: float = 1200.0,
     manifest_path: str | None = None,
+    input_bundle_path: str | None = None,
 ) -> dict:
     """生成、命名、下載並回錄一集 podcast。
 
     Studio artifact 與回錄 source 都命名為 ``EP{n:02d} {title}``。
 
     傳 ``manifest_path`` 時，attempt 會在任何遠端 generation 副作用前持久化；
-    timeout／斷線後須依錯誤中的 ``attempt_id`` 呼叫 ``podcast_episode_reconcile``，
-    不可重送本工具來重生。finalize 各步驟皆 checkpoint，可用
-    ``podcast_episode_resume`` 接續。不傳 manifest 則保留 standalone best-effort 行為。
+    若另傳 ``input_bundle_path``，``brief`` 必須為 ``None``。工具會驗 frozen
+    request／SHA／bytes，以 frozen brief 建立 attempt 與 binding 後才呼叫 provider；
+    明確 not-accepted 的同 bundle 重試沿用同一 attempt。timeout／斷線後須依錯誤中的
+    ``attempt_id`` 呼叫 ``podcast_episode_reconcile``，不可重送本工具來重生。
+    finalize 各步驟皆 checkpoint，可用 ``podcast_episode_resume`` 接續。不傳 manifest
+    則保留 standalone best-effort 行為。
     """
     # 本地驗證先行(壞參數 ValueError 秒退,不浪費 RPC),再做認證預檢:
     # 單集也要等最多 20 分鐘,cookie 死了先秒退(見 auth_probe docstring)。
@@ -975,6 +1084,23 @@ async def podcast_episode(
             "prior_mp3_path with manifest_path is not checkpointed in P0; "
             "use an already verified notebook source or standalone best-effort"
         )
+    prepared_generation_input = None
+    if input_bundle_path is not None:
+        if brief is not None:
+            raise ValueError(
+                "brief must be None when input_bundle_path is provided; "
+                "the provider input comes only from frozen bytes"
+            )
+        if not isinstance(manifest_path, str) or not manifest_path:
+            raise ValueError("input_bundle_path requires manifest_path")
+        prepared_generation_input = load_frozen_generation_input(
+            manifest_path=manifest_path,
+            input_bundle_path=input_bundle_path,
+            episode_n=episode_n,
+        )
+        brief = prepared_generation_input["brief"]
+    elif not isinstance(brief, str) or not brief.strip():
+        raise ValueError("brief must be a non-empty string without input_bundle_path")
     await probe_auth(runtime.get_client())
     return await _run_episode(
         notebook_id,
@@ -988,6 +1114,7 @@ async def podcast_episode(
         audio_length,
         wait_timeout,
         manifest_path=manifest_path,
+        prepared_generation_input=prepared_generation_input,
     )
 
 

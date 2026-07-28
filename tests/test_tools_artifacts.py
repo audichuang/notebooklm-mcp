@@ -152,6 +152,7 @@ async def test_artifact_download_slides_fails_closed_on_a_removed_artifact(fake_
 async def test_revise_slide_revises_then_redownloads_without_regenerating(fake_client, tmp_path):
     """就地改第 3 張 → 重新下載同一份 deck 並回寫 manifest,完全不碰 generate。"""
     m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("deck-1")
     res = await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 2, "把這頁的數字改成 2026-05 的版本")
 
     assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_slide_deck"]
@@ -169,6 +170,7 @@ async def test_revise_slide_follows_the_returned_id_not_the_input(fake_client, t
     """SDK **沒有保證** REVISE_SLIDE 回傳的 task_id 等於傳入的 artifact_id(它只是 parse
     RPC 回來的那個 id)。實作因此一律用回傳值——餵一個不同的 id 證明沒有依賴那個假設。"""
     m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("deck-1")
     fake_client.artifacts.revise_slide_returns_id = "deck-2"
     res = await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
 
@@ -184,12 +186,13 @@ async def test_revise_slide_requires_artifact_id_and_prompt(fake_client, tmp_pat
             await a.artifact_revise_slide("nb-1", m, 5, bad, 0, "改這頁")
         with pytest.raises(ValueError, match="prompt"):
             await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, bad)
-    assert not fake_client.artifacts.calls
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "revise_slide"]
 
 
 async def test_revise_slide_fails_closed_on_removed_deck(fake_client, tmp_path):
     """配額下架的 deck 不得被當成改版成功(改完還會覆寫本機那份完整 PDF)。"""
     m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("deck-1")
     fake_client.artifacts.fail_removed = True
     with pytest.raises(RuntimeError, match="removed"):
         await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
@@ -363,3 +366,52 @@ async def test_post_commit_failure_says_the_file_was_already_replaced(fake_clien
     with pytest.raises(OSError, match="already replaced"):
         await a.generate_slides("nb-1", m, 1)
     assert existing.read_bytes() == b"%PDF-1.4 NEW"      # commit 已發生,誠實反映
+
+
+# ---- v0.4.1:遠端 mutation 前的便宜 preflight ------------------------------------
+# 這些不是 durable attempt(外層斷線重跑仍會重複 mutation,那是整個 slides/report 家族
+# 共有的架構債)。它們只擋「可預判、不必打 RPC 就知道會錯」的那些,免得燒配額才發現。
+
+
+async def test_revise_slide_rejects_an_artifact_from_another_notebook(fake_client, tmp_path):
+    """REVISE_SLIDE 只靠 artifact_id 定位(notebook_id 是 routing header),
+    伺服器不會擋錯配的 ID —— 而這支改的是遠端狀態,不像 download 只寫本機檔。"""
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    with pytest.raises(ValueError, match="不在 notebook nb-1"):
+        await a.artifact_revise_slide("nb-1", m, 5, "deck-elsewhere", 0, "改這頁")
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "revise_slide"]
+
+
+async def test_revise_slide_rejects_a_non_slide_artifact(fake_client, tmp_path):
+    from notebooklm.types import ArtifactType
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("rep-1", kind=ArtifactType.REPORT)
+    with pytest.raises(ValueError, match="不是 slide_deck"):
+        await a.artifact_revise_slide("nb-1", m, 5, "rep-1", 0, "改這頁")
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "revise_slide"]
+
+
+async def test_revise_slide_rejects_an_unfinished_deck(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("deck-1", completed=False)
+    with pytest.raises(ValueError, match="尚未完成"):
+        await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "revise_slide"]
+
+
+async def test_revise_slide_rejects_an_unknown_episode_before_any_rpc(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("deck-1")
+    with pytest.raises(ValueError, match="episode 9 not found"):
+        await a.artifact_revise_slide("nb-1", m, 9, "deck-1", 0, "改這頁")
+    assert not fake_client.artifacts.calls          # 連 get_or_none 都還沒打
+
+
+async def test_generate_slides_and_report_check_the_episode_before_generating(fake_client, tmp_path):
+    """打錯 episode_n 舊行為是「生成 → 下載 → 回寫時才 raise」= 白燒一次配額。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError, match="episode 2 not found"):
+        await a.generate_slides("nb-1", m, 2)
+    with pytest.raises(ValueError, match="episode 2 not found"):
+        await a.generate_report("nb-1", m, 2)
+    assert not fake_client.artifacts.calls
