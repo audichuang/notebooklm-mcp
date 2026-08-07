@@ -19,7 +19,7 @@ uv run pytest -q
 ## Tool install
 
 ```bash
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.4.2"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.5.0"
 ```
 
 The install exposes `notebooklm-mcp` and `notebooklm-cover` on PATH.
