@@ -1,7 +1,9 @@
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -20,7 +22,7 @@ def _write_bundle(workspace, *, brief="exact frozen brief\n"):
         ),
         "evidence_manifest": (
             "evidence-manifest.json",
-            b'{"episode_id":"ep01","sources":[]}\n',
+            b'{"schema_version":1,"qa_kind":"generation_evidence_manifest","episode_id":"ep01","artifacts":[{"id":"packet","path":"seasons/s01/sources/ep01.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":1}]}\n',
         ),
     }
     records = {}
@@ -45,6 +47,16 @@ def _write_bundle(workspace, *, brief="exact frozen brief\n"):
         json.dumps(request, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return bundle, brief
+
+
+def _replace_bundle_file(bundle: Path, key: str, data: bytes) -> None:
+    request_path = bundle / "generation-request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    filename = request["files"][key]["path"]
+    (bundle / filename).write_bytes(data)
+    request["files"][key]["sha256"] = hashlib.sha256(data).hexdigest()
+    request["files"][key]["bytes"] = len(data)
+    request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
 
 
 async def test_manifest_episode_dispatches_exact_frozen_brief_and_binds_before_rpc(
@@ -119,6 +131,271 @@ async def test_frozen_bundle_hash_drift_fails_before_manifest_or_rpc(fake_client
         )
     assert not manifest_path.exists()
     assert fake_client.artifacts.calls == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["generation_request", "coverage_ledger", "evidence_manifest"],
+)
+def test_schema_version_boolean_is_rejected(target, tmp_path):
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, _ = _write_bundle(tmp_path)
+    if target == "generation_request":
+        request_path = bundle / "generation-request.json"
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        request["schema_version"] = True
+        request_path.write_text(
+            json.dumps(request, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    else:
+        request = json.loads(
+            (bundle / "generation-request.json").read_text(encoding="utf-8")
+        )
+        filename = request["files"][target]["path"]
+        payload = json.loads((bundle / filename).read_text(encoding="utf-8"))
+        payload["schema_version"] = True
+        _replace_bundle_file(
+            bundle,
+            target,
+            (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"),
+        )
+    with pytest.raises(ValueError, match="metadata|coverage ledger|evidence manifest"):
+        load_frozen_generation_input(
+            manifest_path=manifest,
+            input_bundle_path=bundle.relative_to(tmp_path),
+            episode_n=1,
+        )
+
+
+def test_bundle_directory_swap_cannot_redirect_frozen_reads(tmp_path):
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, trusted_brief = _write_bundle(tmp_path, brief="trusted inside\n")
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_root.mkdir()
+    outside_bundle, _ = _write_bundle(outside_root, brief="attacker outside\n")
+    held = tmp_path / "held-original"
+    original_is_dir = Path.is_dir
+    swapped = False
+
+    def swap_after_check(path):
+        nonlocal swapped
+        result = original_is_dir(path)
+        if path == bundle and not swapped:
+            swapped = True
+            bundle.rename(held)
+            bundle.symlink_to(outside_bundle, target_is_directory=True)
+        return result
+
+    try:
+        with patch.object(Path, "is_dir", swap_after_check):
+            try:
+                prepared = load_frozen_generation_input(
+                    manifest_path=manifest,
+                    input_bundle_path=bundle.relative_to(tmp_path),
+                    episode_n=1,
+                )
+            except ValueError:
+                return
+        assert prepared["brief"] == trusted_brief
+    finally:
+        shutil.rmtree(outside_root, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    ("key", "data", "message"),
+    [
+        ("coverage_ledger", b"{}\n", "coverage ledger"),
+        ("evidence_manifest", b'{"episode_id":"ep01"}\n', "evidence manifest"),
+    ],
+)
+async def test_self_consistent_malformed_bundle_schema_fails_before_auth_manifest_or_rpc(
+    fake_client, tmp_path, key, data, message
+):
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "manifest/series_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    bundle, _ = _write_bundle(workspace)
+    _replace_bundle_file(bundle, key, data)
+
+    with pytest.raises(ValueError, match=message):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief=None,
+            output_dir=str(workspace / "output"),
+            manifest_path=str(manifest_path),
+            input_bundle_path=str(bundle.relative_to(workspace)),
+        )
+    assert not manifest_path.exists()
+    assert fake_client.artifacts.calls == []
+
+
+async def test_future_frozen_request_is_rejected_before_binding_auth_or_rpc(
+    fake_client, tmp_path, monkeypatch
+):
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, _ = _write_bundle(tmp_path)
+    request_path = bundle / "generation-request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["frozen_at"] = "2999-01-01T00:00:00+00:00"
+    request_path.write_text(
+        json.dumps(request, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    auth_calls = 0
+
+    async def counted_probe(_client):
+        nonlocal auth_calls
+        auth_calls += 1
+
+    monkeypatch.setattr(p, "probe_auth", counted_probe)
+    with pytest.raises(ValueError, match="timestamp order"):
+        await p.podcast_episode(
+            "notebook-1",
+            episode_n=1,
+            title="EP01",
+            brief=None,
+            output_dir=str(tmp_path / "output"),
+            manifest_path=str(manifest),
+            input_bundle_path=str(bundle.relative_to(tmp_path)),
+        )
+    assert not (bundle / "attempt-binding.json").exists()
+    assert auth_calls == 0
+    assert fake_client.artifacts.calls == []
+
+
+async def test_attempt_binding_must_not_precede_frozen_request(
+    fake_client, tmp_path, monkeypatch
+):
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, _ = _write_bundle(tmp_path)
+    bundle_relative = bundle.relative_to(tmp_path)
+    prepared = load_frozen_generation_input(
+        manifest_path=manifest, input_bundle_path=bundle_relative, episode_n=1
+    )
+    binding = {
+        "schema_version": 1,
+        "qa_kind": "generation_attempt_input_binding",
+        "episode_id": "ep01",
+        "generation_request_id": prepared["record_base"]["generation_request_id"],
+        "attempt_id": "attempt-backdated",
+        "generation_request_sha256": prepared["record_base"][
+            "generation_request_sha256"
+        ],
+        "manifest_workspace_sha256": prepared["record_base"][
+            "manifest_workspace_sha256"
+        ],
+        "bound_at": "2026-07-27T23:59:59+00:00",
+    }
+    (bundle / "attempt-binding.json").write_text(
+        json.dumps(binding, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    auth_calls = 0
+
+    async def counted_probe(_client):
+        nonlocal auth_calls
+        auth_calls += 1
+
+    monkeypatch.setattr(p, "probe_auth", counted_probe)
+    with pytest.raises(ValueError, match="binding timestamp order"):
+        await p.podcast_episode(
+            "notebook-1",
+            episode_n=1,
+            title="EP01",
+            brief=None,
+            output_dir=str(tmp_path / "output"),
+            manifest_path=str(manifest),
+            input_bundle_path=str(bundle_relative),
+        )
+    assert auth_calls == 0
+    assert fake_client.artifacts.calls == []
+
+
+async def test_bound_bundle_copied_to_another_manifest_workspace_cannot_replay(
+    fake_client, tmp_path, monkeypatch
+):
+    auth_calls = 0
+
+    async def counted_probe(_client):
+        nonlocal auth_calls
+        auth_calls += 1
+
+    monkeypatch.setattr(p, "probe_auth", counted_probe)
+    first = tmp_path / "first"
+    first_manifest = first / "manifest/series_manifest.json"
+    first_manifest.parent.mkdir(parents=True)
+    bundle, _ = _write_bundle(first)
+    relative_bundle = bundle.relative_to(first)
+    await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(first / "output"),
+        manifest_path=str(first_manifest),
+        input_bundle_path=str(relative_bundle),
+    )
+    calls_before = len(
+        [call for call in fake_client.artifacts.calls if call[0] == "generate_audio"]
+    )
+
+    second = tmp_path / "second"
+    second_manifest = second / "manifest/series_manifest.json"
+    second_manifest.parent.mkdir(parents=True)
+    shutil.copytree(bundle, second / relative_bundle)
+    with pytest.raises(ValueError, match="manifest workspace"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief=None,
+            output_dir=str(second / "output"),
+            manifest_path=str(second_manifest),
+            input_bundle_path=str(relative_bundle),
+        )
+    assert not second_manifest.exists()
+    assert auth_calls == 1
+    assert len(
+        [call for call in fake_client.artifacts.calls if call[0] == "generate_audio"]
+    ) == calls_before
+
+
+async def test_pre_dispatch_baseline_failure_keeps_frozen_attempt_prepared_and_retryable(
+    fake_client, tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "manifest/series_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    bundle, _ = _write_bundle(workspace)
+    real_list = fake_client.artifacts.list
+    failed = False
+
+    async def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise ConnectionError("baseline unavailable")
+        return await real_list(*args, **kwargs)
+
+    monkeypatch.setattr(fake_client.artifacts, "list", fail_once)
+    args = dict(
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(workspace / "output"),
+        manifest_path=str(manifest_path),
+        input_bundle_path=str(bundle.relative_to(workspace)),
+    )
+    with pytest.raises(ConnectionError, match="baseline unavailable"):
+        await p.podcast_episode("nb-1", **args)
+    first = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = first["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "prepared"
+    assert not any(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
+
+    await p.podcast_episode("nb-1", **args)
+    final = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert final["episodes"][0]["attempts"][0]["attempt_id"] == attempt["attempt_id"]
 
 
 async def test_binding_sidecar_rolls_back_when_manifest_rejects_attempt(fake_client, tmp_path):
@@ -323,9 +600,13 @@ def _prepared(tmp_path):
     return {
         "bundle": bundle,
         "episode_id": "ep01",
+        # binding 的 bound_at 不得早於 request 的 frozen_at,所以 helper 得給一個過去的
+        # 凍結時刻(load_frozen_generation_input 也是這樣把它塞進 prepared 的)。
+        "frozen_at": "2026-07-28T00:00:00+00:00",
         "record_base": {
             "generation_request_id": "request-1", "path": "bundle",
             "generation_request_sha256": "x",
+            "manifest_workspace_sha256": "z",
             "runtime_brief_sha256": "y", "runtime_brief_bytes": 1,
         },
     }

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,63 @@ _BUNDLE_FILES = {
     "coverage_ledger": "coverage-ledger.json",
     "evidence_manifest": "evidence-manifest.json",
 }
+_ALLOWED_DISPOSITIONS = {
+    "spoken_required",
+    "written_required",
+    "intentionally_deferred",
+    "out_of_scope",
+}
+_COMMON_COVERAGE_KEYS = {"id", "plan_locator", "disposition"}
+_COVERAGE_ROW_KEYS = {
+    "spoken_required": _COMMON_COVERAGE_KEYS | {"delivery_locator"},
+    "written_required": _COMMON_COVERAGE_KEYS | {"delivery_locator"},
+    "intentionally_deferred": _COMMON_COVERAGE_KEYS | {"destination"},
+    "out_of_scope": _COMMON_COVERAGE_KEYS | {"rationale"},
+}
+
+
+def _read_frozen_bundle_files(workspace: Path, relative: Path) -> dict[str, bytes]:
+    """Pin the bundle inode and read regular children without following symlinks."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(workspace, directory_flags)
+    try:
+        for part in relative.parts:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        pinned = os.fstat(directory_fd)
+        loaded: dict[str, bytes] = {}
+        for filename in ["generation-request.json", *_BUNDLE_FILES.values()]:
+            file_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            try:
+                metadata = os.fstat(file_fd)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise ValueError(f"frozen bundle member must be regular: {filename}")
+                chunks: list[bytes] = []
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    chunks.append(chunk)
+                loaded[filename] = b"".join(chunks)
+            finally:
+                os.close(file_fd)
+        current = os.lstat(workspace / relative)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or current.st_dev != pinned.st_dev
+            or current.st_ino != pinned.st_ino
+        ):
+            raise ValueError("input bundle changed or became a symlink while reading")
+        return loaded
+    except OSError as error:
+        # 三個 containment 規則共用這一句,刻意不從 errno 反推是哪一條:O_NOFOLLOW 對成員
+        # 檔案回 ELOOP,但加上 O_DIRECTORY 之後對 symlink 目錄回的是 ENOTDIR,而 ENOTDIR
+        # 也可能只是路徑中間夾了普通檔案 —— 猜錯比不猜更糟。symlink 祖先是這三者裡最難自己
+        # 看出來的(路徑字面上完全正常、`ls` 也看得到那些檔案),所以訊息要把它講出來。
+        raise ValueError(
+            "input bundle must be a confined real directory "
+            "(no absolute path, no '..', no symlink on any segment)"
+        ) from error
+    finally:
+        os.close(directory_fd)
 
 
 class _DuplicateKey(ValueError):
@@ -44,6 +102,98 @@ def _strict_json(data: bytes, label: str) -> Any:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _nonempty(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_coverage_ledger(value: object, *, episode_id: str) -> None:
+    expected_root = {"schema_version", "qa_kind", "episode_id", "rows"}
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_root
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("qa_kind") != "delivery_coverage_ledger"
+        or value.get("episode_id") != episode_id
+        or not isinstance(value.get("rows"), list)
+        or not value["rows"]
+    ):
+        raise ValueError("coverage ledger schema is invalid")
+    seen: set[str] = set()
+    for row in value["rows"]:
+        disposition = row.get("disposition") if isinstance(row, dict) else None
+        if (
+            disposition not in _ALLOWED_DISPOSITIONS
+            or set(row) != _COVERAGE_ROW_KEYS[disposition]
+            or not _nonempty(row.get("id"))
+            or row["id"] in seen
+            or not _nonempty(row.get("plan_locator"))
+        ):
+            raise ValueError("coverage ledger row schema is invalid")
+        seen.add(row["id"])
+        locator = {
+            "spoken_required": "delivery_locator",
+            "written_required": "delivery_locator",
+            "intentionally_deferred": "destination",
+            "out_of_scope": "rationale",
+        }[disposition]
+        if not _nonempty(row.get(locator)):
+            raise ValueError("coverage ledger row locator is invalid")
+
+
+def _validate_evidence_manifest(value: object, *, episode_id: str) -> None:
+    expected_root = {"schema_version", "qa_kind", "episode_id", "artifacts"}
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_root
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("qa_kind") != "generation_evidence_manifest"
+        or value.get("episode_id") != episode_id
+        or not isinstance(value.get("artifacts"), list)
+        or not value["artifacts"]
+    ):
+        raise ValueError("evidence manifest schema is invalid")
+    ids: set[str] = set()
+    paths: set[str] = set()
+    for artifact in value["artifacts"]:
+        path_value = artifact.get("path") if isinstance(artifact, dict) else None
+        digest = artifact.get("sha256") if isinstance(artifact, dict) else None
+        byte_count = artifact.get("bytes") if isinstance(artifact, dict) else None
+        artifact_id = artifact.get("id") if isinstance(artifact, dict) else None
+        path = Path(path_value) if isinstance(path_value, str) else None
+        if (
+            not isinstance(artifact, dict)
+            or set(artifact) != {"id", "path", "sha256", "bytes"}
+            or not _nonempty(artifact_id)
+            or artifact_id in ids
+            or path is None
+            or path.is_absolute()
+            or ".." in path.parts
+            or not path.parts
+            or path_value in paths
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or isinstance(byte_count, bool)
+            or not isinstance(byte_count, int)
+            or byte_count < 1
+        ):
+            raise ValueError("evidence manifest artifact schema is invalid")
+        ids.add(str(artifact_id))
+        paths.add(str(path_value))
+
+
+def _valid_timestamp(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    offset = parsed.utcoffset()
+    return offset is not None and abs(offset.total_seconds()) <= 14 * 60 * 60
 
 
 def _discard(path: Path) -> None:
@@ -80,29 +230,10 @@ def load_frozen_generation_input(
     raw_bundle = Path(input_bundle_path).expanduser()
     if raw_bundle.is_absolute() or ".." in raw_bundle.parts:
         raise ValueError("input_bundle_path must be a confined relative path")
-    candidate_bundle = workspace / raw_bundle
-    current = workspace
-    for part in raw_bundle.parts:
-        current = current / part
-        if current.is_symlink():
-            raise ValueError("input bundle path must not contain symlinks")
-    bundle = candidate_bundle.resolve(strict=False)
-    try:
-        relative = bundle.relative_to(workspace)
-    except ValueError as error:
-        raise ValueError("input bundle must stay inside manifest workspace") from error
-    current = workspace
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise ValueError("input bundle must not traverse symlinks")
-    if not bundle.is_dir():
-        raise ValueError("input bundle must be a real directory")
-
-    request_path = bundle / "generation-request.json"
-    if not request_path.is_file() or request_path.is_symlink():
-        raise ValueError("generation-request.json is missing")
-    request_bytes = request_path.read_bytes()
+    bundle = workspace / raw_bundle
+    relative = raw_bundle
+    frozen_files = _read_frozen_bundle_files(workspace, relative)
+    request_bytes = frozen_files["generation-request.json"]
     request = _strict_json(request_bytes, "generation-request.json")
     expected_keys = {
         "schema_version",
@@ -118,6 +249,7 @@ def load_frozen_generation_input(
     if (
         not isinstance(request, dict)
         or set(request) != expected_keys
+        or type(request.get("schema_version")) is not int
         or request.get("schema_version") != 1
         or request.get("qa_kind") != "generation_attempt_input"
         or request.get("status") != "frozen"
@@ -129,8 +261,14 @@ def load_frozen_generation_input(
             r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", request["generation_request_id"]
         )
         is None
+        or not _valid_timestamp(request.get("frozen_at"))
     ):
         raise ValueError("generation request metadata is invalid")
+    frozen_at = datetime.fromisoformat(
+        request["frozen_at"].replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    if frozen_at > datetime.now(timezone.utc):
+        raise ValueError("generation request timestamp order is invalid")
     files = request.get("files")
     if not isinstance(files, dict) or set(files) != set(_BUNDLE_FILES):
         raise ValueError("generation request files schema is invalid")
@@ -146,15 +284,21 @@ def load_frozen_generation_input(
             or not isinstance(record.get("sha256"), str)
         ):
             raise ValueError(f"generation request {key} record is invalid")
-        path = bundle / filename
-        if not path.is_file() or path.is_symlink():
-            raise ValueError(f"frozen {key} must be a regular file")
-        data = path.read_bytes()
+        data = frozen_files[filename]
         if len(data) != record["bytes"]:
             raise ValueError(f"{key} byte count mismatch")
         if _sha(data) != record["sha256"]:
             raise ValueError(f"{key} SHA-256 mismatch")
         loaded[key] = data
+
+    _validate_coverage_ledger(
+        _strict_json(loaded["coverage_ledger"], "coverage-ledger.json"),
+        episode_id=request["episode_id"],
+    )
+    _validate_evidence_manifest(
+        _strict_json(loaded["evidence_manifest"], "evidence-manifest.json"),
+        episode_id=request["episode_id"],
+    )
 
     try:
         brief = loaded["runtime_brief"].decode("utf-8")
@@ -164,10 +308,12 @@ def load_frozen_generation_input(
         "brief": brief,
         "bundle": bundle,
         "episode_id": request["episode_id"],
+        "frozen_at": request["frozen_at"],
         "record_base": {
             "generation_request_id": request["generation_request_id"],
             "path": relative.as_posix(),
             "generation_request_sha256": _sha(request_bytes),
+            "manifest_workspace_sha256": _sha(str(manifest).encode("utf-8")),
             "runtime_brief_sha256": files["runtime_brief"]["sha256"],
             "runtime_brief_bytes": files["runtime_brief"]["bytes"],
         },
@@ -179,6 +325,12 @@ def write_attempt_binding(
 ) -> tuple[dict[str, Any], bytes]:
     bundle = prepared["bundle"]
     record_base = prepared["record_base"]
+    bound_at = datetime.now(timezone.utc)
+    frozen_at = datetime.fromisoformat(
+        prepared["frozen_at"].replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    if bound_at < frozen_at:
+        raise ValueError("attempt binding timestamp order is invalid")
     binding = {
         "schema_version": 1,
         "qa_kind": "generation_attempt_input_binding",
@@ -186,7 +338,8 @@ def write_attempt_binding(
         "generation_request_id": record_base["generation_request_id"],
         "attempt_id": attempt_id,
         "generation_request_sha256": record_base["generation_request_sha256"],
-        "bound_at": datetime.now(timezone.utc).isoformat(),
+        "manifest_workspace_sha256": record_base["manifest_workspace_sha256"],
+        "bound_at": bound_at.isoformat(),
     }
     encoded = (json.dumps(binding, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     path = bundle / "attempt-binding.json"
@@ -261,6 +414,7 @@ def read_attempt_binding(
         "generation_request_id",
         "attempt_id",
         "generation_request_sha256",
+        "manifest_workspace_sha256",
         "bound_at",
     }
     attempt_id = binding.get("attempt_id") if isinstance(binding, dict) else None
@@ -274,11 +428,25 @@ def read_attempt_binding(
         != record_base["generation_request_id"]
         or binding.get("generation_request_sha256")
         != record_base["generation_request_sha256"]
+        or binding.get("manifest_workspace_sha256")
+        != record_base["manifest_workspace_sha256"]
         or not isinstance(attempt_id, str)
         or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", attempt_id) is None
-        or not isinstance(binding.get("bound_at"), str)
+        or not _valid_timestamp(binding.get("bound_at"))
     ):
-        raise ValueError("attempt binding does not match frozen generation request")
+        raise ValueError(
+            "attempt binding does not match frozen generation request or manifest workspace"
+        )
+    bound_timestamp = datetime.fromisoformat(
+        binding["bound_at"].replace("Z", "+00:00")
+    )
+    frozen_timestamp = datetime.fromisoformat(
+        prepared["frozen_at"].replace("Z", "+00:00")
+    )
+    if bound_timestamp.astimezone(timezone.utc) < frozen_timestamp.astimezone(
+        timezone.utc
+    ):
+        raise ValueError("attempt binding timestamp order is invalid")
     record = dict(record_base)
     record["attempt_binding_sha256"] = _sha(encoded)
     return attempt_id, record, encoded

@@ -146,6 +146,23 @@ async def test_reconcile_adopts_the_only_unclaimed_audio_candidate(
     ] == ["generate_audio"]
 
 
+async def test_reconcile_accepts_sdk_naive_local_artifact_timestamp(
+    fake_client, tmp_path
+):
+    artifact = _remote_audio("remote-audio-naive")
+    artifact.created_at = datetime.now()
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, [artifact]
+    )
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id
+    )
+
+    assert out["artifact_id"] == "remote-audio-naive"
+    assert out["safe_next_action"] == "podcast_episode_resume"
+
+
 async def test_reconcile_with_no_candidate_stays_unknown(fake_client, tmp_path):
     manifest_path, attempt_id = await _leave_acceptance_unknown(
         fake_client, tmp_path, []

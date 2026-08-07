@@ -234,6 +234,47 @@ async def test_acceptance_unknown_can_adopt_late_verified_artifact(
     assert adopted["safe_next_action"] == "podcast_episode_resume"
 
 
+async def test_acceptance_unknown_adoption_uses_episode_notebook_in_rolling_manifest(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+    with pytest.raises(TimeoutError, match="response lost"):
+        await p.podcast_episode(
+            "episode-notebook",
+            episode_n=40,
+            title="跨供應商委派",
+            brief="第四十集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stored["notebook_id"] = "legacy-show-notebook"
+    manifest_path.write_text(
+        json.dumps(stored, ensure_ascii=False), encoding="utf-8"
+    )
+    attempt_id = stored["episodes"][0]["active_attempt_id"]
+    fake_client.artifacts.artifacts.append(
+        SimpleNamespace(
+            id="late-episode-artifact",
+            title="Audio Overview",
+            kind=ArtifactType.AUDIO,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path),
+        episode_n=40,
+        attempt_id=attempt_id,
+        artifact_id="late-episode-artifact",
+    )
+
+    assert adopted["artifact_id"] == "late-episode-artifact"
+    assert adopted["safe_next_action"] == "podcast_episode_resume"
+
+
 def test_legacy_task_id_is_durable_output_evidence():
     assert p.has_durable_output_evidence({"task_id": "legacy-task"})
 
