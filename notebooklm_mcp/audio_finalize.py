@@ -428,6 +428,9 @@ async def finalize_attempt(
             terminal_status = (
                 "removed" if getattr(final, "is_removed", False) else "failed"
             )
+            # except block 結束時 Python 會 `del error`,所以文字先取出來:閉包只在這個
+            # block 內被 _mutate 同步呼叫過一次,但只要有人把那次呼叫搬出去就會 NameError。
+            error_text = str(error)
 
             def remote_terminal(_episode: dict, current: dict) -> None:
                 current["remote"].update(
@@ -435,7 +438,7 @@ async def finalize_attempt(
                         "status": terminal_status,
                         "status_origin": "remote",
                         "observed_at": datetime.now(timezone.utc).isoformat(),
-                        "error": str(error),
+                        "error": error_text,
                     }
                 )
 
@@ -640,7 +643,6 @@ async def finalize_attempt(
             _mutate(store, episode_n, attempt_id, upload_accepted)
 
     _, attempt = _subject(store, episode_n, attempt_id)
-    source_rename = attempt["finalize"]["feedback_source_rename"]
     sources = await client.sources.list(notebook_id)
     source = next(
         (row for row in sources if getattr(row, "id", None) == source_id), None
