@@ -187,10 +187,9 @@ async def artifact_download_slides(
 ) -> dict:
     """把**已經生成**的簡報用 artifact_id 下載並回寫 manifest,不重新生成。
 
-    救援用:client 端 timeout(例如 mcporter 預設 60s)砍掉 `generate_slides` 時,雲端
-    那份簡報其實生完了,只是 artifact_id 沒回到呼叫端。用
-    `artifact_list(kind="slide_deck")` 找回 ID 後跑本工具,省下一次生成配額。
-    不確定是哪一筆就別猜——重生比綁錯便宜。"""
+    救援用:client timeout 砍掉 `generate_slides` 時雲端那份其實生完了,用
+    `artifact_list(kind="slide_deck")` 找回 ID 就能省一次配額。不確定是哪一筆別猜
+    ——重生比綁錯便宜。"""
     return await _finish_slides(
         notebook_id, manifest_path, episode_n, _require_artifact_id(artifact_id), wait_timeout
     )
@@ -208,11 +207,8 @@ async def artifact_revise_slide(
 ) -> dict:
     """改**已生成簡報中的單一頁**(0-based `slide_index`),再重新下載回寫 manifest。
 
-    省配額用:一頁的數字錯了、一句話要改語氣,舊路徑是重跑 `generate_slides` 整份重生
-    (燒一次生成配額,而且其他頁也會跟著變)。這裡走 SDK 的就地改版,artifact 不變、
-    其餘頁面不動,結束後仍走與生成相同的尾段(等完成→原子換檔下載→回寫
-    `slides_pdf_path`),所以本機那份 PDF 與 publish 看到的一定是改版後的。
-
+    省配額用:一頁改一句話不必整份重生(那還會連帶改動其他頁)。artifact 不變、其餘
+    頁面不動,結束後走與生成相同的尾段(等完成→原子換檔下載→回寫 `slides_pdf_path`)。
     `artifact_id` 用 `artifact_list(kind="slide_deck")` 找。"""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")

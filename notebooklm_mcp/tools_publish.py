@@ -237,32 +237,21 @@ async def publish_series(
 
     Reads series_manifest.json, content-hashes each episode mp3, renders an
     Apple-compliant feed.xml + index.html in memory, and PUTs the season to the
-    feed host's uploader. Deterministic: same show_id -> same URL/token; manifest
-    published_at -> stable pubDates; mp3 content -> stable enclosure URL. The
-    uploader lands each file atomically and never deletes, so a regenerated
-    episode gets a NEW immutable mp3 URL while old cached URLs keep working.
+    feed host's uploader. Deterministic: same show_id -> same URL/token; mp3
+    content -> stable enclosure URL. The uploader never deletes, so a regenerated
+    episode gets a NEW immutable URL while old cached URLs keep working.
 
-    **show 欄位存 manifest(v0.2.9 起)**:首次發布顯式傳齊 show 七欄,成功後自動
-    存進 manifest["show"];之後滾動加集只傳 ``manifest_path``(+``return_episodes``)
-    即沿用——不用重打、也不會打錯覆寫公開節目資訊。顯式參數永遠優先於 manifest
-    既存值,且新值會回寫沿用。``category``/``explicit`` 兩邊都沒給時維持舊預設
-    "Technology"/False。
+    show 七欄首次傳齊即存進 ``manifest["show"]``,之後滾動加集只傳 ``manifest_path``
+    (+ ``return_episodes=[N]``,讓回傳不隨集數膨脹)。顯式參數永遠優先並回寫。
+    ``notebook_id`` 只是某集 mp3 不在本機時的重抓 fallback,且**每集 manifest 自己的
+    ``notebook_id`` 優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
 
-    ``notebook_id`` 選填:只當某集 mp3 不在本機時的重抓 fallback,且**每集自己的
-    manifest `notebook_id` 欄位優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
-    ``return_episodes`` 選填:整季照常發布,但回傳的 ``episodes`` 只含指定集號——
-    滾動 feed 加一集時傳 ``[N]``,免得回傳隨集數線性膨脹(歷史集 URL 早已在案)。
+    ``require_slides`` / ``require_report`` 是**季級政策**(沿用規則同 show 七欄):為
+    True 時 manifest 未回寫該附件路徑就拒絕發布 —— fail-closed required-deliverable
+    preflight gate,**不是 await barrier**(分不出「舊路徑 + 新版正在重生」)。使用者
+    明講整季不做某一項時才關掉對應那個。
 
-    ``require_slides`` / ``require_report`` 是**季級政策**,沿用規則同 show 七欄:``None``
-    (預設)= 沿用 ``manifest["show"]``、首發視為 True;顯式傳值永遠優先並回寫。
-    要求為 True 時,manifest 未回寫該附件路徑就
-    拒絕發布。這是 **fail-closed required-deliverable preflight gate**——音檔/簡報/
-    講義是三個獨立背景呼叫、完成訊號分散,manifest 是唯一匯流點,舊行為「缺路徑就
-    靜默不附」讓「還在生成」與「使用者不要」長得一樣(EP36 事故)。使用者明講整季
-    不做某一項時才把對應那個關掉(兩個獨立旗標,對齊 skill「能略過的只有簡報/研讀
-    講義」的既有語意)。**注意這不是 await barrier**:它只擋「路徑未回寫」,無法辨識
-    「manifest 有上一版路徑、新版正在背景重生」;真正的 in-flight 偵測要等 manifest
-    記錄 generation state,不在本版範圍。"""
+    完整參數/回傳/preflight 涵蓋範圍見 skill ``references/tool-reference.md``。"""
     base_url = _require_env("PODCAST_PUBLIC_BASE_URL")
     salt = _require_env("PODCAST_TOKEN_SALT")
     upload_url = _require_env("PODCAST_UPLOAD_URL").rstrip("/")

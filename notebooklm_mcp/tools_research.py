@@ -164,13 +164,12 @@ async def research_import(
     URL 會直接 raise 並列出來——寧可爆掉,也不要靜默少匯入幾筆讓你以為都進去了。
     `include_report=True` 另外收進 deep research 的報告本身。
 
-    走 SDK 的 `import_sources_with_verification`:IMPORT_RESEARCH 在 deep 負載下常常
-    超過 30 秒、client 端先 timeout 但伺服器其實已經 commit,這支會用 source list 對帳,
-    只補送真的沒進去的那幾筆,不盲目重送造成重複來源。
-
     ⚠️ 匯入的是**這個 notebook_id**。research 建議跑在拋棄式 scratch notebook,核可的
     來源再用 `source_add_url` 進 episode notebook,避免候選污染生成用的來源集
     (見 ADR-0008)。"""
+    # 走 SDK 的 import_sources_with_verification:IMPORT_RESEARCH 在 deep 負載下常常超過
+    # 30 秒、client 端先 timeout 但伺服器其實已經 commit,它用 source list 對帳只補送真的
+    # 沒進去的那幾筆,不盲目重送造成重複來源。
     task_id = _require(task_id, "task_id")
     # 空字串／非字串**不靜默丟掉**:那是呼叫端組清單時出了錯,吞掉會讓「我選了 5 筆」
     # 變成「進了 3 筆」而沒人發現。
