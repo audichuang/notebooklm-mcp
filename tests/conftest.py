@@ -114,6 +114,7 @@ class FakeArtifacts:
                 "generate_audio",
                 dict(
                     notebook_id=notebook_id,
+                    source_ids=source_ids,
                     language=language,
                     instructions=instructions,
                     audio_format=audio_format,

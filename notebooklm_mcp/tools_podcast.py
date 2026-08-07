@@ -15,6 +15,7 @@ from email.utils import format_datetime
 from notebooklm.types import ArtifactType
 
 from . import runtime
+from ._sources import assert_sources_exist, to_source_ids
 from ._status import TerminalGenerationError, ensure_completed, ensure_started
 from .audio_finalize import (
     finalize_attempt,
@@ -51,6 +52,13 @@ SAFE_NEXT_ACTIONS = frozenset(
         ACTION_SOURCE_DELETE,
     }
 )
+
+
+def _artifact_created_at_utc(value: object) -> datetime | None:
+    """Normalize the SDK's local-naive artifact timestamp to aware UTC."""
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(timezone.utc)
 
 
 def _episode_label(episode_n: int, title: str) -> str:
@@ -92,6 +100,26 @@ def _attempt_record(
     return episode, attempt
 
 
+def _audio_settings(
+    language: str,
+    audio_format: str | None,
+    audio_length: str | None,
+    source_ids: list[str] | None = None,
+) -> dict:
+    """The generation inputs an attempt must not silently change across a resume."""
+    settings = {
+        "language": language,
+        "audio_format": audio_format,
+        "audio_length": audio_length,
+    }
+    # 只有 caller 指名來源時才有這個 key:沒指名時 settings 必須與加這個功能之前逐字
+    # 相同,否則 `podcast_series` 的 prepared-attempt 等值比對會把既有 manifest 判成
+    # 「設定變了」。
+    if source_ids is not None:
+        settings["source_ids"] = list(source_ids)
+    return settings
+
+
 def _create_audio_attempt(
     store: ManifestStore,
     *,
@@ -102,6 +130,7 @@ def _create_audio_attempt(
     language: str,
     audio_format: str | None,
     audio_length: str | None,
+    source_ids: list[str] | None = None,
     supersedes_attempt_id: str | None = None,
     attempt_id: str | None = None,
     input_bundle: dict | None = None,
@@ -114,11 +143,7 @@ def _create_audio_attempt(
         "episode": episode_n,
         "title": title.strip(),
         "brief_sha256": hashlib.sha256(brief.encode("utf-8")).hexdigest(),
-        "settings": {
-            "language": language,
-            "audio_format": audio_format,
-            "audio_length": audio_length,
-        },
+        "settings": _audio_settings(language, audio_format, audio_length, source_ids),
         "dispatch": {
             "status": "prepared",
             "artifact_ids_before": [],
@@ -817,6 +842,7 @@ def _reuse_frozen_input_attempt(
     episode_n: int,
     title: str,
     brief: str,
+    settings: dict,
     attempt_id: str,
     input_bundle: dict,
 ) -> bool:
@@ -843,6 +869,9 @@ def _reuse_frozen_input_attempt(
         or attempt.get("title") != title.strip()
         or attempt.get("brief_sha256")
         != hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        # source_ids 跟 brief 一樣是生成輸入:換了來源集合就不是同一次生成,沿用
+        # 這個 attempt 會讓 binding 說謊(「哪一份輸入產出了哪一集」)。
+        or attempt.get("settings") != settings
         or attempt.get("input_bundle") != input_bundle
     ):
         raise ValueError("existing attempt does not match frozen generation input")
@@ -871,6 +900,7 @@ async def _run_episode(
     wait_timeout: float,
     manifest_path: str | None = None,
     prepared_generation_input: dict | None = None,
+    source_ids: list[str] | None = None,
 ) -> dict:
     client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
@@ -879,6 +909,13 @@ async def _run_episode(
     resolved_language = resolve_language(language)
     resolved_audio_format = to_audio_format(audio_format)
     resolved_audio_length = to_audio_length(audio_length)
+    selected_source_ids = to_source_ids(source_ids)
+    settings = _audio_settings(
+        resolved_language, audio_format, audio_length, selected_source_ids
+    )
+    # 唯讀對帳,在建 attempt 與任何副作用之前:一筆打錯/已刪的 id 不會被伺服器擋下來。
+    if selected_source_ids is not None:
+        await assert_sources_exist(client, notebook_id, selected_source_ids)
 
     store = ManifestStore(manifest_path) if manifest_path else None
     attempt_id = None
@@ -910,6 +947,7 @@ async def _run_episode(
                     episode_n=episode_n,
                     title=title,
                     brief=brief,
+                    settings=settings,
                     attempt_id=fixed_attempt_id,
                     input_bundle=input_bundle,
                 )
@@ -926,6 +964,7 @@ async def _run_episode(
                     language=resolved_language,
                     audio_format=audio_format,
                     audio_length=audio_length,
+                    source_ids=selected_source_ids,
                     attempt_id=fixed_attempt_id,
                     input_bundle=input_bundle,
                 )
@@ -976,6 +1015,7 @@ async def _run_episode(
     try:
         status = await client.artifacts.generate_audio(
             notebook_id,
+            source_ids=selected_source_ids,
             language=resolved_language,
             instructions=brief,
             audio_format=resolved_audio_format,
@@ -1063,22 +1103,28 @@ async def podcast_episode(
     wait_timeout: float = 1200.0,
     manifest_path: str | None = None,
     input_bundle_path: str | None = None,
+    source_ids: list[str] | None = None,
 ) -> dict:
     """生成、命名、下載並回錄一集 podcast。
 
     Studio artifact 與回錄 source 都命名為 ``EP{n:02d} {title}``。
 
     傳 ``manifest_path`` 時，attempt 會在任何遠端 generation 副作用前持久化；
-    若另傳 ``input_bundle_path``，``brief`` 必須為 ``None``。工具會驗 frozen
-    request／SHA／bytes，以 frozen brief 建立 attempt 與 binding 後才呼叫 provider；
-    明確 not-accepted 的同 bundle 重試沿用同一 attempt。timeout／斷線後須依錯誤中的
+    若另傳 ``input_bundle_path``（相對 workspace 的路徑），``brief`` 必須為 ``None``，
+    provider 輸入只來自驗過雜湊的 frozen bytes。timeout／斷線後須依錯誤中的
     ``attempt_id`` 呼叫 ``podcast_episode_reconcile``，不可重送本工具來重生。
     finalize 各步驟皆 checkpoint，可用 ``podcast_episode_resume`` 接續。不傳 manifest
     則保留 standalone best-effort 行為。
+
+    ``source_ids`` 指名這一集只讀哪幾筆來源（用 ``source_list`` 取得真實 id）；省略則用
+    筆記本全部來源。**回頭重生某一集時要傳**：筆記本此時已有後續各集的題目與音檔回錄，
+    不指名就會讓那些內容洩進這一集。它與 language／format／length 一樣算生成輸入，會存進
+    attempt settings，resume 時不得改動。
     """
     # 本地驗證先行(壞參數 ValueError 秒退,不浪費 RPC),再做認證預檢:
     # 單集也要等最多 20 分鐘,cookie 死了先秒退(見 auth_probe docstring)。
     _validate_episode_args(episode_n, title, prior_mp3_path)
+    source_ids = to_source_ids(source_ids)
     if manifest_path and prior_mp3_path:
         raise ValueError(
             "prior_mp3_path with manifest_path is not checkpointed in P0; "
@@ -1098,6 +1144,10 @@ async def podcast_episode(
             input_bundle_path=input_bundle_path,
             episode_n=episode_n,
         )
+        # Existing sidecars are replay authority. Validate their request/workspace
+        # identity before auth or any cleanup/baseline RPC; a copied bound bundle
+        # must be rejected without touching the provider.
+        read_attempt_binding(prepared_generation_input)
         brief = prepared_generation_input["brief"]
     elif not isinstance(brief, str) or not brief.strip():
         raise ValueError("brief must be a non-empty string without input_bundle_path")
@@ -1115,6 +1165,7 @@ async def podcast_episode(
         wait_timeout,
         manifest_path=manifest_path,
         prepared_generation_input=prepared_generation_input,
+        source_ids=source_ids,
     )
 
 
@@ -1193,18 +1244,18 @@ async def podcast_episode_reconcile(
     for artifact in artifacts:
         artifact_id = getattr(artifact, "id", None)
         kind = getattr(getattr(artifact, "kind", None), "value", None)
-        created_at = getattr(artifact, "created_at", None)
+        created_at = _artifact_created_at_utc(
+            getattr(artifact, "created_at", None)
+        )
         if (
             not isinstance(artifact_id, str)
             or not artifact_id
             or artifact_id in baseline
             or artifact_id in claimed
             or kind != ArtifactType.AUDIO.value
-            or not isinstance(created_at, datetime)
-            or created_at.tzinfo is None
+            or created_at is None
         ):
             continue
-        created_at = created_at.astimezone(timezone.utc)
         if window_start <= created_at <= window_end:
             candidates.add(artifact_id)
 
@@ -1361,8 +1412,6 @@ def _validate_adoption_identity(
     episode_n: int,
     title: str,
 ) -> None:
-    if manifest.get("notebook_id") not in (None, notebook_id):
-        raise ValueError("adoption subject belongs to a different notebook")
     if episode.get("episode") != episode_n:
         raise ValueError("adoption subject belongs to a different episode")
     if episode.get("notebook_id") not in (None, notebook_id):
@@ -1467,10 +1516,7 @@ async def podcast_attempt_adopt(
     if not isinstance(notebook_id, str) or not notebook_id:
         raise ValueError("adoption subject has no notebook_id")
 
-    manifest_notebook_id = snapshot.get("notebook_id")
     episode_notebook_id = episode.get("notebook_id")
-    if manifest_notebook_id not in (None, notebook_id):
-        raise ValueError("attempt belongs to a different notebook than the manifest")
     if episode_notebook_id not in (None, notebook_id):
         raise ValueError("attempt belongs to a different notebook than the episode")
     if attempt is not None:
@@ -1532,19 +1578,19 @@ async def podcast_attempt_adopt(
             _, _, baseline, dispatched_at = _reconciliation_subject(
                 snapshot, episode_n, attempt_id
             )
-            created_at = getattr(matches[0], "created_at", None)
+            created_at = _artifact_created_at_utc(
+                getattr(matches[0], "created_at", None)
+            )
             if (
                 artifact_id in baseline
-                or not isinstance(created_at, datetime)
-                or created_at.tzinfo is None
+                or created_at is None
             ):
                 raise ValueError(
                     "explicit artifact is not a post-dispatch candidate"
                 )
-            observed_at = created_at.astimezone(timezone.utc)
             if not (
                 dispatched_at - _RECONCILIATION_CLOCK_SKEW
-                <= observed_at
+                <= created_at
                 <= datetime.now(timezone.utc) + _RECONCILIATION_CLOCK_SKEW
             ):
                 raise ValueError("explicit artifact is outside the dispatch window")
@@ -1761,36 +1807,24 @@ async def podcast_attempt_retract(
 ) -> dict:
     """明確作廢某集「已完成但被拒收」的輸出 attempt，讓下一次生成合法產生取代版。
 
-    這是 durability guard 的正門:沒有它,QA 拒收後唯一的出路是手改 manifest JSON,
-    而手改繞過 artifact claim 唯一性、dispatch baseline 與 finalize checkpoint 的全部
-    驗證——guard 沒保護 manifest,只是把寫入趕到工具外(EP35 實例)。
+    QA 拒收的唯一正門——**手改 manifest 不是替代方案**(那會繞過 artifact claim 唯一性、
+    dispatch baseline 與 finalize checkpoint 的全部驗證)。純本機 manifest mutation:不打
+    RPC、不刪遠端 artifact／source、不動本機檔案。
 
-    純本機 manifest mutation:不打任何 RPC、不刪遠端 artifact／source、不動本機檔案。
-    被作廢的 attempt 保留完整 finalize 紀錄,只加上 ``retraction``;清掉的 episode 級
-    輸出證據原值一併存進 ``retraction.retracted_output`` 供對帳。
-
-    可作廢的只有兩種 attempt:(1) episode 的 ``output_attempt_id``;(2) 掛在
-    ``active_attempt_id`` 但**從未 promote** 的未授權 candidate —— 作廢它是「受審計的
-    abandon」,用來解開舊版工具或手改留下的 active／output 分岔(那個狀態否則無路可走),
-    而且**不動現任 output 的任何欄位**。其他狀態(生成中的 attempt)請照
-    ``safe_next_action`` 走 reconcile／resume。
+    可作廢的只有兩種:(1) episode 的 ``output_attempt_id``;(2) 掛在 ``active_attempt_id``
+    但**從未 promote** 的未授權 candidate(受審計的 abandon,用來解開 active／output 分岔,
+    不動現任 output)。生成中的 attempt 請照 ``safe_next_action`` 走 reconcile／resume。
 
     **retract 之後必須先刪掉舊的回錄 source**:它仍在筆記本裡、且與取代版同名,而
     continuity 複驗要求同名 media 恰好一筆。回傳的 ``stale_source_id`` 就是它,
-    ``safe_next_action`` 就是 ``source_delete``——而且這不只是提示:id 會存進 episode 的
-    ``pending_source_cleanup``,下一次生成前會真的去 notebook 驗它已不在,還在就
-    fail-closed(finalize 是按 source_id 驗的,不擋同名,漏刪會靜默留兩筆同名來源污染
-    後續生成的 context)。
+    ``safe_next_action`` 就是 ``source_delete``——而且這不只是提示:下一次生成前會真的去
+    notebook 驗它已不在,還在就 fail-closed。
 
-    拒收版的本機 mp3 **不會被覆寫**:``retracted_attempt_ids`` 本身就算 durable evidence
-    (``has_durable_output_evidence``),所以取代版一律下載到
-    ``output_dir/attempts/<attempt_id>/ep{n:02d}.mp3``——不再取決於當下剛好有沒有
-    ``cover_path``。原檔路徑記在回傳的 ``retracted_mp3_path``。
-
-    標題不可在取代時改(``_create_audio_attempt`` 與 ``_ensure_resume_attempt`` 兩個入口
-    都擋)——label／封面／工作室 artifact 名／回錄來源名／發布標題全綁同一字串,改標題是
-    另一件事,不是重生。作廢後那個 attempt 是 tombstone:``_attempt_record`` default-deny,
+    拒收版的本機 mp3 **不會被覆寫**:取代版一律下載到
+    ``output_dir/attempts/<attempt_id>/ep{n:02d}.mp3``,原檔路徑記在 ``retracted_mp3_path``。
+    標題不可在取代時改(改標題是另一件事,不是重生)。作廢後那個 attempt 是 tombstone:
     reconcile／adopt／resume／promote 一律拒絕再動它(只有本工具冪等重呼讀得到)。
+    詳見 ADR-0009 與 skill ``references/tool-reference.md``。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
         raise ValueError("manifest_path must be a non-empty string")
@@ -2207,11 +2241,13 @@ async def podcast_series(
                     artifact_id = remote["artifact_id"]
 
                 if dispatch_state == "prepared":
-                    expected_settings = {
-                        "language": resolve_language(language),
-                        "audio_format": audio_format,
-                        "audio_length": audio_length,
-                    }
+                    # 整季共用一組 source_ids 沒有意義(每集要看的來源不同),而每集
+                    # 的回錄 source 要跑到那一集才存在,規劃階段填不出來 —— 所以
+                    # series 不開這個參數。帶 source_ids 的 attempt(來自 podcast_episode
+                    # 的重生)在這裡會 fail-loud,不會被靜默改用全部來源續生。
+                    expected_settings = _audio_settings(
+                        resolve_language(language), audio_format, audio_length
+                    )
                     if attempt.get("settings") != expected_settings:
                         raise ValueError(
                             f"episode {episode_n} settings changed during a "

@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from . import runtime
+from ._sources import assert_sources_exist, to_source_ids
 from ._status import ensure_completed, ensure_started
 from ._text import _CITATION_RE, norm as _norm
 from .auth_probe import probe_auth
@@ -207,10 +208,19 @@ async def generate_audio(
     language: str | None = None,
     audio_format: str | None = None,
     audio_length: str | None = None,
+    source_ids: list[str] | None = None,
 ) -> dict:
-    """Generate an audio overview. Defaults to zh_Hant and returns task_id."""
-    status = await runtime.get_client().artifacts.generate_audio(
+    """Generate an audio overview. Defaults to zh_Hant and returns task_id.
+
+    ``source_ids`` 指名只讀哪幾筆來源(用 source_list 取得真實 id);省略則用筆記本
+    全部來源。要排除哪些是呼叫端的政策。"""
+    selected = to_source_ids(source_ids)
+    client = runtime.get_client()
+    if selected is not None:
+        await assert_sources_exist(client, notebook_id, selected)
+    status = await client.artifacts.generate_audio(
         notebook_id,
+        source_ids=selected,
         language=resolve_language(language),
         instructions=instructions,
         audio_format=to_audio_format(audio_format),

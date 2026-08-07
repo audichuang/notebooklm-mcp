@@ -53,6 +53,16 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `tools_basic.py` — notebook / source / `generate_audio` / artifact / `chat_ask`(薄包,`zh_Hant` 預設)。
     含讀取/觀測面:`artifact_list`(列筆記本現有 artifact,救援/對帳用)、`source_list`、
     `source_fulltext`、`notebook_get`;`chat_ask` 吃 `source_ids`(聚焦單集原文)/`conversation_id`
+  - `_sources.py` — caller 指名的 `source_ids` 的形狀驗證 + 一次唯讀 list 對帳
+    (`to_source_ids` / `assert_sources_exist`),`generate_audio` 與 `podcast_episode` 共用。
+    SDK 不傳 `source_ids` 就抓筆記本全部來源,所以**回頭重生某一集時不指名,後面各集的
+    題目與音檔回錄會洩進那一集**。能力在這裡,**選哪幾筆的政策留 host**(ADR-0007;算法
+    正本在 skill §Episodic 的 QA 拒收流程)。`podcast_series` 刻意不開這個參數:整季共用
+    一組沒有意義,而每集的回錄 source 要跑到那一集才存在、規劃階段填不出來;往前跑時
+    筆記本本來就只有 ≤ 當集的來源。`podcast_episode` 的選取會進 `attempt["settings"]`
+    (跟 language/format/length 同級),**只在非 None 時才有那個 key** —— 沒指名時 settings
+    必須與加這個功能之前逐字相同,否則 `podcast_series` 的 prepared-attempt 等值比對會把
+    既有 manifest 判成「設定變了」。
   - `tools_artifacts.py` — `generate_slides`(簡報 PDF)/ `generate_report`(研讀 Markdown)按需生,
     路徑回寫 `series_manifest.json`(供 publish 附連結);不碰音檔迴圈。生成之後的尾段
     (等完成→下載→回寫)抽成 `_finish_slides`/`_finish_report`,讓
@@ -71,12 +81,18 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
   - `generation_input.py` — frozen generation-input bundle:把 runtime-brief / coverage-ledger /
     evidence-manifest 三份 bytes 連同 SHA-256 凍結,`podcast_episode(brief=null,
     input_bundle_path=…)` 逐檔驗雜湊後**只用凍結的 bytes 當 brief**,再寫
-    `attempt-binding.json` sidecar 把 bundle 綁到 attempt。回答的是「哪一份 brief 產出了
-    哪一集」。**驗證與綁定都在第一個遠端副作用之前**(ADR-0001),雜湊不符就在寫 manifest、
+    `attempt-binding.json` sidecar 把 bundle 綁到 attempt。binding 同時保存 request SHA 與
+    resolved manifest path 的 SHA，回答的是「哪一份 brief、在哪一個 manifest workspace，
+    產出了哪一集」；`bound_at` 必須不早於 request 的 `frozen_at`。把已綁 bundle 複製到另一
+    workspace、binding 時序倒置或 schema／identity 不符，都會在 `probe_auth`、cleanup 與 generation
+    RPC 前拒絕，不能重用 attempt ID 再生一次。**驗證與綁定都在第一個遠端副作用之前**(ADR-0001),雜湊不符就在寫 manifest、
     打 RPC 之前 raise。重跑冪等:`read_attempt_binding` 讀回既有綁定沿用同一 attempt_id
     (`_reuse_frozen_input_attempt` 走 `_attempt_record` 這個 tombstone gate、且擋
     `output_attempt_id` 已存在),所以斷線重跑不會重複建 attempt 或重燒配額;取代版要凍新
-    bundle。`rollback_attempt_binding` 只刪「這次自己寫的那份 bytes」,清理失敗回 note 掛上
+    bundle。coverage ledger 與 evidence manifest 不只驗 bytes/hash，還要 strict 驗
+    `schema_version`、`qa_kind`、episode identity、disposition-specific row keys，以及 evidence
+    artifact 的 unique id/confined relative path/lowercase SHA-256/positive byte count。
+    `rollback_attempt_binding` 只刪「這次自己寫的那份 bytes」,清理失敗回 note 掛上
     原例外而**不 raise**(在 except handler 裡再拋會蓋掉真正該讀的錯誤)。
     **`input_bundle_path` 是相對於 workspace 的路徑**(workspace = manifest 的祖父目錄),
     絕對路徑、`..`、路徑上任何 symlink 一律拒。**manifest 的父目錄刻意不限定名稱**——
