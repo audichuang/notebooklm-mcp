@@ -58,6 +58,10 @@ bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次�
 網域了」,實際只是 CLI 太舊(**同一份 storage_state 用 0.7.3 就正常**)。那份全域安裝已
 移除,PATH 上不再有 `notebooklm`;`uv run` 保證用的是 pin 的版本。
 
+**每個 release 要跑一次真實驗收** —— 離線測試用 mock client,結構上找不到「配額真的被拒」
+那一類 bug(v0.7.1 那輪抓到三個,含一個死鎖)。**怎麼搭環境、測資怎麼設計才能讓失敗變成
+可比對的事實、場景怎麼按配額排序**見 [docs/acceptance-testing.md](docs/acceptance-testing.md)。
+
 **真實驗收走測試帳號,不要打主力帳號**(會污染正式資料、且共用同一份每日生成配額):
 獨立 Google 帳號 + Doppler `notebooklm/stg` + **另一組 `PODCAST_TOKEN_SALT`**(salt 不同 ⇒
 測試 feed 落在完全不同的 URL 空間,而 uploader 不刪檔,所以「不要撞」比「事後清」重要)。
