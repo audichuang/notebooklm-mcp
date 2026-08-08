@@ -27,7 +27,13 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 login = ["notebooklm-py[browser]>=0.8,<0.9"]
 
 [project.scripts]
-notebooklm-mcp = "notebooklm_mcp.server:main"
+# ⚠️ 命令叫 `nblm-mcp` 而不是 `notebooklm-mcp`,是因為 **notebooklm-py 0.8.0 自己也宣告了一支
+# `notebooklm-mcp`**(它自己的 MCP server)。兩個套件裝在同一個 uv tool venv 裡,bin/ 只會留
+# 最後寫入的那份 —— 實測全新 `uv tool install` **3/3 都是上游贏**,而上游那支沒有 `fastmcp`
+# 就 ModuleNotFoundError,等於裝完就是壞的。改名是唯一能讓它「確定性正確」的辦法
+# (留著舊名只會變成升級裝有時好、全新裝一定壞的不決定性)。詳見
+# docs/notebooklm-py-0.8-upgrade.md。`notebooklm-cover` 不撞名,維持原樣。
+nblm-mcp = "notebooklm_mcp.server:main"
 notebooklm-cover = "notebooklm_mcp.cover_cli:main"
 
 [tool.pytest.ini_options]

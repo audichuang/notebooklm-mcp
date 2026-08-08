@@ -22,18 +22,24 @@ uv run pytest -q
 uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.7.0"
 ```
 
-The install exposes `notebooklm-mcp` and `notebooklm-cover` on PATH.
+The install exposes `nblm-mcp` and `notebooklm-cover` on PATH.
+
+> **The server command is `nblm-mcp`, not `notebooklm-mcp`.** Since 0.8.0 the
+> `notebooklm-py` dependency ships its own `notebooklm-mcp` console script, and in a
+> shared tool venv the last writer wins — a fresh `uv tool install` gave upstream's
+> (which then crashes on a missing `fastmcp`) 3 times out of 3. Renaming ours is the
+> only way the installed command is deterministically correct.
 
 ## Run the MCP server
 
 ```bash
-doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
+doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio
 ```
 
 HTTP mode for trusted private networks:
 
 ```bash
-doppler run -p notebooklm -c dev -- notebooklm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
+doppler run -p notebooklm -c dev -- nblm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
 ```
 
 ## Auth refresh
@@ -55,7 +61,7 @@ shared across machines.
 ## Local smoke
 
 ```bash
-timeout 8 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio < /dev/null
+timeout 8 doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio < /dev/null
 ```
 
 Expected: no traceback and no auth error. Stdio may exit when stdin closes.

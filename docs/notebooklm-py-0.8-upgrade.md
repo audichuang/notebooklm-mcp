@@ -158,13 +158,39 @@ normalizer 都還在、`chat.ask` / `notebooks.*` / `download_*` / `wait_for_com
 
 ## 新風險
 
-- **`notebooklm-py` 0.8.0 自己也有一支叫 `notebooklm-mcp` 的 console script**
-  (它自己的 MCP server,34 tools,在 `mcp` extra 裡)—— **跟我們的同名**。
-  消費端不受影響:`uv tool install` 只 link 被指名套件的 entry point(實測 `uv tool list`
-  只有我們的 `notebooklm-mcp` / `notebooklm-cover`)。**但 repo 的 dev venv 兩支都在**,
-  `uv run notebooklm-mcp` 會變成看安裝順序 → repo 內開發一律用
-  `uv run python -m notebooklm_mcp.server`。
-  **永遠不要裝 `notebooklm-py[mcp]`**:除了撞名,它還硬 pin `fastmcp==3.4.2`。
+### console script 撞名 → 我們的命令改叫 `nblm-mcp`(**breaking**)
+
+`notebooklm-py` 0.8.0 自己也宣告了一支 `notebooklm-mcp`(它自己的 MCP server),
+**跟我們同名**。兩個套件裝在同一個 uv tool venv,`bin/` 只留最後寫入的那份。
+
+實測(uv 0.9.30)——**這是靠猜會猜錯的地方**:
+
+| 情境 | 誰贏 |
+|---|---|
+| 全新 `uv tool install`(砍掉目錄重裝)× 3 | **上游,3/3** |
+| 只重裝我們的套件(相依沒動) | 我們 |
+
+上游那支 `from fastmcp import FastMCP`,而 `fastmcp` 只在 `mcp` extra 裡 → 全新安裝完
+`notebooklm-mcp` 直接 `ModuleNotFoundError`。也就是說 **3 台 VM + podcast-lab 只要照
+README 裝一次,拿到的就是壞的**。
+
+留著舊名沒有任何好處:全新安裝一定是上游贏(行為與拿掉完全相同),只有「升級裝」會變成
+有時我們贏 —— 那是不決定性,比穩定壞掉更糟。所以 `[project.scripts]` 只留 `nblm-mcp`。
+`notebooklm-cover` 不撞名,維持原樣。
+
+呼叫端要一起改(v0.7.0 已全數更新):`.mcp.json` × 3(podcast-lab / skill / 驗收工作區)、
+README / AGENTS.md / docs/mcp-setup.md / docs/test-account.md、skill 的 SKILL.md 與
+troubleshooting.md。**3 台 VM 的 `claude mcp add-json` 註冊也要重下**(那不在版控裡)。
+
+`tests/test_contracts.py::test_console_script_name_does_not_collide_with_upstream`
+兩頭都鎖:我們沒有重新宣告舊名、且上游仍然宣告著它。上游哪天拿掉,那條會紅 ——
+撞名消失,可以考慮把 `notebooklm-mcp` 收回來讓舊 config 自動痊癒。
+
+**永遠不要裝 `notebooklm-py[mcp]`**:除了撞名,它還硬 pin `fastmcp==3.4.2`。
+
+**教訓**:這件事讀 changelog 讀不出來(它只說「新增 MCP server」),
+`uv tool list` 也看不出來(它列的是**被指名套件**的 entry point 名稱,不是 bin 裡的實際內容)。
+**只有真的跑一次 `<command> --help` 才會發現。** 發版前的 smoke test 因此是硬要求。
 - **L3 headless re-auth**(0.8.0 新增):`NOTEBOOKLM_HEADLESS_REAUTH=1` 或
   `refresh_auth(allow_headless=True)` 會用持久瀏覽器 profile 無頭重鑄 cookie。
   預設關,但只要環境裡有人設了 `=1` 就會在 RPC 中途自動觸發 —— 跟 keepalive 同一類災難。

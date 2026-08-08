@@ -53,7 +53,7 @@ named profile 讓兩個帳號各自一個目錄(`~/.notebooklm/profiles/test/`),
 ### 3. 驗證
 
 ```bash
-doppler run -p notebooklm -c stg -- notebooklm-mcp --transport stdio   # 起得來即可 Ctrl-C
+doppler run -p notebooklm -c stg -- nblm-mcp --transport stdio   # 起得來即可 Ctrl-C
 # 或直接在驗收工作區開 Claude Code,跑 auth_check
 ```
 

@@ -13,7 +13,7 @@ prompt and does NOT register — use `add-json`:
 
 ```bash
 claude mcp add-json notebooklm -s local \
-  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","notebooklm-mcp","--transport","stdio"]}'
+  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","nblm-mcp","--transport","stdio"]}'
 ```
 
 Project `.mcp.json` entries should use the same zero-path command:
@@ -30,7 +30,7 @@ Project `.mcp.json` entries should use the same zero-path command:
         "-c",
         "dev",
         "--",
-        "notebooklm-mcp",
+        "nblm-mcp",
         "--transport",
         "stdio"
       ]
@@ -47,7 +47,7 @@ For HTTP transport:
 
 ```bash
 doppler run -p notebooklm -c dev -- \
-  notebooklm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
+  nblm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
 ```
 
 When auth expires, refresh on a GUI machine and sync the storage state back to Doppler:
@@ -61,7 +61,7 @@ Live server boot smoke test:
 
 ```bash
 timeout 8 doppler run -p notebooklm -c dev -- \
-  notebooklm-mcp --transport stdio < /dev/null
+  nblm-mcp --transport stdio < /dev/null
 ```
 
 Expected: no traceback or auth error. Depending on stdin behavior, the command may exit cleanly or be stopped by `timeout`.

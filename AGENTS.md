@@ -21,7 +21,7 @@ uv run pytest -q
 uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.7.0"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
-doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
+doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio
 #   HTTP 模式：--transport streamable-http --host 127.0.0.1 --port 8484
 #   ⚠️ streamable-http / sse「無認證」——勿綁非 loopback host(同網段可驅動帳號)。
 #   repo 內開發時亦可 uv run python -m notebooklm_mcp.server --transport stdio
@@ -29,7 +29,7 @@ doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
 # 註冊進 Claude Code（細節見 docs/mcp-setup.md）。CLI 2.1.201 的 `claude mcp add … -- …`
 # 會把 `--` 後整串當 prompt，改用 add-json：
 claude mcp add-json notebooklm -s local \
-  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","notebooklm-mcp","--transport","stdio"]}'
+  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","nblm-mcp","--transport","stdio"]}'
 ```
 
 ### 認證（Doppler，3 VM 同步）
@@ -177,9 +177,12 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   每次安裝都自由解析成當下最新——曾經因為寫成 `>=1.0.0` 而出現「dev venv 鎖 1.27.2、四台
   生產實裝 1.28.1」的落差(測試與實跑不同版),且 mcp 2.0 一出就會被靜默吃進去。改版本時
   **對 lock 版本與消費端實裝版本各跑一次全套**,再更新這裡的下界。
-- **(0.8.0)`notebooklm-py` 自己也有一支叫 `notebooklm-mcp` 的 console script,跟我們撞名**。
-  消費端不受影響(`uv tool install` 只 link 被指名套件的);**但 dev venv 兩支都在**,
-  repo 內一律用 `uv run python -m notebooklm_mcp.server`。**別裝 `notebooklm-py[mcp]`**。
+- **(0.8.0)server 命令改叫 `nblm-mcp`,不是 `notebooklm-mcp`** —— 因為 `notebooklm-py`
+  自己也宣告了一支同名 script,同一個 tool venv 只留最後寫入的那份,**實測全新安裝 3/3
+  都是上游贏**(而上游那支缺 `fastmcp` 會直接 ModuleNotFoundError)。
+  **發版前一定要真的跑一次 `<command> --help`** ——`uv tool list` 列的是被指名套件的
+  entry point 名稱,不是 bin 裡的實際內容,看不出撞名。**別裝 `notebooklm-py[mcp]`**。
+  repo 內開發一律 `uv run python -m notebooklm_mcp.server`。
 - **上游/NotebookLM 行為突變時的情報站**:讀 `_research/notebooklm-mcp-cli` 既有 clone 的
   CHANGELOG.md 與 docs/KNOWN_ISSUES.md(jacob-bd,全生態追 Google 改版最快;bl 漂移、cookie
   語意、RPC schema 變動幾乎都最先出現在那),再對照 notebooklm-py 的 GitHub issues。

@@ -401,6 +401,31 @@ def test_research_task_and_source_fields():
 # 寫死等舊 host,於是 `notebooklm login` 永遠等不到。我們用 scripts/login_notebooklm.py
 # 暫代(只改那一行偵測,其餘重用 SDK helper)。下面兩條分別鎖「還能用」與「該退場了」。
 
+def test_console_script_name_does_not_collide_with_upstream():
+    """我們的 server 命令必須是 `nblm-mcp`,**不能**叫 `notebooklm-mcp`。
+
+    notebooklm-py 0.8.0 起自己也宣告了一支 `notebooklm-mcp`(它自己的 MCP server)。
+    兩個套件裝進同一個 uv tool venv,`bin/` 只留最後寫入的那份 —— 實測全新
+    `uv tool install` **3/3 都是上游贏**,而上游那支缺 `fastmcp` 就 ModuleNotFoundError,
+    等於裝完就是壞的。改名是唯一能讓它確定性正確的辦法。
+
+    這條同時是**退場觸發器**:上游哪天不再宣告這支,撞名就消失,那時可以考慮把
+    `notebooklm-mcp` 這個名字收回來(舊 config 就能自動痊癒)。
+    """
+    import importlib.metadata as md
+
+    ours = {ep.name: ep.value for ep in md.distribution("notebooklm-mcp").entry_points}
+    assert ours.get("nblm-mcp") == "notebooklm_mcp.server:main"
+    assert "notebooklm-mcp" not in ours, (
+        "重新宣告 notebooklm-mcp 會撞上 notebooklm-py 的同名 script,全新安裝會拿到壞的那支"
+    )
+
+    upstream = {ep.name for ep in md.distribution("notebooklm-py").entry_points}
+    assert "notebooklm-mcp" in upstream, (
+        "上游不再宣告 notebooklm-mcp —— 撞名消失了,可以考慮把這個命令名收回來"
+    )
+
+
 def test_login_script_still_has_the_sdk_helpers_it_borrows():
     """替代腳本刻意直接用 SDK 內部 helper,好讓產出的 storage_state 與 `notebooklm login`
     逐字等價(cookie domain 過濾、原子寫檔、帳號 metadata)。上游改名這裡就要紅——

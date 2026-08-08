@@ -39,7 +39,11 @@ jobs:
       - name: uv tool install wheel smoke
         run: |
           uv tool install --python 3.12 --force dist/*.whl
-          notebooklm-mcp --help
+          # grep 我們自己的 usage 行,不是只看 exit code。相依套件可能宣告同名的 console
+          # script,而同一個 tool venv 只留最後寫入的那份 —— 那時 `--help` 會成功地跑到
+          # **別人的程式**。notebooklm-py 0.8.0 就這樣搶走了舊名 notebooklm-mcp
+          # (全新安裝實測 3/3),我們因此改叫 nblm-mcp。見 docs/notebooklm-py-0.8-upgrade.md。
+          nblm-mcp --help | grep -q "NotebookLM MCP server"
           notebooklm-cover --help
 
       - name: Skill docs sync check
