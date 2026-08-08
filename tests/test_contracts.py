@@ -449,3 +449,23 @@ def test_login_script_should_be_retired_once_upstream_knows_the_new_host():
     assert "notebook.google.com" not in _ALLOWED_BASE_HOSTS, (
         "上游已認得 notebook.google.com —— scripts/login_notebooklm.py 可以退場了"
     )
+
+
+def test_relogin_hint_does_not_point_at_the_broken_login_command():
+    """認證失效訊息**不能**教人跑 `notebooklm login`。
+
+    2026-08 起 Google 把未認證的登入流程轉到 notebook.google.com,SDK(含 0.8.0)的
+    偵測仍寫死舊網域 —— 照著跑會卡滿 5 分鐘 timeout。而這段訊息出現的時機正是
+    「認證死了、使用者最會照著做」的時候,指錯就是直接浪費五分鐘。
+
+    這條與 test_login_script_should_be_retired_once_upstream_knows_the_new_host 成對:
+    上游修好那天那條會紅,提醒把腳本刪掉,**順便**把這段訊息改回去。
+    """
+    from notebooklm_mcp.auth_probe import RELOGIN_HINT
+
+    assert "scripts/login_notebooklm.py" in RELOGIN_HINT
+    assert "sync-auth.sh" in RELOGIN_HINT
+    # 只允許出現在「不要用它」的告誡裡,不能是被建議執行的指令。
+    for line in RELOGIN_HINT.splitlines():
+        if "notebooklm login" in line:
+            assert "不要用" in line, f"這行像是在叫人跑壞掉的登入指令:{line!r}"

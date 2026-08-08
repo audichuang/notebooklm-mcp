@@ -7,10 +7,18 @@ fail-fast:cookie 已死時秒退並給重登指引,而不是燒掉數小時等�
 """
 from __future__ import annotations
 
+# ⚠️ 這裡**不能**寫 `notebooklm login`:2026-08 起 Google 把未認證的登入流程轉到
+# notebook.google.com,而 SDK(含 0.8.0)的偵測仍寫死舊網域,照著跑會卡滿 5 分鐘 timeout。
+# 這段訊息出現的時機正是「認證死了、使用者最會照著做」的時候,指錯就是直接浪費五分鐘。
+# 替代腳本 scripts/login_notebooklm.py 只改掉那一行偵測,其餘重用 SDK helper。
+# 上游修好時 tests/test_contracts.py 的退場 tripwire 會紅,屆時這段也一起改回去。
 RELOGIN_HINT = (
-    "NotebookLM 認證失效或無法連線。請在有 GUI 的機器重登後同步:\n"
-    "  notebooklm login && bash scripts/sync-auth.sh\n"
-    "再重啟 MCP server(Doppler 會注入新的 NOTEBOOKLM_AUTH_JSON)。"
+    "NotebookLM 認證失效或無法連線。請在有 GUI 的機器重登後同步\n"
+    "(在 notebooklm-mcp repo 目錄下執行):\n"
+    "  uv run python scripts/login_notebooklm.py   # 主力帳號;測試帳號加 --profile test\n"
+    "  bash scripts/sync-auth.sh                   # 測試帳號:--profile test --config stg\n"
+    "再重啟 MCP server(Doppler 會注入新的 NOTEBOOKLM_AUTH_JSON)。\n"
+    "註:不要用 `notebooklm login` —— Google 已搬登入網域,上游偵測還沒跟上,會卡到 timeout。"
 )
 
 
