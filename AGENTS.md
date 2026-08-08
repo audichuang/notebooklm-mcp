@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.7.1"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.7.2"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio
@@ -146,6 +146,8 @@ bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次�
 - `scripts/` — `check_skill_sync.py`(CI 用:MCP 工具名 ⟷ skill 文件同步硬檢查)、`sync-auth.sh`
   (登入機推 Doppler;`--profile/--config` 可指向測試帳號)、`setup-test-config.sh`(建
   `notebooklm/stg` 測試 config)、`backfill_published_at.py`(published_at 一次性回填)
+- `CHANGELOG.md` — **各版本改了什麼、為什麼、踩到什麼事故**。版本敘事一律寫在那裡,
+  **不要回填進本檔** —— 本檔只放「還在生效的紀律」,歷史會把它撐爆
 - `docs/notebooklm-py-0.8-upgrade.md` — 上游 SDK 升級筆記(0.7.3 → 0.8.0)。**下次升 major 前先讀
   末尾的「驗證方式」**:別只讀 changelog,行為變更不會出現在簽名裡(rename 的短路就是這樣溜過去的)
 - `docs/adr/` — 能力邊界決策。**砍掉已規劃的 scope 也要留一支**:2026-06-07 redesign design doc
@@ -248,6 +250,12 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   以及 `podcast_series` 呼叫 `_run_episode` 那圈(漏了第三個,整季會把例外拋出去而不是回
   安全停點)。完整推導見
   [升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §1。
+- **「從未 dispatch 的 attempt」由建立它的那支工具原樣重呼續推**(`_is_resendable_same_request`)。
+  帶 `source_ids` 的 attempt `podcast_series` 接不了,只有 `podcast_episode` 能續。
+  **「逐字相同」是安全邊界** —— 設定變了還沿用等於靜默換掉生成輸入。連帶三條:
+  ①`_reset_attempt_for_resend` 要 dispatch 與 remote **一起**清(只清一半會讓 series 看到
+  `remote.status="failed"` 而誤判該 supersede);②診斷靠 `errors[]`(只 append),不靠
+  `remote`;③**驗證一律先於變更**。事故經過見 [CHANGELOG](CHANGELOG.md) v0.7.2。
 - 0.7.0 起 source add API 尾端參數(`wait`/`wait_timeout`/`title` 等)**keyword-only**,
   位置呼叫直接 TypeError(contract 測試有鎖)。0.8.0 起 `add_url` 也有 `title=`,**刻意不用**
   ——命名鐵律靠顯式 rename 的 fail-loud 後檢守著。
@@ -423,6 +431,12 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 4. `docs/mcp-setup.md`
 5. `audi-skill/notebooklm/SKILL.md` §Auth
 6. `../podcast-lab/AGENTS.md` §更新 notebooklm-mcp
+
+**外加一件不算 pin 但一定要做的**:在 `CHANGELOG.md` 開一節寫「改了什麼、為什麼、
+踩到什麼事故」。版本敘事只寫在那裡 —— **不要回填進本檔**。
+
+**tag 之前**:CI 綠(它含 wheel 的 `uv tool install` + `--help` 冒煙),
+**tag 之後**:照 pin 用 tag 真的裝一次再收工 —— v0.7.0 的撞名就是這一步才發現的。
 
 驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab ../../audi-skill | grep -v docs/superpowers`
 (`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實)。

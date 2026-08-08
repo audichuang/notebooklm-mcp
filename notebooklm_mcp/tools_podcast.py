@@ -180,7 +180,8 @@ def _create_audio_attempt(
     if input_bundle is not None:
         attempt["input_bundle"] = dict(input_bundle)
 
-    def mutate(manifest: dict) -> None:
+    def mutate(manifest: dict) -> str | None:
+        """回傳「沿用的既有 attempt_id」;None = 照常新建上面那個 attempt。"""
         manifest.setdefault("notebook_id", notebook_id)
         episode = next(
             (ep for ep in manifest["episodes"] if ep.get("episode") == episode_n),
@@ -218,10 +219,31 @@ def _create_audio_attempt(
             active_attempt_id = episode.get("active_attempt_id")
             if active_attempt_id:
                 if supersedes_attempt_id != active_attempt_id:
+                    _, prior = _attempt_record(manifest, episode_n, active_attempt_id)
+                    if _is_resendable_same_request(
+                        prior,
+                        notebook_id=notebook_id,
+                        title=title,
+                        brief_sha256=attempt["brief_sha256"],
+                        settings=attempt["settings"],
+                        input_bundle=attempt.get("input_bundle"),
+                    ):
+                        # 原樣重呼 = 沿用同一個 attempt 重送(不建新的、不多燒配額)。
+                        # 這步只在「已確認是同一個請求」之後才做 —— 驗證先於變更
+                        # (F-7 的教訓)。重設用與 `_rearm_not_accepted_attempt` 同一顆
+                        # helper:兩條路都必須讓 dispatch 與 remote 一起回到乾淨的
+                        # prepared,只重設一半會讓 series 看到 remote.status="failed"
+                        # 而誤判成「該 supersede」。診斷不會遺失——被拒的原因留在
+                        # `errors[]`,那份是只 append 的。
+                        _reset_attempt_for_resend(prior)
+                        return active_attempt_id
                     raise ValueError(
                         f"episode {episode_n} already has durable active attempt "
-                        f"{active_attempt_id!r}; reconcile or resume it before "
-                        "creating another attempt"
+                        f"{active_attempt_id!r} (dispatch="
+                        f"{prior['dispatch'].get('status')!r}); reconcile or resume it "
+                        "before creating another attempt. If it never dispatched, "
+                        "re-call with the identical arguments to resend that same "
+                        "attempt instead of creating a new one."
                     )
                 _, prior_attempt = _attempt_record(
                     manifest, episode_n, active_attempt_id
@@ -258,9 +280,59 @@ def _create_audio_attempt(
         episode.setdefault("notebook_id", notebook_id)
         episode.setdefault("attempts", []).append(attempt)
         episode["active_attempt_id"] = attempt_id
+        return None
 
-    store.update(mutate)
-    return attempt_id
+    _, reused_attempt_id = store.update(mutate)
+    # 沿用既有 attempt 時要回傳**它的** id,不是上面預先生成的那顆 uuid ——
+    # 呼叫端拿這個 id 去 claim dispatch、綁 artifact、寫 checkpoint。
+    return reused_attempt_id or attempt_id
+
+
+def _is_resendable_same_request(
+    attempt: dict,
+    *,
+    notebook_id: str,
+    title: str,
+    brief_sha256: str,
+    settings: dict,
+    input_bundle: dict | None,
+) -> bool:
+    """這個 active attempt 能不能由「原樣重呼」直接沿用重送?
+
+    只有兩個條件同時成立才算:**(a) 它從未成功 dispatch**(所以沒有遠端 artifact 會被
+    孤兒化、也沒有配額已經被燒掉),**(b) 這次請求與它逐字相同**(notebook / 標題 /
+    brief 雜湊 / settings / frozen bundle 綁定)。
+
+    存在的理由是一個真實死鎖(v0.7.1 驗收 F-8):`podcast_episode` 帶 `source_ids` 重生時
+    若剛好撞到配額拒絕,該集就再也推不動——`podcast_series` 不認它的 settings
+    (整季沒有 per-episode `source_ids`)、`reconcile` 拒收 not_accepted、`resume` 要的
+    `artifact_id` 是 null、`retract` 只認已 promote 的輸出。兩個 owner 互相推,而唯一
+    的脫出方式是手改 manifest —— 那是 ADR-0009 明令禁止的。
+
+    修法選擇「讓建立它的那支工具自己重送」而不是新增作廢工具:attempt 是
+    `podcast_episode` 建的,就該由 `podcast_episode` 推進,呼叫端的動作是**原樣重跑同一
+    個呼叫**,與 series 的續跑語意一致,不必學新工具。這也與 `_reuse_frozen_input_attempt`
+    對 frozen bundle 做的事同一個 pattern(讀回既有綁定、沿用同一 attempt_id、不重複建)。
+
+    **請求只要有一個欄位不同就不沿用**(照舊 fail-loud)。「設定變了還沿用」等於靜默
+    改掉生成輸入,比死鎖更糟。
+    """
+    if attempt["dispatch"].get("status") not in ("prepared", "not_accepted"):
+        return False
+    if attempt["remote"].get("artifact_id") is not None:
+        # not_accepted 依契約不該有 artifact 對應;真有就是資料壞了,交給既有 guard 擋。
+        return False
+    if attempt.get("notebook_id") != notebook_id:
+        return False
+    if attempt.get("title") != title.strip():
+        return False
+    if attempt.get("brief_sha256") != brief_sha256:
+        return False
+    if attempt.get("settings") != settings:
+        return False
+    # frozen input bundle 的綁定是 attempt identity 的一部分:一邊有一邊沒有、
+    # 或綁到不同 bundle,都不是同一個請求。
+    return attempt.get("input_bundle") == input_bundle
 
 
 def _ensure_resume_attempt(
@@ -536,6 +608,71 @@ def _mark_not_accepted(
     store.update(mutate)
 
 
+def _assert_series_owns_attempt(
+    attempt: dict,
+    series_settings: dict,
+    episode_n: int,
+    attempt_id: str,
+) -> None:
+    """整季能不能接手這個 attempt —— 不能的話 fail-loud,**且指出誰能**。
+
+    `podcast_series` 刻意不開 per-episode `source_ids`(整季共用一組沒有意義,而每集的
+    回錄 source 要跑到那一集才存在、規劃階段填不出來)。所以帶 `source_ids` 的 attempt
+    ——那是 `podcast_episode` 重生時建的——series 生不出相同的 settings,不能靜默改用
+    全部來源續生。
+
+    但只講「設定變了」會把人卡死:v0.7.1 驗收 F-8 就是這樣走進死路的,而
+    troubleshooting 對 not_accepted 的指示恰好是「重呼 podcast_series」。訊息因此要
+    明講正確的續跑者是 `podcast_episode` 原樣重呼(見 `_is_resendable_same_request`)。
+    """
+    stored = attempt.get("settings")
+    if stored == series_settings:
+        return
+    owner_hint = (
+        " This attempt carries per-episode source_ids, so podcast_series cannot"
+        " reproduce its settings — continue it by re-calling podcast_episode with the"
+        " identical arguments (same title/brief/source_ids), which resends that same"
+        " attempt without burning a new one."
+        if isinstance(stored, dict) and "source_ids" in stored
+        else " Restore the original language/format/length, or retract the attempt."
+    )
+    raise ValueError(
+        f"episode {episode_n} attempt {attempt_id!r} settings do not match this"
+        f" podcast_series call.{owner_hint}"
+    )
+
+
+def _reset_attempt_for_resend(attempt: dict) -> None:
+    """把一個「從未成功 dispatch」的 attempt 就地清回乾淨的 prepared。
+
+    dispatch 與 remote **必須一起**重設:只清 dispatch 會留下 `remote.status="failed"`,
+    而 `podcast_series` 看到那個值會判定「該 supersede」,於是明明要沿用的 attempt 被
+    換掉。被拒的原因不會遺失 —— 它在 `errors[]` 裡,那份只 append、從不清除。
+
+    兩個呼叫端共用:`_rearm_not_accepted_attempt`(series 續跑)與 `_create_audio_attempt`
+    的同請求沿用分支(podcast_episode 原樣重呼,見 `_is_resendable_same_request`)。
+    """
+    dispatch = attempt["dispatch"]
+    dispatch.update(
+        {
+            "status": "prepared",
+            "artifact_ids_before": [],
+            "dispatched_at": None,
+            "accepted_at": None,
+        }
+    )
+    dispatch.pop("candidate_artifact_ids", None)
+    attempt["remote"].update(
+        {
+            "status": "unknown",
+            "status_origin": None,
+            "observed_at": None,
+            "error": None,
+            "error_code": None,
+        }
+    )
+
+
 def _rearm_not_accepted_attempt(
     store: ManifestStore,
     episode_n: int,
@@ -550,24 +687,7 @@ def _rearm_not_accepted_attempt(
             return False
         if attempt["remote"].get("artifact_id") is not None:
             raise ValueError("not_accepted attempt cannot have an artifact mapping")
-        dispatch.update(
-            {
-                "status": "prepared",
-                "artifact_ids_before": [],
-                "dispatched_at": None,
-                "accepted_at": None,
-            }
-        )
-        dispatch.pop("candidate_artifact_ids", None)
-        attempt["remote"].update(
-            {
-                "status": "unknown",
-                "status_origin": None,
-                "observed_at": None,
-                "error": None,
-                "error_code": None,
-            }
-        )
+        _reset_attempt_for_resend(attempt)
         return True
 
     _, rearmed = store.update(mutate)
@@ -1181,6 +1301,16 @@ async def _run_episode(
         # not_accepted 讓呼叫端可以直接重試,不必先跑一次註定撈不到東西的對帳。
         if store is not None:
             _mark_not_accepted(store, episode_n, attempt_id, exc)
+            # 比照下面的 acceptance_unknown 分支把 attempt_id 與下一步塞進訊息:
+            # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經
+            # 被持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。docstring 承諾「依錯誤中的
+            # attempt_id 續跑」,兩個分支都要兌現。
+            exc.args = (
+                f"{exc}\n伺服器拒絕了這次生成,**沒有**建立任何 artifact"
+                f"(attempt_id={attempt_id!r},已標記 not_accepted)。"
+                "配額/限流回復後,用**完全相同的參數**重呼 podcast_episode 即可沿用"
+                "同一個 attempt 重送——不會新建 attempt、也不會多燒一次配額。",
+            )
         raise
     except (Exception, asyncio.CancelledError) as exc:
         if store is not None:
@@ -2434,6 +2564,18 @@ async def podcast_series(
                 remote = attempt.get("remote", {})
                 remote_state = remote.get("status")
                 artifact_id = remote.get("artifact_id")
+                # 整季能不能接手這個 attempt,由 settings 是否可重現決定。**這件事要在
+                # 任何變更之前判斷**:下面的 rearm 會把 remote.error / error_code /
+                # dispatched_at 全部清掉,擺在驗證之前的話,一個註定失敗的呼叫仍然會先
+                # 毀掉「為什麼被拒」的診斷(v0.7.1 驗收 F-7:抹完的 manifest 看起來就像
+                # 分類從未生效過)。
+                series_settings = _audio_settings(
+                    resolve_language(language), audio_format, audio_length
+                )
+                if dispatch_state in ("prepared", "not_accepted"):
+                    _assert_series_owns_attempt(
+                        attempt, series_settings, episode_n, active_attempt_id
+                    )
                 if dispatch_state == "not_accepted":
                     rearmed = _rearm_not_accepted_attempt(
                         store, episode_n, active_attempt_id
@@ -2480,18 +2622,14 @@ async def podcast_series(
                     artifact_id = remote["artifact_id"]
 
                 if dispatch_state == "prepared":
-                    # 整季共用一組 source_ids 沒有意義(每集要看的來源不同),而每集
-                    # 的回錄 source 要跑到那一集才存在,規劃階段填不出來 —— 所以
-                    # series 不開這個參數。帶 source_ids 的 attempt(來自 podcast_episode
-                    # 的重生)在這裡會 fail-loud,不會被靜默改用全部來源續生。
-                    expected_settings = _audio_settings(
-                        resolve_language(language), audio_format, audio_length
+                    # settings 可重現性已在上面(任何變更之前)驗過。這裡再驗一次是因為
+                    # 上面那圈只涵蓋「進入本輪時就是 prepared/not_accepted」的 attempt,
+                    # 而 remote failed/removed 的 supersede 分支會**新建**一個 prepared
+                    # attempt 落到這裡——那顆是 series 自己建的,必然相符,但顯式驗過
+                    # 才不會在未來有人改動 supersede 分支時靜默漏掉。
+                    _assert_series_owns_attempt(
+                        attempt, series_settings, episode_n, active_attempt_id
                     )
-                    if attempt.get("settings") != expected_settings:
-                        raise ValueError(
-                            f"episode {episode_n} settings changed during a "
-                            "prepared attempt"
-                        )
                     baseline = await client.artifacts.list(
                         notebook_id, artifact_type=ArtifactType.AUDIO
                     )
@@ -2515,7 +2653,7 @@ async def podcast_series(
                     try:
                         started = await client.artifacts.generate_audio(
                             notebook_id,
-                            language=expected_settings["language"],
+                            language=series_settings["language"],
                             instructions=plan["brief"],
                             audio_format=to_audio_format(audio_format),
                             audio_length=to_audio_length(audio_length),
