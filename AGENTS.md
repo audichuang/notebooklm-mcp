@@ -39,9 +39,29 @@ claude mcp add-json notebooklm -s local \
 
 ```bash
 uv pip install -e ".[login]" && uv run playwright install chromium   # 僅登入機需要
-notebooklm login                       # 開瀏覽器登入，看到 NotebookLM 首頁才按 ENTER
-bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動即生效
+uv run python scripts/login_notebooklm.py   # 開瀏覽器登入,登入完成即可,不必按鍵
+bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次啟動即生效
 ```
+
+**登入為什麼不用原生 `notebooklm login`**(2026-08):Google 把未認證的登入流程轉到
+`notebook.google.com`(少了 `lm`),而 SDK 的偵測寫死等 `notebooklm.google.com/**`,
+於是登入完成後永遠等不到、卡滿 5 分鐘 timeout。0.8.0 的 host 白名單也還沒跟上,
+升級解不了。`scripts/login_notebooklm.py` **只改掉那一行偵測**(兩個 host 都收),
+其餘全部重用 SDK helper,產出的 storage_state 與原生指令等價。
+**已認證的 RPC 仍走舊網域且正常**,壞的只有登入這段。上游修好時
+`tests/test_contracts.py::test_login_script_should_be_retired_once_upstream_knows_the_new_host`
+會紅,提醒把這支刪掉。**若哪天 API 端點也搬家,notebooklm-py 會整個壞、我們跟著壞** —— 那是要盯的頭號上游風險。
+
+**CLI 一律走 `uv run notebooklm`,不要另外裝全域版**:全域安裝會與 repo pin 的版本悄悄
+漂開。2026-08 踩過一次:pipx 的全域版停在 **0.3.2**,`profile` 子指令不存在,而且對現行
+認證一律回 `Authentication expired or invalid` —— 那個訊息會把人誤導成「NotebookLM 搬
+網域了」,實際只是 CLI 太舊(**同一份 storage_state 用 0.7.3 就正常**)。那份全域安裝已
+移除,PATH 上不再有 `notebooklm`;`uv run` 保證用的是 pin 的版本。
+
+**真實驗收走測試帳號,不要打主力帳號**(會污染正式資料、且共用同一份每日生成配額):
+獨立 Google 帳號 + Doppler `notebooklm/stg` + **另一組 `PODCAST_TOKEN_SALT`**(salt 不同 ⇒
+測試 feed 落在完全不同的 URL 空間,而 uploader 不刪檔,所以「不要撞」比「事後清」重要)。
+一次性設定與登入流程見 [docs/test-account.md](docs/test-account.md)。
 
 ## Architecture
 
@@ -123,7 +143,9 @@ bash scripts/sync-auth.sh              # 推到 Doppler，所有 VM 下次啟動
     的佔位符 → headless Chrome 光柵化 → RGB JPEG → `validate_artwork`;template 由 agy 設計、已凍結
   - `assets/cover_episode.html` / `cover_show.html` — agy 設計、固化的封面 HTML template(隨 wheel 打包)
 - `tests/test_contracts.py` — 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API,擋上游漂移(離線 tripwire)
-- `scripts/` — `check_skill_sync.py`(CI 用:MCP 工具名 ⟷ skill 文件同步硬檢查)、`sync-auth.sh`(登入機推 Doppler)
+- `scripts/` — `check_skill_sync.py`(CI 用:MCP 工具名 ⟷ skill 文件同步硬檢查)、`sync-auth.sh`
+  (登入機推 Doppler;`--profile/--config` 可指向測試帳號)、`setup-test-config.sh`(建
+  `notebooklm/stg` 測試 config)、`backfill_published_at.py`(published_at 一次性回填)
 - `docs/adr/` — 能力邊界決策。**砍掉已規劃的 scope 也要留一支**:2026-06-07 redesign design doc
   的工具清單裡本來就有 `research_start` / `research_wait_import`,實作時掉了、沒有任何決策記錄,
   結果整個 research namespace 隱形了 38 集(ADR-0008 補記)

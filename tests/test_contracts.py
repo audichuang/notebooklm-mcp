@@ -326,3 +326,33 @@ def test_research_task_and_source_fields():
     assert {ResearchStatus.COMPLETED, ResearchStatus.IN_PROGRESS,
             ResearchStatus.FAILED, ResearchStatus.NOT_FOUND} <= set(ResearchStatus)
     assert ResearchSource(url="u", title="t").is_report is False
+
+
+# ---- 暫時的登入替代腳本(scripts/login_notebooklm.py)的兩道 tripwire ------------
+# 背景:2026-08 Google 把未認證的登入流程轉到 notebook.google.com,而 SDK 的登入偵測
+# 寫死等舊 host,於是 `notebooklm login` 永遠等不到。我們用 scripts/login_notebooklm.py
+# 暫代(只改那一行偵測,其餘重用 SDK helper)。下面兩條分別鎖「還能用」與「該退場了」。
+
+def test_login_script_still_has_the_sdk_helpers_it_borrows():
+    """替代腳本刻意直接用 SDK 內部 helper,好讓產出的 storage_state 與 `notebooklm login`
+    逐字等價(cookie domain 過濾、原子寫檔、帳號 metadata)。上游改名這裡就要紅——
+    那代表替代腳本會在使用者登入到一半時 ImportError。"""
+    from notebooklm.cli.services.playwright_login import (  # noqa: F401
+        GOOGLE_ACCOUNTS_URL,
+        ensure_chromium_installed,
+        filter_storage_state_cookies_by_domain_policy,
+        repair_playwright_account_metadata,
+    )
+    from notebooklm.io import atomic_write_json  # noqa: F401
+    from notebooklm.paths import get_browser_profile_dir, get_storage_path  # noqa: F401
+
+
+def test_login_script_should_be_retired_once_upstream_knows_the_new_host():
+    """**廢棄觸發器**:上游把 notebook.google.com 納入白名單的那天,這條會紅。
+    紅了就照 scripts/login_notebooklm.py 的「廢棄條件」把它刪掉、改回
+    `uv run notebooklm login`,並清掉 docs/test-account.md 的對應段落。"""
+    from notebooklm._env import _ALLOWED_BASE_HOSTS
+
+    assert "notebook.google.com" not in _ALLOWED_BASE_HOSTS, (
+        "上游已認得 notebook.google.com —— scripts/login_notebooklm.py 可以退場了"
+    )

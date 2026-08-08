@@ -1,26 +1,63 @@
 #!/usr/bin/env bash
 # sync-auth.sh — 必須流程：將 notebooklm login 產生的認證資料同步到 Doppler
-# 這是 3 台 VM 共用 NOTEBOOKLM_AUTH_JSON 唯讀認證的真相來源。
+# 這是多台 VM 共用 NOTEBOOKLM_AUTH_JSON 唯讀認證的真相來源。
 #
 # 用法：
-#   notebooklm login          # 先登入
-#   bash scripts/sync-auth.sh # 推送到 Doppler
+#   notebooklm login                          # 先登入（主力帳號）
+#   bash scripts/sync-auth.sh                 # 推送到 Doppler notebooklm/dev
+#
+#   # 測試帳號（與主力帳號完全隔離，見 docs/test-account.md）
+#   notebooklm profile create test
+#   notebooklm -p test login                  # 用「測試用 Google 帳號」登入
+#   bash scripts/sync-auth.sh --profile test --config stg
+#
+# 參數（都有預設值，不傳＝維持原本的主力帳號行為）：
+#   --config <name>    Doppler config，預設 dev
+#   --profile <name>   notebooklm named profile，預設用 default profile 的 storage_state
+#   --storage <path>   直接指定 storage_state.json（覆蓋 --profile 推導）
 #
 # 前置條件：
 #   - doppler CLI 已安裝且已登入 (doppler me)
-#   - notebooklm-py 已安裝且已登入 (notebooklm login)
+#   - notebooklm-py 已安裝且該 profile 已登入
 
 set -euo pipefail
 
 PROJECT="notebooklm"
 CONFIG="dev"
+PROFILE=""
+STORAGE_PATH=""
 
-# 解析 storage_state.json 路徑
-STORAGE_PATH="${NOTEBOOKLM_HOME:-$HOME/.notebooklm}/storage_state.json"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)  CONFIG="$2";  shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
+    --storage) STORAGE_PATH="$2"; shift 2 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    *) echo "❌ 未知參數：$1（用 --help 看用法）"; exit 2 ;;
+  esac
+done
+
+# 解析 storage_state.json 路徑。named profile 落在 profiles/<name>/ 底下（SDK 慣例），
+# 這正是「測試帳號不會蓋掉主力帳號本機認證」的關鍵——兩個帳號各自一個目錄。
+NBLM_HOME="${NOTEBOOKLM_HOME:-$HOME/.notebooklm}"
+if [[ -z "$STORAGE_PATH" ]]; then
+  if [[ -n "$PROFILE" ]]; then
+    STORAGE_PATH="$NBLM_HOME/profiles/$PROFILE/storage_state.json"
+  else
+    STORAGE_PATH="$NBLM_HOME/storage_state.json"
+  fi
+fi
 
 if [[ ! -f "$STORAGE_PATH" ]]; then
   echo "❌ 找不到 $STORAGE_PATH"
-  echo "   請先執行 notebooklm login"
+  if [[ -n "$PROFILE" ]]; then
+    # 一律寫 `uv run notebooklm`:PATH 上不該有全域安裝(會與 repo pin 的版本漂開,
+    # 2026-08 踩過 0.3.2 誤報 auth expired 那次),uv run 才保證是 pin 的版本。
+    echo "   請先在 repo 目錄執行：uv run notebooklm profile create $PROFILE"
+    echo "                         uv run notebooklm -p $PROFILE login"
+  else
+    echo "   請先在 repo 目錄執行：uv run notebooklm login"
+  fi
   exit 1
 fi
 
@@ -32,14 +69,15 @@ fi
 
 # 確認專案存在，不存在就建立
 if ! doppler secrets -p "$PROJECT" -c "$CONFIG" &>/dev/null 2>&1; then
-  echo "📦 Doppler 專案 '$PROJECT' 不存在，正在建立..."
-  doppler projects create "$PROJECT" --description "NotebookLM Google OAuth session"
+  echo "❌ Doppler config 不存在：$PROJECT/$CONFIG"
+  echo "   先建好 config（測試帳號用 stg，見 docs/test-account.md），或改傳 --config"
+  exit 1
 fi
 
 # 讀取 JSON 並推送到 Doppler
 AUTH_JSON=$(cat "$STORAGE_PATH")
 
-echo "📤 正在同步認證到 Doppler (project=$PROJECT, config=$CONFIG)..."
+echo "📤 正在同步認證到 Doppler (project=$PROJECT, config=$CONFIG, 來源=$STORAGE_PATH)..."
 echo "$AUTH_JSON" | doppler secrets set NOTEBOOKLM_AUTH_JSON --raw -p "$PROJECT" -c "$CONFIG"
 
 # 驗證
