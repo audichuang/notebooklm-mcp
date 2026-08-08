@@ -412,6 +412,12 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - 全程繁體中文註解/文件。TDD:測試先紅再綠,每任務一 commit。
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
 - 不污染 `_research/`(唯讀參考 clone)。
+- **大型修復輪派 agent 時:Sonnet 實作 → Opus 審查 → 主模型裁決**(採納/駁回 findings、
+  最終驗證、commit 留在主迴圈)。這個分層被實績驗證過:Opus 抓到的正是本 repo 反覆出現的
+  **「補一半」**——guard 放進上傳迴圈內、`except Exception` 漏掉 `CancelledError`、
+  測試只鎖三個 handler 之一。兩條操作紀律:①**同一個檔案不可讓兩個 agent 並行編輯**,
+  按檔案分區,小雜項主迴圈自己 inline 改;②修正輪要把「審查者的具體建議 + 裁決取捨」
+  寫進 agent prompt,別讓它重新發明一次。
 
 ## Cross-Repo Sync Checklist
 
