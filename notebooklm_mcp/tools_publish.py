@@ -9,6 +9,7 @@ uploader never deletes", a reader on the public read port never sees a feed.xml
 that points at a missing enclosure."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -17,10 +18,13 @@ import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
+from urllib.parse import urlsplit
 
 import httpx
+from mcp.types import ToolAnnotations
 
 from . import runtime
+from ._atomic import download_atomically
 from .manifest_store import ManifestStore
 from .app import mcp
 from .publish import artwork as artwork_mod
@@ -46,6 +50,19 @@ def _require_env(name: str) -> str:
     return val
 
 
+def _require_url_env(name: str) -> str:
+    """讀 env 且驗證 scheme 是 http(s)。**這不是在防 bearer token 外洩**——httpx 對
+    非 http/https scheme 本來就在開 socket 前先丟 `UnsupportedProtocol`,token 從未
+    送出去;這裡純粹是把那個原生例外換成講得清楚「哪個環境變數打錯了」的設定錯誤,
+    讓打錯字這種最粗糙的失誤在讀 env 當下就 fail-fast,不必等到 `_auth_precheck`
+    真的發 GET 才炸。訊息只印 scheme,不印(可能是內網的)URL 本身。"""
+    val = _require_env(name)
+    scheme = urlsplit(val).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError(f"{name} must use http(s), got scheme {scheme!r}")
+    return val
+
+
 def _require_media_binaries() -> None:
     missing = [
         binary for binary in ("ffprobe", "ffmpeg")
@@ -64,7 +81,7 @@ def _make_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_TIMEOUT)
 
 
-async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None) -> str:
+async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None, staging_dir: str) -> str:
     """Local path to the episode mp3. If the manifest's mp3_path is gone
     (output_dir cleaned), re-download via artifact_id; else fail-fast.
 
@@ -85,16 +102,36 @@ async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None) -> str:
             f"episode {ep.get('episode')}: mp3_path missing and no notebook_id to re-download from "
             "(add per-episode notebook_id to the manifest entry, or pass notebook_id to publish_series)"
         )
-    staging = path or os.path.join(
-        os.environ.get("TMPDIR", "/tmp"), f"ep{ep['episode']:02d}.mp3"
-    )
-    os.makedirs(os.path.dirname(staging), exist_ok=True)
+    # 既有 mp3_path 就地換檔;沒有時放進呼叫端傳入的 staging_dir(publish_series 用
+    # TemporaryDirectory 包住整個 preflight+上傳段,離開自動清除——不留無界累積的目錄)。
+    staging = path or os.path.join(staging_dir, f"ep{ep['episode']:02d}.mp3")
+    # 取代版的 mp3 一律落在 `attempts/<attempt_id>/`,那層目錄最容易被清掉(把 manifest
+    # 搬到另一台發布機也一樣);`download_atomically` 在 dirname(final) 裡 mkstemp,父目錄
+    # 不在就直接 FileNotFoundError——而「mp3 不見了就重抓」正是本函式宣稱要處理的情境。
+    os.makedirs(os.path.dirname(staging) or ".", exist_ok=True)
     client = runtime.get_client()
-    await client.artifacts.download_audio(notebook_id, staging, artifact_id)
-    if not (os.path.exists(staging) and os.path.getsize(staging) > 0):
+    try:
+        # 固定檔名的下載一律原子換檔(同 slides/report 的 _finish_slides/_finish_report):
+        # temp → 驗非空 → fsync → os.replace。誠實講:實裝 notebooklm-py 0.7.3 的
+        # download_url 本來就是 mkstemp → 空檔案就 raise → os.replace,不會把半份檔案
+        # 直接寫進我們給的 dest——「partial file 頂替既有完整 mp3」這個情境目前只有
+        # 測試用的假 client(故意先寫半份 bytes 再 raise)能重現,不是觀察到的真實
+        # SDK 行為。這層外層 guard 防的是「SDK 未來換行為」或「未來換成非 SDK 的寫入
+        # 路徑」,belt-and-suspenders,不是在修一個目前存在的真實 bug。
+        await download_atomically(
+            staging,
+            lambda dest: client.artifacts.download_audio(notebook_id, dest, artifact_id),
+            lambda _dest: None,   # 內容格式交給後面 _embed_cover 的 ffprobe 驗
+        )
+    except ValueError as exc:
+        # 只攔 _atomic 的「空檔案」語意(download_atomically 唯一會丟的 ValueError 形狀)。
+        # 原本 `except ValueError` 連 download_audio 自己的 ValueError(artifact 不存在等)
+        # 都改寫成「produced no file」,誤導診斷——那些要原樣往上拋。
+        if "downloaded file is empty" not in str(exc):
+            raise
         raise ValueError(
             f"episode {ep.get('episode')}: re-download via artifact {artifact_id} produced no file"
-        )
+        ) from exc
     return staging
 
 
@@ -102,7 +139,10 @@ async def _auth_precheck(client, base: str, upload_token: str) -> None:
     """Probe GET /healthz WITH the bearer before sending any big mp3, so a wrong
     token (or a PODCAST_UPLOAD_URL mis-pointed at the read-only Caddy) fails fast
     instead of surfacing as a mid-PUT connection reset. Require BOTH 200 AND the
-    uploader's marker header — Caddy's /healthz also returns 200 but lacks it."""
+    uploader's marker header — Caddy's /healthz also returns 200 but lacks it.
+
+    scheme 合法性(http/https)由呼叫端 `_require_url_env` 在讀 env 當下就驗過,這裡
+    不重複做;故意不做 host allowlist(過度工程,且合法用途本來就允許任意內網 host)。"""
     r = await client.get(f"{base}/healthz",
                          headers={"Authorization": f"Bearer {upload_token}"})
     if r.status_code != 200 or r.headers.get("X-Podcast-Uploader") != "1":
@@ -174,9 +214,19 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
                      "-c:a", "libmp3lame", "-b:a", "256k", "-ar", "44100", "-ac", "2",
                      tmp],
                     check=True,
+                    timeout=600,   # ffprobe(30s)/Chrome(180s)都有 timeout,這是唯一沒有的
                 )
             except FileNotFoundError as exc:
                 raise ValueError("ffmpeg is required to normalize podcast audio") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise ValueError(f"ffmpeg normalization timed out after 600s: {mp3_path}") from exc
+            except subprocess.CalledProcessError as exc:
+                # 與上面 ffprobe 的錯誤契約一致(那邊也是把 subprocess 失敗轉成帶訊息的
+                # ValueError):ffmpeg 非 0 退出碼時 raise,別讓原生 CalledProcessError
+                # 往外傳。
+                raise ValueError(
+                    f"ffmpeg normalization failed (returncode={exc.returncode}): {mp3_path}"
+                ) from exc
 
         try:
             tags = ID3(tmp)
@@ -216,7 +266,7 @@ def _audio_duration_hms(path: str) -> str | None:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def publish_series(
     manifest_path: str,
     show_id: str | None = None,
@@ -252,9 +302,17 @@ async def publish_series(
     明講整季不做某一項時才關掉對應那個。
 
     完整參數/回傳/preflight 涵蓋範圍見 skill ``references/tool-reference.md``。"""
-    base_url = _require_env("PODCAST_PUBLIC_BASE_URL")
+    base_url = _require_url_env("PODCAST_PUBLIC_BASE_URL")
+    # return_episodes 只是回傳過濾器,但舊版拖到所有 PUT + manifest 回寫都完成後才
+    # `set(return_episodes)`——傳個 [[1]] 之類的壞型別會在「發布其實已成功」之後才
+    # unhashable TypeError,呼叫端誤以為整批失敗。任何遠端副作用前先驗掉。
+    if return_episodes is not None and not all(
+        isinstance(n, int) and not isinstance(n, bool) for n in return_episodes
+    ):
+        raise ValueError("return_episodes must be a list of ints")
+
     salt = _require_env("PODCAST_TOKEN_SALT")
-    upload_url = _require_env("PODCAST_UPLOAD_URL").rstrip("/")
+    upload_url = _require_url_env("PODCAST_UPLOAD_URL").rstrip("/")
     upload_token = _require_env("PODCAST_UPLOAD_TOKEN")
 
     # show 設定解析:顯式參數 > manifest["show"] 既存值;七欄缺一即 fail-fast。
@@ -349,6 +407,12 @@ async def publish_series(
             raise ValueError(f"episode {n}: description is required (真 show notes,不可空白)")
         if desc == ep["title"].strip():
             raise ValueError(f"episode {n}: description must not equal title (需真 show notes)")
+        # render_episode_notes_html 對 script/外部資源(markdown 圖片、javascript: 連結)
+        # fail-closed,那是本機可預判的 deterministic 失敗,不該等到前幾集 PUT 完才爆
+        # (與下面 report_md_path 的 render_report_html 預渲染同一理由)。這裡丟棄回傳值
+        # ——guard 只掃 notes 本身的 body,attachments 對它無影響,迴圈內仍會帶
+        # attachments 重新渲染一次真正要上傳的 HTML。
+        notes_html.render_episode_notes_html(desc, [])
         # 附件 requirement + 已填路徑的存在性都在這裡驗完。存在性檢查原本在上傳迴圈
         # 內(舊 :385/:397),後面某集缺檔會讓前面幾集的 mp3/封面已經 PUT 到 NAS,
         # 違反本迴圈上方註解自己宣告的「任何 upload 之前驗完」不變式。
@@ -366,139 +430,153 @@ async def publish_series(
             if path and not (os.path.exists(path) and os.path.getsize(path) > 0):
                 raise ValueError(f"episode {n}: {key} missing file: {path}")
 
-    _require_media_binaries()
+    # 用單次 run 專屬的 staging 目錄裝重抓的 mp3(見 _ensure_local_mp3):
+    # os.replace 換的是目的路徑本身,symlink 攻擊面在最終路徑,不在暫存目錄的檔案
+    # mode——固定檔名不是覆寫面。TemporaryDirectory 預設 0700 解的是另一件事:未發布
+    # 的音檔以 0644 落在共用 /tmp 會被同機其他本機帳號讀到,0700 只讓這個 process 的
+    # owner 進得去。舊版每次缺檔用 mkdtemp() 各留一個目錄,沒人清、無界累積;這裡改成
+    # with 包住整段 preflight+上傳,離開(含例外)自動清乾淨。
+    with tempfile.TemporaryDirectory(prefix="notebooklm-mp3-") as staging_dir:
+        _require_media_binaries()
 
-    # 每集 mp3 在任何 PUT 之前 resolve 成真正存在的本機檔(缺檔就在這裡完成 NotebookLM
-    # 重抓)。只驗 artifact_id 不夠:_ensure_local_mp3 還要 notebook_id,而且遠端下載
-    # 本身可能失敗——舊版在上傳迴圈內才 resolve,EP05 重抓失敗會讓 EP01–04 的
-    # mp3/封面已經落在 NAS 上。dict 只存路徑,不把整季音訊載進 RAM。
-    resolved_mp3: dict[int, str] = {}
-    for ep in manifest_eps:
-        resolved_mp3[int(ep["episode"])] = await _ensure_local_mp3(ep, notebook_id)
+        # 每集 mp3 在任何 PUT 之前 resolve 成真正存在的本機檔(缺檔就在這裡完成 NotebookLM
+        # 重抓)。只驗 artifact_id 不夠:_ensure_local_mp3 還要 notebook_id,而且遠端下載
+        # 本身可能失敗——舊版在上傳迴圈內才 resolve,EP05 重抓失敗會讓 EP01–04 的
+        # mp3/封面已經落在 NAS 上。dict 只存路徑,不把整季音訊載進 RAM。
+        resolved_mp3: dict[int, str] = {}
+        for ep in manifest_eps:
+            resolved_mp3[int(ep["episode"])] = await _ensure_local_mp3(ep, notebook_id, staging_dir)
 
-    # 講義 HTML 也預先渲染:render_report_html 命中 script/外部資源會 fail-closed,
-    # 那是本機可預判的 deterministic 失敗,不該等到前幾集 PUT 完才爆。Markdown 渲染
-    # 後通常幾十 KB,整季加總遠小於單一 mp3,不構成 RAM 壓力。
-    rendered_reports: dict[int, bytes] = {}
-    for ep in manifest_eps:
-        rpath = ep.get("report_md_path")
-        if rpath:
-            with open(rpath, encoding="utf-8") as f:
-                rendered_reports[int(ep["episode"])] = notes_html.render_report_html(
-                    f.read(), ep["title"]
-                ).encode("utf-8")
-    # One mp3 in RAM at a time: read -> hash -> PUT -> drop. NEVER accumulate the
-    # whole season (8-12 episodes x tens of MB = 300-600MB resident on a possibly
-    # small VM). 講義 HTML 是刻意的例外(整季幾百 KB,見上方預渲染)。Commit order
-    # still holds: every mp3 + artwork is PUT inside this loop, and
-    # show.json/feed.xml are rendered and PUT only AFTER it.
-    new_eps: dict[str, dict] = {}
-    published = []
-    async with _make_client() as client:
-        await _auth_precheck(client, upload_url, upload_token)
-
-        for ep in manifest_eps:                                    # 1) media: mp3
-            n = int(ep["episode"])
-            local = resolved_mp3[n]                                # preflight 已 resolve
-            # 正規化成 true MP3 並內嵌 ID3/APIC:Apple/Spotify 常優先吃音檔內嵌圖,
-            # 不是 feed 的 <item> itunes:image。正規化/內嵌後 bytes 變 → content-hash/URL
-            # 變(預期一次性 churn,uploader 不刪舊 URL)。cover_path 已 preflight。
-            mp3_bytes = _embed_cover(local, ep["cover_path"])
-            mp3_len = len(mp3_bytes)                                # enclosure length 用內嵌後大小
-            hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]      # hash 內嵌後 bytes
-            mfile = media_filename(n, hash8)
-            await _put(client, upload_url, token, upload_token, mfile, mp3_bytes)
-            del mp3_bytes
-
-            # 1a) media: 單集封面(每集必做,preflight 已驗存在 + Apple 規格:方形
-            #     1400–3000px、RGB、無 alpha)。content-addressed;這裡重讀一次取格式定副檔名。
-            cpath = ep["cover_path"]
-            c_info = artwork_mod.validate_artwork(cpath)
-            with open(cpath, "rb") as f:
-                cover_bytes = f.read()
-            c_ext = "jpg" if c_info["format"] == "JPEG" else "png"
-            ep_artwork_file = cover_filename(n, hashlib.sha256(cover_bytes).hexdigest()[:8], c_ext)
-            await _put(client, upload_url, token, upload_token, ep_artwork_file, cover_bytes)
-            del cover_bytes
-
-            # 1b) media: 附件(簡報 PDF / 研讀講義 HTML),content-addressed,公開 URL
-            #     append 到單集 description。requirement 與缺檔都已在 preflight 擋掉;
-            #     這裡的檢查留作 defensive assertion(不 re-download)。
-            base_pub = base_url.rstrip("/")
-            desc_base = ep["description"].strip()   # preflight 已保證非空且不等於標題
-            attachments: list[tuple[str, str, str]] = []   # (emoji, label, url)
-            pdf_url = None      # 回傳給呼叫端,免其事後逆向 content-hash 檔名
-            html_url = None
-
-            spath = ep.get("slides_pdf_path")
-            if spath:
-                if not (os.path.exists(spath) and os.path.getsize(spath) > 0):
-                    raise ValueError(f"episode {n}: slides_pdf_path missing file: {spath}")
-                with open(spath, "rb") as f:
-                    pdf_bytes = f.read()
-                pfile = attachment_filename(n, hashlib.sha256(pdf_bytes).hexdigest()[:8], "pdf")
-                pdf_url = f"{base_pub}/feeds/{token}/{pfile}"
-                await _put(client, upload_url, token, upload_token, pfile, pdf_bytes)
-                attachments.append(("📄", "本集簡報 (PDF)", pdf_url))
-                del pdf_bytes
-
+        # 講義 HTML 也預先渲染:render_report_html 命中 script/外部資源會 fail-closed,
+        # 那是本機可預判的 deterministic 失敗,不該等到前幾集 PUT 完才爆。Markdown 渲染
+        # 後通常幾十 KB,整季加總遠小於單一 mp3,不構成 RAM 壓力。
+        rendered_reports: dict[int, bytes] = {}
+        for ep in manifest_eps:
             rpath = ep.get("report_md_path")
             if rpath:
-                if not (os.path.exists(rpath) and os.path.getsize(rpath) > 0):
-                    raise ValueError(f"episode {n}: report_md_path missing file: {rpath}")
-                html_bytes = rendered_reports[n]                    # preflight 已渲染 + 驗過
-                hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
-                html_url = f"{base_pub}/feeds/{token}/{hfile}"
-                await _put(client, upload_url, token, upload_token, hfile, html_bytes)
-                del html_bytes                                     # 只放掉區域名稱(正本在 rendered_reports)
-                attachments.append(("📖", "研讀講義", html_url))
+                with open(rpath, encoding="utf-8") as f:
+                    rendered_reports[int(ep["episode"])] = notes_html.render_report_html(
+                        f.read(), ep["title"]
+                    ).encode("utf-8")
+        # One mp3 in RAM at a time: read -> hash -> PUT -> drop. NEVER accumulate the
+        # whole season (8-12 episodes x tens of MB = 300-600MB resident on a possibly
+        # small VM). 講義 HTML 是刻意的例外(整季幾百 KB,見上方預渲染)。Commit order
+        # still holds: every mp3 + artwork is PUT inside this loop, and
+        # show.json/feed.xml are rendered and PUT only AFTER it.
+        new_eps: dict[str, dict] = {}
+        published = []
+        async with _make_client() as client:
+            await _auth_precheck(client, upload_url, upload_token)
 
-            # 純文字 <description>(fallback,含裸 URL)+ 富文字 <content:encoded>
-            # (Apple/Overcast/Pocket Casts 優先渲染:條列 + 具名連結,不裸露長 URL)。
-            desc = desc_base
-            if attachments:
-                desc += "\n\n" + "\n".join(f"{e} {label}:{u}" for e, label, u in attachments)
-            desc_html = notes_html.render_episode_notes_html(desc_base, attachments)
+            for ep in manifest_eps:                                    # 1) media: mp3
+                n = int(ep["episode"])
+                local = resolved_mp3[n]                                # preflight 已 resolve
+                # 正規化成 true MP3 並內嵌 ID3/APIC:Apple/Spotify 常優先吃音檔內嵌圖,
+                # 不是 feed 的 <item> itunes:image。正規化/內嵌後 bytes 變 → content-hash/URL
+                # 變(預期一次性 churn,uploader 不刪舊 URL)。cover_path 已 preflight。
+                # ffmpeg 轉檔屬於昂貴同步 I/O,丟到 thread 別卡住事件迴圈(同 tools_basic.py
+                # :159-161 對便宜檔案 I/O 的理由,這裡代價更高:整季逐集轉檔期間其他工具與
+                # protocol ping 都會無回應)。用裸名稱查找(不先綁 local 變數),讓測試的
+                # autouse monkeypatch seam(`monkeypatch.setattr(tools_publish, "_embed_cover", …)`)
+                # 繼續有效——模組全域在呼叫當下才查名字,monkeypatch 換掉的正是這個全域。
+                mp3_bytes = await asyncio.to_thread(_embed_cover, local, ep["cover_path"])
+                mp3_len = len(mp3_bytes)                                # enclosure length 用內嵌後大小
+                hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]      # hash 內嵌後 bytes
+                mfile = media_filename(n, hash8)
+                await _put(client, upload_url, token, upload_token, mfile, mp3_bytes)
+                del mp3_bytes
 
-            new_eps[str(n)] = {
-                "title": ep["title"],
-                "description": desc,
-                "description_html": desc_html,
-                "guid": identity.episode_guid(show_id, n),
-                "pub_date": ep.get("published_at") or _fallback_pub_date(n),
-                "media_file": mfile,
-                "length": mp3_len,   # 內嵌封面後的大小(mp3_bytes 已 del)
+                # 1a) media: 單集封面(每集必做,preflight 已驗存在 + Apple 規格:方形
+                #     1400–3000px、RGB、無 alpha)。content-addressed;這裡重讀一次取格式定副檔名。
+                cpath = ep["cover_path"]
+                c_info = artwork_mod.validate_artwork(cpath)
+                with open(cpath, "rb") as f:
+                    cover_bytes = f.read()
+                c_ext = "jpg" if c_info["format"] == "JPEG" else "png"
+                ep_artwork_file = cover_filename(n, hashlib.sha256(cover_bytes).hexdigest()[:8], c_ext)
+                await _put(client, upload_url, token, upload_token, ep_artwork_file, cover_bytes)
+                del cover_bytes
+
+                # 1b) media: 附件(簡報 PDF / 研讀講義 HTML),content-addressed,公開 URL
+                #     append 到單集 description。requirement 與缺檔都已在 preflight 擋掉;
+                #     這裡的檢查留作 defensive assertion(不 re-download)。
+                base_pub = base_url.rstrip("/")
+                desc_base = ep["description"].strip()   # preflight 已保證非空且不等於標題
+                attachments: list[tuple[str, str, str]] = []   # (emoji, label, url)
+                pdf_url = None      # 回傳給呼叫端,免其事後逆向 content-hash 檔名
+                html_url = None
+
+                spath = ep.get("slides_pdf_path")
+                if spath:
+                    if not (os.path.exists(spath) and os.path.getsize(spath) > 0):
+                        raise ValueError(f"episode {n}: slides_pdf_path missing file: {spath}")
+                    with open(spath, "rb") as f:
+                        pdf_bytes = f.read()
+                    pfile = attachment_filename(n, hashlib.sha256(pdf_bytes).hexdigest()[:8], "pdf")
+                    pdf_url = f"{base_pub}/feeds/{token}/{pfile}"
+                    await _put(client, upload_url, token, upload_token, pfile, pdf_bytes)
+                    attachments.append(("📄", "本集簡報 (PDF)", pdf_url))
+                    del pdf_bytes
+
+                rpath = ep.get("report_md_path")
+                if rpath:
+                    if not (os.path.exists(rpath) and os.path.getsize(rpath) > 0):
+                        raise ValueError(f"episode {n}: report_md_path missing file: {rpath}")
+                    html_bytes = rendered_reports[n]                    # preflight 已渲染 + 驗過
+                    hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
+                    html_url = f"{base_pub}/feeds/{token}/{hfile}"
+                    await _put(client, upload_url, token, upload_token, hfile, html_bytes)
+                    del html_bytes                                     # 只放掉區域名稱(正本在 rendered_reports)
+                    attachments.append(("📖", "研讀講義", html_url))
+
+                # 純文字 <description>(fallback,含裸 URL)+ 富文字 <content:encoded>
+                # (Apple/Overcast/Pocket Casts 優先渲染:條列 + 具名連結,不裸露長 URL)。
+                desc = desc_base
+                if attachments:
+                    desc += "\n\n" + "\n".join(f"{e} {label}:{u}" for e, label, u in attachments)
+                desc_html = notes_html.render_episode_notes_html(desc_base, attachments)
+
+                new_eps[str(n)] = {
+                    "title": ep["title"],
+                    "description": desc,
+                    "description_html": desc_html,
+                    "guid": identity.episode_guid(show_id, n),
+                    "pub_date": ep.get("published_at") or _fallback_pub_date(n),
+                    "media_file": mfile,
+                    "length": mp3_len,   # 內嵌封面後的大小(mp3_bytes 已 del)
+                }
+                # ffprobe 是同步 subprocess,跟上面的 _embed_cover 同理丟到 thread,別讓
+                # 整季逐集探測期間卡住事件迴圈。
+                duration = await asyncio.to_thread(_audio_duration_hms, local)
+                if duration:
+                    new_eps[str(n)]["duration"] = duration
+                new_eps[str(n)]["artwork_file"] = ep_artwork_file   # 每集必做,一定有單集封面
+                published.append({
+                    "n": n, "title": ep["title"], "guid": new_eps[str(n)]["guid"],
+                    "url": f"{base_pub}/feeds/{token}/{mfile}",
+                    "cover_url": f"{base_pub}/feeds/{token}/{ep_artwork_file}",
+                    "pdf_url": pdf_url,     # None 若該集無簡報
+                    "html_url": html_url,   # None 若該集無講義
+                    "duration": duration,   # 對帳用(HH:MM:SS;ffprobe 失敗為 None),免再抓整份 feed
+                })
+
+            await _put(client, upload_url, token, upload_token,         # 1) media: artwork
+                       artwork_file, art_bytes)                         # bytes 已在 preflight 讀好
+
+            show = {
+                "show_id": show_id, "token": token, "notebook_id": notebook_id,
+                "title": show_title.strip(), "description": show_description,
+                "language": "zh-Hant", "author": author,
+                "owner_name": owner_name, "owner_email": owner_email,
+                "category": category, "explicit": bool(explicit),
+                "artwork_file": artwork_file, "episodes": new_eps,
             }
-            duration = _audio_duration_hms(local)
-            if duration:
-                new_eps[str(n)]["duration"] = duration
-            new_eps[str(n)]["artwork_file"] = ep_artwork_file   # 每集必做,一定有單集封面
-            published.append({
-                "n": n, "title": ep["title"], "guid": new_eps[str(n)]["guid"],
-                "url": f"{base_pub}/feeds/{token}/{mfile}",
-                "cover_url": f"{base_pub}/feeds/{token}/{ep_artwork_file}",
-                "pdf_url": pdf_url,     # None 若該集無簡報
-                "html_url": html_url,   # None 若該集無講義
-                "duration": duration,   # 對帳用(HH:MM:SS;ffprobe 失敗為 None),免再抓整份 feed
-            })
-
-        await _put(client, upload_url, token, upload_token,         # 1) media: artwork
-                   artwork_file, art_bytes)                         # bytes 已在 preflight 讀好
-
-        show = {
-            "show_id": show_id, "token": token, "notebook_id": notebook_id,
-            "title": show_title.strip(), "description": show_description,
-            "language": "zh-Hant", "author": author,
-            "owner_name": owner_name, "owner_email": owner_email,
-            "category": category, "explicit": bool(explicit),
-            "artwork_file": artwork_file, "episodes": new_eps,
-        }
-        show_json = json.dumps(show, ensure_ascii=False, indent=2).encode("utf-8")
-        await _put(client, upload_url, token, upload_token, "show.json", show_json)    # 2) state
-        await _put(client, upload_url, token, upload_token,                            # 3) derived
-                   "feed.xml", feed_mod.build_feed_xml(show, base_url).encode("utf-8"))
-        await _put(client, upload_url, token, upload_token,
-                   "index.html", feed_mod.build_index_html(show, base_url).encode("utf-8"))
+            show_json = json.dumps(show, ensure_ascii=False, indent=2).encode("utf-8")
+            await _put(client, upload_url, token, upload_token, "show.json", show_json)    # 2) state
+            await _put(client, upload_url, token, upload_token,                            # 3) derived
+                       "feed.xml", feed_mod.build_feed_xml(show, base_url).encode("utf-8"))
+            await _put(client, upload_url, token, upload_token,
+                       "index.html", feed_mod.build_index_html(show, base_url).encode("utf-8"))
 
     # 發布成功才在最新 snapshot 上回寫 show；store lock 不跨上方任何 HTTP await。
     persisted_show = {
@@ -521,7 +599,7 @@ async def publish_series(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def feed_info(show_id: str) -> dict:
     """Deterministic feed identity + public URLs for a show_id. Pure computation
     (token = HMAC(salt, show_id)); the MCP keeps no state, so per-episode detail

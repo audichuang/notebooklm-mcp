@@ -218,6 +218,49 @@ async def test_auth_precheck_runs_before_any_put(env, tmp_path, artwork_png, mon
     assert captured == []  # not a single byte uploaded on a bad precheck
 
 
+def test_require_url_env_rejects_non_http_scheme(monkeypatch):
+    """L5：PODCAST_UPLOAD_URL 若打錯成非 http(s) scheme，要在讀 env 當下(_require_url_env)
+    就給清楚的設定錯誤——不是留給 httpx 在 client.get() 開 socket 前丟原生
+    UnsupportedProtocol(那個原生例外本來就已經防住 token 外洩，scheme check 的價值
+    是「訊息看得懂」，不是多一層安全防線)。"""
+    monkeypatch.setenv("PODCAST_UPLOAD_URL", "ftp://evil.example")
+    with pytest.raises(ValueError, match="http"):
+        tools_publish._require_url_env("PODCAST_UPLOAD_URL")
+
+
+def test_require_url_env_error_does_not_leak_url(monkeypatch):
+    """訊息只印 scheme，不印(可能是內網的)URL 本身。"""
+    monkeypatch.setenv("PODCAST_UPLOAD_URL", "ftp://192.0.2.10:8086/secret-path")
+    with pytest.raises(ValueError) as exc_info:
+        tools_publish._require_url_env("PODCAST_UPLOAD_URL")
+    assert "192.0.2.10" not in str(exc_info.value)
+    assert "ftp" in str(exc_info.value)
+
+
+async def test_publish_rejects_non_http_upload_url_before_any_put(env, tmp_path, artwork_png, monkeypatch):
+    """整合驗證:壞 scheme 的 PODCAST_UPLOAD_URL 在 publish_series 裡於讀 env 當下就
+    raise,連 manifest 都還沒動、更不會發出任何 PUT。"""
+    captured = _install_mock(monkeypatch)
+    monkeypatch.setenv("PODCAST_UPLOAD_URL", "ftp://192.0.2.10:8086")
+    with pytest.raises(ValueError, match="http"):
+        await _publish(_two_episode_manifest(tmp_path), artwork_png)
+    assert captured == []
+
+
+async def test_return_episodes_bad_type_fails_before_any_put(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """`return_episodes` 只是回傳過濾器,但舊版拖到所有 PUT + manifest 回寫都完成後
+    才 `set(return_episodes)`——傳個 [[1]] 之類的壞型別(list 不可 hash)會在「發布其實
+    已成功」之後才 unhashable TypeError,呼叫端誤以為整批失敗。要在任何遠端副作用前
+    就 ValueError。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    with pytest.raises(ValueError, match="return_episodes must be a list of ints"):
+        await _publish(manifest, artwork_png, return_episodes=[[1]])
+    assert captured == []
+
+
 async def test_publish_is_idempotent(env, tmp_path, artwork_png, monkeypatch):
     captured = _install_mock(monkeypatch)
     pub_at = {1: "Wed, 01 Jan 2020 09:00:00 +0800", 2: "Thu, 02 Jan 2020 09:00:00 +0800"}
@@ -777,6 +820,114 @@ def test_embed_cover_reports_missing_ffmpeg(tmp_path, monkeypatch):
         _real_embed(str(src), cover)
 
 
+def test_embed_cover_ffmpeg_call_includes_timeout(tmp_path, monkeypatch):
+    """M4:ffprobe(30s)/Chrome(180s)都有 timeout,ffmpeg 是唯一沒有的外部命令——
+    補上避免卡住的轉檔行程讓整季發布永遠掛著。"""
+    src = tmp_path / "source.mp3"
+    src.write_bytes(b"audio")
+    cover = _valid_cover(tmp_path, "ffmpeg-timeout-cover.jpg")
+    monkeypatch.setattr(
+        tools_publish.subprocess, "check_output",
+        lambda *_a, **_k: json.dumps({
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+            "streams": [{"codec_name": "aac"}],
+        }),
+    )
+    captured_kwargs = {}
+
+    def fake_run(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        raise FileNotFoundError("ffmpeg")   # 沿用既有「找不到 ffmpeg」錯誤路徑
+
+    monkeypatch.setattr(tools_publish.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="ffmpeg.*required"):
+        _real_embed(str(src), cover)
+    assert captured_kwargs.get("timeout") == 600
+
+
+def test_embed_cover_ffmpeg_timeout_raises_value_error(tmp_path, monkeypatch):
+    """ffmpeg 卡住超過 timeout 必須 fail-closed 成 ValueError,與 ffprobe 那支的
+    錯誤契約一致,不是讓原生 subprocess.TimeoutExpired 往外傳。"""
+    src = tmp_path / "source.mp3"
+    src.write_bytes(b"audio")
+    cover = _valid_cover(tmp_path, "ffmpeg-hang-cover.jpg")
+    monkeypatch.setattr(
+        tools_publish.subprocess, "check_output",
+        lambda *_a, **_k: json.dumps({
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+            "streams": [{"codec_name": "aac"}],
+        }),
+    )
+
+    def hanging_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(tools_publish.subprocess, "run", hanging_run)
+
+    with pytest.raises(ValueError, match="ffmpeg.*timed out"):
+        _real_embed(str(src), cover)
+
+
+def test_embed_cover_ffmpeg_nonzero_exit_raises_value_error(tmp_path, monkeypatch):
+    """ffmpeg 非 0 退出碼(check=True 觸發的 CalledProcessError)必須 fail-closed 成
+    ValueError 且帶 returncode,與 ffprobe 那支的錯誤契約一致,不是讓原生
+    subprocess.CalledProcessError 往外傳。"""
+    src = tmp_path / "source.mp3"
+    src.write_bytes(b"audio")
+    cover = _valid_cover(tmp_path, "ffmpeg-nonzero-cover.jpg")
+    monkeypatch.setattr(
+        tools_publish.subprocess, "check_output",
+        lambda *_a, **_k: json.dumps({
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+            "streams": [{"codec_name": "aac"}],
+        }),
+    )
+
+    def failing_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=args[0])
+
+    monkeypatch.setattr(tools_publish.subprocess, "run", failing_run)
+
+    with pytest.raises(ValueError, match="returncode=1"):
+        _real_embed(str(src), cover)
+
+
+async def test_embed_cover_runs_off_event_loop_thread(env, tmp_path, artwork_png, monkeypatch):
+    """M4:整季逐集轉檔期間不能凍住事件迴圈——_embed_cover 必須跑在
+    asyncio.to_thread,不是同步卡在 publish_series 的協程裡(比照
+    tools_basic.py:159-161 對便宜檔案 I/O 的既有理由)。"""
+    import threading
+    _install_mock(monkeypatch)
+    main_thread = threading.current_thread()
+    seen = {}
+
+    def spy(mp3_path, cover_path):
+        seen["thread"] = threading.current_thread()
+        return open(mp3_path, "rb").read()
+
+    monkeypatch.setattr(tools_publish, "_embed_cover", spy)
+    await _publish(_two_episode_manifest(tmp_path), artwork_png)
+    assert seen["thread"] is not main_thread
+
+
+async def test_audio_duration_hms_runs_off_event_loop_thread(env, tmp_path, artwork_png, monkeypatch):
+    """ffprobe 是同步 subprocess,跟 _embed_cover 同理——上傳迴圈內呼叫
+    _audio_duration_hms 必須跑在 asyncio.to_thread,不是同步卡在協程裡。"""
+    import threading
+    _install_mock(monkeypatch)
+    main_thread = threading.current_thread()
+    seen = {}
+
+    def spy(path):
+        seen["thread"] = threading.current_thread()
+        return "00:00:01"
+
+    monkeypatch.setattr(tools_publish, "_audio_duration_hms", spy)
+    await _publish(_two_episode_manifest(tmp_path), artwork_png)
+    assert seen["thread"] is not main_thread
+
+
 async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(
         env, tmp_path, artwork_png, monkeypatch):
     """端到端鎖住發布契約：真 NotebookLM-like MP4/AAC 經 publish_series 後，
@@ -845,6 +996,102 @@ async def test_missing_mp3_prefers_episode_notebook_id(env, tmp_path, artwork_pn
         await _publish(mpath, artwork_png, notebook_id="nb-show-level")
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download")
     assert dl["notebook_id"] == "nb-ep1"            # 不是 nb-show-level
+
+
+async def test_missing_mp3_redownloads_when_parent_directory_is_gone(
+    env, tmp_path, artwork_png, monkeypatch, fake_client
+):
+    """取代版 mp3 落在 `attempts/<attempt_id>/`,那層目錄最容易被整個清掉(或把 manifest
+    搬到另一台發布機)。download_atomically 在 dirname(final) 裡 mkstemp,父目錄不在就
+    FileNotFoundError——而「mp3 不見了就重抓」正是 _ensure_local_mp3 宣稱要處理的情境。"""
+    import json
+    _install_mock(monkeypatch)
+    mpath = _two_episode_manifest(tmp_path)
+    data = json.loads(open(mpath, encoding="utf-8").read())
+    ep1 = data["episodes"][0]
+    os.unlink(ep1["mp3_path"])
+    # 整個 attempts/<id>/ 目錄都不存在,只有 manifest 記得那個路徑
+    ep1["mp3_path"] = str(tmp_path / "attempts" / "att-1" / "ep01.mp3")
+    ep1["artifact_id"] = "a-1"
+    ep1["notebook_id"] = "nb-ep1"
+    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+
+    await _publish(mpath, artwork_png)                  # 不得 FileNotFoundError
+
+    assert os.path.getsize(ep1["mp3_path"]) > 0         # 真的重抓落檔了
+
+
+async def test_download_audio_value_error_propagates_unrewritten(
+    env, tmp_path, artwork_png, monkeypatch, fake_client
+):
+    """download_audio 自己丟的 ValueError(artifact 不存在等)不該被 _ensure_local_mp3
+    改寫成「produced no file」——那個訊息只留給 _atomic 的空檔案語意,否則遠端真正的
+    錯誤原因被蓋掉,誤導診斷。"""
+    import json
+    _install_mock(monkeypatch)
+    mpath = _two_episode_manifest(tmp_path)
+    data = json.loads(open(mpath, encoding="utf-8").read())
+    ep1 = data["episodes"][0]
+    os.unlink(ep1["mp3_path"])
+    ep1["artifact_id"] = "a-1"
+    ep1["notebook_id"] = "nb-ep1"
+    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    fake_client.artifacts.download_audio_exc = ValueError("artifact a-1 not found in notebook nb-ep1")
+    with pytest.raises(ValueError, match="not found in notebook"):
+        await _publish(mpath, artwork_png)
+
+
+async def test_interrupted_mp3_redownload_leaves_no_partial_file(
+    env, tmp_path, artwork_png, monkeypatch, fake_client
+):
+    """M1:重抓 mp3 中斷(寫半個檔就拋例外)必須是原子換檔——最終路徑不得殘留 partial
+    檔,也不得被半份檔案頂替(這裡最終路徑等於「已刪除」的舊 mp3_path)。"""
+    import json
+    _install_mock(monkeypatch)
+    mpath = _two_episode_manifest(tmp_path)
+    data = json.loads(open(mpath, encoding="utf-8").read())
+    ep1 = data["episodes"][0]
+    mp3_path = ep1["mp3_path"]
+    os.unlink(mp3_path)                              # 模擬 output/ 被清掉，需要重抓
+    ep1["artifact_id"] = "a-1"
+    ep1["notebook_id"] = "nb-ep1"
+    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+
+    fake_client.artifacts.download_audio_partial_bytes = b"only-half-a-file"
+    fake_client.artifacts.download_audio_exc = ConnectionError("dropped mid-transfer")
+
+    with pytest.raises(ConnectionError, match="dropped mid-transfer"):
+        await _publish(mpath, artwork_png)
+
+    assert not os.path.exists(mp3_path)               # 沒有半份檔頂替（原檔已刪除）
+    leftovers = [f for f in os.listdir(os.path.dirname(mp3_path)) if f.endswith(".part")]
+    assert leftovers == []                            # temp 檔也清乾淨了
+
+
+async def test_staging_dir_is_cleaned_up_after_publish(env, tmp_path, artwork_png, monkeypatch, fake_client):
+    """staging 目錄由 publish_series 用 TemporaryDirectory 包住整個 preflight+上傳段,
+    離開(成功或例外)都自動清乾淨——不是每次缺檔各自 mkdtemp() 留一個目錄無界累積。"""
+    _install_mock(monkeypatch)
+    mpath = _two_episode_manifest(tmp_path)
+    data = json.loads(open(mpath, encoding="utf-8").read())
+    ep1 = data["episodes"][0]
+    os.unlink(ep1["mp3_path"])                      # 觸發重抓分支,才會用到 staging_dir
+    ep1["artifact_id"] = "a-1"
+    ep1["notebook_id"] = "nb-ep1"
+    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+
+    seen: dict = {}
+    real_ensure = tools_publish._ensure_local_mp3
+
+    async def spy(ep, fallback_notebook_id, staging_dir):
+        seen["dir"] = staging_dir
+        assert os.path.isdir(staging_dir)           # 用到的當下目錄確實存在
+        return await real_ensure(ep, fallback_notebook_id, staging_dir)
+
+    monkeypatch.setattr(tools_publish, "_ensure_local_mp3", spy)
+    await _publish(mpath, artwork_png)
+    assert seen.get("dir")
+    assert not os.path.exists(seen["dir"])           # publish 結束後自動清掉
 
 
 async def test_missing_mp3_without_any_notebook_fails_clearly(env, tmp_path, artwork_png, monkeypatch):
@@ -919,6 +1166,26 @@ async def test_later_episode_report_render_failure_uploads_nothing(env, tmp_path
 
     with pytest.raises(Exception):
         await _publish(manifest, artwork_png, require_slides=True, require_report=True)
+    assert captured == []            # EP01 一個 blob 都沒落地
+
+
+async def test_later_episode_notes_render_failure_uploads_nothing(env, tmp_path, artwork_png, monkeypatch):
+    """render_episode_notes_html 對 markdown 圖片等危險 body fail-closed,那也是本機可
+    預判的失敗,guard 的呼叫點必須在 preflight,不能只在上傳迴圈內——否則 EP01 的
+    mp3/封面會先落到 NAS 上才輪到 EP02 的 description 爆掉。"""
+    captured = _install_mock(monkeypatch)
+    eps = []
+    for n in (1, 2):
+        desc = "![t](https://evil.example/pixel.png)" if n == 2 else f"第{n}集重點整理。"
+        eps.append({
+            "episode": n, "title": f"第{n}集", "description": desc,
+            "mp3_path": _write_mp3(tmp_path, f"notes{n}.mp3", f"audio-{n}".encode()),
+            "cover_path": _valid_cover(tmp_path, f"notes{n}-cover.png"),
+        })
+    manifest = _manifest(tmp_path, eps, "notes_render.json")
+
+    with pytest.raises(ValueError, match="自包含"):
+        await _publish(manifest, artwork_png)
     assert captured == []            # EP01 一個 blob 都沒落地
 
 
