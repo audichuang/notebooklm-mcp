@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -15,6 +16,7 @@ from typing import Any, Callable
 
 from notebooklm.types import ArtifactType
 
+from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE
 from ._atomic import fsync_parent as _fsync_parent
 from ._status import TerminalGenerationError, ensure_completed
 from .manifest_store import ManifestStore
@@ -217,6 +219,20 @@ def _completed_output(
     }
 
 
+def _created_at_utc(value: object) -> datetime | None:
+    """把 Source.created_at 正規化成 aware UTC。
+
+    **notebooklm-py 0.7.x 的 `Source.created_at` 是 host-local naive**
+    (`_datetime_from_timestamp` 走 `datetime.fromtimestamp(value)`,不帶 tz)——舊版
+    reconciliation 直接用 `tzinfo is None` 排除,等於把**實裝 SDK 回來的每一筆** source
+    都濾掉,response-loss 後永遠對不到、卡在 acceptance_unknown。naive 值視為本地時間
+    (`astimezone()` 的預設)轉 UTC:unix timestamp 是絕對時刻,round-trip 回正確 instant。
+    0.8 起改回 aware,這裡對 aware/naive 都正確。"""
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(timezone.utc)
+
+
 async def _reconcile_source_upload(
     client: object,
     store: ManifestStore,
@@ -243,7 +259,7 @@ async def _reconcile_source_upload(
     candidates: list[str] = []
     for source in sources:
         source_id = getattr(source, "id", None)
-        created_at = getattr(source, "created_at", None)
+        created_at = _created_at_utc(getattr(source, "created_at", None))
         if (
             not isinstance(source_id, str)
             or not source_id
@@ -251,11 +267,9 @@ async def _reconcile_source_upload(
             or source_id in claimed
             or _kind_value(getattr(source, "kind", None)) != "media"
             or getattr(source, "title", None) != expected_title
-            or not isinstance(created_at, datetime)
-            or created_at.tzinfo is None
+            or created_at is None
         ):
             continue
-        created_at = created_at.astimezone(timezone.utc)
         if (
             dispatched_at - _SOURCE_CLOCK_SKEW
             <= created_at
@@ -532,6 +546,7 @@ async def finalize_attempt(
             )
 
         _mutate(store, episode_n, attempt_id, download_dispatching)
+        replaced = False
         try:
             await client.artifacts.download_audio(
                 notebook_id, temp_path, artifact_id
@@ -540,18 +555,53 @@ async def finalize_attempt(
             if size <= 0:
                 raise ValueError("downloaded audio is empty")
             digest = _sha256_file(temp_path)
+            # mkstemp 給 0600,os.replace 會把 temp 的 mode 一起帶到最終 mp3——沿用既有
+            # 檔案的 mode,首次下載才用 _NEW_FILE_MODE(對齊 _atomic.download_atomically
+            # 同一做法,fsync 前就要設好)。
+            try:
+                mode = stat.S_IMODE(os.stat(mp3_path).st_mode)
+            except FileNotFoundError:
+                mode = _NEW_FILE_MODE
+            os.chmod(temp_path, mode)
             with open(temp_path, "rb") as handle:
                 os.fsync(handle.fileno())
             os.replace(temp_path, mp3_path)
-            _fsync_parent(mp3_path)
+            replaced = True
         except Exception:
             def download_failed(_episode: dict, current: dict) -> None:
+                # temp_path 這裡就要清掉的檔案,寫回 None 才跟 download_completed 一致
+                # ——留舊路徑會讓稽核欄位說謊(它已經被下面的 finally unlink 掉了)。
                 current["finalize"]["download"].update(
-                    {"status": "failed", "temp_path": temp_path}
+                    {"status": "failed", "temp_path": None}
                 )
 
             _mutate(store, episode_n, attempt_id, download_failed)
             raise
+        finally:
+            # CancelledError 是 BaseException 子類,不會落進上面的 except Exception——
+            # 而 client cancellation(mcporter 預設 60s vs 單集動輒 20 分)正是這條路
+            # 最常見的中斷來源。清理不能只掛在 except Exception 底下,否則每次取消都
+            # 留一份 .part。用涵蓋整段的 finally + replaced flag(manifest_store.py 的
+            # _write 用過的 pattern):os.replace 成功就不用清(temp_path 已經不存在),失敗或
+            # 取消都清掉沒換成功的 partial。cancelled 不寫 "failed" checkpoint——durable
+            # 語意不變:resume 判定只看 status=="completed"(:516-524),"dispatching"
+            # 原地留著,下次會重新從 mkstemp 開始。
+            if not replaced:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+        # directory fsync 是 commit(os.replace)**之後**的事,且在不支援目錄 fsync 的
+        # mount(network/overlay)上會回 EINVAL/ENOTSUP——放進上面的 try 會讓「檔案已換好、
+        # 只是 fsync 不支援」被 except 寫成 status="failed",而 resume 只認 "completed",
+        # 於是每次重下載都在同一行失敗、永遠 finalize 不了。故移到 try 外並容忍那組 errno
+        # (對齊 _atomic.download_atomically 的 post-commit 處理)。
+        try:
+            _fsync_parent(mp3_path)
+        except OSError as exc:
+            if exc.errno not in _DIR_FSYNC_UNSUPPORTED:
+                raise
 
         def download_completed(_episode: dict, current: dict) -> None:
             current["finalize"]["download"].update(

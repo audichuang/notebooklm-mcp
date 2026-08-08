@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
+from mcp.types import ToolAnnotations
 from notebooklm.types import ArtifactType
 
 from . import runtime
@@ -173,6 +174,15 @@ def _create_audio_attempt(
             None,
         )
         if episode is not None:
+            # post-retract 的集用 podcast_episode 傳錯 notebook_id 會造成
+            # episode(nb-A)/attempt(nb-B)身分分裂——`_ensure_resume_attempt` 兩條
+            # 分支都已經有這道 guard,這裡補齊第三個新建 attempt 的入口(逐字對齊
+            # resume 新建分支的寫法與錯誤訊息風格)。
+            existing_notebook = episode.get("notebook_id")
+            if existing_notebook not in (None, notebook_id):
+                raise ValueError(
+                    f"episode {episode_n} belongs to another notebook"
+                )
             legacy_preparatory_output = (
                 not episode.get("attempts")
                 and has_durable_output_evidence(episode)
@@ -673,6 +683,27 @@ def _bind_accepted_artifact(
     store.update(mutate)
 
 
+def _first_published_at(episode: dict) -> str | None:
+    """回頭重生一集時,pubDate 必須是首發時間、不能漂成重生當下(真實事故:
+    saa-drill EP05/EP09——GUID 不變＝同集更新,episodic feed 按 pubDate 倒序,漂移
+    會讓重生集跳到列表前面;RSS 排序假設 pubDate 隨集號遞增,見 tools_publish.py
+    的 fallback 註解)。沿 attempts 建立順序(即 list 的 append 順序)找回第一筆
+    非空的 retracted_output.published_at——那是 retract 當時從 episode 級投影搶救
+    下來的首發時間。取「第一筆非空」而非「第一筆有 retraction」:
+    abandons_unauthorized_candidate 分支(從未 promote 就被作廢的 candidate)留下的
+    retracted_output 是空 dict,必須跳過,不能誤判成「這集從沒發過」。"""
+    for attempt in episode.get("attempts", []):
+        retraction = attempt.get("retraction")
+        if not isinstance(retraction, dict):
+            continue
+        # `or {}` 而非 default {}:手改的 manifest 可能把 retracted_output 寫成 null,
+        # default 只在 key 不存在時生效,擋不住顯式 null(本模組的前提就是手改會發生)。
+        published_at = (retraction.get("retracted_output") or {}).get("published_at")
+        if isinstance(published_at, str) and published_at:
+            return published_at
+    return None
+
+
 def _promote_attempt_output(
     store: ManifestStore,
     episode_n: int,
@@ -698,8 +729,17 @@ def _promote_attempt_output(
         episode["artifact_id"] = output["artifact_id"]
         episode["mp3_path"] = os.path.abspath(output["mp3_path"])
         episode["output_attempt_id"] = attempt_id
-        for key in ("title", "label", "published_at"):
+        for key in ("title", "label"):
             episode.setdefault(key, output[key])
+        # published_at 不能跟 title／label 一樣用 output 自己的 setdefault:output 裡
+        # 那個值是「這次生成完成的時刻」,取代版每一次重生都會不一樣。已驗證的安全
+        # 互動(見上方 _attempt_record 的 tombstone 與 :1867 附近 retract 冪等分支的
+        # ownership guard):取代版 B 帶著 A 的首發時間上任後,對 A 重打冪等 retract
+        # 不會誤刪 B 的投影——那條 guard 只在 output_attempt_id in (None, attempt_id)
+        # 時才動手,B 是現任 output 時整段會跳過。
+        episode.setdefault(
+            "published_at", _first_published_at(episode) or output["published_at"]
+        )
         # episode 級 continuity 證據:attempt 裡的 source_id 是主要真相,但 legacy
         # projection 只認得 episode 級欄位。不寫 feedback_source_adopted_at——那是
         # podcast_attempt_adopt 的人工驗證標記,resume 靠它判斷可否沿用舊 source。
@@ -721,6 +761,31 @@ def _validate_episode_args(episode_n: int, title: str, prior_mp3_path: str | Non
         raise ValueError(f"episode {episode_n} requires a non-empty 'title'")
     if prior_mp3_path and episode_n <= 1:
         raise ValueError("prior_mp3_path requires episode_n >= 2 (there is no prior to episode 1)")
+
+
+def _require_existing_manifest(
+    manifest_path: str, *, missing_hint: str | None = None
+) -> None:
+    """resume／reconcile／adopt／retract 動的一定是既有 attempt/episode。
+
+    reconcile／adopt／retract 三個只做 ``ManifestStore.read()``(唯讀);缺檔時本來
+    就會在下游用「episode is missing from the manifest」的 ValueError 乾淨失敗,不會
+    寫出任何檔案、更不會長出分岔的新 manifest——這裡秒退純粹是把「路徑打錯」講得更
+    直白、更早,不是在防什麼結構性風險。真正會 bootstrap(在缺檔路徑上新建一份空
+    schema 再 ``store.update()`` 寫下去)並緊接著打遠端 RPC(download／rename／
+    source add)的只有 resume:``_ensure_resume_attempt`` 找不到既有 episode 時會
+    就地建一筆——路徑打錯就等於在錯的地方生出一份新 manifest,而且真的燒了下載與
+    回錄上傳,不只是白讀一次。"""
+    if os.path.isdir(manifest_path):
+        raise ValueError(
+            f"manifest_path is a directory, not a file: {manifest_path!r}"
+        )
+    if not os.path.isfile(manifest_path):
+        hint = f" ({missing_hint})" if missing_hint else ""
+        raise ValueError(
+            f"manifest_path does not exist: {manifest_path!r}; check for a typo — "
+            f"this tool only continues an existing manifest, it never creates one{hint}"
+        )
 
 
 async def _finalize_episode(
@@ -782,55 +847,93 @@ async def _assert_source_cleanup_done(
     retract 不打 RPC(刻意),所以刪舊回錄 source 是呼叫端的動作;但「靠文件提醒」等於
     沒有防護——finalize 是按 source_id 驗的,漏刪會靜默留下兩筆同名 media,之後每次
     生成都把兩份逐字稿餵進 context。故把它變成生成的 precondition:真的去 notebook
-    查,還在就 fail-closed;已經不在才清掉義務、放行。"""
+    查,還在就 fail-closed;已經不在才清掉義務、放行。
+
+    聚合範圍是**整個 canonical notebook**,不是只有 `episode_n` 這一列:retract EP_a
+    後漏刪其 stale source,若只驗當前這一集,回頭跳過 dirty 的 EP_a、改生成同 notebook
+    的 EP_b(例如 start 跳過較早集)會直接放行——EP_b 未指名 source_ids 時就把 EP_a
+    的拒收逐字稿讀進 context。canonical notebook 取
+    ``episode.get("notebook_id") or manifest.get("notebook_id")``;canonical 不同的集
+    互不影響(不同 notebook 的義務不該互相卡住)。"""
     snapshot = store.read()
-    episode = next(
-        (row for row in snapshot["episodes"] if row.get("episode") == episode_n), None
+    episodes = snapshot.get("episodes", [])
+    manifest_notebook_id = snapshot.get("notebook_id")
+
+    def canonical_notebook(row: dict) -> object:
+        return row.get("notebook_id") or manifest_notebook_id
+
+    target_episode = next(
+        (row for row in episodes if row.get("episode") == episode_n), None
     )
-    pending = (episode or {}).get("pending_source_cleanup") or []
-    if not pending:
+    if target_episode is not None and (target_episode.get("pending_source_cleanup") or []):
+        # 先驗這一集本身的 notebook 身分,再拿它查。`notebook_id` 是呼叫端給的,而清理
+        # 義務是綁在 manifest 那個 notebook 上——拿一個空的別的 notebook 來查,會「查無
+        # 此 source」而把義務誤判成已結案(舊來源其實還躺在真正的筆記本裡)。
+        canonical = canonical_notebook(target_episode)
+        if canonical is not None and canonical != notebook_id:
+            raise ValueError(
+                f"episode {episode_n} belongs to notebook {canonical!r}, not "
+                f"{notebook_id!r}; cannot discharge its source cleanup from another notebook"
+            )
+
+    pending_by_episode = [
+        (row.get("episode"), list(row["pending_source_cleanup"]))
+        for row in episodes
+        if row.get("pending_source_cleanup")
+        and canonical_notebook(row) in (None, notebook_id)
+    ]
+    if not pending_by_episode:
         return
-    # 先驗 notebook 身分,再拿它查。`notebook_id` 是呼叫端給的,而清理義務是綁在
-    # manifest 那個 notebook 上——拿一個空的別的 notebook 來查,會「查無此 source」
-    # 而把義務誤判成已結案(舊來源其實還躺在真正的筆記本裡)。
-    canonical = (episode or {}).get("notebook_id") or snapshot.get("notebook_id")
-    if canonical is not None and canonical != notebook_id:
-        raise ValueError(
-            f"episode {episode_n} belongs to notebook {canonical!r}, not "
-            f"{notebook_id!r}; cannot discharge its source cleanup from another notebook"
-        )
+
     live = {
         getattr(source, "id", None) for source in await client.sources.list(notebook_id)
     }
-    remaining = [source_id for source_id in pending if source_id in live]
-    if remaining:
+    violations = [
+        (ep_n, source_id)
+        for ep_n, pending in pending_by_episode
+        for source_id in pending
+        if source_id in live
+    ]
+    if violations:
+        details = ", ".join(f"episode {ep_n}: {sid}" for ep_n, sid in violations)
         raise ValueError(
-            f"episode {episode_n} has retracted feedback sources still in the "
-            f"notebook: {', '.join(remaining)}. Delete them first — "
+            f"notebook {notebook_id!r} has retracted feedback sources still in the "
+            f"notebook: {details}. Delete them first — "
             f"source_delete(notebook_id={notebook_id!r}, source_id=...) — then retry; "
             "leaving them creates two identically named sources."
         )
 
-    checked_absent = set(pending)
+    # 只有「身分確定就是這個 notebook」的列才可以結案。canonical 為 None(episode 與
+    # manifest 都沒有 notebook_id 的 legacy 列)納入上面的違規檢查是保守的正確做法,但
+    # 不能拿呼叫端隨手傳的 notebook 查不到就當它結案——那筆舊來源可能正躺在別的筆記本裡,
+    # 一旦誤清就再也沒有東西擋它污染後續生成。
+    clearable = {
+        row.get("episode")
+        for row in episodes
+        if row.get("pending_source_cleanup") and canonical_notebook(row) == notebook_id
+    }
+    checked_absent_by_episode = {
+        ep_n: set(pending)
+        for ep_n, pending in pending_by_episode
+        if ep_n in clearable
+    }
 
     def clear(manifest: dict) -> None:
-        row = next(
-            (item for item in manifest["episodes"] if item.get("episode") == episode_n),
-            None,
-        )
-        if row is None:
-            return
-        # 只清「這次真的查過、確認不在」的那幾筆:await 期間可能又有一次 retract 追加
-        # 新義務,無條件 pop 整個欄位會把它一起吞掉。
-        left = [
-            source_id
-            for source_id in row.get("pending_source_cleanup", [])
-            if source_id not in checked_absent
-        ]
-        if left:
-            row["pending_source_cleanup"] = left
-        else:
-            row.pop("pending_source_cleanup", None)
+        for row in manifest["episodes"]:
+            checked_absent = checked_absent_by_episode.get(row.get("episode"))
+            if checked_absent is None:
+                continue
+            # 只清「這次真的查過、確認不在」的那幾筆:await 期間可能又有一次 retract 追加
+            # 新義務,無條件 pop 整個欄位會把它一起吞掉。
+            left = [
+                source_id
+                for source_id in row.get("pending_source_cleanup", [])
+                if source_id not in checked_absent
+            ]
+            if left:
+                row["pending_source_cleanup"] = left
+            else:
+                row.pop("pending_source_cleanup", None)
 
     store.update(clear)
 
@@ -1089,7 +1192,7 @@ async def _run_episode(
         raise
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def podcast_episode(
     notebook_id: str,
     episode_n: int,
@@ -1193,6 +1296,7 @@ async def podcast_episode_reconcile(
         or wait_timeout <= 0
     ):
         raise ValueError("wait_timeout must be greater than zero")
+    _require_existing_manifest(manifest_path)
 
     store = ManifestStore(manifest_path)
     snapshot = store.read()
@@ -1333,6 +1437,14 @@ async def podcast_episode_resume(
     _validate_episode_args(episode_n, title, None)
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id 必填(從 durable attempt 或 reconcile 結果取得)")
+    if manifest_path:
+        _require_existing_manifest(
+            manifest_path,
+            missing_hint=(
+                "for a legacy artifact with no manifest yet, call this tool "
+                "without manifest_path (standalone best-effort)"
+            ),
+        )
     await probe_auth(runtime.get_client())
     if manifest_path:
         store = ManifestStore(manifest_path)
@@ -1450,6 +1562,31 @@ def _attempt_can_adopt_source(attempt: dict) -> bool:
     )
 
 
+def _queue_pending_source_cleanup(
+    episode: dict, source_ids: list[str], *, exclude: str
+) -> list[str]:
+    """把 adopt 換掉的舊 source(s)排進這一集的 ``pending_source_cleanup``(去重、
+    排除這次選中的那筆),讓 `_assert_source_cleanup_done` 在下一次生成前逼刪——
+    否則同名重複 source 從此沒人記得,後續每集生成都讀到它。
+
+    回傳的是**這一集尚未結案的全部義務**,不是只有這次新增的那幾筆:adopt 回應遺失時
+    host 會冪等重呼,若第二次回傳空清單、`safe_next_action` 就會從 source_delete 翻回
+    series,host 照著走卻被 gate 硬擋成 ValueError(狀態冪等、指引卻不冪等,等於把
+    自動化 host 導進死路)。"""
+    to_queue = [
+        source_id
+        for source_id in dict.fromkeys(source_ids)  # 去重、保留順序
+        if isinstance(source_id, str) and source_id and source_id != exclude
+    ]
+    if to_queue:
+        # 只在真的有東西要排時才建 key,維持「沒有義務就沒有這個欄位」的既有形狀。
+        pending = episode.setdefault("pending_source_cleanup", [])
+        for source_id in to_queue:
+            if source_id not in pending:
+                pending.append(source_id)
+    return list(episode.get("pending_source_cleanup", []))
+
+
 @mcp.tool()
 async def podcast_attempt_adopt(
     manifest_path: str,
@@ -1489,6 +1626,7 @@ async def podcast_attempt_adopt(
         raise ValueError(
             "provide exactly one non-empty artifact_id or feedback_source_id"
         )
+    _require_existing_manifest(manifest_path)
 
     store = ManifestStore(manifest_path)
     snapshot = store.read()
@@ -1706,7 +1844,7 @@ async def podcast_attempt_adopt(
                     return True
         return False
 
-    def adopt_source(manifest: dict) -> None:
+    def adopt_source(manifest: dict) -> list[str]:
         current_episode = next(
             row
             for row in manifest["episodes"]
@@ -1742,7 +1880,13 @@ async def podcast_attempt_adopt(
                     history.append(previous)
             current_episode["feedback_source_id"] = feedback_source_id
             current_episode["feedback_source_adopted_at"] = now
-            return
+            # 被取代的舊 id 只記進歷史還不夠——同名重複 source 從此沒人記得,故也排進
+            # 清理義務,讓下一次生成前的 gate 逼刪(見 `_queue_pending_source_cleanup`)。
+            return _queue_pending_source_cleanup(
+                current_episode,
+                [previous] if isinstance(previous, str) else [],
+                exclude=feedback_source_id,
+            )
 
         assert current_attempt is not None
         if not _attempt_can_adopt_source(current_attempt):
@@ -1761,6 +1905,14 @@ async def podcast_attempt_adopt(
                 "feedback source is no longer an ambiguity candidate"
             )
         previous = upload.get("source_id")
+        # 未被選中的 candidate(reconciliation_ambiguous 遺留)與被取代的 previous 一樣是
+        # 同名重複 source——`upload.update` 下面即將把 candidate_source_ids 清空,先在
+        # 清空前抓下來,連同 previous 一起排入清理義務。
+        stale_candidates = [
+            source_id
+            for source_id in upload.get("candidate_source_ids", [])
+            if source_id != feedback_source_id
+        ]
         if previous not in (None, feedback_source_id):
             history = upload.setdefault("previous_source_ids", [])
             if previous not in history:
@@ -1784,9 +1936,14 @@ async def podcast_attempt_adopt(
             )
         else:
             rename.update({"status": "completed", "adopted_at": now})
+        return _queue_pending_source_cleanup(
+            current_episode,
+            [*stale_candidates, previous] if isinstance(previous, str) else stale_candidates,
+            exclude=feedback_source_id,
+        )
 
-    store.update(adopt_source)
-    return {
+    _, stale_source_ids = store.update(adopt_source)
+    result = {
         "complete": not needs_rename,
         "episode_n": episode_n,
         "attempt_id": attempt_id,
@@ -1796,35 +1953,29 @@ async def podcast_attempt_adopt(
         ),
         "safe_next_action": ACTION_RESUME if needs_rename else ACTION_SERIES,
     }
+    if stale_source_ids:
+        result["stale_source_ids"] = stale_source_ids
+        result["safe_next_action"] = ACTION_SOURCE_DELETE
+    return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True))
 async def podcast_attempt_retract(
     manifest_path: str,
     episode_n: int,
     attempt_id: str,
     reason: str,
 ) -> dict:
-    """明確作廢某集「已完成但被拒收」的輸出 attempt，讓下一次生成合法產生取代版。
+    """QA 拒收的唯一正門：純本機 manifest mutation，不打 RPC、不動遠端或本機檔案。
 
-    QA 拒收的唯一正門——**手改 manifest 不是替代方案**(那會繞過 artifact claim 唯一性、
-    dispatch baseline 與 finalize checkpoint 的全部驗證)。純本機 manifest mutation:不打
-    RPC、不刪遠端 artifact／source、不動本機檔案。
+    ``attempt_id`` 必須是該集的 ``output_attempt_id``，或掛在 ``active_attempt_id`` 但
+    從未 promote 的未授權 candidate；``reason`` 必填非空。
 
-    可作廢的只有兩種:(1) episode 的 ``output_attempt_id``;(2) 掛在 ``active_attempt_id``
-    但**從未 promote** 的未授權 candidate(受審計的 abandon,用來解開 active／output 分岔,
-    不動現任 output)。生成中的 attempt 請照 ``safe_next_action`` 走 reconcile／resume。
+    retract 後必須把回傳的 ``stale_source_ids`` 逐一 ``source_delete``：下一次生成或
+    resume 前會實際查 notebook 驗證，還在就 fail-closed。標題不可在取代時改。同一
+    attempt 重呼冪等。
 
-    **retract 之後必須先刪掉舊的回錄 source**:它仍在筆記本裡、且與取代版同名,而
-    continuity 複驗要求同名 media 恰好一筆。回傳的 ``stale_source_id`` 就是它,
-    ``safe_next_action`` 就是 ``source_delete``——而且這不只是提示:下一次生成前會真的去
-    notebook 驗它已不在,還在就 fail-closed。
-
-    拒收版的本機 mp3 **不會被覆寫**:取代版一律下載到
-    ``output_dir/attempts/<attempt_id>/ep{n:02d}.mp3``,原檔路徑記在 ``retracted_mp3_path``。
-    標題不可在取代時改(改標題是另一件事,不是重生)。作廢後那個 attempt 是 tombstone:
-    reconcile／adopt／resume／promote 一律拒絕再動它(只有本工具冪等重呼讀得到)。
-    詳見 ADR-0009 與 skill ``references/tool-reference.md``。
+    詳見 skill ``references/tool-reference.md`` 與 ADR-0009。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
         raise ValueError("manifest_path must be a non-empty string")
@@ -1835,6 +1986,7 @@ async def podcast_attempt_retract(
     if not isinstance(reason, str) or not reason.strip():
         # retract 是審計事件:沒有理由的作廢等於無聲覆寫,正是本工具要取代的東西。
         raise ValueError("reason must be a non-empty string")
+    _require_existing_manifest(manifest_path)
 
     _RETRACTED_EPISODE_KEYS = (
         "output_attempt_id",
@@ -1950,7 +2102,29 @@ async def podcast_attempt_retract(
     }
 
 
-@mcp.tool()
+def _active_attempt_or_reraise(current: dict, episode_n: int) -> str:
+    """`podcast_series` 在候選集區間內、`_run_episode` 建立 attempt 之前就撞到的例外,
+    要原樣浮上去給呼叫端看——沒有 default 的 `next()`／dict 下標會把 StopIteration／
+    KeyError 蓋掉真正該讓人看到的原始例外。三個 except handler(TerminalGenerationError／
+    RuntimeError／(TimeoutError, ConnectionError))結構完全相同,抽成這裡共用,「補一半」
+    就不可能發生。裸 `raise` 合法:沿用的是呼叫端當下正在處理的例外(bare raise 讀
+    thread-local 的「目前處理中例外」,不是詞法綁定),只要這裡是同步呼叫、沒有中間再
+    冒出別的例外就成立。
+    殘留同類路徑(已評估可達性極低,留待真的踩到再處理):handler 接下來的
+    `_attempt_record` 對「找不到」或「已 retract」的 attempt 也會 raise,一樣會蓋掉
+    原例外——但這裡的 attempt_id 是剛從 manifest 讀回的 active_attempt_id,理論上
+    _attempt_record 找不到的機率極低。"""
+    row = next(
+        (item for item in current["episodes"] if item.get("episode") == episode_n),
+        None,
+    )
+    attempt_id = row.get("active_attempt_id") if row else None
+    if attempt_id is None:
+        raise
+    return attempt_id
+
+
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def podcast_series(
     notebook_id: str,
     episodes: list[dict],
@@ -1979,6 +2153,13 @@ async def podcast_series(
         if not isinstance(title, str) or not title.strip():
             raise ValueError(
                 f"episode {i} must have a non-empty 'title' (got: {title!r})"
+            )
+        # brief=None 會撐到迴圈內 `.encode()` 才炸(EP1 已燒配額);brief="" 更會
+        # 靜默生出空 brief 的一集。跟 title 同一道前驗、同一時機。
+        brief = ep.get("brief")
+        if not isinstance(brief, str) or not brief.strip():
+            raise ValueError(
+                f"episode {i} must have a non-empty 'brief' (got: {brief!r})"
             )
 
     os.makedirs(output_dir, exist_ok=True)
@@ -2429,12 +2610,7 @@ async def podcast_series(
             )
         except TerminalGenerationError:
             current = store.read()
-            row = next(
-                item
-                for item in current["episodes"]
-                if item.get("episode") == episode_n
-            )
-            attempt_id = row["active_attempt_id"]
+            attempt_id = _active_attempt_or_reraise(current, episode_n)
             _, failed_attempt = _attempt_record(
                 current, episode_n, attempt_id
             )
@@ -2446,12 +2622,7 @@ async def podcast_series(
             )
         except RuntimeError:
             current = store.read()
-            row = next(
-                item
-                for item in current["episodes"]
-                if item.get("episode") == episode_n
-            )
-            attempt_id = row["active_attempt_id"]
+            attempt_id = _active_attempt_or_reraise(current, episode_n)
             _, stopped_attempt = _attempt_record(
                 current, episode_n, attempt_id
             )
@@ -2465,12 +2636,7 @@ async def podcast_series(
             )
         except (TimeoutError, ConnectionError):
             current = store.read()
-            row = next(
-                item
-                for item in current["episodes"]
-                if item.get("episode") == episode_n
-            )
-            attempt_id = row["active_attempt_id"]
+            attempt_id = _active_attempt_or_reraise(current, episode_n)
             _, stopped_attempt = _attempt_record(
                 current, episode_n, attempt_id
             )

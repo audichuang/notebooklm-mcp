@@ -65,14 +65,8 @@ NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
 主流程(優先用高階工具,別自己拼低階步驟):
 - 整季/一般單集生成 → podcast_series(episodes 放一集即單集)。若 host 已建立
   frozen generation input bundle，改用 podcast_episode(brief=null, manifest_path=...,
-  input_bundle_path=...)，由實際 provider capability 在 RPC 前驗 bytes 並綁 attempt；
-  不可先輸出 preview payload 再事後 bind。**input_bundle_path 是相對於 workspace 的
-  路徑**(workspace = manifest 的祖父目錄)，絕對路徑會被拒；同一個 bundle 重跑是冪等的
-  (讀回既有綁定沿用同一 attempt)，取代版要凍新 bundle。有 manifest-backed attempt 時，依工具回傳的
-  safe_next_action 續跑；acceptance_unknown 用 podcast_episode_reconcile 對帳，
-  ambiguous／legacy／feedback source restore 用 podcast_attempt_adopt 綁定明確且已驗證的
-  遠端 ID。podcast_episode_resume 是鎖定 accepted artifact finalize 或未傳 manifest 的
-  standalone／legacy fallback。
+  input_bundle_path=...)(路徑與冪等規則見 skill)。有 manifest-backed attempt 時，
+  依工具回傳的 safe_next_action 續跑。
 - 發布成 Apple RSS → publish_series(讀 series_manifest.json;需 env
   PODCAST_PUBLIC_BASE_URL / PODCAST_TOKEN_SALT / PODCAST_UPLOAD_URL /
   PODCAST_UPLOAD_TOKEN)。
@@ -84,8 +78,6 @@ NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
 - start=N 只是 execution lower bound/trust boundary,不會重生已完成集。
 - 長 MCP request 可能被 client cancellation 終止；可靠性來自 manifest checkpoint
   與重呼,不保證 server 在背景跑完。未傳 manifest_path 的 standalone call 僅 best-effort。
-- P0 不接受 manifest_path + prior_mp3_path；legacy continuity 必須有可驗證的 source id。
-  即使 finalize 已完成，resume 仍會重新確認遠端 feedback source identity/status。
 - QA/protected facts 是可選 host workflow,不是 MCP lifecycle；外部 manifest writer
   必須改用 MCP tool 或同一 ManifestStore,不能直接覆寫 JSON。
 - streamable-http / sse 模式「無認證」——勿綁非 loopback host。

@@ -283,7 +283,11 @@ class FakeSources:
                 "id": sid,
                 "title": title,
                 "kind": kind,
-                "created_at": created_at or datetime.now(timezone.utc),
+                # 忠實模擬實裝 notebooklm-py 0.7.x:Source.created_at 是 host-local **naive**
+                # (_datetime_from_timestamp 走 datetime.fromtimestamp 不帶 tz)。用 aware 值當
+                # 預設會讓 reconciliation 測試綠、production 卻對不到任何 source(見
+                # audio_finalize._created_at_utc 的註解)。
+                "created_at": created_at or datetime.now(),
                 "is_ready": is_ready,
             }
         )

@@ -20,6 +20,7 @@ from __future__ import annotations
 # 選來源要用後者:host 挑的 URL 最後會被 SDK 的 timeout readback 拿去對帳,identity 不一致時
 # `#a` / `#b` 兩個候選在我們眼中是兩筆、在 verification 眼中是同一筆,對帳數字就會錯。
 # 是私有 API,故 test_contracts 有鎖(改名會在發版前紅,不會等到 production ImportError)。
+from mcp.types import ToolAnnotations
 from notebooklm._research import _normalize_import_verification_url as _import_url_key
 from notebooklm.research import extract_report_urls, normalize_citation_url
 
@@ -48,7 +49,7 @@ def _candidate(source, cited_urls: set[str]) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def research_start(
     notebook_id: str,
     query: str,
@@ -85,7 +86,7 @@ async def research_start(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def research_wait(
     notebook_id: str,
     task_id: str,
@@ -150,7 +151,7 @@ async def research_wait(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def research_import(
     notebook_id: str,
     task_id: str,

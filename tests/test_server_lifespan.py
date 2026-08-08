@@ -102,3 +102,20 @@ def test_server_reexports_for_backwards_compat():
 
     assert server.mcp is app.mcp
     assert server.main is app.main
+
+
+def test_instructions_are_skeleton_not_parameter_detail():
+    """P1 瘦身的漂移防護(不是行為契約):instructions 是「骨架」,參數級細節與
+    routing 已各自存在 podcast_episode docstring / skill 文件裡一份,instructions
+    重複第二份正是 AGENTS.md「刻意不複製 SKILL.md 以免漂移」要防的漂移源。
+    (P0 manifest_path+prior_mp3_path 那條是鐵律而非參數細節,但它已由工具端的
+    ValueError 秒退編碼、訊息自帶指引,instructions 不重複第二份。)
+
+    正向鎖兩句必須存在的指引;細節長回來則靠總長度上限擋,不用逐字負向斷言把
+    一次性的刪除固化成永久約束。
+    """
+    text = app._INSTRUCTIONS
+    assert "路徑與冪等規則見 skill" in text
+    assert "safe_next_action 續跑" in text
+    # 瘦身後 1,065 chars;上限留緩衝,但擋得住任何一整段細節(數百字)長回來。
+    assert len(text) <= 1400, f"instructions 長到 {len(text)} chars——細節請放 skill"

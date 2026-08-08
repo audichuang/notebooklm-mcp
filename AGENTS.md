@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.5.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.6.0"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -209,6 +209,39 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   §Episodic;**實作上唯一要記的是命名邏輯集中在 `_episode_label()`**,改流程時對照那裡,別各處自己拼字串。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`
   (`_text.norm` 已封裝)。
+- **`published_at` 是「首發時間」不是「產製時間」**(v0.6.0):retract 必須把它 pop 進
+  `retraction.retracted_output`(它是 `has_hard_output_evidence` 的硬證據,留著會擋死重生),
+  但 promote 補回時要走 `_first_published_at()` ——沿 attempts 建立順序找**第一筆非空**的
+  `retracted_output.published_at`(abandon 分支留的是空 dict,要跳過)。舊行為用
+  `setdefault` 補成重生當下的 wall clock,GUID 不變(同集更新)pubDate 卻漂,episodic feed
+  按 pubDate 倒序 → 重生集跳到列表最前(saa-drill EP05/EP09 實際事故)。**改 code 不會回溯
+  既有 manifest**,用 `scripts/backfill_published_at.py`(dry-run 預設,走 ManifestStore)。
+- **`os.replace` 之後的 directory fsync 一律移出 try 並容忍 `_DIR_FSYNC_UNSUPPORTED`**:
+  replace 是 commit point,dir fsync 只是額外的 crash-durability。留在 try 內會讓 NAS/overlay
+  mount(回 EINVAL/ENOTSUP)上「已經寫成功」被回報成整個失敗——呼叫端據此 rollback
+  (如 `generation_input` 的 binding),變成「manifest 有新 attempt、binding 卻被刪」。
+  `_atomic.download_atomically` 一開始就對,`manifest_store._write` 與 `audio_finalize` 的
+  mp3 下載都是後來才補上的**同一個坑**(補一半的又一例)。
+- **manifest 的 notebook 一致性只擋寫入、不擋讀取**(`_validate(..., on_write=True)`):
+  episode 與其非 retracted attempt 的 `notebook_id` 必須一致,但 v0.5.0 之前建立 attempt
+  沒有這道 guard,線上可能已有分裂的 manifest。讀取端也驗會讓它們每次 `read()` 都 raise,
+  連 `podcast_attempt_retract`(修復正門)與回填腳本都打不開,唯一出路變成 ADR-0009 禁止的
+  手改 JSON。**壞資料要讀得進來,才修得掉**;retracted tombstone 一律豁免(否則 retract 後
+  換 notebook 重生就寫不進去)。
+- **`Source.created_at` 在實裝 0.7.x 是 host-local naive**(`_datetime_from_timestamp` 走
+  `datetime.fromtimestamp()` 不帶 tz;0.8 才改 aware)。source upload 的 response-loss
+  reconciliation 曾用 `tzinfo is None` 排除候選,等於把**實裝 SDK 回來的每一筆**都濾掉,
+  永遠卡在 `acceptance_unknown`。統一走 `audio_finalize._created_at_utc()` 正規化(naive 當
+  本地時間轉 UTC,aware 照轉)。**測試的 fake source 也必須產 naive**,否則測試綠、production
+  死——`tests/conftest.py` 的 `_add` 已改成 `datetime.now()`。
+- **發布用的 HTML guard 是標籤/屬性允許清單,不是關鍵字黑名單**(`publish/notes_html.py`):
+  黑名單會把「設定 online=1」「JavaScript:動態語言的起點」這種普通中文散文誤殺(誤判成本 =
+  整季 publish raise),又漏掉 `<svg><image href>`、`<input type=image>` 等。允許清單走
+  stdlib `HTMLParser`,但**要一併擋「被 parser 吞掉的區段」**(comment / decl / CDATA / PI):
+  `<![CDATA[ > <img …> ]]>` 在 HTMLParser 眼中是一個 `unknown_decl`,瀏覽器卻當 bogus comment
+  在第一個 `>` 結束、`<img>` 變真元素(chrome --dump-dom 驗過)。惰性行內標籤
+  (`b`/`i`/`span`/`details`…)刻意放行:report 來自 NotebookLM,夾帶它們不罕見,而屬性另有
+  逐一過濾,放行不擴大攻擊面。
 - **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`)。工具已內建
   `strip_citations` 由 server 端清(`_text._CITATION_RE`),`episode_set_description` 也預設再清一次
   ——**新程式碼別再自己寫 regex**,要改清理規則改 `_CITATION_RE` 一處。

@@ -10,16 +10,36 @@ guard 沒保護 manifest,只是把寫入趕出工具外。
 in-flight finalizer、還是任何把指標寫回去的 writer。
 """
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from notebooklm_mcp import audio_finalize
 from notebooklm_mcp import tools_basic as b
 from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp._status import TerminalGenerationError
 from notebooklm_mcp.manifest_store import ManifestStore
 
 
 EP = {"title": "心法篇", "brief": "1"}
+
+
+class _TickingDatetime(datetime):
+    """單調遞增的假鐘,供 published_at 回歸測試用。
+
+    conftest 的 fake finalize 用真的 `datetime.now()` 算 published_at;測試若跑得夠
+    快,兩次生成可能落在同一秒,讓 bug(補回重生時間)跟 fix(釘住首發時間)巧合地
+    產出同一個字串,測不出差別。換一個保證嚴格遞增的鐘,兩次「現在」永遠不同。"""
+
+    _tick = 0
+
+    @classmethod
+    def now(cls, tz=None):
+        _TickingDatetime._tick += 1
+        moment = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
+            hours=_TickingDatetime._tick
+        )
+        return moment.astimezone(tz) if tz else moment
 
 
 async def _complete_ep1(fake_client, tmp_path) -> tuple[str, dict]:
@@ -77,6 +97,81 @@ async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(
     assert after["pending_source_cleanup"] == [before["feedback_source_id"]]
 
 
+# ---- pubDate 不得漂移(真實事故:saa-drill EP05/EP09)---------------------------
+
+def test_first_published_at_skips_abandoned_empty_retraction():
+    """`abandons_unauthorized_candidate` 分支(從未 promote 就被作廢的 candidate)留下
+    的 `retracted_output` 是空 dict——不能被誤判成「這集從沒發過」而提前 return None,
+    要跳過去找下一筆真的非空的。"""
+    episode = {
+        "attempts": [
+            {"attempt_id": "att-abandoned", "retraction": {"retracted_output": {}}},
+            {
+                "attempt_id": "att-a",
+                "retraction": {
+                    "retracted_output": {
+                        "published_at": "Fri, 24 Jul 2026 09:00:00 +0800"
+                    }
+                },
+            },
+        ]
+    }
+    assert p._first_published_at(episode) == "Fri, 24 Jul 2026 09:00:00 +0800"
+    assert p._first_published_at({"attempts": []}) is None
+
+
+async def test_replacement_keeps_the_original_published_at_not_the_regeneration_time(
+    fake_client, tmp_path, monkeypatch
+):
+    """真實事故(saa-drill EP05/EP09):重生一集不能讓 pubDate 漂成重生時間——GUID 不變
+    ＝同集更新,episodic feed 按 pubDate 倒序(tools_publish.py 的 fallback 註解自己
+    宣告 pubDate 隨集號遞增是系統不變量),漂移會讓重生集跳到列表最前面。"""
+    monkeypatch.setattr(audio_finalize, "datetime", _TickingDatetime)
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    first_published_at = before["published_at"]
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
+    await b.source_delete("nb-1", before["feedback_source_id"])
+
+    await p.podcast_episode(
+        "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+
+    after = _episode(manifest_path)
+    assert after["published_at"] == first_published_at
+
+
+async def test_second_replacement_still_keeps_the_original_published_at(
+    fake_client, tmp_path, monkeypatch
+):
+    """多次重生:再 retract 取代版、再生一次,仍要等於最初首發值——不是「上一版」的
+    時間漂進來,是本來就沒動過的第一筆。"""
+    monkeypatch.setattr(audio_finalize, "datetime", _TickingDatetime)
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    first_published_at = before["published_at"]
+
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
+    await b.source_delete("nb-1", before["feedback_source_id"])
+    await p.podcast_episode(
+        "nb-1", episode_n=1, title=EP["title"], brief="第二版",
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+    replacement = _episode(manifest_path)
+    assert replacement["published_at"] == first_published_at
+
+    await p.podcast_attempt_retract(
+        manifest_path, 1, replacement["output_attempt_id"], reason="QA 再拒收"
+    )
+    await b.source_delete("nb-1", replacement["feedback_source_id"])
+    await p.podcast_episode(
+        "nb-1", episode_n=1, title=EP["title"], brief="第三版",
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+
+    final = _episode(manifest_path)
+    assert final["published_at"] == first_published_at
+
+
 async def test_replacement_requires_deleting_the_stale_source_first(
     fake_client, tmp_path
 ):
@@ -106,12 +201,56 @@ async def test_replacement_requires_deleting_the_stale_source_first(
     assert "pending_source_cleanup" not in after           # 義務結案
     assert len(after["attempts"]) == 2
     assert after["output_attempt_id"] == after["attempts"][1]["attempt_id"]
-    assert after["published_at"]                            # setdefault 欄位補回來了
+    # setdefault 欄位補回來了,而且是首發時間,不是這次重生的完成時間
+    assert after["published_at"] == before["published_at"]
     # 拒收版的 mp3 沒被覆寫(episode 仍有 durable evidence → 取代版走 attempts/ 子目錄)
     assert after["mp3_path"] != before["mp3_path"]
     assert f"attempts/{after['output_attempt_id']}" in after["mp3_path"]
     # 筆記本裡只剩取代版那一筆同名來源
     assert fake_client.sources.titles().count("EP01 心法篇") == 1
+
+
+@pytest.mark.parametrize(
+    "exc_type", [TerminalGenerationError, RuntimeError, ConnectionError]
+)
+async def test_series_does_not_mask_an_early_error_with_a_lookup_crash(
+    fake_client, tmp_path, monkeypatch, exc_type
+):
+    """retract 之後 active_attempt_id／output_attempt_id 都已被刪掉;series 重跑該集若
+    在建立新 attempt 之前就撞到被攔的例外(例如清理驗證途中斷線、或伺服器終態失敗),
+    except handler 裡無 default 的 next() 與 row["active_attempt_id"] 不能把它換成
+    StopIteration／KeyError——呼叫端必須看到原始例外「型別與訊息」(L4)。三種例外
+    型別各對應 `podcast_series` 攔的三個 except handler
+    (TerminalGenerationError／RuntimeError／(TimeoutError, ConnectionError)),缺一就會
+    漏鎖對應那條路徑——第一輪修復只鎖了 ConnectionError 那條,revert 另兩條照樣全綠。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    stale = before["feedback_source_id"]
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
+    await b.source_delete("nb-1", stale)  # 清理義務結案,series 才會落到「無 attempt」分支
+
+    async def boom(*args, **kwargs):
+        raise exc_type("network blip during cleanup verification")
+
+    monkeypatch.setattr(p, "_run_episode", boom)
+
+    with pytest.raises(exc_type, match="network blip"):
+        await p.podcast_series("nb-1", [EP], output_dir=str(tmp_path), start=1)
+
+
+async def test_series_does_not_mask_an_early_error_when_no_row_exists_yet(
+    fake_client, tmp_path, monkeypatch
+):
+    """`row` 本身是 None 的那一半(全新集,manifest 還沒有這一列,例如它是 start 指向
+    的第一個候選)也要原樣拋出原始例外——`if row else None` 的另一半分支,上面的
+    parametrize(既有 attempt、只是指標被清掉)測不到它。"""
+
+    async def boom(*args, **kwargs):
+        raise ConnectionError("network blip before any attempt exists")
+
+    monkeypatch.setattr(p, "_run_episode", boom)
+
+    with pytest.raises(ConnectionError, match="network blip before any attempt exists"):
+        await p.podcast_series("nb-1", [EP], output_dir=str(tmp_path), start=1)
 
 
 async def test_retract_replacement_cannot_change_the_title(fake_client, tmp_path):
@@ -280,6 +419,9 @@ async def test_delayed_retract_retry_does_not_destroy_the_replacement(
         output_dir=str(tmp_path), manifest_path=manifest_path,
     )
     replacement = _episode(manifest_path)
+    # 新語意:取代版的 published_at 本來就該是 A 的首發時間,不是自己重生的完成時間
+    # ——否則下面「重呼不改變它」的斷言測不出「它本來就是對的值」。
+    assert replacement["published_at"] == before["published_at"]
 
     await p.podcast_attempt_retract(manifest_path, 1, attempt_a, reason="QA")
 
@@ -500,4 +642,262 @@ async def test_retract_rejects_bad_arguments_before_touching_the_manifest(
     with pytest.raises(ValueError, match="attempt .* is missing"):
         await p.podcast_attempt_retract(manifest_path, 1, "att-nope", reason="QA")
 
-    assert _episode(manifest_path)["output_attempt_id"] == attempt_id   # 一個字都沒改
+
+# ---- 清理義務要聚合整個 canonical notebook,不是只看 episode_n 那一列(review #3) ----
+
+
+async def test_cleanup_gate_blocks_generating_a_different_episode_in_the_same_notebook(
+    fake_client, tmp_path
+):
+    """retract EP1 之後漏刪其 stale source,回頭跳過 dirty 的 EP1、改生成同一
+    notebook 的 EP2(例如 start 跳過較早集)不得放行——EP2 未指名 source_ids 時會把
+    EP1 的拒收逐字稿讀進 context。gate 現在聚合整個 canonical notebook 的所有集,
+    不是只看即將生成的那一集。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
+    )
+    call_boundary = len(fake_client.artifacts.calls)
+
+    with pytest.raises(
+        ValueError, match="retracted feedback sources still in the notebook"
+    ):
+        await p.podcast_episode(
+            "nb-1", episode_n=2, title="實戰篇", brief="第二集",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    # 一次生成配額都沒燒,EP2 也沒被寫進 manifest
+    assert not [
+        c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"
+    ]
+    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    assert len(stored["episodes"]) == 1
+
+    # 刪掉 source 後重跑 → 通過,且 EP1 的 pending 被清
+    await b.source_delete("nb-1", before["feedback_source_id"])
+    out = await p.podcast_episode(
+        "nb-1", episode_n=2, title="實戰篇", brief="第二集",
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+    assert out["episode"] == 2
+    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
+    assert "pending_source_cleanup" not in ep1
+
+
+async def test_cleanup_gate_blocks_series_start_skipping_the_dirty_episode(
+    fake_client, tmp_path
+):
+    """同一情境透過 `podcast_series(start=2)` 觸發——series 每集前導的 gate 一樣要看
+    整個 notebook,不能只看即將生成的那一集。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
+    )
+    call_boundary = len(fake_client.artifacts.calls)
+
+    with pytest.raises(
+        ValueError, match="retracted feedback sources still in the notebook"
+    ):
+        await p.podcast_series(
+            "nb-1",
+            [EP, {"title": "實戰篇", "brief": "第二集"}],
+            output_dir=str(tmp_path),
+            start=2,
+        )
+    assert not [
+        c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"
+    ]
+
+
+async def test_cleanup_gate_does_not_cross_different_notebooks(fake_client, tmp_path):
+    """canonical notebook 不同的集互不影響:EP1 的清理義務若實際上屬於另一個
+    notebook,生成同一批次裡不同 notebook 的 EP2 不該被卡住。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
+    )
+    ManifestStore(manifest_path).update(
+        lambda manifest: manifest["episodes"][0].update({"notebook_id": "nb-other"})
+    )
+
+    out = await p.podcast_episode(
+        "nb-1", episode_n=2, title="實戰篇", brief="第二集",
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+    assert out["episode"] == 2
+    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
+    # EP1 的義務原封不動,沒被誤判成已結案
+    assert ep1["pending_source_cleanup"] == [before["feedback_source_id"]]
+
+
+# ---- _create_audio_attempt 也要驗 episode notebook 一致性(review #9) -------------
+
+
+async def test_create_audio_attempt_rejects_notebook_mismatch_after_retract(
+    fake_client, tmp_path
+):
+    """post-retract 的集用 podcast_episode 傳錯 notebook_id 會造成
+    episode(nb-A)/attempt(nb-B)身分分裂——`_create_audio_attempt` 補上跟
+    `_ensure_resume_attempt` 兩條分支一致的 guard。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
+    )
+    await b.source_delete("nb-1", before["feedback_source_id"])
+
+    store = ManifestStore(manifest_path)
+    with pytest.raises(ValueError, match="belongs to another notebook"):
+        p._create_audio_attempt(
+            store,
+            notebook_id="nb-B",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後的 brief",
+            language="zh_Hant",
+            audio_format="deep-dive",
+            audio_length="long",
+        )
+    # 一個字都沒改
+    after = _episode(manifest_path)
+    assert "active_attempt_id" not in after
+    assert len(after["attempts"]) == 1
+
+
+# ---- adopt 換 source 後,舊 id 與未選中 candidate 都要進清理義務(review #4) -------
+
+
+async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
+    fake_client, tmp_path
+):
+    """adopt 換掉 attempt 的 feedback source 後,被取代的舊 id 與同一輪未被選中的
+    candidate 都要進 pending_source_cleanup——否則同名重複 source 從此沒人記得,
+    後續每集生成都讀到它。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    # add_file 在拋錯之前已經在遠端建好 source(真實 SDK 語意):失敗的自我回錄上傳
+    # 本身就留下一筆同名 source。再手動補一筆同名的,湊出真正的歧義(reconciliation
+    # 只看名字/時窗,分不出哪筆才是「自己那次」上傳的)。
+    fake_client.sources.add_file_exc_after_create = TimeoutError("upload response lost")
+    with pytest.raises(TimeoutError, match="upload response lost"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
+            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        )
+    fake_client.sources.add_file_exc_after_create = None
+    fake_client.sources._add("ep01.mp3", kind="media")
+
+    stopped = await p.podcast_series(
+        "nb-1", episodes=[EP], output_dir=str(tmp_path),
+    )
+    assert stopped["observed_state"] == "reconciliation_ambiguous"
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt_id = stored["episodes"][0]["active_attempt_id"]
+    candidates = (
+        stored["episodes"][0]["attempts"][0]["finalize"]
+        ["feedback_source_upload"]["candidate_source_ids"]
+    )
+    assert len(candidates) == 2
+    candidate_a, candidate_b = candidates
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id,
+        feedback_source_id=candidate_a,
+    )
+    assert adopted["stale_source_ids"] == [candidate_b]
+    assert adopted["safe_next_action"] == "source_delete"
+    pending = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+        "pending_source_cleanup"
+    ]
+    assert pending == [candidate_b]
+
+    # 修正:把選錯的 candidate_a 換成已就位、已改名成最終 label 的 candidate_c——
+    # 被取代的 candidate_a 也要排進清理義務,而不是只留在 previous_source_ids 裡。
+    candidate_c = fake_client.sources._add("EP01 心法篇", kind="media")
+    corrected = await p.podcast_attempt_adopt(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id,
+        feedback_source_id=candidate_c,
+    )
+    # 回傳的是「這一集尚未結案的全部義務」,不是只有這次新增的那筆——host 照著
+    # stale_source_ids 刪才刪得乾淨。
+    assert set(corrected["stale_source_ids"]) == {candidate_a, candidate_b}
+    assert corrected["safe_next_action"] == "source_delete"
+    pending = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+        "pending_source_cleanup"
+    ]
+    assert set(pending) == {candidate_a, candidate_b}
+
+    # 冪等重呼:狀態不累積,**指引也不能翻回 series**。義務還掛著就必須還是
+    # source_delete,否則自動化 host 照著回傳去跑 series,會被 gate 硬擋成 ValueError。
+    again = await p.podcast_attempt_adopt(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id,
+        feedback_source_id=candidate_c,
+    )
+    assert set(again["stale_source_ids"]) == {candidate_a, candidate_b}
+    assert again["safe_next_action"] == "source_delete"
+    assert set(
+        json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+            "pending_source_cleanup"
+        ]
+    ) == {candidate_a, candidate_b}          # 不累積
+
+    # 下一次生成前不刪就 fail-closed
+    store = ManifestStore(manifest_path)
+    with pytest.raises(
+        ValueError, match="retracted feedback sources still in the notebook"
+    ):
+        await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
+
+    # 全部刪掉後通過
+    await b.source_delete("nb-1", candidate_a)
+    await b.source_delete("nb-1", candidate_b)
+    await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
+    assert "pending_source_cleanup" not in json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )["episodes"][0]
+
+
+async def test_legacy_adopt_source_replacement_queues_previous_for_cleanup(
+    fake_client, tmp_path
+):
+    """legacy 分支(attempt_id=None)換 source 時,被取代的舊 id 一樣要進
+    pending_source_cleanup——不能只留在 previous_feedback_source_ids 裡沒人清。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "title": "心法篇",
+                        "artifact_id": "legacy-artifact",
+                        "mp3_path": str(tmp_path / "legacy-ep01.mp3"),
+                        "published_at": "Wed, 01 Jan 2020 09:00:00 +0800",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "legacy-ep01.mp3").write_bytes(b"legacy audio")
+    label = "EP01 心法篇"
+    old_source_id = fake_client.sources._add(label, kind="media")
+    # 同名的第二筆:正是這個機制要防的——同名重複 source 若沒人記得清理義務就會一直
+    # 留在筆記本裡。
+    new_source_id = fake_client.sources._add(label, kind="media")
+
+    await p.podcast_attempt_adopt(
+        str(manifest_path), episode_n=1, feedback_source_id=old_source_id,
+    )
+    result = await p.podcast_attempt_adopt(
+        str(manifest_path), episode_n=1, feedback_source_id=new_source_id,
+    )
+
+    assert result["stale_source_ids"] == [old_source_id]
+    assert result["safe_next_action"] == "source_delete"
+    episode = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]
+    assert episode["pending_source_cleanup"] == [old_source_id]
+    assert episode["previous_feedback_source_ids"] == [old_source_id]

@@ -431,9 +431,53 @@ async def test_interrupted_download_does_not_replace_prior_successful_mp3(
     assert mp3_path.read_bytes() == b"known-good-audio"
 
 
+async def test_first_mp3_download_is_not_left_private(fake_client, tmp_path):
+    """mkstemp 給 0600;第一次下載沒有舊檔可繼承 mode,不該落成 0600(對齊
+    _atomic.download_atomically 同一顧慮——否則之後 publish_series 讀不到)。"""
+    import os
+    import stat
+
+    manifest_path = tmp_path / "series_manifest.json"
+    out = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    assert stat.S_IMODE(os.stat(out["mp3_path"]).st_mode) == 0o644
+
+
+async def test_interrupted_mp3_download_leaves_no_partial_file(fake_client, tmp_path):
+    """失敗的 .part temp 沒清理會隨每次重試累積;要跟 _atomic.download_atomically 一樣
+    在 except 分支清掉(清理失敗不得蓋掉原例外)。"""
+    import os
+
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.download_audio_partial_bytes = b"partial"
+    fake_client.artifacts.download_audio_exc = ConnectionError("download interrupted")
+
+    with pytest.raises(ConnectionError, match="download interrupted"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    leftovers = [name for name in os.listdir(tmp_path) if name.endswith(".part")]
+    assert leftovers == []
+
+
 async def test_completed_attempt_with_missing_mp3_only_redownloads(
     fake_client, tmp_path
 ):
+    import os
+    import stat
+
     manifest_path = tmp_path / "series_manifest.json"
     first = await p.podcast_episode(
         "nb-1",
@@ -445,6 +489,10 @@ async def test_completed_attempt_with_missing_mp3_only_redownloads(
     )
     mp3_path = tmp_path / "ep01.mp3"
     mp3_path.unlink()
+    # 鎖 manifest_store 的「os.stat 讀到既有檔案就沿用其 mode」分支:resume 這條真實
+    # 路徑會再寫好幾次 manifest(finalize 每個 checkpoint 都是一次 update),寫完不該
+    # 被打回預設的 0644。
+    os.chmod(manifest_path, 0o600)
     artifact_boundary = len(fake_client.artifacts.calls)
     source_boundary = len(fake_client.sources.calls)
 
@@ -458,6 +506,7 @@ async def test_completed_attempt_with_missing_mp3_only_redownloads(
     )
 
     assert resumed["attempt_id"] == first["attempt_id"]
+    assert stat.S_IMODE(os.stat(manifest_path).st_mode) == 0o600
     assert mp3_path.read_bytes() == fake_client.artifacts.download_audio_bytes
     assert [
         call[0]
@@ -469,6 +518,61 @@ async def test_completed_attempt_with_missing_mp3_only_redownloads(
         for call in fake_client.sources.calls[source_boundary:]
         if call[0] in {"add_file", "rename"}
     ] == []
+
+
+async def test_cancelled_download_is_cleaned_up_without_being_marked_failed(
+    fake_client, tmp_path
+):
+    """CancelledError 是 BaseException 子類,不會落進 `except Exception`——而 client
+    cancellation(mcporter 預設 60s vs 單集動輒 20 分)正是這條路最常見的中斷來源。
+    清理與 durable 語意都要對:.part 不留下一份,且 checkpoint 不能被標成
+    "failed"(cancelled ≠ failed;resume 判定只看 status=="completed")。"""
+    import asyncio
+    import os
+
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.download_audio_partial_bytes = b"partial"
+    fake_client.artifacts.download_audio_exc = asyncio.CancelledError("client 60s timeout")
+
+    with pytest.raises(asyncio.CancelledError, match="client 60s timeout"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    leftovers = [name for name in os.listdir(tmp_path) if name.endswith(".part")]
+    assert leftovers == []
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    episode = manifest["episodes"][0]
+    attempt_id = episode["active_attempt_id"]
+    attempt = next(
+        row for row in episode["attempts"] if row["attempt_id"] == attempt_id
+    )
+    download = attempt["finalize"]["download"]
+    assert download["status"] == "dispatching"  # 不是 "failed"
+
+    # 之後真的能不重生地續完:清掉注入的 cancellation,resume 重下載一次即可。
+    fake_client.artifacts.download_audio_exc = None
+    fake_client.artifacts.download_audio_partial_bytes = None
+    generate_boundary = len(fake_client.artifacts.calls)
+    resumed = await p.podcast_episode_resume(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        artifact_id=attempt["remote"]["artifact_id"],
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    assert resumed["attempt_id"] == attempt_id
+    assert not any(
+        c[0] == "generate_audio"
+        for c in fake_client.artifacts.calls[generate_boundary:]
+    )
 
 
 async def test_adopt_replacement_feedback_source_without_uploading_again(
@@ -502,7 +606,11 @@ async def test_adopt_replacement_feedback_source_without_uploading_again(
     attempt = stored["episodes"][0]["attempts"][0]
     upload = attempt["finalize"]["feedback_source_upload"]
     assert adopted["feedback_source_id"] == replacement_source_id
-    assert adopted["safe_next_action"] == "podcast_series"
+    # 被取代的 old_source_id 現在要進清理義務(對齊 retract 的回傳形狀)——即使本測試
+    # 用 sources.clear() 模擬它早就不在筆記本裡了,回傳的 hint 仍是「有待刪項」;真正
+    # 的存在性驗證留給下一次 `_assert_source_cleanup_done`(它會查到已經不在、悄悄結案)。
+    assert adopted["stale_source_ids"] == [old_source_id]
+    assert adopted["safe_next_action"] == "source_delete"
     assert upload["source_id"] == replacement_source_id
     assert upload["status"] == "completed"
     assert upload["previous_source_ids"] == [old_source_id]
@@ -524,3 +632,8 @@ async def test_adopt_replacement_feedback_source_without_uploading_again(
         for call in fake_client.sources.calls[source_boundary:]
         if call[0] in {"add_file", "rename"}
     ] == []
+    # old_source_id 已經不在筆記本裡(sources.clear() 模擬),cleanup gate 查證後悄悄
+    # 結案,不擋 series 續跑。
+    assert "pending_source_cleanup" not in json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )["episodes"][0]

@@ -420,14 +420,19 @@ async def test_adopt_rejects_attempt_identity_drift_before_remote_lookup(
     await p.podcast_episode_reconcile(
         str(manifest_path), episode_n=1, attempt_id=attempt_id
     )
-    store = p.ManifestStore(manifest_path)
 
-    def corrupt_identity(manifest):
-        episode, attempt = p._attempt_record(manifest, 1, attempt_id)
-        attempt["title"] = "另一集"
-        episode["notebook_id"] = "nb-other"
-
-    store.update(corrupt_identity)
+    # 繞過 ManifestStore 直接改寫 JSON 檔:真實的手改破壞本來就長這樣。只留 title
+    # drift——episode/attempt notebook 分裂現在會被 manifest_store._validate 的一致性
+    # guard 在任何 store.read() 就擋下(見 test_manifest_store.py),連不到這裡要測的
+    # podcast_attempt_adopt 下游 identity gate,那個場景已經換一層測、由別的測試鎖住。
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    corrupted_attempt = next(
+        a for a in stored["episodes"][0]["attempts"] if a["attempt_id"] == attempt_id
+    )
+    corrupted_attempt["title"] = "另一集"
+    manifest_path.write_text(
+        json.dumps(stored, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     artifact_boundary = len(fake_client.artifacts.calls)
     source_boundary = len(fake_client.sources.calls)
 

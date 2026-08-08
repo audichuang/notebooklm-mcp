@@ -13,6 +13,7 @@ def _manifest(tmp_path, episodes):
 
 
 async def test_generate_slides_downloads_and_writes_manifest(fake_client, tmp_path):
+    fake_client.sources.seed("EP01 題目")
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     res = await a.generate_slides("nb-1", m, 1, source_ids=["src-1"], slide_format="detailed")
 
@@ -39,6 +40,7 @@ async def test_generate_slides_unknown_episode_errors(fake_client, tmp_path):
 
 
 async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp_path):
+    fake_client.sources.seed("EP01 題目")
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     res = await a.generate_report("nb-1", m, 1, report_format="study_guide", source_ids=["src-1"])
 
@@ -415,3 +417,64 @@ async def test_generate_slides_and_report_check_the_episode_before_generating(fa
     with pytest.raises(ValueError, match="episode 2 not found"):
         await a.generate_report("nb-1", m, 2)
     assert not fake_client.artifacts.calls
+
+
+# ---- M2:source_ids preflight(現成 guard 補進 generate_slides / generate_report) --
+# 打錯/已刪的 source_id 伺服器不擋,燒完一次生成配額才發現拿到聚焦錯誤的產物。
+# generate_audio(tools_basic.py)與 podcast_episode(tools_podcast.py)已在用同一道
+# _sources.to_source_ids + assert_sources_exist——這裡補上這兩支缺的那份(見
+# test_source_selection.py 的對照組)。
+
+
+async def test_generate_slides_rejects_an_absent_source_before_generating(fake_client, tmp_path):
+    fake_client.sources.seed("EP01 題目")
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError, match="src-9"):
+        await a.generate_slides("nb-1", m, 1, source_ids=["src-1", "src-9"])
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_slide_deck"]
+
+
+async def test_generate_report_rejects_an_absent_source_before_generating(fake_client, tmp_path):
+    fake_client.sources.seed("EP01 題目")
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError, match="src-9"):
+        await a.generate_report("nb-1", m, 1, source_ids=["src-1", "src-9"])
+    assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_report"]
+
+
+@pytest.mark.parametrize(
+    "bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"]
+)
+async def test_generate_slides_rejects_a_malformed_selection(fake_client, tmp_path, bad):
+    """空清單/重複/非字串在打 RPC 之前就退,與 to_source_ids 的既定語意一致。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError):
+        await a.generate_slides("nb-1", m, 1, source_ids=bad)
+    assert not fake_client.artifacts.calls
+
+
+@pytest.mark.parametrize(
+    "bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"]
+)
+async def test_generate_report_rejects_a_malformed_selection(fake_client, tmp_path, bad):
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError):
+        await a.generate_report("nb-1", m, 1, source_ids=bad)
+    assert not fake_client.artifacts.calls
+
+
+async def test_generate_slides_without_selection_keeps_sdk_fallback(fake_client, tmp_path):
+    """不傳 source_ids = 現行行為(SDK 自己抓全部來源),不多打 sources.list。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    await a.generate_slides("nb-1", m, 1)
+    gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_slide_deck")
+    assert gen["source_ids"] is None
+    assert not [c for c in fake_client.sources.calls if c[0] == "list"]
+
+
+async def test_generate_report_without_selection_keeps_sdk_fallback(fake_client, tmp_path):
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    await a.generate_report("nb-1", m, 1)
+    gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_report")
+    assert gen["source_ids"] is None
+    assert not [c for c in fake_client.sources.calls if c[0] == "list"]

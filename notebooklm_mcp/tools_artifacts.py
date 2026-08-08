@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 
+from mcp.types import ToolAnnotations
+
 from . import runtime
 from ._atomic import download_atomically
+from ._sources import assert_sources_exist, to_source_ids
 from ._status import ensure_completed, ensure_started
 from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
@@ -150,7 +153,7 @@ async def _finish_slides(
     return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def generate_slides(
     notebook_id: str,
     manifest_path: str,
@@ -163,11 +166,15 @@ async def generate_slides(
     wait_timeout: float = 1800.0,
 ) -> dict:
     """生成該集簡報並下載 PDF,路徑回寫 manifest 的 slides_pdf_path。"""
+    selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 打錯集號別燒一次生成配額
     client = runtime.get_client()
+    if selected is not None:
+        # 打錯/已刪的 source_id 伺服器不擋——燒完一次生成配額才發現拿到聚焦錯誤的簡報。
+        await assert_sources_exist(client, notebook_id, selected)
     status = await client.artifacts.generate_slide_deck(
         notebook_id,
-        source_ids=source_ids,
+        source_ids=selected,
         language=resolve_language(language),
         instructions=instructions,
         slide_format=to_slide_format(slide_format),
@@ -285,7 +292,7 @@ def _validate_report_prompt(
     return prompt
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def generate_report(
     notebook_id: str,
     manifest_path: str,
@@ -303,12 +310,16 @@ async def generate_report(
     study_guide / briefing_doc / blog_post 之外的形狀)。兩者必須成對,且 custom
     格式不吃 `extra_instructions`——要求併進 `custom_prompt`。"""
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
+    selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 同上
     client = runtime.get_client()
+    if selected is not None:
+        # 同 generate_slides:打錯/已刪的 source_id 伺服器不擋,先唯讀對帳。
+        await assert_sources_exist(client, notebook_id, selected)
     status = await client.artifacts.generate_report(
         notebook_id,
         report_format=to_report_format(report_format),
-        source_ids=source_ids,
+        source_ids=selected,
         language=resolve_language(language),
         custom_prompt=custom_prompt,
         extra_instructions=extra_instructions,

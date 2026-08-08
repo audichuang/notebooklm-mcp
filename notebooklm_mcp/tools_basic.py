@@ -9,6 +9,8 @@ import asyncio
 import tempfile
 from pathlib import Path
 
+from mcp.types import ToolAnnotations
+
 from . import runtime
 from ._sources import assert_sources_exist, to_source_ids
 from ._status import ensure_completed, ensure_started
@@ -93,7 +95,7 @@ async def _probe_extraction(notebook_id: str, source_id: str, *, is_file: bool) 
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def auth_check() -> dict:
     """輕量真 RPC 驗證 NotebookLM 認證(cookie)是否有效。
 
@@ -110,7 +112,7 @@ async def notebook_create(title: str) -> dict:
     return {"notebook_id": nb.id, "title": getattr(nb, "title", title)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def notebook_list() -> dict:
     """List all notebooks."""
     nbs = await runtime.get_client().notebooks.list()
@@ -189,7 +191,9 @@ async def source_add_file(
     return out
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True)
+)
 async def source_delete(notebook_id: str, source_id: str) -> dict:
     """Delete a caller-selected source that is no longer needed.
 
@@ -201,7 +205,7 @@ async def source_delete(notebook_id: str, source_id: str) -> dict:
     return {"deleted": source_id}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
 async def generate_audio(
     notebook_id: str,
     instructions: str | None = None,
@@ -232,7 +236,7 @@ async def generate_audio(
     return {"task_id": task_id, "artifact_id": task_id}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
     """List artifacts already in a notebook, so you can see and recover them —
     e.g. an audio episode whose download got interrupted (find its artifact_id
@@ -263,7 +267,7 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def artifact_wait(notebook_id: str, task_id: str, timeout: float = 1200.0) -> dict:
     """Wait for a generation task to complete."""
     status = await runtime.get_client().artifacts.wait_for_completion(notebook_id, task_id, timeout=timeout)
@@ -366,7 +370,7 @@ async def chat_ask(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def source_list(notebook_id: str) -> dict:
     """List a notebook's sources — find a source_id for explicit source
     management or a focused generate_slides/report source_ids set, and confirm
@@ -386,7 +390,7 @@ async def source_list(notebook_id: str) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def source_fulltext(
     notebook_id: str,
     source_id: str,
@@ -421,7 +425,7 @@ async def source_fulltext(
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def notebook_get(notebook_id: str) -> dict:
     """Get a notebook's metadata (title, source count, owner) — confirm you're
     targeting the right notebook before generating or publishing."""

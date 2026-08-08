@@ -445,6 +445,7 @@ async def test_ambiguous_uploaded_source_candidate_can_be_adopted_before_rename(
     add_boundary = len(
         [call for call in fake_client.sources.calls if call[0] == "add_file"]
     )
+    unselected = candidates[1]
     adopted = await p.podcast_attempt_adopt(
         str(manifest_path),
         episode_n=1,
@@ -453,7 +454,25 @@ async def test_ambiguous_uploaded_source_candidate_can_be_adopted_before_rename(
     )
 
     assert adopted["complete"] is False
-    assert adopted["safe_next_action"] == "podcast_episode_resume"
+    # 未被選中的那筆同名 candidate 現在要進清理義務——它跟選中的那筆一樣同名,漏了記錄
+    # 就會從此沒人記得,resume 前必須先刪(見 fix #4/#16 review 的 candidate_source_ids
+    # 清空即遺忘問題)。
+    assert adopted["stale_source_ids"] == [unselected]
+    assert adopted["safe_next_action"] == "source_delete"
+
+    with pytest.raises(
+        ValueError, match="retracted feedback sources still in the notebook"
+    ):
+        await p.podcast_episode_resume(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            artifact_id="task-123",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    await fake_client.sources.delete("nb-1", unselected)
     resumed = await p.podcast_episode_resume(
         "nb-1",
         episode_n=1,
@@ -466,6 +485,9 @@ async def test_ambiguous_uploaded_source_candidate_can_be_adopted_before_rename(
     assert len(
         [call for call in fake_client.sources.calls if call[0] == "add_file"]
     ) == add_boundary
+    assert "pending_source_cleanup" not in json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )["episodes"][0]
 
 
 async def test_completed_episode_transport_failure_returns_structured_partial(

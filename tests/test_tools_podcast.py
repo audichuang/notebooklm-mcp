@@ -30,6 +30,31 @@ async def test_series_rejects_empty_title(fake_client, tmp_path):
     assert fake_client.artifacts.calls == []
 
 
+async def test_series_rejects_none_brief_before_any_rpc(fake_client, tmp_path):
+    """brief=None 若不在前驗擋掉,會撐到迴圈內 `.encode()` 才炸——這時 EP1 早就燒過
+    一次生成配額。整批要在任何 RPC 前一次驗完,跟 title 對稱。"""
+    eps = [
+        {"title": "心法篇", "brief": "第一集"},
+        {"title": "實戰篇", "brief": None},
+    ]
+    with pytest.raises(ValueError, match="brief"):
+        await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
+    assert fake_client.artifacts.calls == []
+    assert not (tmp_path / "series_manifest.json").exists()
+
+
+async def test_series_rejects_empty_brief_before_any_rpc(fake_client, tmp_path):
+    """brief="" 不會炸,只會靜默生出一集空 brief 的 podcast——一樣要在任何 RPC 前擋。"""
+    eps = [
+        {"title": "心法篇", "brief": "第一集"},
+        {"title": "實戰篇", "brief": "   "},
+    ]
+    with pytest.raises(ValueError, match="brief"):
+        await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
+    assert fake_client.artifacts.calls == []
+    assert not (tmp_path / "series_manifest.json").exists()
+
+
 async def test_episode_names_with_title(fake_client, tmp_path):
     out = await p.podcast_episode(
         "nb-1", episode_n=2, title="實戰篇", brief="第二集", output_dir=str(tmp_path)
@@ -367,6 +392,73 @@ async def test_episode_without_manifest_path_writes_nothing(fake_client, tmp_pat
     await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b",
                             output_dir=str(tmp_path))
     assert not os.path.exists(tmp_path / "series_manifest.json")
+
+
+# ── manifest 必須已存在(M3)────────────────────────────────────────────────
+# podcast_episode／podcast_series 才有「檔案不存在就新建」的受支援流程(上面兩個
+# stub 測試 + skill tool-reference.md 都鎖著)。resume／reconcile／adopt／retract
+# 動的一定是既有 attempt/episode。reconcile／adopt／retract 只做唯讀的
+# `ManifestStore.read()`,缺檔時本來就會在下游乾淨失敗、不會寫出任何東西;真正會在
+# 缺檔路徑上 bootstrap 一份新 manifest、還緊接著打遠端 RPC 的只有 resume——秒退對
+# 這四個工具的價值不同,但都是好過讓錯的路徑悄悄往下走。
+
+async def test_resume_rejects_a_manifest_path_that_does_not_exist(fake_client, tmp_path):
+    fake_client.notebooks.fail_list = True  # 若先 probe 會變別的錯誤 → 抓不到這個 ValueError
+    missing = tmp_path / "nested" / "series_manifest.json"
+    with pytest.raises(ValueError, match="does not exist"):
+        await p.podcast_episode_resume(
+            "nb-1", 1, "心法篇", "art-1", str(tmp_path), manifest_path=str(missing),
+        )
+    assert not missing.parent.exists()          # 沒有亂建父目錄
+    assert fake_client.artifacts.calls == []     # 沒打任何 RPC
+
+
+async def test_reconcile_rejects_a_manifest_path_that_does_not_exist(fake_client, tmp_path):
+    missing = tmp_path / "nested" / "series_manifest.json"
+    with pytest.raises(ValueError, match="does not exist"):
+        await p.podcast_episode_reconcile(str(missing), episode_n=1, attempt_id="att-1")
+    assert not missing.parent.exists()
+    assert fake_client.artifacts.calls == []
+
+
+async def test_adopt_rejects_a_manifest_path_that_does_not_exist(fake_client, tmp_path):
+    missing = tmp_path / "nested" / "series_manifest.json"
+    with pytest.raises(ValueError, match="does not exist"):
+        await p.podcast_attempt_adopt(str(missing), episode_n=1, artifact_id="art-1")
+    assert not missing.parent.exists()
+    assert fake_client.artifacts.calls == []
+
+
+async def test_retract_rejects_a_manifest_path_that_does_not_exist(fake_client, tmp_path):
+    missing = tmp_path / "nested" / "series_manifest.json"
+    with pytest.raises(ValueError, match="does not exist"):
+        await p.podcast_attempt_retract(str(missing), 1, "att-1", reason="QA")
+    assert not missing.parent.exists()
+    assert fake_client.artifacts.calls == []
+
+
+async def test_manifest_path_that_is_a_directory_gets_a_distinct_error(fake_client, tmp_path):
+    """路徑存在但不是檔案(例如目錄)是打錯路徑的另一種形狀,不該混進「does not
+    exist」——那句話對一個真的存在的目錄是誤導。"""
+    directory = tmp_path / "series_manifest.json"
+    directory.mkdir()
+    with pytest.raises(ValueError, match="is a directory, not a file"):
+        await p.podcast_episode_reconcile(str(directory), episode_n=1, attempt_id="att-1")
+    assert fake_client.artifacts.calls == []
+
+
+async def test_resume_missing_manifest_error_points_at_the_standalone_escape_hatch(
+    fake_client, tmp_path
+):
+    """resume 是四個工具裡唯一會在缺檔路徑上 bootstrap 新 manifest 的——訊息要指一條
+    正規出路,而不是只講「打錯了」。"""
+    fake_client.notebooks.fail_list = True  # 若先 probe 會變別的錯誤 → 抓不到這個 ValueError
+    missing = tmp_path / "nested" / "series_manifest.json"
+    with pytest.raises(ValueError, match="standalone best-effort"):
+        await p.podcast_episode_resume(
+            "nb-1", 1, "心法篇", "art-1", str(tmp_path), manifest_path=str(missing),
+        )
+    assert fake_client.artifacts.calls == []
 
 
 async def test_series_write_manifest_preserves_unknown_top_level_keys(fake_client, tmp_path):

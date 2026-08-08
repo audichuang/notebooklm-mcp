@@ -71,6 +71,34 @@ def test_legacy_read_projects_revision_for_cas_without_rewriting_disk(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8")) == legacy
 
 
+def test_new_manifest_file_is_not_left_private(tmp_path):
+    """mkstemp 給 0600;首次寫入沒有舊檔可繼承 mode,不該落成 0600(對齊
+    _atomic.download_atomically 同一顧慮——QA／發布之類的其他帳號會讀不到)。"""
+    import os
+    import stat
+
+    path = tmp_path / "series_manifest.json"
+    ManifestStore(path).update(lambda manifest: manifest["episodes"].append({"episode": 1}))
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
+
+
+def test_update_preserves_existing_manifest_file_mode(tmp_path):
+    """os.replace 會把 mkstemp 的 0600 帶到最終檔——手動 chmod 之後,任一次 update
+    不能把它打回別的值。改成 chmod 0o600(不是首寫本來就會落地的 0o644)才真的鎖住
+    「os.stat 讀到既有檔案就沿用」那個分支;chmod 644 是 no-op,測不出東西。"""
+    import os
+    import stat
+
+    path = tmp_path / "series_manifest.json"
+    ManifestStore(path).update(lambda manifest: manifest["episodes"].append({"episode": 1}))
+    os.chmod(path, 0o600)
+
+    ManifestStore(path).update(
+        lambda manifest: manifest["episodes"][0].update({"title": "心法篇"})
+    )
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
 def test_missing_manifest_reads_as_empty_schema_without_creating_data_file(tmp_path):
     path = tmp_path / "series_manifest.json"
 
@@ -218,6 +246,64 @@ def test_replace_failure_preserves_old_manifest(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".series_manifest.json.*.tmp"))
 
 
+def test_existing_notebook_split_manifest_stays_readable(tmp_path):
+    """notebook 一致性只在寫入端擋。v0.5.0 之前 _create_audio_attempt 沒有這道 guard,
+    線上可能已經有 episode/attempt 身分分裂的 manifest;若讀取端也驗,那些 manifest 每次
+    read() 都 raise,連 podcast_attempt_retract(修復正門)與回填腳本都打不開,唯一出路
+    變成 ADR-0009 禁止的手改 JSON。讀得進來、才修得掉。"""
+    path = tmp_path / "series_manifest.json"
+    split = {
+        "schema_version": 2,
+        "revision": 3,
+        "episodes": [
+            {
+                "episode": 1,
+                "notebook_id": "nb-A",
+                "attempts": [
+                    {"attempt_id": "att-1", "episode": 1, "notebook_id": "nb-B"}
+                ],
+            }
+        ],
+    }
+    path.write_text(json.dumps(split), encoding="utf-8")
+
+    snapshot = ManifestStore(path).read()               # 不得 raise
+    assert snapshot["episodes"][0]["notebook_id"] == "nb-A"
+
+    # 但新的寫入仍 fail-closed(不讓分裂繼續長)
+    with pytest.raises(ValueError, match="notebook_id"):
+        ManifestStore(path).update(
+            lambda manifest: manifest["episodes"][0].update({"title": "心法篇"})
+        )
+
+
+def test_directory_fsync_unsupported_is_tolerated_after_commit(tmp_path, monkeypatch):
+    """os.replace 是 commit point。目錄 fsync 在不支援的 mount(NAS/overlay,回
+    EINVAL/ENOTSUP)上失敗**不得**讓 update 看起來整個失敗——否則呼叫端會據此
+    rollback(如 generation_input 的 binding),造成「manifest 有新 revision、binding 卻
+    被刪」的分裂。這條鎖住 commit 後的 errno 容忍。"""
+    import errno
+
+    path = tmp_path / "series_manifest.json"
+    path.write_text(
+        json.dumps({"schema_version": 2, "revision": 0, "episodes": []}),
+        encoding="utf-8",
+    )
+
+    def unsupported(_path):
+        raise OSError(errno.EINVAL, "directory fsync unsupported on this mount")
+
+    monkeypatch.setattr("notebooklm_mcp.manifest_store._fsync_parent", unsupported)
+
+    # 不得 raise
+    ManifestStore(path).update(lambda manifest: manifest.update({"notebook_id": "nb-1"}))
+
+    committed = json.loads(path.read_text(encoding="utf-8"))
+    assert committed["notebook_id"] == "nb-1"          # 已提交
+    assert committed["revision"] == 1                    # revision 有遞增
+    assert not list(tmp_path.glob(".series_manifest.json.*.tmp"))
+
+
 def test_concurrent_process_updates_do_not_lose_either_episode(tmp_path):
     path = tmp_path / "series_manifest.json"
     path.write_text(
@@ -286,3 +372,114 @@ def test_malformed_attempt_references_raise_value_error(
 
     with pytest.raises(ValueError, match="manifest is corrupt"):
         ManifestStore(path).read()
+
+
+def test_episode_attempt_notebook_split_raises(tmp_path):
+    """episode.notebook_id 與其（非 retracted）attempt.notebook_id 必須一致——只驗
+    episode ↔ attempts,不拿 manifest 級 notebook_id 來比(這份 manifest 支援每集不同
+    notebook,manifest 級只是預設值)。這正是 EP35 事故的手改破壞形狀。
+
+    **只擋寫入、不擋讀取**:v0.5.0 之前建立 attempt 完全沒有這道 guard,線上可能已經
+    有分裂的 manifest;讀取端也驗會讓它們每次 read() 都 raise,連修復正門
+    (podcast_attempt_retract)與回填腳本都打不開(見
+    test_existing_notebook_split_manifest_stays_readable)。"""
+    path = tmp_path / "series_manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "revision": 0,
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "notebook_id": "nb-A",
+                        "attempts": [
+                            {
+                                "attempt_id": "attempt-1",
+                                "episode": 1,
+                                "notebook_id": "nb-B",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="notebook_id"):
+        ManifestStore(path).update(
+            lambda manifest: manifest["episodes"][0].update({"title": "心法篇"})
+        )
+
+
+def test_retracted_attempt_notebook_split_is_exempt(tmp_path):
+    """retract 的 tombstone 是歷史紀錄,不參與這道一致性檢查——否則 retract 之後想
+    切換 notebook 重生就寫不進去(取代版的新 attempt 才要跟 episode 一致)。"""
+    path = tmp_path / "series_manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "revision": 0,
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "notebook_id": "nb-B",
+                        "attempts": [
+                            {
+                                "attempt_id": "attempt-1",
+                                "episode": 1,
+                                "notebook_id": "nb-A",
+                                "retraction": {"reason": "QA"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # 走**寫入**路徑才鎖得住豁免:讀取端本來就不驗這條,用 read() 會空過。
+    ManifestStore(path).update(
+        lambda manifest: manifest["episodes"][0].update({"title": "心法篇"})
+    )
+
+
+def test_multi_notebook_manifest_with_consistent_attempts_passes(tmp_path):
+    """合法用法:兩個 episode 各自不同 notebook,各自的 attempt 都跟自己的 episode
+    一致——manifest 支援每集不同 notebook,寫入必須照常通過。"""
+    path = tmp_path / "series_manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "revision": 0,
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "notebook_id": "nb-A",
+                        "attempts": [
+                            {"attempt_id": "attempt-1", "episode": 1, "notebook_id": "nb-A"}
+                        ],
+                    },
+                    {
+                        "episode": 2,
+                        "notebook_id": "nb-B",
+                        "attempts": [
+                            {"attempt_id": "attempt-2", "episode": 2, "notebook_id": "nb-B"}
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # 同上:走寫入路徑,否則這條「合法多 notebook 不被誤擋」的斷言測不到東西。
+    snapshot, _ = ManifestStore(path).update(
+        lambda manifest: manifest["episodes"][0].update({"title": "心法篇"})
+    )
+    assert snapshot["episodes"][0]["notebook_id"] == "nb-A"
+    assert snapshot["episodes"][1]["notebook_id"] == "nb-B"

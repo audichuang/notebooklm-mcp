@@ -32,6 +32,7 @@ REQUIRED_CONTRACT_TERMS = (
     "include_report",    # research_import:報告 entry 沒有 URL,只能靠這個旗標指名
     "input_bundle_path", # podcast_episode 的凍結輸入;相對路徑契約呼叫端猜不到
     "max_report_chars",  # research_wait 預設不回報告本文
+    "source_ids",        # v0.5.0 起 generate_audio/slides/report 與 podcast_episode 可指名來源
 )
 
 
