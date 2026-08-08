@@ -230,6 +230,21 @@ async def test_episode_set_description_validates(tmp_path):
         await a.episode_set_description(m, 9, "真 show notes")
 
 
+async def test_episode_set_description_rejects_unsafe_notes_at_write_time(tmp_path):
+    """夾帶外部資源的 show notes 不能安穩寫進 manifest、等到整季生完跑 publish 才爆。
+    docstring 宣告「錯誤在寫入當下就爆」,就要真的跑 publish 端那顆 guard。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    for bad in (
+        "本集重點\n\n![追蹤像素](https://evil.example/pixel.png)",
+        "本集重點\n\n[點我](javascript:alert(1))",
+    ):
+        with pytest.raises(ValueError, match="自包含"):
+            await a.episode_set_description(m, 1, bad)
+    # 正常的中文技術散文不可誤殺(guard 誤判的代價是整季發不出去)
+    ok = await a.episode_set_description(m, 1, "• 我們談 JavaScript:動態語言的起點\n• 設定 online=1")
+    assert "JavaScript" in ok["description"]
+
+
 # ---- v0.3.3:簡報/講義原子換檔(torn write regression)---------------------------
 # 固定檔名 ep{n:02d}-slides.pdf / -report.md 的就地覆寫:重生中斷會讓 partial file 頂替
 # 原本完整的產物,而 manifest 仍指向同一路徑,publish 的「存在且非空」檢查抓不到。

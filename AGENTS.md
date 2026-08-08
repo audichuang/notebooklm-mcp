@@ -216,6 +216,12 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   `setdefault` 補成重生當下的 wall clock,GUID 不變(同集更新)pubDate 卻漂,episodic feed
   按 pubDate 倒序 → 重生集跳到列表最前(saa-drill EP05/EP09 實際事故)。**改 code 不會回溯
   既有 manifest**,用 `scripts/backfill_published_at.py`(dry-run 預設,走 ManifestStore)。
+  **修正欄位時,manifest 與「回傳給呼叫端的那份 dict」是兩個出口**:v0.6.0 第一版只在
+  `mutate` 裡蓋掉 manifest,四個呼叫點卻都是 `_promote_attempt_output(…, output);
+  return output` —— feed 對、回傳值仍是重生時刻(真實驗收抓到:manifest 12:07:20、
+  回傳值 12:16:39)。所以 `_promote_attempt_output` 會把生效值寫回 `output`,四條路徑
+  (episode / resume / series 兩處)一起正確。**測試要同時斷言 manifest 與回傳值**,
+  只驗前者正是這個 bug 溜過去的原因。
 - **`os.replace` 之後的 directory fsync 一律移出 try 並容忍 `_DIR_FSYNC_UNSUPPORTED`**:
   replace 是 commit point,dir fsync 只是額外的 crash-durability。留在 try 內會讓 NAS/overlay
   mount(回 EINVAL/ENOTSUP)上「已經寫成功」被回報成整個失敗——呼叫端據此 rollback

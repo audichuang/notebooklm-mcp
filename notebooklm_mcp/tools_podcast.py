@@ -192,9 +192,15 @@ def _create_audio_attempt(
                 or has_hard_output_evidence(episode)
                 or legacy_preparatory_output
             ):
+                # 訊息要能自己走完:「P0 does not support implicit regeneration」是內部
+                # 術語(P0 指的是專案內部的能力分期),呼叫端讀不懂、也不知道下一步。
+                # 講清楚為什麼擋、以及唯一的合法出路。
                 raise ValueError(
-                    f"episode {episode_n} already has a durable output; "
-                    "P0 does not support implicit regeneration"
+                    f"episode {episode_n} already has a completed output; refusing to "
+                    "silently overwrite it. To replace it: podcast_attempt_retract"
+                    f"(manifest_path=..., episode_n={episode_n}, attempt_id=..., reason=...), "
+                    "then source_delete each id it returns in stale_source_ids, then "
+                    "generate again (the title cannot change)."
                 )
             active_attempt_id = episode.get("active_attempt_id")
             if active_attempt_id:
@@ -740,6 +746,15 @@ def _promote_attempt_output(
         episode.setdefault(
             "published_at", _first_published_at(episode) or output["published_at"]
         )
+        # 回寫進 output:這支函式的四個呼叫點都是 `_promote…(…, output); return output`,
+        # 只改 manifest 會讓**回傳值**仍帶著「這次重生的時刻」——feed 對、呼叫端拿到的
+        # 卻是錯的 pubDate(v0.6.0 實測抓到:manifest 12:07:20、回傳值 12:16:39)。
+        # 修在這個匯流點,四條路徑一起正確。
+        output["published_at"] = episode["published_at"]
+        # 回寫進 output:這支函式的四個呼叫點都是 `_promote…(…, output); return output`,
+        # 只改 manifest 會讓**回傳值**still 帶著「這次重生的時刻」——feed 對、呼叫端拿到的
+        # 卻是錯的 pubDate(v0.6.0 實測抓到:manifest 12:07:20、回傳值 12:16:39)。
+        # 修在這個匯流點,四條路徑一起正確。
         # episode 級 continuity 證據:attempt 裡的 source_id 是主要真相,但 legacy
         # projection 只認得 episode 級欄位。不寫 feedback_source_adopted_at——那是
         # podcast_attempt_adopt 的人工驗證標記,resume 靠它判斷可否沿用舊 source。

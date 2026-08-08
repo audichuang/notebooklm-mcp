@@ -412,7 +412,12 @@ async def publish_series(
         # (與下面 report_md_path 的 render_report_html 預渲染同一理由)。這裡丟棄回傳值
         # ——guard 只掃 notes 本身的 body,attachments 對它無影響,迴圈內仍會帶
         # attachments 重新渲染一次真正要上傳的 HTML。
-        notes_html.render_episode_notes_html(desc, [])
+        # guard 的訊息只描述「壞在哪」,不知道自己是第幾集——45 集的季度光靠內容片段
+        # 很難定位(同一支工具的 title/cover/description 檢查都有帶集號)。補上。
+        try:
+            notes_html.render_episode_notes_html(desc, [])
+        except ValueError as exc:
+            raise ValueError(f"episode {n}: description {exc}") from exc
         # 附件 requirement + 已填路徑的存在性都在這裡驗完。存在性檢查原本在上傳迴圈
         # 內(舊 :385/:397),後面某集缺檔會讓前面幾集的 mp3/封面已經 PUT 到 NAS,
         # 違反本迴圈上方註解自己宣告的「任何 upload 之前驗完」不變式。
@@ -455,9 +460,13 @@ async def publish_series(
             rpath = ep.get("report_md_path")
             if rpath:
                 with open(rpath, encoding="utf-8") as f:
-                    rendered_reports[int(ep["episode"])] = notes_html.render_report_html(
-                        f.read(), ep["title"]
-                    ).encode("utf-8")
+                    try:
+                        rendered = notes_html.render_report_html(f.read(), ep["title"])
+                    except ValueError as exc:      # 同上:訊息要指名是哪一集的講義
+                        raise ValueError(
+                            f"episode {ep['episode']}: report_md_path {rpath} {exc}"
+                        ) from exc
+                rendered_reports[int(ep["episode"])] = rendered.encode("utf-8")
         # One mp3 in RAM at a time: read -> hash -> PUT -> drop. NEVER accumulate the
         # whole season (8-12 episodes x tens of MB = 300-600MB resident on a possibly
         # small VM). 講義 HTML 是刻意的例外(整季幾百 KB,見上方預渲染)。Commit order

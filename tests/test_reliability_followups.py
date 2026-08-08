@@ -333,7 +333,7 @@ async def test_published_legacy_output_blocks_implicit_supersede_after_failed_re
             if call[0] == "generate_audio"
         ]
     )
-    with pytest.raises(ValueError, match="durable output"):
+    with pytest.raises(ValueError, match="refusing to silently overwrite"):
         await p.podcast_series(
             "nb-1",
             episodes=[{"title": "心法篇", "brief": "第一集"}],

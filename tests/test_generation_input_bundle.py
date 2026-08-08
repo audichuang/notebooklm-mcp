@@ -414,7 +414,7 @@ async def test_binding_sidecar_rolls_back_when_manifest_rejects_attempt(fake_cli
     bundle, _ = _write_bundle(workspace)
     calls_before = len(fake_client.artifacts.calls)
 
-    with pytest.raises(ValueError, match="durable output"):
+    with pytest.raises(ValueError, match="refusing to silently overwrite"):
         await p.podcast_episode(
             "nb-1",
             episode_n=1,

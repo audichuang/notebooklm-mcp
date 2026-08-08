@@ -374,7 +374,7 @@ async def test_episode_stub_with_output_evidence_fails_closed(fake_client, tmp_p
     mpath.write_text(json.dumps({"notebook_id": "old-nb", "episodes": [manual]}),
                      encoding="utf-8")
 
-    with pytest.raises(ValueError, match="durable output"):
+    with pytest.raises(ValueError, match="refusing to silently overwrite"):
         await p.podcast_episode(
             "nb-9", episode_n=3, title="紀律篇", brief="b",
             output_dir=str(tmp_path), manifest_path=str(mpath),

@@ -132,13 +132,18 @@ async def test_replacement_keeps_the_original_published_at_not_the_regeneration_
     await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
     await b.source_delete("nb-1", before["feedback_source_id"])
 
-    await p.podcast_episode(
+    returned = await p.podcast_episode(
         "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
         output_dir=str(tmp_path), manifest_path=manifest_path,
     )
 
     after = _episode(manifest_path)
     assert after["published_at"] == first_published_at
+    # **回傳值也要是首發時間**。第一版只在寫 manifest 時蓋掉,回傳的仍是 finalize 產的
+    # 「這次生成完成的時刻」——feed 對、但任何相信回傳值的呼叫端拿到錯的 pubDate
+    # (v0.6.0 實測:manifest 12:07:20、回傳值 12:16:39)。這就是本 repo 的頭號教訓
+    # 「補一半等於沒補」,所以這條斷言必須跟著 manifest 那條一起在。
+    assert returned["published_at"] == first_published_at
 
 
 async def test_second_replacement_still_keeps_the_original_published_at(

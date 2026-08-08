@@ -15,6 +15,7 @@ from .languages import resolve_language
 from .app import mcp
 from ._text import _CITATION_RE
 from .manifest_store import ManifestStore
+from .publish import notes_html
 
 
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
@@ -52,13 +53,18 @@ async def episode_set_description(
     取代「host 開 bash 改 JSON」那步:本工具與 generate_slides/generate_report 的
     回寫同在 server process 事件迴圈內同步讀改寫,天然不 interleave——chat_ask 產完
     show notes 即可回寫,不用等三個生成到齊。注意這不是跨 process 檔案鎖,別再用
-    外部腳本同時改同一份 manifest。並前置驗 publish 的 preflight 條件(非空、
-    不等於標題),讓錯誤在寫入當下就爆,不留到發布才 fail。"""
+    外部腳本同時改同一份 manifest。並前置驗 publish 的**全部** preflight 條件(非空、
+    不等於標題、渲染後自包含),讓錯誤在寫入當下就爆,不留到發布才 fail。"""
     desc = description.strip()
     if strip_citations:
         desc = _CITATION_RE.sub("", desc).strip()
     if not desc:
         raise ValueError("description is empty(清完引用標記後也不可為空)")
+    # 跑 publish 端那顆一模一樣的 guard。少了這道,夾帶 markdown 圖片／javascript: 連結的
+    # show notes 會安穩寫進 manifest,直到整季生完、跑 publish_series 才 fail-closed——
+    # docstring 自己宣告「錯誤在寫入當下就爆」,那就要真的做到(chat_ask 產的 notes 來自
+    # 可被 prompt injection 的外部文章,這不是理論風險)。
+    notes_html.render_episode_notes_html(desc, [])
     _load_ep_and_write(manifest_path, episode_n, description=desc)
     return {"episode": episode_n, "description": desc, "stripped": strip_citations}
 
