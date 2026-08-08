@@ -9,8 +9,8 @@ Google 把 NotebookLM 的**未認證登入流程**轉到 `notebook.google.com`(�
     page.wait_for_url(f"{get_base_url()}/**", ...)   # playwright_login.py
 
 於是使用者在瀏覽器登入完成、分頁停在新網域,SDK 永遠等不到,卡滿 5 分鐘後 timeout
-(關掉瀏覽器則是 TargetClosedError)。0.7.3 與最新的 0.8.0 host 白名單都只有
-`notebooklm.google.com` / `notebooklm.cloud.google.com`,升級解不了;`NOTEBOOKLM_BASE_URL`
+(關掉瀏覽器則是 TargetClosedError)。**我們已經升到 0.8.0,它的 host 白名單仍然只有**
+`notebooklm.google.com` / `notebooklm.cloud.google.com` —— 升級沒有解掉;`NOTEBOOKLM_BASE_URL`
 也不能指到新網域(白名單會 raise)。
 
 **已認證的 RPC 仍走舊網域且正常**,所以壞的只有登入這一段。

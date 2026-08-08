@@ -637,3 +637,30 @@ async def test_adopt_replacement_feedback_source_without_uploading_again(
     assert "pending_source_cleanup" not in json.loads(
         manifest_path.read_text(encoding="utf-8")
     )["episodes"][0]
+
+
+def test_created_at_utc_normalises_both_naive_and_aware():
+    """跨 SDK 版本的護欄:0.7.x 的 Source.created_at 是 host-local **naive**、
+    0.8.0 改回 **aware UTC**(`_datetime_from_timestamp` 傳 tz=timezone.utc)。
+
+    這顆正規化器是 response-loss reconciliation 的唯一入口。舊版曾用
+    `tzinfo is None` 排除候選,等於把實裝 SDK 回來的每一筆都濾掉,永遠卡在
+    acceptance_unknown。兩種形狀都必須折算成**同一個絕對時刻**——unix timestamp
+    是絕對的,naive 值視為本地時間轉 UTC 才會 round-trip 回正確 instant。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from notebooklm_mcp.audio_finalize import _created_at_utc
+
+    instant = datetime(2026, 8, 8, 4, 30, tzinfo=timezone.utc)
+    # 0.8.0 形狀:已經是 aware UTC,原樣通過。
+    assert _created_at_utc(instant) == instant
+    # 0.7.x 形狀:同一個 epoch 的 host-local naive 值,必須折回同一個 instant。
+    naive_local = datetime.fromtimestamp(instant.timestamp())
+    assert naive_local.tzinfo is None
+    assert _created_at_utc(naive_local) == instant
+    # 非 datetime(SDK 回 None / 解析失敗)不能爆,回 None 讓呼叫端 fail-closed。
+    assert _created_at_utc(None) is None
+    assert _created_at_utc("2026-08-08") is None
+    # aware 但非 UTC 也要折算,不是只把 tzinfo 換掉。
+    assert _created_at_utc(instant.astimezone(timezone(timedelta(hours=8)))) == instant

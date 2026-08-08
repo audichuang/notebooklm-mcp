@@ -471,3 +471,74 @@ async def test_sdk_failed_status_is_not_accepted_not_transport_unknown(
     assert attempt["remote"]["status"] == "failed"
     assert attempt["remote"]["error"] == "simulated failure"
     assert attempt["errors"][-1]["phase"] == "dispatch"
+
+
+async def test_sdk_raised_rate_limit_is_not_accepted_not_acceptance_unknown(
+    fake_client, tmp_path
+):
+    """notebooklm-py 0.8.0(ADR-0019 / #1342)把伺服器的同步拒絕從「回傳
+    status='failed'」改成 **raise**。同一件事(配額/限流)不能因為 SDK 換了表達方式
+    就掉進不同的終態:
+
+      - 0.7.x:回傳 failed → ensure_started → not_accepted → 直接重試即可
+      - 0.8.0 若不分類:落進通用 except → acceptance_unknown → 逼使用者先跑一次
+        註定撈不到東西的 podcast_episode_reconcile 才准重生
+
+    後者不會弄壞資料,但把一個**乾淨的終態**謊報成「結果不明」。拒絕的契約明說
+    沒有建出 task,所以標 not_accepted 才誠實。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+
+    with pytest.raises(RateLimitError, match="每日配額已用盡"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+        "attempts"
+    ][0]
+    assert attempt["dispatch"]["status"] == "not_accepted"
+    assert attempt["remote"]["artifact_id"] is None
+    assert attempt["remote"]["status"] == "failed"
+    # 拒絕的**理由**必須留下來——例外沒有 .error 欄位,不轉換的話 manifest 只會
+    # 留一句 "failed",而「為什麼」正是操作者唯一需要的資訊。
+    assert "每日配額已用盡" in attempt["remote"]["error"]
+    assert attempt["remote"]["error_code"] == "RateLimitError"
+    assert attempt["errors"][-1]["phase"] == "dispatch"
+
+
+async def test_generic_rpc_failure_stays_acceptance_unknown(fake_client, tmp_path):
+    """反向鎖:除了契約講死「沒建出 task」的那兩種,其餘一律留在 acceptance_unknown。
+
+    兩種誤判的代價不對稱——把拒絕誤判成 unknown 只是多跑一次對帳(便宜);把
+    **已受理**誤判成拒絕會讓呼叫端直接重生,變成重複 artifact + 重燒配額。所以
+    `_REFUSED_WITHOUT_DISPATCH` 不能為了訊息好看而長大。RPCError 是父類,更要確認
+    它沒有因為 RateLimitError 是它的子類就被一起吃進去。
+    """
+    from notebooklm.exceptions import RPCError
+
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.generate_audio_exc = RPCError("伺服器 500")
+
+    with pytest.raises(RPCError):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+        "attempts"
+    ][0]
+    assert attempt["dispatch"]["status"] == "acceptance_unknown"

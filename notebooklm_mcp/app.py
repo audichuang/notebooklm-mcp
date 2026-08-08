@@ -25,20 +25,36 @@ from . import runtime
 
 _AUTH_JSON_ENV = "NOTEBOOKLM_AUTH_JSON"
 _DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
+_HEADLESS_REAUTH_ENV = "NOTEBOOKLM_HEADLESS_REAUTH"
+
+# inline auth(Doppler 注入 NOTEBOOKLM_AUTH_JSON)期間強制成這樣;None = 刪掉該變數。
+# 共同理由:**任何會在本 process 內重鑄 cookie 的機制,在 inline 模式都是淨損失**——
+# 新 cookie 只活在記憶體、寫不回 Doppler,下一個 stdio process 反而拿舊的啟動,
+# 而重鑄本身還會把 3 VM 共用的那份作廢。
+#   - DISABLE_KEEPALIVE_POKE=1:擋掉 from_storage() 冷啟動的 RotateCookies poke。
+#   - HEADLESS_REAUTH 刪掉:0.8.0 新增的 L3「無頭重新認證」(用持久瀏覽器 profile
+#     靜默重鑄 cookie)。它預設就是關的,但只要環境裡有人設了 =1 就會在 RPC 中途
+#     自動觸發 —— 顯式壓掉,別讓紀律取決於別人的環境。VM 上也根本沒有那個 profile。
+# 兩者都只在 inline 模式壓:登入機讀本機 storage_state 時,重鑄後寫得回檔案,是對的行為。
+_INLINE_AUTH_ENV_OVERRIDES: dict[str, str | None] = {
+    _DISABLE_KEEPALIVE_ENV: "1",
+    _HEADLESS_REAUTH_ENV: None,
+}
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
-    # notebooklm-py 0.7.x:from_storage() 是同步函式,回傳可直接 async with 的
+    # notebooklm-py 0.8.x:from_storage() 是同步函式,回傳可直接 async with 的
     # context(0.4.x「coroutine 必須 await」慣用法已走入歷史)。
-    # Doppler 注入的 NOTEBOOKLM_AUTH_JSON 是唯讀真相來源:RotateCookies 會把
-    # 新 cookie 留在記憶體,卻寫不回 Doppler,下一個 stdio process 反而拿舊
-    # cookie 啟動。MCP 不開背景 keepalive;inline auth 還要關掉 from_storage()
-    # 冷啟動時的 poke。
+    # MCP 一律**不傳 keepalive=**,再加上下面這組 env override(理由見上)。
     inline_auth = _AUTH_JSON_ENV in os.environ
-    old_disable = os.environ.get(_DISABLE_KEEPALIVE_ENV)
+    saved = {name: os.environ.get(name) for name in _INLINE_AUTH_ENV_OVERRIDES}
     if inline_auth:
-        os.environ[_DISABLE_KEEPALIVE_ENV] = "1"
+        for name, value in _INLINE_AUTH_ENV_OVERRIDES.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
     try:
         async with NotebookLMClient.from_storage() as client:
             runtime.set_client(client)
@@ -48,10 +64,11 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 runtime.set_client(None)
     finally:
         if inline_auth:
-            if old_disable is None:
-                os.environ.pop(_DISABLE_KEEPALIVE_ENV, None)
-            else:
-                os.environ[_DISABLE_KEEPALIVE_ENV] = old_disable
+            for name, old in saved.items():
+                if old is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = old
 
 
 # Protocol-level server instructions: surfaced to ANY MCP client (even one

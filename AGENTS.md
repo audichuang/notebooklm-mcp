@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.6.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.7.0"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c dev -- notebooklm-mcp --transport stdio
@@ -45,9 +45,9 @@ bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次�
 
 **登入為什麼不用原生 `notebooklm login`**(2026-08):Google 把未認證的登入流程轉到
 `notebook.google.com`(少了 `lm`),而 SDK 的偵測寫死等 `notebooklm.google.com/**`,
-於是登入完成後永遠等不到、卡滿 5 分鐘 timeout。0.8.0 的 host 白名單也還沒跟上,
-升級解不了。`scripts/login_notebooklm.py` **只改掉那一行偵測**(兩個 host 都收),
-其餘全部重用 SDK helper,產出的 storage_state 與原生指令等價。
+於是登入完成後永遠等不到、卡滿 5 分鐘 timeout。**我們已經升到 0.8.0,它的 host 白名單
+仍然只有舊的兩個——升級沒有解掉這件事**。`scripts/login_notebooklm.py` **只改掉那一行偵測**
+(兩個 host 都收),其餘全部重用 SDK helper,產出的 storage_state 與原生指令等價。
 **已認證的 RPC 仍走舊網域且正常**,壞的只有登入這段。上游修好時
 `tests/test_contracts.py::test_login_script_should_be_retired_once_upstream_knows_the_new_host`
 會紅,提醒把這支刪掉。**若哪天 API 端點也搬家,notebooklm-py 會整個壞、我們跟著壞** —— 那是要盯的頭號上游風險。
@@ -146,6 +146,8 @@ bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次�
 - `scripts/` — `check_skill_sync.py`(CI 用:MCP 工具名 ⟷ skill 文件同步硬檢查)、`sync-auth.sh`
   (登入機推 Doppler;`--profile/--config` 可指向測試帳號)、`setup-test-config.sh`(建
   `notebooklm/stg` 測試 config)、`backfill_published_at.py`(published_at 一次性回填)
+- `docs/notebooklm-py-0.8-upgrade.md` — 上游 SDK 升級筆記(0.7.3 → 0.8.0)。**下次升 major 前先讀
+  末尾的「驗證方式」**:別只讀 changelog,行為變更不會出現在簽名裡(rename 的短路就是這樣溜過去的)
 - `docs/adr/` — 能力邊界決策。**砍掉已規劃的 scope 也要留一支**:2026-06-07 redesign design doc
   的工具清單裡本來就有 `research_start` / `research_wait_import`,實作時掉了、沒有任何決策記錄,
   結果整個 research namespace 隱形了 38 集(ADR-0008 補記)
@@ -165,12 +167,19 @@ bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次�
 tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `show_id`(**永不改**),
 不綁 notebook_id。
 
-## Gotchas(notebooklm-py 0.7.3,pin `>=0.7.3,<0.8`;與 GitHub HEAD 不同,以**實裝版本**為準)
+## Gotchas(notebooklm-py 0.8.0,pin `>=0.8,<0.9`;與 GitHub HEAD 不同,以**實裝版本**為準)
+
+> 0.7.3 → 0.8.0 的升級細節(改了什麼、為什麼那樣改、哪些 breaking change 擦邊而過、
+> 新能力為什麼不採用、下次升級的驗證流程)在
+> **[docs/notebooklm-py-0.8-upgrade.md](docs/notebooklm-py-0.8-upgrade.md)**。
 
 - **`mcp[cli]` 必須有上界(`>=1.27,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端
   每次安裝都自由解析成當下最新——曾經因為寫成 `>=1.0.0` 而出現「dev venv 鎖 1.27.2、四台
   生產實裝 1.28.1」的落差(測試與實跑不同版),且 mcp 2.0 一出就會被靜默吃進去。改版本時
   **對 lock 版本與消費端實裝版本各跑一次全套**,再更新這裡的下界。
+- **(0.8.0)`notebooklm-py` 自己也有一支叫 `notebooklm-mcp` 的 console script,跟我們撞名**。
+  消費端不受影響(`uv tool install` 只 link 被指名套件的);**但 dev venv 兩支都在**,
+  repo 內一律用 `uv run python -m notebooklm_mcp.server`。**別裝 `notebooklm-py[mcp]`**。
 - **上游/NotebookLM 行為突變時的情報站**:讀 `_research/notebooklm-mcp-cli` 既有 clone 的
   CHANGELOG.md 與 docs/KNOWN_ISSUES.md(jacob-bd,全生態追 Google 改版最快;bl 漂移、cookie
   語意、RPC schema 變動幾乎都最先出現在那),再對照 notebooklm-py 的 GitHub issues。
@@ -185,6 +194,10 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   fetch-token 路徑(`_auth/refresh.py` 的 `_fetch_tokens_with_jar`)無條件先打一次
   RotateCookies、無函式參數可關,少了這顆連 `doppler run -- notebooklm <cmd>` 的 CLI
   呼叫都會作廢一次共用 cookie。跨 session 老化照舊靠 GUI 機重登 + `sync-auth.sh`。
+- **(0.8.0)這條紀律延伸到所有「在本 process 內重鑄 cookie」的機制,inline auth 一律關掉。**
+  新的兩個是 **L3 headless re-auth**(`NOTEBOOKLM_HEADLESS_REAUTH`,`app.py` lifespan 會顯式
+  刪掉這個 env)與 **master-token headless auth**(`headless` extra,**刻意不採用**)。
+  理由與取捨見[升級筆記](docs/notebooklm-py-0.8-upgrade.md)的「新能力」一節。
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
 - `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。
@@ -221,10 +234,20 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - `sources.add_file` 有 `title`(0.7.x),**但內部仍是 add→rename 兩步且改名失敗只 log 不
   raise** → podcast 流程維持顯式 add_file → rename 兩步(fail-loud);`source_add_file` 工具
   的 title= 有回傳後檢,未生效會 raise。
-- `rename()` 的 `return_object` **預設 True 會再抓一次全量清單驗證、可能 raise not-found**
-  → 我們所有 rename 呼叫點顯式傳 `return_object=False`(fire-and-forget,RPC 錯誤仍會 raise)。
+- **(0.8.0)`rename(return_object=False)` 不再是 fire-and-forget**(#1362):兩種模式都做
+  存在性檢查,查不到就 raise。`artifacts.rename` 因此每次多一趟 `LIST_ARTIFACTS`,而且**多了
+  一條原本不存在的失敗路徑**。我們仍一律傳 `False`;哪些呼叫點該防、哪些**刻意不防**,
+  見[升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §2。
+- **(0.8.0)生成 kickoff 的同步拒絕改成 raise,不再回 `status="failed"`**(ADR-0019 / #1342)
+  ——這會**悄悄改變 attempt 的終態分類**,是本次升級唯一需要動邏輯的地方。
+  `_REFUSED_WITHOUT_DISPATCH` 只收契約講死「沒有建出 task」的兩種例外(誤判代價不對稱,
+  **別讓這個集合長大**)。動這條路徑時**三個 except 要一起看**:kickoff、`ensure_started`、
+  以及 `podcast_series` 呼叫 `_run_episode` 那圈(漏了第三個,整季會把例外拋出去而不是回
+  安全停點)。完整推導見
+  [升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §1。
 - 0.7.0 起 source add API 尾端參數(`wait`/`wait_timeout`/`title` 等)**keyword-only**,
-  位置呼叫直接 TypeError(contract 測試有鎖)。
+  位置呼叫直接 TypeError(contract 測試有鎖)。0.8.0 起 `add_url` 也有 `title=`,**刻意不用**
+  ——命名鐵律靠顯式 rename 的 fail-loud 後檢守著。
 - `wait_for_completion` 的 `poll_interval` 已移除(0.7.x);呼叫只用 `timeout=`。
 - 改 contract 測試時對「**實裝版本**」跑,別信 `_research/` 的 HEAD clone。
 - 命名鐵律(每集 mp3 回錄 + 工作室 artifact **完全同名** `EP{n:02d} 標題`)的正本在 skill
@@ -256,12 +279,11 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   連 `podcast_attempt_retract`(修復正門)與回填腳本都打不開,唯一出路變成 ADR-0009 禁止的
   手改 JSON。**壞資料要讀得進來,才修得掉**;retracted tombstone 一律豁免(否則 retract 後
   換 notebook 重生就寫不進去)。
-- **`Source.created_at` 在實裝 0.7.x 是 host-local naive**(`_datetime_from_timestamp` 走
-  `datetime.fromtimestamp()` 不帶 tz;0.8 才改 aware)。source upload 的 response-loss
-  reconciliation 曾用 `tzinfo is None` 排除候選,等於把**實裝 SDK 回來的每一筆**都濾掉,
-  永遠卡在 `acceptance_unknown`。統一走 `audio_finalize._created_at_utc()` 正規化(naive 當
-  本地時間轉 UTC,aware 照轉)。**測試的 fake source 也必須產 naive**,否則測試綠、production
-  死——`tests/conftest.py` 的 `_add` 已改成 `datetime.now()`。
+- **`Source.created_at` 的 tz 在 0.7.x/0.8.0 之間翻過一次面**(naive → aware UTC)。邏輯端
+  統一走 `audio_finalize._created_at_utc()`,兩種形狀都正確,**升級不用改邏輯**。
+  **陷阱在 fake**:`tests/conftest.py` 的 fake source 必須跟**實裝版本**同形,否則重演那次
+  「測試綠、production 把每一筆 source 都濾掉、永遠卡 `acceptance_unknown`」的事故
+  (曾用 `tzinfo is None` 排除候選)。兩條測試各守一半:正規化器本身、以及「fake 有沒有說謊」。
 - **發布用的 HTML guard 是標籤/屬性允許清單,不是關鍵字黑名單**(`publish/notes_html.py`):
   黑名單會把「設定 online=1」「JavaScript:動態語言的起點」這種普通中文散文誤殺(誤判成本 =
   整季 publish raise),又漏掉 `<svg><image href>`、`<input type=image>` 等。允許清單走
@@ -331,10 +353,9 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   `custom_prompt` 會套通用預設句、靜態格式給了 `custom_prompt` 會被丟掉、`custom` 的
   `extra_instructions` 不串接。SDK 全都不 raise,要燒完一次配額拿到錯的講義才發現 →
   `_validate_report_prompt` 在打 RPC 前擋掉三種。
-- **`retry_failed` 與其他 generate 的錯誤契約不同**:它對伺服器端同步拒絕(rate limit /
-  配額)是 **raise**,不像 `generate_*` / `revise_slide` 吞成 `status="failed"`(SDK 說明是
-  ADR-0019「async kickoff」,新方法born on the right side)。`artifact_retry_failed` 因此
-  不必為拒絕設計回傳碼,但仍保留 `ensure_started` 擋空 task_id。
+- **(0.8.0)`retry_failed` 與其他 generate 的錯誤契約現在一致了**:全部對同步拒絕 raise
+  (0.7.x 只有 `retry_failed` 這樣)。「哪支會 raise」不再需要記;`ensure_started` 在所有
+  呼叫點仍保留(擋空 task_id,且 0.7.x 形狀萬一回來也仍被正確處理)。
 - **未暴露的 artifact 型別是產品決策**:video / cinematic_video / infographic / quiz /
   flashcards / data_table / mind_map 的 `generate_*` 都**刻意不做**成 MCP tool(不出 YouTube 版;
   封面走 `notebooklm-cover` 的 HTML+Chrome 決定性管線,不能換成 infographic——發布端拿封面

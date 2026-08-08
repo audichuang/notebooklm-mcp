@@ -15,6 +15,7 @@ from notebooklm_mcp import app, runtime
 
 
 DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
+HEADLESS_REAUTH_ENV = "NOTEBOOKLM_HEADLESS_REAUTH"
 
 
 class _FakeClientCM:
@@ -57,6 +58,28 @@ async def test_lifespan_with_inline_auth_disables_cookie_rotation(monkeypatch):
     async with app._lifespan(app.mcp):
         assert isinstance(runtime.get_client(), _FakeClientCM)
     assert DISABLE_KEEPALIVE_ENV not in app.os.environ
+
+
+async def test_lifespan_with_inline_auth_suppresses_headless_reauth(monkeypatch):
+    """0.8.0 的 L3 headless re-auth 在 inline(Doppler)模式必須被壓掉。
+
+    它會用持久瀏覽器 profile 靜默重鑄 cookie —— 跟 keepalive/RotateCookies 同一類
+    災難:新 cookie 只活在這個 process、寫不回 Doppler,還會把 3 VM 共用的那份作廢。
+    預設關不夠,環境裡被誰設成 "1" 就會在 RPC 中途自動觸發,所以 lifespan 要顯式刪掉,
+    並在退出後**原樣還原**(不能順手把使用者的設定吃掉)。
+    """
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", '{"cookies":[]}')
+    monkeypatch.setenv(HEADLESS_REAUTH_ENV, "1")
+
+    def fake_from_storage(*args, **kwargs):
+        assert kwargs.get("keepalive") is None
+        assert HEADLESS_REAUTH_ENV not in app.os.environ
+        return _FakeClientCM()
+
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", fake_from_storage)
+    async with app._lifespan(app.mcp):
+        assert HEADLESS_REAUTH_ENV not in app.os.environ
+    assert app.os.environ[HEADLESS_REAUTH_ENV] == "1"
 
 
 async def test_lifespan_enters_from_storage_context(monkeypatch):

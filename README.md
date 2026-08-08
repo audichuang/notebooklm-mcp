@@ -1,6 +1,6 @@
 # notebooklm-mcp
 
-Thin self-built MCP server over `notebooklm-py>=0.7.3,<0.8` for NotebookLM automation: notebooks, sources, zh_Hant-first audio overview, source-grounded chat, deterministic episodic podcast seasons, per-episode attachments, and RSS publishing.
+Thin self-built MCP server over `notebooklm-py>=0.8,<0.9` for NotebookLM automation: notebooks, sources, zh_Hant-first audio overview, source-grounded chat, deterministic episodic podcast seasons, per-episode attachments, and RSS publishing.
 
 ## Requirements
 
@@ -19,7 +19,7 @@ uv run pytest -q
 ## Tool install
 
 ```bash
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.6.0"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.7.0"
 ```
 
 The install exposes `notebooklm-mcp` and `notebooklm-cover` on PATH.

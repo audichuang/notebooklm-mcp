@@ -96,8 +96,8 @@ bash scripts/sync-auth.sh --profile test --config stg
 (`playwright_login.py` 的 `page.wait_for_url`)。但 Google 已經把未認證的登入流程轉到
 **`notebook.google.com`**(少了 `lm`)——實測 `curl -L https://notebooklm.google.com/`
 的 `continue=` 參數就是 `https://notebook.google.com/`。登入後分頁停在新網域,
-SDK 等的舊網域永遠不匹配。**0.8.0 的 host 白名單也還沒跟上**(一樣只有
-`notebooklm.google.com` / `notebooklm.cloud.google.com`),所以升級解不了。
+SDK 等的舊網域永遠不匹配。**我們已經升到 0.8.0(2026-08-08),它的 host 白名單仍然只有
+`notebooklm.google.com` / `notebooklm.cloud.google.com` —— 升級沒有解掉這件事。**
 `NOTEBOOKLM_BASE_URL` 也不能指到新網域——它有白名單,會直接 raise。
 
 **還沒壞的部分**:已認證的 RPC 仍走舊網域且正常(實測 `notebooks.list()` 回 289 本)。

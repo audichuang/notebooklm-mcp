@@ -126,9 +126,14 @@ def test_source_add_tail_params_are_keyword_only():
 
 
 def test_rename_signatures_gained_return_object():
-    """0.7.0 起 rename() 有 return_object,**預設 True:改名後會再抓一次全量清單
-    驗證、找不到會 raise**。我們所有 rename 呼叫點顯式傳 return_object=False,
-    保留 0.4.1 的 fire-and-forget 語意(不多打 RPC、不引入新失敗模式)。"""
+    """rename() 的 return_object 仍在,且仍是 keyword-only。
+
+    **語意在 0.8.0(#1362)變了**:`return_object=False` 不再短路。0.7.x 的 False
+    是真 fire-and-forget(不查、不 raise、成功回 None);0.8.0 兩種模式都跑存在性
+    檢查,False 只是「成功時回 None」。我們仍然一律傳 False——artifacts 兩邊等價,
+    sources 的 False 在 RPC 有回 echo 時仍會短路(省一次 fetch),而且我們本來就
+    不用回傳物件。行為差異記在 tools_podcast._finalize_episode 的註解與 AGENTS.md。
+    """
     from notebooklm._artifacts import ArtifactsAPI
     from notebooklm._sources import SourcesAPI
 
@@ -137,6 +142,49 @@ def test_rename_signatures_gained_return_object():
     # return_object 是 keyword-only:鎖住它,擋未來有人寫成位置參數(我方一律 keyword 傳 False)。
     for func in (ArtifactsAPI.rename, SourcesAPI.rename):
         assert inspect.signature(func).parameters["return_object"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_rename_false_no_longer_short_circuits():
+    """0.8.0 的 rename(return_object=False) **會**做存在性檢查(#1362)。
+
+    這條鎖的是「行為」而非簽名:0.7.x 的短路是 `if not return_object …: return None`,
+    0.8.0 拿掉了。上游哪天又改回短路,`audio_finalize` 的 rename 例外處理就會變成
+    永遠走不到的死碼,而 `_finalize_episode` 的註解會變成謊話——這裡先紅。
+
+    用原始碼比對而不是打 RPC:contract 測試必須離線。
+    """
+    import inspect as _inspect
+
+    from notebooklm._artifacts import ArtifactsAPI
+    from notebooklm._sources import SourcesAPI
+
+    art_src = _inspect.getsource(ArtifactsAPI.rename)
+    # 0.7.x 的短路長這樣;0.8.0 應該已經不存在。
+    assert "if not return_object and not future_errors_enabled()" not in art_src
+    assert "ArtifactNotFoundError" in art_src, "artifacts.rename 應該仍會在查不到時 raise"
+    src_src = _inspect.getsource(SourcesAPI.rename)
+    assert "SourceNotFoundError" in src_src, "sources.rename 應該仍會在查不到時 raise"
+
+
+def test_generation_kickoff_refuses_by_raising():
+    """0.8.0(ADR-0019 / #1342):同步拒絕改成 raise,不再回 status='failed'。
+
+    這是 `_REFUSED_WITHOUT_DISPATCH` 分類的**唯一依據**。上游若退回舊契約,
+    那個 except 分支會靜默失效、配額拒絕又會被標成 acceptance_unknown——
+    所以把「這兩種例外型別存在」與「kickoff 的文件講明會 raise」一起鎖住。
+    """
+    import inspect as _inspect
+
+    from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
+    from notebooklm._artifact import generation
+
+    assert issubclass(RateLimitError, Exception)
+    assert issubclass(ArtifactFeatureUnavailableError, Exception)
+    # 「artifact id 缺席 = 沒有建出 task」是我們把它歸成 not_accepted 的理由。
+    parse_src = _inspect.getsource(
+        generation.ArtifactGenerationService._parse_generation_result
+    )
+    assert "raise ArtifactFeatureUnavailableError" in parse_src
 
 
 def test_audio_enum_members():
@@ -175,11 +223,31 @@ def test_source_signatures_and_fields():
     from notebooklm import Source
     from notebooklm._sources import SourcesAPI
 
-    assert _params(SourcesAPI.add_url) == ["self", "notebook_id", "url", "wait", "wait_timeout"]
+    # 0.8.0 add_url 尾端加 title(可在 add 時直接命名,省掉 add→rename 兩步;
+    # podcast 流程目前仍走顯式兩步,因為 add_file 的 title= 內部就是那兩步且會靜默失敗)。
+    assert _params(SourcesAPI.add_url) == ["self", "notebook_id", "url", "wait", "wait_timeout", "title"]
     # 0.7.x add_text 尾端加 idempotent(重試防重複;我們不傳,預設即可)
     assert _params(SourcesAPI.add_text) == ["self", "notebook_id", "title", "content", "wait", "wait_timeout", "idempotent"]
     assert _params(SourcesAPI.delete) == ["self", "notebook_id", "source_id"]
     assert "id" in getattr(Source, "__dataclass_fields__", {})
+
+
+def test_source_created_at_is_timezone_aware():
+    """0.8.0 起 `Source.created_at` 是 **aware UTC**(0.7.x 是 host-local naive)。
+
+    `tests/conftest.py` 的 fake source 必須跟實裝版本同形,否則會重演那次事故:
+    測試綠、production 把每一筆 source 都濾掉,response-loss 後永遠卡在
+    acceptance_unknown。上游哪天再翻回 naive,這裡先紅,提醒同步改 fake。
+    (`_created_at_utc` 本身兩種都吃,有專屬單元測試——這條鎖的是「fake 有沒有說謊」。)
+    """
+    from datetime import datetime, timezone
+
+    from notebooklm._types.common import _datetime_from_timestamp
+
+    stamped = _datetime_from_timestamp(1_785_000_000)
+    assert isinstance(stamped, datetime)
+    assert stamped.tzinfo is not None, "上游翻回 naive 了 —— conftest 的 fake 要跟著改"
+    assert stamped.utcoffset() == timezone.utc.utcoffset(None)
 
 
 def test_notebook_signatures_and_fields():

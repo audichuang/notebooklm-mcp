@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 from mcp.types import ToolAnnotations
+from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
 from notebooklm.types import ArtifactType
 
 from . import runtime
@@ -38,6 +39,18 @@ from .manifest_store import ManifestStore
 
 _TZ = timezone(timedelta(hours=8))
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
+
+# 生成 kickoff 的例外裡,**契約上保證「伺服器沒有建出任何 task」**的那幾種。
+# notebooklm-py 0.8.0(ADR-0019 / #1342)把同步拒絕從「回傳 status='failed'」改成
+# raise:`RateLimitError` 是伺服器的 USER_DISPLAYABLE_ERROR 拒絕(配額/限流),
+# `ArtifactFeatureUnavailableError` 來自 `_parse_generation_result` 的
+# 「a missing id means no task was created」。兩者都等同 0.7.x 的 not_accepted。
+#
+# **刻意不收 `RPCError` / `DecodingError` / 網路錯誤 / CancelledError**:那些都可能
+# 發生在伺服器已經受理之後,歸成 not_accepted 會讓呼叫端直接重生 → 重複 artifact +
+# 重燒配額。兩種誤判的代價不對稱——把拒絕誤判成 unknown 只是多跑一次撈不到東西的
+# 對帳(便宜),把已受理誤判成拒絕是真的損失,所以這個集合只放契約講死的那兩種。
+_REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
 
 ACTION_ADOPT = "podcast_attempt_adopt"
 ACTION_RECONCILE = "podcast_episode_reconcile"
@@ -480,13 +493,28 @@ def _mark_not_accepted(
     attempt_id: str,
     status: object,
 ) -> None:
+    """把 attempt 標成「伺服器明確拒絕、沒有建出任何 artifact」。
+
+    `status` 吃兩種形狀,因為 SDK 的錯誤契約在 0.8.0 換了邊:
+      - 0.7.x 的 `GenerationStatus(task_id="", status="failed")`(由 `ensure_started`
+        判定後傳進來)——讀 `.error` / `.error_code`;
+      - 0.8.0 起同步拒絕改成 **raise**(ADR-0019 #1342),傳進來的是例外本身。
+    兩條路都必須寫進同一個 not_accepted 終態,否則同一件事會依 SDK 版本落到不同狀態。
+    """
+
     def mutate(manifest: dict) -> None:
         _, attempt = _attempt_record(manifest, episode_n, attempt_id)
         if attempt["dispatch"]["status"] != "dispatching":
             return
         now = datetime.now(timezone.utc).isoformat()
-        error = getattr(status, "error", None)
-        error_code = getattr(status, "error_code", None)
+        if isinstance(status, BaseException):
+            # 例外沒有 .error/.error_code;不轉換的話 manifest 會留下一條只寫著
+            # "failed" 的紀錄,把「為什麼被拒」這個唯一有用的資訊丟掉。
+            error = str(status) or type(status).__name__
+            error_code = type(status).__name__
+        else:
+            error = getattr(status, "error", None)
+            error_code = getattr(status, "error_code", None)
         attempt["dispatch"]["status"] = "not_accepted"
         attempt["remote"].update(
             {
@@ -825,8 +853,16 @@ async def _finalize_episode(
 
     # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so
     # the notebook stays legible regardless of the download outcome, then pull the mp3.
-    # fire-and-forget:0.7.3 預設 return_object=True 會再抓全量清單驗證且可能
-    # raise not-found;顯式 False 保留 0.4.1 語意(RPC 層錯誤仍會 raise)。
+    #
+    # ⚠️ `return_object=False` **不再是 fire-and-forget**(0.8.0 / #1362):它現在照樣跑
+    # 一次 LIST_ARTIFACTS,查不到就 raise ArtifactNotFoundError,只是成功時回 None。
+    # 0.7.x 那個「False 直接短路、不查也不 raise」的行為已經拿掉了,所以這一行從
+    # 「絕不會因為找不到而失敗」變成「會」。
+    # 保持現狀不加防護是刻意的:走到這裡代表 ensure_completed 剛通過(而 poll_status
+    # 本來就是靠 artifact list 判定的),artifact 幾毫秒前還在清單裡;此刻查不到基本上
+    # 只有一種解釋——被伺服器下架(配額)。那種情況下面的 download_audio 一樣會失敗,
+    # 提早爆掉反而誠實。失敗語意由呼叫端補完:podcast_episode 的 except 會附上
+    # artifact_id + podcast_episode_resume 的續跑指引。
     await client.artifacts.rename(notebook_id, artifact_id, label, return_object=False)
 
     mp3_path = os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
@@ -1139,6 +1175,13 @@ async def _run_episode(
             audio_format=resolved_audio_format,
             audio_length=resolved_audio_length,
         )
+    except _REFUSED_WITHOUT_DISPATCH as exc:
+        # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
+        # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」——標成
+        # not_accepted 讓呼叫端可以直接重試,不必先跑一次註定撈不到東西的對帳。
+        if store is not None:
+            _mark_not_accepted(store, episode_n, attempt_id, exc)
+        raise
     except (Exception, asyncio.CancelledError) as exc:
         if store is not None:
             _mark_acceptance_unknown(store, episode_n, attempt_id, exc)
@@ -2482,6 +2525,19 @@ async def podcast_series(
                             store, episode_n, active_attempt_id, exc
                         )
                         raise
+                    except _REFUSED_WITHOUT_DISPATCH as exc:
+                        # 明確拒絕(配額/限流)沒有建出 task:回 not_accepted +
+                        # ACTION_SERIES,呼叫端稍後原樣重跑整季即可。歸成
+                        # acceptance_unknown 會逼出一次撈不到東西的對帳。
+                        _mark_not_accepted(
+                            store, episode_n, active_attempt_id, exc
+                        )
+                        return partial(
+                            episode_n,
+                            active_attempt_id,
+                            "not_accepted",
+                            ACTION_SERIES,
+                        )
                     except Exception as exc:
                         _mark_acceptance_unknown(
                             store, episode_n, active_attempt_id, exc
@@ -2635,7 +2691,13 @@ async def podcast_series(
                 failed_attempt["remote"]["status"],
                 ACTION_SERIES,
             )
-        except RuntimeError:
+        # RuntimeError 是 0.7.x 的形狀(ensure_started 判定失敗後自己拋的);
+        # 0.8.0 起伺服器的同步拒絕**直接 raise SDK 例外**,型別完全不同(RateLimitError
+        # 繼承 NotebookLMError,不是 RuntimeError),漏收的話整季會把原始例外拋給
+        # 呼叫端,而不是回這裡的結構化安全停點 —— podcast_series「預期內的停止用回傳
+        # 值表達」這個契約就破了。真正的判準是下面那行「attempt 是不是 not_accepted」,
+        # 例外型別只是入場券,所以兩種形狀都收。
+        except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH):
             current = store.read()
             attempt_id = _active_attempt_or_reraise(current, episode_n)
             _, stopped_attempt = _attempt_record(

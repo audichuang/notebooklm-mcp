@@ -283,11 +283,12 @@ class FakeSources:
                 "id": sid,
                 "title": title,
                 "kind": kind,
-                # 忠實模擬實裝 notebooklm-py 0.7.x:Source.created_at 是 host-local **naive**
-                # (_datetime_from_timestamp 走 datetime.fromtimestamp 不帶 tz)。用 aware 值當
-                # 預設會讓 reconciliation 測試綠、production 卻對不到任何 source(見
-                # audio_finalize._created_at_utc 的註解)。
-                "created_at": created_at or datetime.now(),
+                # 忠實模擬實裝 notebooklm-py **0.8.0**:Source.created_at 改回 tz-aware UTC
+                # (`_datetime_from_timestamp` 現在傳 tz=timezone.utc)。0.7.x 是 host-local
+                # naive,而那次 naive/aware 的落差讓 reconciliation 在測試綠、production
+                # 卻濾掉每一筆 source —— 所以這裡必須跟著實裝版本走,不能兩邊各猜一個。
+                # `_created_at_utc` 對 naive/aware 都正確(有專屬測試鎖著),換版本不會再爆。
+                "created_at": created_at or datetime.now(timezone.utc),
                 "is_ready": is_ready,
             }
         )
@@ -366,9 +367,12 @@ class FakeSources:
                                "content": self.fulltext_content,
                                "char_count": len(self.fulltext_content)})()
 
-    async def add_url(self, notebook_id, url, *, wait=False, wait_timeout=120.0):
-        self.calls.append(("add_url", dict(notebook_id=notebook_id, url=url, wait=wait)))
-        return type("Src", (), {"id": self._add(url)})()
+    # 鏡射 notebooklm-py 0.8.0:尾端加 title=(add 時直接命名;我們目前不傳)。
+    async def add_url(self, notebook_id, url, *, wait=False, wait_timeout=120.0, title=None):
+        self.calls.append(
+            ("add_url", dict(notebook_id=notebook_id, url=url, wait=wait, title=title))
+        )
+        return type("Src", (), {"id": self._add(title or url)})()
 
     async def add_text(self, notebook_id, title, content, *, wait=False,
                        wait_timeout=120.0, idempotent=False):

@@ -501,3 +501,27 @@ async def test_adopt_explicit_source_id_migrates_legacy_output_without_upload(
         for call in fake_client.sources.calls[source_boundary:]
         if call[0] in {"add_file", "rename"}
     ] == []
+
+
+async def test_series_raised_rate_limit_stops_as_not_accepted(fake_client, tmp_path):
+    """整季路徑的同一條契約(0.8.0 #1342):配額拒絕 → not_accepted + 可直接重跑整季。
+
+    這裡的損害比單集版更明顯:回 acceptance_unknown 會讓自動化 host 依
+    `safe_next_action` 去跑 podcast_episode_reconcile,而那支必然回報「沒有這個
+    artifact」,整季就卡在一個根本不存在的疑點上。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+
+    out = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
+
+    assert out["complete"] is False
+    assert out["observed_state"] == "not_accepted"
+    assert out["safe_next_action"] == "podcast_series"
+    stored = json.loads(
+        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
+    )
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "not_accepted"
+    assert "每日配額已用盡" in attempt["remote"]["error"]
