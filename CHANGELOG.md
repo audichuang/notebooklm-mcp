@@ -50,6 +50,35 @@ id,下載到的會是**沒改過的舊那份**,而且看起來完全成功。修
 出現兩筆)是確定的,所以那條 precondition 不鬆;要結案得用兩個內容互斥的來源做一次
 生成對照。
 
+### 真實驗收(2026-08-10,stg 9 帳號池):FAIL-1 **已修好**
+
+targeted 一輪,只驗 FAIL-1 —— 核心機制沿用 v0.9.0 的結論(v0.9.1 沒動到)。重現前提
+(作用中帳號 rotate 到非 owner 槽位)在 MCP 工具面挪不動輪替游標,所以由測試腳本走
+`app._lifespan` 起 pool 驅動,**RPC 全是真的**。
+
+用 slot 1 的憑證直接走 SDK 建一顆**刻意不分享**的 notebook,rotate 到 slot 2
+(唯讀 `notebooks.get` 實測 `rpc_code=7`),然後照 v0.9.0 的死路走一遍:
+
+| 步驟 | 實測 |
+|---|---|
+| `podcast_series` | 2.1s 停在 `observed_state="notebook_access_denied"`,`error` 指名 `notebook_share_with_pool` 並寫出被拒帳號,`attempt_count=1` |
+| `notebook_share_with_pool`(v0.9.0 死在這) | **12.9s 成功**。`shared_by` = slot 1 owner ≠ 作用中的 slot 2;`shared_with` = 其餘 8 個;事後 `get_status` 後檢 `OWNER×1 + EDITOR×8` |
+| 掃描成本 | 只花 2 趟 `get_status` 就命中 owner(先試作用中、再依槽位順序);沒權限那個 **0 趟 `add_user`**;12.9s 幾乎全在 8 個 `add_user`,單趟 sharing RPC 0.33–0.61s,**掃描期間沒撞到 rate limit** |
+| 輪替游標 | 掃描前後同一個帳號 —— 沒被借走 |
+| 再跑 `podcast_series` | `observed_state` 變 `pending`,dispatch `accepted`;而且這次撞配額 failover **連走 4 個不同帳號**對同一個 notebook 送出、一次 permission denied 都沒有 —— 分享對 pool 全員生效,不只對掃描碰到的那一個 |
+
+兩個邊界:pool 全員都看不到時 raise `NotebookAccessDenied`,訊息列出被拒的 8 個帳號並
+說出兩條出路(掃完整個 pool 8 趟唯讀 `get_status` = 4.3s,≈0.54s/帳號)。**非權限錯誤
+不被吞掉這條在真實環境測到了**(原以為做不出來):不存在的 notebook id 回的是
+`rpc_code=5`(not found)而非 7,9 帳號的 pool **只打 1 趟 `get_status`** 就原樣重拋。
+
+那個真實形狀原本沒有離線測試鎖著 ——
+`test_share_reraises_non_permission_errors_instead_of_walking_the_pool` 用的是
+`RuntimeError`,連 `isinstance(exc, ClientError)` 都不過,**走不到 `rpc_code` 的比較**。
+補上
+`test_share_reraises_a_client_error_whose_rpc_code_is_not_permission_denied`,並做過
+突變驗證:判準退化成「只看型別」時只有新那條紅,舊那條仍綠。
+
 
 ## v0.9.0
 
