@@ -8,6 +8,55 @@
 
 ---
 
+## v0.8.0
+
+多帳號配額 pool。Google One 家庭方案下有 5 個付費帳號,但一個 process 只綁一份
+`NOTEBOOKLM_AUTH_JSON`,某帳號當日配額用完整條生成線就停住 —— 即使 pool 裡還有 4 個
+活的帳號。決策與已實測的前提見
+[ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)。
+
+### 新增
+
+- **lifespan 支援 N 個帳號**。Doppler 同一個 config 注入 `NOTEBOOKLM_AUTH_JSON` +
+  `_2`/`_3`…,各建一個長駐 client。**`get_client()` 的語意刻意不變**(「當前作用中的
+  那一個」)→ 46 個呼叫點、安裝指令、MCP 註冊、client 端一行都不用動,`dev` 這種
+  單憑證 config 的行為完全照舊(遷移因此可以逐台進行,漏改的機器照樣能跑)。
+  憑證輪流覆寫 env 再 `from_storage()`:SDK 只認不帶後綴的那個 key
+  (`_auth/cookies.py`),而 `AuthTokens` 沒有 `from_json`。啟動期單線程、建完還原,
+  憑證不必落到檔案系統。
+- **編號缺號 fail-loud**:`_2` 沒設但 `_4` 有 = Doppler 打錯一個字的形狀。靜默跳過會讓
+  那個付費帳號永遠不進 pool,而症狀只是「配額比預期早用完」,幾乎查不回根因。
+- **配額被拒就換帳號,原地重送同一個 attempt**。實測配額耗盡是**同步拒絕**
+  (1.35 秒、`dispatch.status=not_accepted`、`remote.artifact_id=null`),落在
+  `_REFUSED_WITHOUT_DISPATCH` 這條「契約保證沒建出 task」的路上 → 重送是冪等的:
+  **同一個 `attempt_id`,不 supersede、不新建 attempt、不多燒一次配額紀錄**。
+  兩種形狀(0.8.0 起 raise、0.7.x 回 `task_id=""` 由 `ensure_started` 判定)收進
+  同一個 `_dispatch_audio_with_failover`,分兩處各補一次正是本 repo 反覆出事的「補一半」。
+- **`dispatch.account`**(單帳號也記)+ **`errors[]` 的 `dispatch_failover`**
+  (from/to/理由)。對 client 透明可以,對稽核紀錄不行 —— 沒有它「EP35 是誰生的」
+  事後答不出來。**選 `errors[]` 不是隨便選的**:`_reset_attempt_for_resend` 會把
+  dispatch/remote 清回 prepared,診斷放那裡會被抹掉。
+
+### 邊界(刻意不做)
+
+- **已 dispatch 之後的失敗不換帳號**。`status="removed"` 看起來像配額問題,但那時
+  task 已存在,換帳號等於 retract + 取代版 —— 讓 MCP 在背後改寫 manifest 的因果紀錄,
+  正是 ADR-0009 禁止的事。維持既有的結構化安全停點,`podcast_series` 那圈因此**一行未改**
+  (它的判準是 `dispatch.status != "not_accepted"`,failover 對它完全透明)。
+- **認證失效不 failover,大聲停住**。靜默吸收過期憑證的 pool 會一路吸到沒帳號可用。
+- **`store is None`(standalone 無 manifest)不換帳號**:沒有地方寫稽核紀錄。
+- **輪替是 per-process 持續,不是 per-attempt 重設**:今天耗盡的帳號今天就是耗盡了,
+  每集都先撞一次等於每集多燒一趟 RPC、多一筆假的 failover 紀錄。
+
+### 尚未驗證
+
+**真實的 failover 一次都沒跑過** —— rotate 只在 mock client 上測過。`stg` 的三個
+免費帳號就是為此存在(免費配額低,打得爆才測得到)。它同時會驗證「配額算**發起者**
+不算 notebook owner」這個**操作者拍板但未實測**的假設 —— 若配額算 owner,換呼叫端
+帳號毫無作用,這一版的功能全部作廢。
+
+---
+
 ## v0.7.2
 
 真實驗收(v0.7.1,測試帳號)抓到的三個 bug。**觸發條件都是「配額拒絕」**,而那正是
