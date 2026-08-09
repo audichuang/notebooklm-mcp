@@ -106,7 +106,11 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
 **改到 pool / dispatch / 認證 / 發布就要跑一次真實驗收** —— 離線測試用 mock client,
 結構上找不到「配額真的被拒」那一類 bug(v0.7.1 抓到三個含一個死鎖;v0.8.0 抓到三個 P0)。
 **怎麼搭環境、測資怎麼設計、以及「哪五類事只有真帳號測得到」的分工線**見
-[docs/acceptance-testing.md](docs/acceptance-testing.md)。
+[docs/acceptance-testing.md](docs/acceptance-testing.md)(不變的方法論),
+**這一版要驗什麼**則每版一份 —— v0.9.0 是 [docs/acceptance-v0.9.0.md](docs/acceptance-v0.9.0.md)
+(⚠️ **v0.9.0 尚未跑真實驗收**;含一條離線證不了、必須那輪收掉的前提:
+`get_share_status` 到底列不列 owner —— 若不列,`notebook_share_with_pool` 會在 failover
+之後把 owner 降權,而後檢會判定「已生效」放行)。
 **驗收完要回收**:抓到的東西凡是寫得成離線測試的,一律補進 `tests/`(收之前先做突變驗證,
 確認它真的會紅)——否則下一輪還要再燒一次真實配額去發現同一件事。
 
