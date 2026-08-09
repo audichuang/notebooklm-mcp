@@ -228,10 +228,6 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 
 ## Gotchas(notebooklm-py 0.8.0,pin `>=0.8,<0.9`;與 GitHub HEAD 不同,以**實裝版本**為準)
 
-> 0.7.3 → 0.8.0 的升級細節(改了什麼、為什麼那樣改、哪些 breaking change 擦邊而過、
-> 新能力為什麼不採用、下次升級的驗證流程)在
-> **[docs/notebooklm-py-0.8-upgrade.md](docs/notebooklm-py-0.8-upgrade.md)**。
-
 - **`mcp[cli]` 必須有上界(`>=1.27,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端
   每次安裝都自由解析成當下最新——曾經因為寫成 `>=1.0.0` 而出現「dev venv 鎖 1.27.2、四台
   生產實裝 1.28.1」的落差(測試與實跑不同版),且 mcp 2.0 一出就會被靜默吃進去。改版本時
@@ -253,218 +249,54 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   CHANGELOG.md 與 docs/KNOWN_ISSUES.md(jacob-bd,全生態追 Google 改版最快;bl 漂移、cookie
   語意、RPC schema 變動幾乎都最先出現在那),再對照 notebooklm-py 的 GitHub issues。
   **`_research/` 唯讀:連 `git pull` 都不做**,clone 更新請使用者自行決定。
-- `from_storage()` 是**同步函式**,回傳可直接 `async with` 的 context →
-  `async with NotebookLMClient.from_storage()`(0.4.x「coroutine 必須 await」慣用法已走入
-  歷史)。MCP **不傳 `keepalive=`**:Doppler `NOTEBOOKLM_AUTH_JSON` 是 3 VM 共用、唯讀
-  真相來源;RotateCookies 會把新 cookie 留在單一 process 記憶體卻寫不回 Doppler,下一個
-  stdio process 反而拿舊 cookie 啟動。`app.py` 在 inline auth 模式會暫時設
-  `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`,連 `from_storage()` 冷啟動的 poke 一起關掉。
-  Doppler `notebooklm/dev` 也**常駐設了 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`**:0.4.1 起
-  fetch-token 路徑(`_auth/refresh.py` 的 `_fetch_tokens_with_jar`)無條件先打一次
-  RotateCookies、無函式參數可關,少了這顆連 `doppler run -- notebooklm <cmd>` 的 CLI
-  呼叫都會作廢一次共用 cookie。跨 session 老化照舊靠 GUI 機重登 + `sync-auth.sh`。
 - **(0.8.0)這條紀律延伸到所有「在本 process 內重鑄 cookie」的機制,inline auth 一律關掉。**
   新的兩個是 **L3 headless re-auth**(`NOTEBOOKLM_HEADLESS_REAUTH`,`app.py` lifespan 會顯式
   刪掉這個 env)與 **master-token headless auth**(`headless` extra,**刻意不採用**)。
   理由與取捨見[升級筆記](docs/notebooklm-py-0.8-upgrade.md)的「新能力」一節。
-- **(v0.9.0)給 SDK 一個真的 storage_state path,會把好幾條原本靠「env 模式」早退的護欄
-  一起降級** —— 這是憑證落檔換來並行安全的**隱藏代價**,不是疏漏:
-  ①**L2 inline PSIDTS `RotateCookies`**(`_auth/psidts_recovery.py` 的 `_resolve_recovery_path`:
-  env 模式回 None 而拒絕、**有 path 就接受**),而且它**不受 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE`
-  管`**——唯一入口是 strict cookie loader 的 `ValueError`,所以 `_write_credential_file`
-  **必須以 strict 同語義預驗證**(必要 cookie 的 value 也要非空,不能只檢查 key 存在),
-  那條路才真的到不了;②L3/L4 的 `storage_path is None` 早退失效,現在只靠「env 已刪」與
-  「`master_token.json` 不存在」擋著。動這一塊時三條要一起看,少一條就等於在本 process 內
-  重鑄一次 3 VM 共用的 cookie —— 而新 cookie 只活在 temp 檔裡寫不回 Doppler,**另外兩台
-  下次啟動就掛**,本機卻正常啟動、只有 debug 級訊息。
+- **(v0.9.0)pool 的憑證落檔,把好幾條原本靠「env 模式」早退的重鑄護欄一起降級了。**
+  動 `app.py` 的憑證/lifespan 那一塊時三件事要一起看:①`_write_credential_file` 的預驗證
+  **必須與 strict cookie loader 同語義**(必要 cookie 的 **value 也要非空**,不能只檢查 key
+  在不在)—— 那是 L2 inline PSIDTS `RotateCookies` 唯一入口的門,而 L2 **不受
+  `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管**;②L3/L4 現在只靠「env 已刪」與「`master_token.json`
+  不存在」擋著;③等價前提由
+  `tests/test_client_pool.py::test_precheck_agrees_with_the_sdk_strict_loader` 守著,**它紅就
+  代表這條路又開了**。破功的後果:3 VM 共用的 cookie 被本 process 重鑄、新的寫不回 Doppler,
+  另外兩台下次啟動就掛,而本機正常啟動只有 debug 訊息。
+  推導與取捨見 [ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md) 的 v0.9.0 amendment。
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
-- `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。
-- **`status="removed"` ≠ `is_failed`(0.6.0 起)**:被伺服器下架的 artifact(NOT_FOUND
-  輪詢耗盡,通常是每日配額)回 `status="removed"` 且 `is_failed=False`(0.4.x 是合成
-  `"failed"`)。`ensure_completed` 一併擋 `is_removed` 才不會把配額下架當成功放行。
 - `sources.delete` 是 **idempotent**(0.7.0 起):刪不存在的 source 也「成功」不 raise。
   `source_delete` 回的 `deleted` 只代表「呼叫後該 id 已不在筆記本」,**不保證它先前存在**
   (打錯 id 也回 deleted)。要確認刪掉某既有來源,先用 `source_list` 拿真實 `source_id`。
-  ⚠️ **「刪掉」有兩層,而它們是不同的 RPC** —— v0.9.0 驗收看到「刪除後 `source_list`
-  看不到,但 `source_fulltext` 用同一個 `source_id` 在 55 分鐘後仍讀得回全文」,當時
-  判 INCONCLUSIVE。**已由 SDK 三環結案(2026-08-10,離線可驗)**:
-  ①`generate_audio(source_ids=None)` 是在 **client 端**呼叫 `notebooks.get_source_ids()`
-  拿清單、再把明確 id 列表送進 RPC,**不是讓伺服器自己挑**;②`get_source_ids` 走
-  `get_raw()` → `GET_NOTEBOOK`,而 `sources.list`(我方 `source_list`)走的**也是**
-  `GET_NOTEBOOK` —— 同一支 RPC、同一份資料,所以 **`source_list` 看不到 ⟺ 生成的清單裡
-  也沒有它**;③`get_fulltext` 的 params 是 `[[source_id]]`、**不帶 notebook_id**,直接查
-  source 物件、繞過 notebook。**所以「刪掉還讀得回」是預期的,不是清理失敗**,ADR-0009
-  的清理義務有效。
-  三環由 `test_generation_takes_its_source_list_from_the_notebook_not_the_server` 釘住
-  ——**任何一環被上游改掉,這個推導就失效、清理義務要重新論證**。注意它證明的是**推導的
-  前提**,不是端到端行為:真要端到端,得用兩個內容互斥的來源做一次生成對照。
-- **upload endpoint 的副檔名地雷**:`.json`/`.ts`/`.py`/`.yaml` 直接 400 Bad Request(上游只
-  提前擋 HTML family:`_source/upload.py:262` 的 `_HTML_UPLOAD_SUFFIXES`)。v0.3.3 起
-  `source_add_file` 自動把讀得開的小 UTF-8 文字檔複製成 `<原檔名>.md` 上傳並回
-  `converted_from`(EP36 的 fixture-output.json 事故:每次新檔案副檔名都不同,pitfall 文件
-  救不了)。`_NO_AUTO_WRAP_SUFFIXES` **不是** endpoint support allowlist——我們無法從外部
-  證明那件事,它的語意只有「這些格式不該用改副檔名來處理」(文件/表格/圖片/媒體會丟掉
-  原生語意;HTML 要保留上游的 ValidationError)。**刻意不用 `mimetypes.guess_type()`**:它讀
-  `/etc/mime.types`,同一支 `.ts` 在有/無該檔的機器上分類不同,3 VM + podcast-lab 會不決定性。
-  另外 **NUL byte 是合法 UTF-8**,`read_text()` 只擋掉無效序列的那一半 → 需要獨立的
-  `"\x00" in text` guard。顯式 `mime_type` 一律優先(呼叫端比我們清楚那是什麼)。
-  注意 `source_add_file` 只是 caller-facing 通用入口;`tools_podcast.py:726/845` 與
-  `audio_finalize.py:623` 的已知 mp3 直接打 SDK,不經過它。
-- **任何新的原子寫入一律重用 `_atomic`,別自己再寫一份**。`generation_input` 的 sidecar
-  曾經自帶一個 `_fsync_directory`,結果把 v0.3.3 學過的三件事全漏了:mkstemp 的 0600 被帶到
-  最終檔、commit point 之後的 fsync 放在 try 裡(一拋就把剛建立的綁定刪掉)、沒容忍
-  `_DIR_FSYNC_UNSUPPORTED`。三件事都有測試鎖著——但鎖在簡報/講義那條路上,新路徑照樣漏。
-  `fsync_parent` / `_NEW_FILE_MODE` / `_DIR_FSYNC_UNSUPPORTED` 是 package 內共用的。
-  **注意 sidecar 用 `os.link` 而不是 `os.replace`**:它要的是「只在不存在時建立」
-  (原本的 `O_EXCL` 語義,一個 bundle 只綁一次),`os.replace` 會靜默蓋掉既有綁定。
-- **固定檔名的下載一律原子換檔**(`_atomic.download_atomically`):`ep{n:02d}-slides.pdf` /
-  `-report.md` 原本直接寫最終路徑,重生中斷會讓 partial file 頂替上一版完整產物,而 manifest
-  仍指向同一路徑、`publish_series` 的「存在且非空」檢查也抓不到。temp → 驗(非空 + PDF
-  magic / UTF-8 可讀)→ fsync → `os.replace` → fsync parent,與音檔 finalize 同一 pattern
-  (`fsync_parent` 已抽到 `_atomic.py`,兩邊共用)。
-- `sources.add_file` 有 `title`(0.7.x),**但內部仍是 add→rename 兩步且改名失敗只 log 不
-  raise** → podcast 流程維持顯式 add_file → rename 兩步(fail-loud);`source_add_file` 工具
-  的 title= 有回傳後檢,未生效會 raise。
-- **(0.8.0)`rename(return_object=False)` 不再是 fire-and-forget**(#1362):兩種模式都做
-  存在性檢查,查不到就 raise。`artifacts.rename` 因此每次多一趟 `LIST_ARTIFACTS`,而且**多了
-  一條原本不存在的失敗路徑**。我們仍一律傳 `False`;哪些呼叫點該防、哪些**刻意不防**,
-  見[升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §2。
-- **(0.8.0)生成 kickoff 的同步拒絕改成 raise,不再回 `status="failed"`**(ADR-0019 / #1342)
-  ——這會**悄悄改變 attempt 的終態分類**,是本次升級唯一需要動邏輯的地方。
-  `_REFUSED_WITHOUT_DISPATCH` 只收契約講死「沒有建出 task」的兩種例外(誤判代價不對稱,
-  **別讓這個集合長大**)。動這條路徑時**四個 except 要一起看**(v0.8.0 寫成「三個」時漏算了
-  它自己新增的那一個):kickoff、`ensure_started`、`podcast_series` 呼叫 `_run_episode` 那圈
-  (漏了它,整季會把例外拋出去而不是回安全停點)、以及 **series 自己 inline 重送那圈**
-  ——最後這個當初無條件回 `not_accepted`,而 manifest 可能寫的是 `acceptance_unknown`,
-  回報與紀錄相反。姊妹分支早就有「讀 manifest 覆核、例外型別只是入場券」的寫法,
-  照抄過去即可。完整推導見
-  [升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §1。
-- **「從未 dispatch 的 attempt」由建立它的那支工具原樣重呼續推**(`_is_resendable_same_request`)。
-  帶 `source_ids` 的 attempt `podcast_series` 接不了,只有 `podcast_episode` 能續。
-  **「逐字相同」是安全邊界** —— 設定變了還沿用等於靜默換掉生成輸入。連帶三條:
-  ①`_reset_attempt_for_resend` 要 dispatch 與 remote **一起**清(只清一半會讓 series 看到
-  `remote.status="failed"` 而誤判該 supersede);②診斷靠 `errors[]`(只 append),不靠
-  `remote`;③**驗證一律先於變更**。事故經過見 [CHANGELOG](CHANGELOG.md) v0.7.2。
-- 0.7.0 起 source add API 尾端參數(`wait`/`wait_timeout`/`title` 等)**keyword-only**,
-  位置呼叫直接 TypeError(contract 測試有鎖)。0.8.0 起 `add_url` 也有 `title=`,**刻意不用**
-  ——命名鐵律靠顯式 rename 的 fail-loud 後檢守著。
-- `wait_for_completion` 的 `poll_interval` 已移除(0.7.x);呼叫只用 `timeout=`。
+  ⚠️ **刪除後 `source_fulltext` 用同一個 `source_id` 仍讀得回全文(實測 55 分鐘後仍可)
+  —— 那是預期的,不是清理失敗**:它繞過 notebook 直接查 source 物件,而生成用的來源清單
+  與 `source_list` 同走 `GET_NOTEBOOK`。所以 ADR-0009 的清理義務有效。推導的三個前提由
+  `tests/test_contracts.py::test_generation_takes_its_source_list_from_the_notebook_not_the_server`
+  釘住(**它紅就代表推導失效、清理義務要重新論證**),完整論證在該測試的 docstring。
 - 改 contract 測試時對「**實裝版本**」跑,別信 `_research/` 的 HEAD clone。
-- **多帳號 pool(v0.8.x)動 dispatch 前必讀 [ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**。
-  三條實作紀律(每條都被真實事故驗證過):
+- **多帳號 pool 動 dispatch/認證前必讀 [ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**
+  (含 v0.9.0 amendment)。四條實作紀律,每條都被真實事故驗證過、都有測試鎖:
   ①**`podcast_series` 有兩條 dispatch 路徑**(全新一集走 `_run_episode`、重送/supersede 是
-  series 自己 inline),兩條共用 `_dispatch_audio_with_failover` —— v0.8.0 只補了一條,
-  於是 pool 對「重試」這條最需要它的路完全無效,而那正是工具自己給的 `safe_next_action`。
-  ②**身分跟著 client 走,不准放進 process 全域**(v0.9.0 起;舊的 `runtime._sync_auth_env`
-  已刪除)。SDK 的媒體下載在下載當下重讀憑證,而 **MCP 是並行的**(每則 message 一個
-  `tg.start_soon`,本 package 零鎖)——EP05 在 finalize、EP06 撞配額 rotate,一個全域槽
-  不可能同時是兩個值,加鎖也救不了。現在每個槽位各自寫一份 **0600 storage_state 檔**
-  (0700 目錄,lifespan 各條退出路徑都刪),`from_storage(path=…)` 把路徑注進 download
-  service。**憑證因此會落檔**——這推翻了 ADR-0010 當初列的「不落檔」優點,取捨是:能讀那個
-  目錄的 user 本來就讀得到 `/proc/<pid>/environ`。**落檔前一定要跑
-  `extract_cookies_from_storage` 驗一次**:給了真路徑會把 SDK 的 **L2 inline PSIDTS
-  `RotateCookies`** 重新武裝(它**不受 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管**),而它唯一
-  入口是 strict loader 的 `ValueError`,先驗過那條路就永遠到不了。
-  ②-b **記帳與送出必須同源**:`runtime.snapshot()` 一次取 `(label, client)` 往下傳,
-  `_dispatch_audio_with_failover` 換帳號時兩者一起換。分開讀 `active_account()` 與
-  `get_client()`,並行的另一次 rotate 會落在 await 的縫裡,manifest 記 A、實際 B 送出
-  ——**兩個帳號都成功,所以事後查不出來**(ADR-0010 §Transparency:manifest 是唯一憑據)。
-  ③failover **只掛在 `_REFUSED_WITHOUT_DISPATCH` 那一條 except**(契約保證沒建出 task);
-  已 dispatch 之後換帳號等於 retract + 取代版,是 ADR-0009 禁止的「MCP 在背後改寫因果紀錄」。
+  series 自己 inline),**兩條共用 `_dispatch_audio_with_failover`** —— v0.8.0 只補了一條,
+  於是 pool 對「重試」這條最需要它的路完全無效。
+  ②**身分跟著 client 走,不准放進 process 全域**:每個槽位各自一份 storage_state 檔,
+  `from_storage(path=…)`。MCP 是並行的,一個全域槽不可能同時是兩個值,**加鎖也救不了**。
+  ③**記帳與送出必須同源**:`runtime.snapshot()` 一次取 `(label, client)` 往下傳,
+  `_dispatch_audio_with_failover` 回 `(artifact_id, account, client)`,failover 換帳號時
+  一起換。分開讀 `active_account()` 與 `get_client()`,並行 rotate 會落在 await 的縫裡 ——
+  manifest 記 A、實際 B 送出,而**兩個帳號都成功,所以事後查不出來**。
+  ④failover **只掛在 `_REFUSED_WITHOUT_DISPATCH` 那一條 except**(契約保證沒建出 task)。
   **`ensure_started` 拋了不等於沒建出 task** —— 它的條件是 `is_failed or not task_id`,而
-  「有 id + failed」在 SDK 路徑上可達(`_parse_generation_result`:有 artifact_id 就回),
-  那種形狀 rotate 重送會產生**第二個 artifact**;只有真的沒有 id 才算零副作用。
+  「有 id + failed」在 SDK 路徑上可達,那種形狀 rotate 重送會產生**第二個 artifact**;
+  只有真的沒有 id 才算零副作用。已 dispatch 之後換帳號 = ADR-0009 禁止的改寫因果紀錄。
   `tests/test_pool_gaps.py`(經突變驗證)是這區最敏感的守門員。
 - 命名鐵律(每集 mp3 回錄 + 工作室 artifact **完全同名** `EP{n:02d} 標題`)的正本在 skill
   §Episodic;**實作上唯一要記的是命名邏輯集中在 `_episode_label()`**,改流程時對照那裡,別各處自己拼字串。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`
   (`_text.norm` 已封裝)。
-- **`published_at` 是「首發時間」不是「產製時間」**(v0.6.0):retract 必須把它 pop 進
-  `retraction.retracted_output`(它是 `has_hard_output_evidence` 的硬證據,留著會擋死重生),
-  但 promote 補回時要走 `_first_published_at()` ——沿 attempts 建立順序找**第一筆非空**的
-  `retracted_output.published_at`(abandon 分支留的是空 dict,要跳過)。舊行為用
-  `setdefault` 補成重生當下的 wall clock,GUID 不變(同集更新)pubDate 卻漂,episodic feed
-  按 pubDate 倒序 → 重生集跳到列表最前(saa-drill EP05/EP09 實際事故)。**改 code 不會回溯
-  既有 manifest**,用 `scripts/backfill_published_at.py`(dry-run 預設,走 ManifestStore)。
-  **修正欄位時,manifest 與「回傳給呼叫端的那份 dict」是兩個出口**:v0.6.0 第一版只在
-  `mutate` 裡蓋掉 manifest,四個呼叫點卻都是 `_promote_attempt_output(…, output);
-  return output` —— feed 對、回傳值仍是重生時刻(真實驗收抓到:manifest 12:07:20、
-  回傳值 12:16:39)。所以 `_promote_attempt_output` 會把生效值寫回 `output`,四條路徑
-  (episode / resume / series 兩處)一起正確。**測試要同時斷言 manifest 與回傳值**,
-  只驗前者正是這個 bug 溜過去的原因。
-- **`os.replace` 之後的 directory fsync 一律移出 try 並容忍 `_DIR_FSYNC_UNSUPPORTED`**:
-  replace 是 commit point,dir fsync 只是額外的 crash-durability。留在 try 內會讓 NAS/overlay
-  mount(回 EINVAL/ENOTSUP)上「已經寫成功」被回報成整個失敗——呼叫端據此 rollback
-  (如 `generation_input` 的 binding),變成「manifest 有新 attempt、binding 卻被刪」。
-  `_atomic.download_atomically` 一開始就對,`manifest_store._write` 與 `audio_finalize` 的
-  mp3 下載都是後來才補上的**同一個坑**(補一半的又一例)。
-- **manifest 的 notebook 一致性只擋寫入、不擋讀取**(`_validate(..., on_write=True)`):
-  episode 與其非 retracted attempt 的 `notebook_id` 必須一致,但 v0.5.0 之前建立 attempt
-  沒有這道 guard,線上可能已有分裂的 manifest。讀取端也驗會讓它們每次 `read()` 都 raise,
-  連 `podcast_attempt_retract`(修復正門)與回填腳本都打不開,唯一出路變成 ADR-0009 禁止的
-  手改 JSON。**壞資料要讀得進來,才修得掉**;retracted tombstone 一律豁免(否則 retract 後
-  換 notebook 重生就寫不進去)。
-- **`Source.created_at` 的 tz 在 0.7.x/0.8.0 之間翻過一次面**(naive → aware UTC)。邏輯端
-  統一走 `audio_finalize._created_at_utc()`,兩種形狀都正確,**升級不用改邏輯**。
-  **陷阱在 fake**:`tests/conftest.py` 的 fake source 必須跟**實裝版本**同形,否則重演那次
-  「測試綠、production 把每一筆 source 都濾掉、永遠卡 `acceptance_unknown`」的事故
-  (曾用 `tzinfo is None` 排除候選)。兩條測試各守一半:正規化器本身、以及「fake 有沒有說謊」。
-- **發布用的 HTML guard 是標籤/屬性允許清單,不是關鍵字黑名單**(`publish/notes_html.py`):
-  黑名單會把「設定 online=1」「JavaScript:動態語言的起點」這種普通中文散文誤殺(誤判成本 =
-  整季 publish raise),又漏掉 `<svg><image href>`、`<input type=image>` 等。允許清單走
-  stdlib `HTMLParser`,但**要一併擋「被 parser 吞掉的區段」**(comment / decl / CDATA / PI):
-  `<![CDATA[ > <img …> ]]>` 在 HTMLParser 眼中是一個 `unknown_decl`,瀏覽器卻當 bogus comment
-  在第一個 `>` 結束、`<img>` 變真元素(chrome --dump-dom 驗過)。惰性行內標籤
-  (`b`/`i`/`span`/`details`…)刻意放行:report 來自 NotebookLM,夾帶它們不罕見,而屬性另有
-  逐一過濾,放行不擴大攻擊面。
 - **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`)。工具已內建
   `strip_citations` 由 server 端清(`_text._CITATION_RE`),`episode_set_description` 也預設再清一次
   ——**新程式碼別再自己寫 regex**,要改清理規則改 `_CITATION_RE` 一處。
-- **發布的 preflight 是硬契約,且一定在第一個 PUT 之前**(v0.3.3):`require_slides` /
-  `require_report` 預設 True——manifest 沒回寫附件路徑就 raise。理由是三個生成是獨立背景
-  呼叫、完成訊號分散,manifest 是唯一匯流點,舊行為「缺路徑靜默不附」讓「還在生成」與
-  「使用者不要」無從區分(EP36 發布早於交付完成)。兩個獨立旗標,對齊 skill「能略過的只有
-  簡報/研讀講義」。同一輪把附件檔案存在性、**每集 mp3 的 `_ensure_local_mp3` resolve**、
-  **講義 HTML 預渲染**全部提前——舊版都在上傳迴圈內,後面某集失敗會讓前面幾集的
-  mp3/封面已經落在 NAS 上(違反該迴圈上方註解自己宣告的不變式)。**只驗 `artifact_id` 不夠**:
-  resolve 還要 `notebook_id`,且遠端下載本身可能失敗。**這叫 required-deliverable preflight
-  gate,不是 await barrier**(分不出「manifest 有舊路徑、新版正在重生」),也**不保證零 orphan
-  blob**(網路/ffmpeg/uploader 階段失敗仍會留未引用的 immutable blob,那是 media-first 發布
-  的已知代價)。
-- **附加簡報/講義**:`generate_slides`/`generate_report` 只吃**傳入的 `source_ids`**才聚焦原文;
-  不傳則 SDK 用全部來源(v1 不自動排除音檔來源)。附件缺檔時 `publish_series` **fail-fast**。
-  **順序鐵律**:uploader 白名單放寬 `.pdf`/`.html` 後**要先重部署 NAS**,再跑帶附件的發布,否則附件 PUT 404。
-  講義是 Markdown(`download_report`),`notes_html` 渲染成 HTML 才 host;`.md` 只留本機。
-- **`research.start` 只送 `[query, source_type] + notebook_id`**(`_research.py:374-379`):
-  筆記本裡已有的來源**對搜尋內容毫無影響**,notebook_id 只決定 task 掛在哪、import 進哪。
-  種子只能寫進 query 字串——這條 API 事實推導出的 caller 政策(scratch notebook、query
-  recipe)正本在 skill `references/research.md`,別在這裡重抄。
-  `mode="deep"` 只支援 `source="web"`;`wait_for_completion` 對 timeout 丟
-  `ResearchTimeoutError`(TimeoutError 子類),對 **FAILED 是回傳而非 raise** → 工具端自己擋。
-  匯入一律走 `import_sources_with_verification`:`IMPORT_RESEARCH` 在 deep 負載下常超過 30 秒、
-  client 先 timeout 但伺服器已 commit,它用 source list 對帳只補送缺的那幾筆。
-- **`select_cited_sources` 不是 `ResearchAPI` 的方法**,是 `notebooklm/research.py` 的
-  module-level 純函式(不打 RPC)。ResearchAPI 本體只有 5 個 RPC 方法。cited 判定因此是純本地
-  計算,我們只用 `extract_report_urls` / `normalize_citation_url` 算出事實標記回傳,不把
-  cited-only 做成 MCP 參數(那會把選擇政策塞進 capability layer,違反 ADR-0007)。
-- **兩顆 URL normalizer 不可混用**(SDK docstring 自己寫明 distinct,contract 測試有鎖):
-  `research.normalize_citation_url` 給「報告 markdown 裡的引用」比對——strip 尾端標點、
-  **保留 fragment**;`_research._normalize_import_verification_url` 給 import identity——
-  **丟掉 fragment**(伺服器存的時候剝掉)、不 strip 標點。`research_import` 選來源必須用
-  **後者**,否則 `#a`/`#b` 兩個候選在我們眼中是兩筆、在 SDK 的 timeout readback 對帳中是
-  同一筆,筆數就對不起來。**兩顆都不 strip 前後空白**,呼叫端傳進來的 URL 要自己先 strip。
-  後者是私有 API,靠 `test_import_identity_differs_from_citation_identity` 當 tripwire。
-- **`research_import` 必須自己驗 `status == completed`**:SDK 的 importer **完全不做**
-  lifecycle 檢查,而 `failed` 的 task 仍可能留著已解析的 `sources` —— 少了這道 gate 就能
-  繞過 `research_wait` 匯入半套或作廢的候選。identity 碰撞則**只檢查被選取的那些**:
-  候選清單裡兩筆不相干的來源剛好 canonical 相同,不該讓一次合法 selection 整批失敗
-  (v0.4.0 曾這樣過度 fail-closed)。
-- **`import_sources_with_verification` 的 readback 只涵蓋 SDK 自己的 `RPCTimeoutError`**,
-  **不涵蓋**外層 MCP client timeout / coroutine cancellation / server 被砍。外層結果不明時
-  重呼 `research_import` 會重複匯入 —— 先 `source_list` 對帳。之所以只算 P2 而非 P1,是因為
-  ADR-0008 把 research 綁在拋棄式 scratch notebook:對不清楚就丟掉整個 notebook,
-  episode notebook 不受影響。
 - **遠端 mutation 前要有便宜 preflight,但那不是 durable attempt**:`artifact_revise_slide`
   與 `artifact_retry_failed` 改的是**遠端狀態**(不像 download 類救援只寫本機檔),而兩支
   RPC 都只靠 `artifact_id` 定位、`notebook_id` 只是 routing header,錯配 ID 伺服器不會擋 →
@@ -475,48 +307,16 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   slides/report 家族共有的架構債(`generate_slides` 逐字同形),要修得做成涵蓋 generate 與
   revise 的 attachment attempt(含 manifest 存 `slides_artifact_id` 才能驗 episode binding),
   不是替 revise 單獨拆 kickoff/finalize。
-- **`generate_report` 的三種靜默吞噬**(`_artifact/payloads.py:219,538`):`custom` 沒給
-  `custom_prompt` 會套通用預設句、靜態格式給了 `custom_prompt` 會被丟掉、`custom` 的
-  `extra_instructions` 不串接。SDK 全都不 raise,要燒完一次配額拿到錯的講義才發現 →
-  `_validate_report_prompt` 在打 RPC 前擋掉三種。
-- **(0.8.0)`retry_failed` 與其他 generate 的錯誤契約現在一致了**:全部對同步拒絕 raise
-  (0.7.x 只有 `retry_failed` 這樣)。「哪支會 raise」不再需要記;`ensure_started` 在所有
-  呼叫點仍保留(擋空 task_id,且 0.7.x 形狀萬一回來也仍被正確處理)。
-- **未暴露的 artifact 型別是產品決策**:video / cinematic_video / infographic / quiz /
-  flashcards / data_table / mind_map 的 `generate_*` 都**刻意不做**成 MCP tool(不出 YouTube 版;
-  封面走 `notebooklm-cover` 的 HTML+Chrome 決定性管線,不能換成 infographic——發布端拿封面
-  bytes 做 content-hash)。`artifact_list(kind=…)` 仍可列出它們,那只是讀取面。
-- **封面圖 = 凍結的 HTML template + headless Chrome 光柵化**(`notebooklm-cover`,實作
-  `cover_cli.py`)。設計固化在 `notebooklm_mcp/assets/cover_episode.html` / `cover_show.html`
-  (由 **agy/Gemini 設計、產出自包含 HTML**,已 commit 進 repo);**生封面時不叫 agy**——工具只做
-  「填佔位符 `__SHOW__`/`__EPNUM__`/`__TITLE__`/`__BYLINE__`/`__HUE__` → Chrome 截 3000² → RGB JPEG
-  → `validate_artwork`」,離線、決定性、無 LLM。要換整體設計才再叫一次 agy 重生 template(手動、很少)。
-  agy 這類 coding agent **仍不能直接吐點陣圖**,但**擅長出 HTML/CSS**,交給 Chrome 光柵化質感高一截、
-  改版只改 template。**需系統有 headless Chrome**(`google-chrome`/`chromium`;`--chrome` 或
-  `NOTEBOOKLM_COVER_CHROME` 指定)——只有「產封面的那台」需要,3 個認證 VM 不用。NotebookLM 下載的
-  音檔是 **fragmented-MP4 / DASH**(AAC),雖常用 `.mp3` 副檔名卻不是 MP3；`_embed_cover`
-  發布前會正向辨識並轉成 256 kbps true MP3，再寫 ID3/APIC(見下方 gotcha)。
-- **單集封面**:`notebooklm-cover --manifest <json> --show-name Audicast --byline audichuang [--output-dir <dir>]`
-  批次讀 episodes 逐集填 episode template(集號決定色相 `(n*77)%360`、集標當大標、EP 徽章)、
-  把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>` 掛 `itunes:image`,
-  缺 `cover_path` 直接 fail,不 fallback 節目封面)。**節目封面**:`--show --output assets/cover.jpg
-  --show-name Audicast --tagline "…" --byline audichuang`。單集一次性:`--output --episode EP0n --title "…"`。
-  **決定性鐵律**:發布端用封面 bytes 做 content-hash,同一集必須永遠生同一張——所以色相只能是集號的
-  函式(不可隨機);但 bytes 也吃 **Chrome/CJK 字型版本**,換版本會漂 → 固定在同一台機器產、產出的
-  JPEG 即事實來源(可版控;等同舊 PIL 的字型 caveat)。`.jpg`/`.png` uploader 白名單本來就放行,
-  **不用重部署 NAS**(不像加 `.pdf`/`.html` 那次)。
-- **單集封面「app 讀不到」的真根因 = 音檔沒內嵌圖 + 格式假標**:feed 的 `<item>`
-  itunes:image 我方掛得對、URL 也公網可達(實測 200),但 Apple/Spotify 常優先吃音檔內嵌圖。
-  NotebookLM raw 檔是 fragmented MP4/AAC、常偽裝成 `.mp3`;若仍以 `audio/mpeg` 發布，副檔名/MIME/
-  container/codec 四者矛盾。故 `publish_series` 的 `_embed_cover` seam 先用 ffprobe **正向辨識**:
-  MP4/AAC → ffmpeg 轉 256 kbps、44.1 kHz stereo true MP3；既有 true MP3 不重編音訊；其他格式
-  fail-closed。最後用 mutagen 寫單一 authoritative front-cover ID3/APIC。這讓公開 enclosure 的
-  `.mp3` + `audio/mpeg` 與實際 MP3 完全一致且可 HTTP range seek。**代價**:首次啟用正規化會讓
-  MP4 來源各集換一次 content-hash URL(舊 URL 因 uploader 不刪仍可用,訂閱者可能重抓)。
-  exact output bytes/hash 只在相同 ffmpeg/libmp3lame 工具鏈穩定；升級會再次 churn enclosure URL，
-  故產製環境要固定版本，計畫升級時要預期重驗。測試用假 audio bytes 由 autouse fixture 把
-  `_embed_cover` 換成 no-op；真媒體 regression 鎖住 MP4→MP3、
-  MP3 保留、ADTS 拒絕、端到端 uploaded bytes/副檔名/RSS MIME 一致與決定性。
+
+### 按需載入的 gotchas(只在動到那一塊時讀)
+
+| 動到什麼 | 先讀 |
+|---|---|
+| research 三支工具 | [docs/gotchas-research.md](docs/gotchas-research.md) |
+| 發布 / 附件 / 封面 | [docs/gotchas-publish.md](docs/gotchas-publish.md) |
+| 直接呼叫 notebooklm-py | [docs/gotchas-sdk.md](docs/gotchas-sdk.md) |
+| attempt 狀態機 / manifest | [docs/gotchas-attempt.md](docs/gotchas-attempt.md) |
+| 寫檔 / 上傳來源 | [docs/gotchas-files.md](docs/gotchas-files.md) |
 
 ## Conventions
 
