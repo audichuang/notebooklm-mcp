@@ -71,6 +71,11 @@ def active_account() -> str | None:
     return _POOL[_ACTIVE][0] if _POOL else None
 
 
+def all_accounts() -> list[str]:
+    """pool 裡每個帳號的 label,依槽位順序。"""
+    return [label for label, _, _ in _POOL]
+
+
 def rotate_client() -> str | None:
     """切到下一個還沒用過的帳號,回傳它的 label;沒有下一個就回 None。
 

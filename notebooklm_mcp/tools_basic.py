@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from mcp.types import ToolAnnotations
+from notebooklm.rpc.types import SharePermission
 
 from . import runtime
 from ._sources import assert_sources_exist, to_source_ids
@@ -105,11 +106,59 @@ async def auth_check() -> dict:
     return await probe_auth(runtime.get_client())
 
 
+async def _share_with_pool(notebook_id: str) -> list[str]:
+    """把新建的 notebook 分享給 pool 裡其餘帳號(EDITOR),回傳分享成功的清單。
+
+    多帳號 failover 換帳號後,是拿新帳號對**同一個 notebook_id** 送出 —— 新帳號
+    看不到那個 notebook 的話整條 pool 是空談(v0.8.0 驗收 F-2:實測其餘帳號
+    `notebooks.get` 一律 permission denied)。而 MCP 建的 notebook 預設只屬於建立
+    它的帳號,先前**沒有任何機制**建立那個前置狀態。
+
+    單帳號時完全不打 RPC —— 現行所有機器的行為一個字不變。
+    `notify=False`:pool 是同一個人的帳號,不需要寄通知信。
+    """
+    others = [a for a in runtime.all_accounts() if a != runtime.active_account()]
+    if not others:
+        return []
+    # label 退回 "#N" 表示啟動時拿不到那個帳號的 email,分享不了。靜默略過會讓它
+    # 永遠沒有權限,而症狀要等 failover 換過去才出現——中間隔著整段生成時間。
+    unresolved = [a for a in others if "@" not in a]
+    if unresolved:
+        raise RuntimeError(
+            f"notebook {notebook_id!r} 已建立,但 pool 裡的 {unresolved} 沒有可用的帳號 email,"
+            "無法分享 —— 這些槽位在 server 啟動時取不到 email。請手動分享或重啟 server。"
+        )
+    client = runtime.get_client()
+    shared: list[str] = []
+    for email in others:
+        try:
+            await client.sharing.add_user(
+                notebook_id, email, SharePermission.EDITOR, notify=False
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"notebook {notebook_id!r} **已建立**,但分享給 {email} 失敗({exc})。"
+                f"已分享:{shared}。手動補分享(EDITOR)或刪掉這個 notebook 再重來 —— "
+                "沒分享到的帳號在 failover 換過去時會 permission denied。"
+            ) from exc
+        shared.append(email)
+    return shared
+
+
 @mcp.tool()
 async def notebook_create(title: str) -> dict:
-    """Create a new notebook. Returns its id."""
+    """Create a new notebook. Returns its id.
+
+    多帳號 pool 模式下會自動把它分享給其餘帳號(EDITOR),否則 failover 換帳號後
+    那些帳號看不到這個 notebook。單帳號模式行為不變。
+    """
     nb = await runtime.get_client().notebooks.create(title)
-    return {"notebook_id": nb.id, "title": getattr(nb, "title", title)}
+    shared = await _share_with_pool(nb.id)
+    return {
+        "notebook_id": nb.id,
+        "title": getattr(nb, "title", title),
+        "shared_with": shared,
+    }
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))

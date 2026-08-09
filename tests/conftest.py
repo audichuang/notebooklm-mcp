@@ -389,8 +389,10 @@ class FakeNotebooks:
     def __init__(self):
         # True 時 list() 擲認證死亡錯誤——模擬 cookie 過期(auth 預檢的紅路徑)。
         self.fail_list = False
+        self.created: list[str] = []
 
     async def create(self, title):
+        self.created.append("nb-123")
         return type("NB", (), {"id": "nb-123", "title": title})()
 
     async def list(self):
@@ -488,6 +490,18 @@ class FakeResearch:
         return list(self.imported)
 
 
+class FakeSharing:
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.add_user_exc = None
+
+    async def add_user(self, notebook_id, email, permission=None, notify=True, welcome_message=""):
+        if self.add_user_exc is not None:
+            raise self.add_user_exc
+        self.calls.append((notebook_id, email, permission, notify))
+        return SimpleNamespace(notebook_id=notebook_id, shared_users=[])
+
+
 class FakeClient:
     def __init__(self):
         self.artifacts = FakeArtifacts()
@@ -495,6 +509,7 @@ class FakeClient:
         self.notebooks = FakeNotebooks()
         self.chat = FakeChat()
         self.research = FakeResearch()
+        self.sharing = FakeSharing()
 
 
 @pytest.fixture
