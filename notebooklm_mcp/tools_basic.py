@@ -106,54 +106,80 @@ async def auth_check() -> dict:
     return await probe_auth(runtime.get_client())
 
 
-async def _share_with_pool(notebook_id: str) -> list[str]:
-    """把新建的 notebook 分享給 pool 裡其餘帳號(EDITOR),回傳分享成功的清單。
+def _pool_peers(notebook_id: str) -> list[str]:
+    """pool 裡除了作用中之外的帳號 email。
 
-    多帳號 failover 換帳號後,是拿新帳號對**同一個 notebook_id** 送出 —— 新帳號
-    看不到那個 notebook 的話整條 pool 是空談(v0.8.0 驗收 F-2:實測其餘帳號
-    `notebooks.get` 一律 permission denied)。而 MCP 建的 notebook 預設只屬於建立
-    它的帳號,先前**沒有任何機制**建立那個前置狀態。
-
-    單帳號時完全不打 RPC —— 現行所有機器的行為一個字不變。
-    `notify=False`:pool 是同一個人的帳號,不需要寄通知信。
+    label 退回 "#N" 表示啟動時拿不到那個帳號的 email,分享不了。靜默略過會讓它
+    永遠沒有權限,而症狀要等 failover 換過去才出現——中間隔著整段生成時間。
     """
     others = [a for a in runtime.all_accounts() if a != runtime.active_account()]
-    if not others:
-        return []
-    # label 退回 "#N" 表示啟動時拿不到那個帳號的 email,分享不了。靜默略過會讓它
-    # 永遠沒有權限,而症狀要等 failover 換過去才出現——中間隔著整段生成時間。
     unresolved = [a for a in others if "@" not in a]
     if unresolved:
         raise RuntimeError(
-            f"notebook {notebook_id!r} 已建立,但 pool 裡的 {unresolved} 沒有可用的帳號 email,"
+            f"notebook {notebook_id!r}:pool 裡的 {unresolved} 沒有可用的帳號 email,"
             "無法分享 —— 這些槽位在 server 啟動時取不到 email。請手動分享或重啟 server。"
         )
+    return others
+
+
+async def _share_each(notebook_id: str, emails: list[str]) -> list[str]:
+    """逐一分享,失敗時說出已經完成到哪裡。"""
     client = runtime.get_client()
     shared: list[str] = []
-    for email in others:
+    for email in emails:
         try:
             await client.sharing.add_user(
                 notebook_id, email, SharePermission.EDITOR, notify=False
             )
         except Exception as exc:
             raise RuntimeError(
-                f"notebook {notebook_id!r} **已建立**,但分享給 {email} 失敗({exc})。"
-                f"已分享:{shared}。手動補分享(EDITOR)或刪掉這個 notebook 再重來 —— "
-                "沒分享到的帳號在 failover 換過去時會 permission denied。"
+                f"notebook {notebook_id!r} 分享給 {email} 失敗({exc})。已分享:{shared}。"
+                "手動補分享(EDITOR)——沒分享到的帳號在 failover 換過去時會 permission denied。"
             ) from exc
         shared.append(email)
     return shared
 
 
 @mcp.tool()
+async def notebook_share_with_pool(notebook_id: str) -> dict:
+    """把**既有** notebook 分享給多帳號 pool 裡的其餘帳號(EDITOR)。
+
+    `notebook_create` 從 v0.8.1 起會自動做這件事;這支是給**既有** notebook 補的
+    ——v0.8.1 之前建的、或在 NotebookLM 網頁上手動建的。沒有這個前置狀態,配額耗盡
+    後 failover 換帳號時會 `NotebookAccessDenied`。
+
+    **冪等**:已經有權限的帳號直接跳過,重跑安全。單帳號模式是 no-op(不打任何 RPC)。
+    """
+    peers = _pool_peers(notebook_id)
+    if not peers:
+        return {"notebook_id": notebook_id, "shared_with": [], "already_shared": []}
+    status = await runtime.get_client().sharing.get_status(notebook_id)
+    existing = {getattr(u, "email", None) for u in getattr(status, "shared_users", [])}
+    already = [e for e in peers if e in existing]
+    todo = [e for e in peers if e not in existing]
+    return {
+        "notebook_id": notebook_id,
+        "shared_with": await _share_each(notebook_id, todo),
+        "already_shared": already,
+    }
+
+
+@mcp.tool()
 async def notebook_create(title: str) -> dict:
     """Create a new notebook. Returns its id.
 
-    多帳號 pool 模式下會自動把它分享給其餘帳號(EDITOR),否則 failover 換帳號後
-    那些帳號看不到這個 notebook。單帳號模式行為不變。
+    多帳號 pool 模式下會自動把它分享給其餘帳號(EDITOR):failover 換帳號後是拿新
+    帳號對**同一個 notebook_id** 送出,新帳號看不到它的話整條 pool 是空談
+    (v0.8.0 驗收 F-2:實測其餘帳號 `notebooks.get` 一律 permission denied)。
+    單帳號模式完全不打額外 RPC,行為不變。既有 notebook 用 `notebook_share_with_pool`。
     """
     nb = await runtime.get_client().notebooks.create(title)
-    shared = await _share_with_pool(nb.id)
+    # notebook 已經建出來了,分享失敗必須說清楚這件事 —— 否則呼叫端不知道雲端多了
+    # 一個孤兒 notebook,也無從手動補分享。
+    try:
+        shared = await _share_each(nb.id, _pool_peers(nb.id))
+    except RuntimeError as exc:
+        raise RuntimeError(f"notebook {nb.id!r} **已建立**,但{exc}") from exc
     return {
         "notebook_id": nb.id,
         "title": getattr(nb, "title", title),

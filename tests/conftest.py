@@ -494,12 +494,21 @@ class FakeSharing:
     def __init__(self):
         self.calls: list[tuple] = []
         self.add_user_exc = None
+        # 既有共享者(email 字串);notebook_share_with_pool 靠它判斷誰不用再分享。
+        self.existing: list[str] = []
 
     async def add_user(self, notebook_id, email, permission=None, notify=True, welcome_message=""):
         if self.add_user_exc is not None:
             raise self.add_user_exc
         self.calls.append((notebook_id, email, permission, notify))
+        self.existing.append(email)
         return SimpleNamespace(notebook_id=notebook_id, shared_users=[])
+
+    async def get_status(self, notebook_id):
+        return SimpleNamespace(
+            notebook_id=notebook_id,
+            shared_users=[SimpleNamespace(email=e) for e in self.existing],
+        )
 
 
 class FakeClient:

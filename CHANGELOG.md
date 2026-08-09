@@ -8,6 +8,41 @@
 
 ---
 
+## v0.8.2
+
+v0.8.1 的真實驗收(stg 四個命題全綠 + prd 端到端四集回歸)之後的補完。
+
+### 新增
+
+- **`notebook_share_with_pool`** —— 把**既有** notebook 補分享給 pool 其餘帳號(EDITOR)。
+  v0.8.1 的自動分享只對 `notebook_create` 生效,而正在跑的專案 notebook 都是既有的;
+  沒有這個前置狀態,配額耗盡 failover 換帳號時會 `NotebookAccessDenied`,而在這支工具
+  之前唯一的補法是自己寫 SDK 腳本。**冪等**(已有權限的帳號跳過),單帳號是 no-op。
+
+### 修正
+
+- `notebook_get` 的 docstring 講明 **`is_owner` 在 notebook 有共享者時一律回 `False`**
+  (驗收 G-1:同一份 owner 憑證,移除共享者後同一欄位才變 `True`)。多帳號 pool 下自動
+  分享是常態,這個欄位實務上恆為 `False`,**不能拿來判斷歸屬**。行為來自上游 SDK,
+  沒有任何生產邏輯依賴它,所以照實轉發 + 文件說清楚,不悄悄拿掉欄位。
+- 補上 v0.8.1 漏 commit 的 `uv.lock` 版本號。
+
+### 驗收結果(v0.8.1,四個命題全綠)
+
+- **重送/supersede 路徑也 failover、也記帳號**(F-4 的修正成立):同一 attempt 重呼後
+  `errors[]` 3→6,新增兩筆新時間戳的 `dispatch_failover`,`attempts` 仍是 1、無 supersede。
+- **下載用作用中帳號的身分**(F-1):把舊 notebook 的共享移除到只剩 owner,下載仍成功。
+- **自動分享**(F-2)在 pool=5 下也成立(`shared_with` 回 4 個帳號)。
+- **permission denied → `not_accepted`**,訊息指名要分享;不再往下 rotate。
+- 走錯路兩條都安全:對 `not_accepted` 跑 reconcile 是純本機拒絕、manifest 一個位元沒動。
+
+### 仍待確認(不在這一版)
+
+F-3(finalize 失敗原因不進 `errors[]`)、F-5(暫時性失敗的 `remote.error` 只有一句
+`failed`)。兩者都是既有行為,影響的是出事後的可查性,不是成功路徑。
+
+---
+
 ## v0.8.1
 
 v0.8.0 的真實驗收(stg 三個免費帳號,三個帳號全部打爆)抓到的三個 P0 + 一個設計缺口。

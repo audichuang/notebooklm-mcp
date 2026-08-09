@@ -37,6 +37,46 @@ async def test_single_account_creates_without_sharing(fake_client):
     assert fake_client.sharing.calls == []
 
 
+async def test_share_with_pool_backfills_an_existing_notebook(fake_client):
+    """既有 notebook(v0.8.1 之前建的、或手動建的)的補救入口。
+
+    自動分享只對 `notebook_create` 生效。既有 notebook 沒有這個前置狀態,配額耗盡
+    failover 換帳號時會 NotebookAccessDenied —— 而在有這支工具之前,唯一的補法是
+    自己寫 SDK 腳本。
+    """
+    runtime.set_clients(
+        [("a@x.com", fake_client), ("b@x.com", fake_client), ("c@x.com", fake_client)]
+    )
+    fake_client.sharing.existing = ["a@x.com", "b@x.com"]  # b 已經分享過了
+
+    out = await basic.notebook_share_with_pool("nb-old")
+
+    assert out["shared_with"] == ["c@x.com"], "只補缺的那些"
+    assert out["already_shared"] == ["b@x.com"]
+    assert fake_client.sharing.calls == [
+        ("nb-old", "c@x.com", SharePermission.EDITOR, False)
+    ]
+
+
+async def test_share_with_pool_is_idempotent(fake_client):
+    """全部都分享過了就完全不打 add_user —— 重跑安全。"""
+    runtime.set_clients([("a@x.com", fake_client), ("b@x.com", fake_client)])
+    fake_client.sharing.existing = ["a@x.com", "b@x.com"]
+
+    out = await basic.notebook_share_with_pool("nb-old")
+
+    assert out["shared_with"] == []
+    assert out["already_shared"] == ["b@x.com"]
+    assert fake_client.sharing.calls == []
+
+
+async def test_share_with_pool_on_single_account_is_a_noop(fake_client):
+    runtime.set_client(fake_client)
+    out = await basic.notebook_share_with_pool("nb-old")
+    assert out["shared_with"] == [] and out["already_shared"] == []
+    assert fake_client.sharing.calls == []
+
+
 async def test_unresolvable_account_label_fails_loud(fake_client):
     """label 退回 `#N`(啟動時拿不到 email)就分享不了,必須當場爆掉。
 
