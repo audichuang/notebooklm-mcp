@@ -477,7 +477,13 @@ async def source_fulltext(
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def notebook_get(notebook_id: str) -> dict:
     """Get a notebook's metadata (title, source count, owner) — confirm you're
-    targeting the right notebook before generating or publishing."""
+    targeting the right notebook before generating or publishing.
+
+    ⚠️ `is_owner` 在 notebook **有任何共享者時一律回 False**,即使呼叫的就是 owner
+    本人(v0.8.1 驗收 G-1:同一份 owner 憑證,移除共享者之後同一個欄位才變 True)。
+    多帳號 pool 模式下自動分享是常態,所以這個欄位實務上恆為 False,**不能拿來判斷
+    歸屬**。行為來自上游 SDK 對 share status 的解讀,不是這一版引入的;我們照實轉發。
+    """
     nb = await runtime.get_client().notebooks.get(notebook_id)
     # SDK 0.3.4 的 get() 不一定回 None——找不到可能回帶空 id 的物件,兩種都當「找不到」。
     if nb is None or not getattr(nb, "id", None):
