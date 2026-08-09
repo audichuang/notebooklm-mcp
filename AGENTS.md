@@ -43,6 +43,32 @@ uv run python scripts/login_notebooklm.py   # 開瀏覽器登入,登入完成即
 bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次啟動即生效
 ```
 
+#### Config 佈局(2026-08-09)
+
+| config | 用途 | 帳號 |
+|---|---|---|
+| `prd` | 正式環境 | 5 個**付費**帳號:`NOTEBOOKLM_AUTH_JSON` + `_2`…`_5` |
+| `stg` | 測試環境 | 3 個**免費**帳號:`NOTEBOOKLM_AUTH_JSON` + `_2`/`_3` |
+| `dev` / `dev_personal` | 舊的生產入口 | 主力帳號,**刻意原封不動** |
+| `dev_alt` | 備援帳號的臨時入口 | pool 落地那天刪掉(見下) |
+
+`_2`/`_3`… 是 client pool 的憑證格式(**[ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**)。
+SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生效、也不影響任何機器 ——
+`dev` → `prd` 因此可以逐台遷,漏改的機器照舊能跑(strangler pattern,這正是**不改名 `dev`** 的理由)。
+
+**三條會出事的紀律:**
+
+- **`prd` 的 `PODCAST_TOKEN_SALT` 必須逐字等於 `dev` 的**。feed 公開路徑是 `HMAC(salt, show_id)`,
+  換 salt = 已發布節目全部換 URL、訂閱者掉光。`stg` 則**刻意不同**(URL 空間隔離)。
+  建 `prd` **不能用 `setup-test-config.sh`** —— 那支的預設行為是產生新 salt。
+- **認證一律 `doppler secrets set --raw`,絕不用 `secrets upload`**。upload 會做變數插值,
+  cookie 值裡的 `$` 被當 secret reference 吃掉:實測 16137 bytes 的 storage_state 上傳後
+  變成 16103 bytes 的**無效 JSON**,而指令回報成功。複製後**驗 hash 還不夠**,要真的跑一次
+  RPC(`await client.get_account_email()`)。
+- **branch config 會繼承 root 的未覆寫 secret**。`dev_alt` 是 `dev` 的 branch,它自己的
+  `NOTEBOOKLM_AUTH_JSON` 是帳號 2,卻會**繼承 `dev` 的 `_2`(也是帳號 2)**→ pool 變成同一個
+  帳號輪兩次,failover 看起來像壞掉。pool 落地時直接刪掉 `dev_alt`,別留著當陷阱。
+
 **登入為什麼不用原生 `notebooklm login`**(2026-08):Google 把未認證的登入流程轉到
 `notebook.google.com`(少了 `lm`),而 SDK 的偵測寫死等 `notebooklm.google.com/**`,
 於是登入完成後永遠等不到、卡滿 5 分鐘 timeout。**我們已經升到 0.8.0,它的 host 白名單
