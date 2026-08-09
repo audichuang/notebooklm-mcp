@@ -144,6 +144,88 @@ async def test_generic_failure_never_rotates(fake_client, tmp_path):
     del original
 
 
+async def test_has_id_but_failed_is_not_zero_side_effect_so_it_does_not_rotate(
+    fake_client, tmp_path
+):
+    """SDK 契約上可達、但更危險的一種拒絕形狀:有 id 卻 `is_failed=True`。
+
+    `_artifact/generation.py:586-590` 明寫「有 artifact_id 就回
+    GenerationStatus(task_id=artifact_id, status=...)」,而 `_ARTIFACT_STATUS_MAP`
+    含 FAILED → "failed",所以「有 id + failed」這個形狀在上游可達,不是 0.7.x 的
+    `task_id=""` 那種零副作用拒絕。伺服器已經建出 task 了——rotate 重送會產生第二個
+    artifact,manifest 卻只綁得到新帳號那個,第一個不在 artifact_ids_before 基線裡,
+    日後 reconcile 會撞成 reconciliation_ambiguous,還多燒一次配額。
+    """
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    calls: list = []
+    original = fake_client.artifacts.generate_audio
+
+    async def has_id_but_failed(*args, **kwargs):
+        calls.append(runtime.active_account())
+        return type(
+            "S",
+            (),
+            {
+                "task_id": "task-ghost-1",
+                "is_failed": True,
+                "status": "failed",
+                "error": "upstream refused after building the task",
+            },
+        )()
+
+    fake_client.artifacts.generate_audio = has_id_but_failed
+    manifest_path = tmp_path / "series_manifest.json"
+
+    with pytest.raises(RuntimeError, match="upstream refused after building the task"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    assert calls == ["a@x"], "有 id 卻 failed 不是零副作用——不准換帳號重送"
+    attempt = _attempts(manifest_path)[0]
+    assert attempt["dispatch"]["status"] == "acceptance_unknown", (
+        "標成 not_accepted 會讓呼叫端誤以為可以安全重送,實際上伺服器可能已經建出 task"
+    )
+    del original
+
+
+async def test_generic_runtime_error_still_gets_the_reconcile_hint(
+    fake_client, tmp_path
+):
+    """普通 `RuntimeError`(非 ensure_started 判定的 not_accepted)一樣要拿到續跑指引。
+
+    `_dispatch_audio_with_failover` 的泛用 except 分支把它標成 acceptance_unknown、
+    原樣重拋;但它剛好也是 `RuntimeError` 型別,曾被 `_run_episode` 排在泛用分支之前的
+    `except RuntimeError: raise` 攔住,續跑指引(podcast_episode_reconcile)整條蒸發
+    ——重構帶進來的回歸,v0.7.2 舊碼走 `except Exception` 才拿得到。
+    """
+    runtime.set_clients([("solo@x", fake_client)])
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("weird transient failure")
+
+    fake_client.artifacts.generate_audio = boom
+    manifest_path = tmp_path / "series_manifest.json"
+
+    with pytest.raises(RuntimeError, match="podcast_episode_reconcile"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    attempt = _attempts(manifest_path)[0]
+    assert attempt["dispatch"]["status"] == "acceptance_unknown"
+
+
 async def test_status_shaped_refusal_also_rotates(fake_client, tmp_path):
     """0.7.x 的形狀(回 `task_id=""` 而不是 raise)也要 failover。
 
@@ -272,11 +354,14 @@ async def test_permission_denied_is_not_acceptance_unknown(fake_client, tmp_path
     fake_client.artifacts.generate_audio = denied
     manifest_path = tmp_path / "series_manifest.json"
 
-    with pytest.raises(p.NotebookAccessDenied, match="分享"):
+    with pytest.raises(p.NotebookAccessDenied, match="分享") as excinfo:
         await p.podcast_episode(
             "nb-1", episode_n=1, title="心法篇", brief="第一集",
             output_dir=str(tmp_path), manifest_path=str(manifest_path),
         )
+    assert "notebook_share_with_pool" in str(excinfo.value), (
+        "訊息要指名補分享的正門工具,不能只說『手動補分享』"
+    )
 
     assert calls == ["a@x"], "權限問題不該一個一個帳號試過去"
     attempt = _attempts(manifest_path)[0]
@@ -284,10 +369,26 @@ async def test_permission_denied_is_not_acceptance_unknown(fake_client, tmp_path
         "確定沒建出 task,不是受理不明"
     )
     assert "permission denied" in attempt["remote"]["error"]
+    assert "notebook_share_with_pool" in attempt["remote"]["error"], (
+        "manifest 的 remote.error 要帶出補分享的下一步,不是只留原始的 "
+        "\"permission denied\"——原本 _mark_not_accepted 收到的是建 "
+        "NotebookAccessDenied **之前**的原始 ClientError,指引整條蒸發"
+    )
 
 
 async def test_permission_denied_in_series_returns_a_safe_stop(fake_client, tmp_path):
-    """series 路徑上同一件事要回結構化安全停點,而不是 acceptance_unknown/reconcile。"""
+    """series 路徑上同一件事要回結構化安全停點,而且要能跟『還在等配額』分開來看。
+
+    舊斷言只驗 `observed_state == "not_accepted"` 與
+    `safe_next_action != "podcast_episode_reconcile"`——那剛好是「等配額」的安全
+    停點也會給出的一模一樣的形狀。呼叫端拿工具自己給的 `safe_next_action`
+    (`podcast_series`)原樣重呼,只會撞回同一個沒權限的帳號,而
+    `attempt_count`/`superseded_attempt_count`(partial() 唯一的『有沒有在原地打轉』
+    依據)兩輪都是 1/0,跟等配額完全同一組數字,看不出自己在原地打轉。修法是給權限
+    問題自己的 observed_state,並把帶著 `notebook_share_with_pool` 指引的
+    `NotebookAccessDenied` 訊息透過 `error` 欄位帶出來(不新增 `safe_next_action`
+    字面值——那個集合是白名單,見 `_classify_not_accepted_stop` 的說明)。
+    """
     from notebooklm.exceptions import ClientError
 
     runtime.set_clients([("a@x", fake_client)])
@@ -301,8 +402,11 @@ async def test_permission_denied_in_series_returns_a_safe_stop(fake_client, tmp_
         "nb-1", episodes=[{"title": "心法篇", "brief": "1"}],
         output_dir=str(tmp_path), start=1,
     )
-    assert out["observed_state"] == "not_accepted"
-    assert out["safe_next_action"] != "podcast_episode_reconcile"
+    assert out["observed_state"] == "notebook_access_denied", (
+        "不能跟『等配額』長得一樣——否則原樣重呼會在同一集永遠卡死而看不出來"
+    )
+    assert out["safe_next_action"] == "podcast_series"
+    assert "notebook_share_with_pool" in out["error"]
 
 
 async def test_reset_for_resend_clears_the_stale_account(fake_client, tmp_path):

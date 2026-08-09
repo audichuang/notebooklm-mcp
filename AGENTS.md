@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.8.2"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.0"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
@@ -64,6 +64,15 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
 **加帳號時編號必須連續,而且順序不能顛倒**:要把既有的往後挪(例如把 `_6`/`_7` 挪成
 `_8`/`_9` 好空出位置),**先複製到新位置、再覆蓋舊位置** —— 任何一刻都不能出現空號,
 否則 server 當場 raise(那個 guard 是刻意的,跳號在實務上都是 Doppler 打錯字)。
+**不帶後綴的那個也算槽位**:它缺席而 `_2` 還在,同樣當場 raise(v0.9.0 補;舊版會靜默
+退成單帳號、連 inline 模式的兩條 env 紀律一起關掉,而在有本機 storage_state 的登入機上
+還會啟動成功)。
+
+**同一個帳號不得佔兩個槽位** —— v0.9.0 起 server 啟動時比對 email,重複就 raise。
+配額不會因此變多,而 failover 會寫下一筆謊報的 rotation(`from_account` → `to_account`
+其實是同一個人),看起來像 pool 壞掉。最常見成因就是上面講的 branch config 繼承。
+**這道檢查在兩個槽位都拿不到 email 時失效**(退成 `#1`/`#2` 天然不相撞)——保護正好
+在認證退化時消失,別把它當成完備保證。
 
 **三條會出事的紀律:**
 
@@ -222,6 +231,13 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   每次安裝都自由解析成當下最新——曾經因為寫成 `>=1.0.0` 而出現「dev venv 鎖 1.27.2、四台
   生產實裝 1.28.1」的落差(測試與實跑不同版),且 mcp 2.0 一出就會被靜默吃進去。改版本時
   **對 lock 版本與消費端實裝版本各跑一次全套**,再更新這裡的下界。
+  **這個落差會自己重新長出來,要定期對帳**:2026-08-09 又漂成「lock 1.28.1 / 實裝 1.29.0」,
+  而且不是純帳面差異——1.29.0 啟動時多印一行 `pydantic_settings … IncompleteFieldDefinitionWarning:
+  Field 'lifespan' has an incomplete definition`,1.28.1 完全不印。走的是 stderr 所以沒破壞
+  stdio 協定,但它證明實裝版本有 CI 從沒跑過的行為(已把 lock 拉到 1.29.0 對齊並跑過全套)。
+  查法:`grep -A1 'name = "mcp"' uv.lock` vs
+  `~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('mcp'))"`。
+  **對齊要用 `uv sync --extra dev`,不是 `uv pip install -e .`** —— 後者不會把 venv 拉到 lock 的版本。
 - **(0.8.0)server 命令改叫 `nblm-mcp`,不是 `notebooklm-mcp`** —— 因為 `notebooklm-py`
   自己也宣告了一支同名 script,同一個 tool venv 只留最後寫入的那份,**實測全新安裝 3/3
   都是上游贏**(而上游那支缺 `fastmcp` 會直接 ModuleNotFoundError)。
@@ -246,6 +262,16 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   新的兩個是 **L3 headless re-auth**(`NOTEBOOKLM_HEADLESS_REAUTH`,`app.py` lifespan 會顯式
   刪掉這個 env)與 **master-token headless auth**(`headless` extra,**刻意不採用**)。
   理由與取捨見[升級筆記](docs/notebooklm-py-0.8-upgrade.md)的「新能力」一節。
+- **(v0.9.0)給 SDK 一個真的 storage_state path,會把好幾條原本靠「env 模式」早退的護欄
+  一起降級** —— 這是憑證落檔換來並行安全的**隱藏代價**,不是疏漏:
+  ①**L2 inline PSIDTS `RotateCookies`**(`_auth/psidts_recovery.py` 的 `_resolve_recovery_path`:
+  env 模式回 None 而拒絕、**有 path 就接受**),而且它**不受 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE`
+  管`**——唯一入口是 strict cookie loader 的 `ValueError`,所以 `_write_credential_file`
+  **必須以 strict 同語義預驗證**(必要 cookie 的 value 也要非空,不能只檢查 key 存在),
+  那條路才真的到不了;②L3/L4 的 `storage_path is None` 早退失效,現在只靠「env 已刪」與
+  「`master_token.json` 不存在」擋著。動這一塊時三條要一起看,少一條就等於在本 process 內
+  重鑄一次 3 VM 共用的 cookie —— 而新 cookie 只活在 temp 檔裡寫不回 Doppler,**另外兩台
+  下次啟動就掛**,本機卻正常啟動、只有 debug 級訊息。
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
 - `GenerationStatus` **無 `artifact_id`**;`task_id` 本身就是 artifact id(download/rename 用它)。
@@ -289,9 +315,12 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - **(0.8.0)生成 kickoff 的同步拒絕改成 raise,不再回 `status="failed"`**(ADR-0019 / #1342)
   ——這會**悄悄改變 attempt 的終態分類**,是本次升級唯一需要動邏輯的地方。
   `_REFUSED_WITHOUT_DISPATCH` 只收契約講死「沒有建出 task」的兩種例外(誤判代價不對稱,
-  **別讓這個集合長大**)。動這條路徑時**三個 except 要一起看**:kickoff、`ensure_started`、
-  以及 `podcast_series` 呼叫 `_run_episode` 那圈(漏了第三個,整季會把例外拋出去而不是回
-  安全停點)。完整推導見
+  **別讓這個集合長大**)。動這條路徑時**四個 except 要一起看**(v0.8.0 寫成「三個」時漏算了
+  它自己新增的那一個):kickoff、`ensure_started`、`podcast_series` 呼叫 `_run_episode` 那圈
+  (漏了它,整季會把例外拋出去而不是回安全停點)、以及 **series 自己 inline 重送那圈**
+  ——最後這個當初無條件回 `not_accepted`,而 manifest 可能寫的是 `acceptance_unknown`,
+  回報與紀錄相反。姊妹分支早就有「讀 manifest 覆核、例外型別只是入場券」的寫法,
+  照抄過去即可。完整推導見
   [升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §1。
 - **「從未 dispatch 的 attempt」由建立它的那支工具原樣重呼續推**(`_is_resendable_same_request`)。
   帶 `source_ids` 的 attempt `podcast_series` 接不了,只有 `podcast_episode` 能續。
@@ -309,12 +338,26 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   ①**`podcast_series` 有兩條 dispatch 路徑**(全新一集走 `_run_episode`、重送/supersede 是
   series 自己 inline),兩條共用 `_dispatch_audio_with_failover` —— v0.8.0 只補了一條,
   於是 pool 對「重試」這條最需要它的路完全無效,而那正是工具自己給的 `safe_next_action`。
-  ②**`NOTEBOOKLM_AUTH_JSON` 必須隨時等於作用中帳號**(`runtime._sync_auth_env`):SDK 的媒體
-  下載在下載當下**重讀這個 env**,不是用 client 自己的 session。把它當暫存槽用會讓所有下載
-  以最後一個槽位的身分發出,而症狀出現在十幾分鐘後的 finalize。③failover **只掛在
-  `_REFUSED_WITHOUT_DISPATCH` 那一條 except**(契約保證沒建出 task);已 dispatch 之後換帳號
-  等於 retract + 取代版,是 ADR-0009 禁止的「MCP 在背後改寫因果紀錄」。
-  `tests/test_pool_gaps.py` 那四條(經突變驗證)是這區最敏感的守門員。
+  ②**身分跟著 client 走,不准放進 process 全域**(v0.9.0 起;舊的 `runtime._sync_auth_env`
+  已刪除)。SDK 的媒體下載在下載當下重讀憑證,而 **MCP 是並行的**(每則 message 一個
+  `tg.start_soon`,本 package 零鎖)——EP05 在 finalize、EP06 撞配額 rotate,一個全域槽
+  不可能同時是兩個值,加鎖也救不了。現在每個槽位各自寫一份 **0600 storage_state 檔**
+  (0700 目錄,lifespan 各條退出路徑都刪),`from_storage(path=…)` 把路徑注進 download
+  service。**憑證因此會落檔**——這推翻了 ADR-0010 當初列的「不落檔」優點,取捨是:能讀那個
+  目錄的 user 本來就讀得到 `/proc/<pid>/environ`。**落檔前一定要跑
+  `extract_cookies_from_storage` 驗一次**:給了真路徑會把 SDK 的 **L2 inline PSIDTS
+  `RotateCookies`** 重新武裝(它**不受 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管**),而它唯一
+  入口是 strict loader 的 `ValueError`,先驗過那條路就永遠到不了。
+  ②-b **記帳與送出必須同源**:`runtime.snapshot()` 一次取 `(label, client)` 往下傳,
+  `_dispatch_audio_with_failover` 換帳號時兩者一起換。分開讀 `active_account()` 與
+  `get_client()`,並行的另一次 rotate 會落在 await 的縫裡,manifest 記 A、實際 B 送出
+  ——**兩個帳號都成功,所以事後查不出來**(ADR-0010 §Transparency:manifest 是唯一憑據)。
+  ③failover **只掛在 `_REFUSED_WITHOUT_DISPATCH` 那一條 except**(契約保證沒建出 task);
+  已 dispatch 之後換帳號等於 retract + 取代版,是 ADR-0009 禁止的「MCP 在背後改寫因果紀錄」。
+  **`ensure_started` 拋了不等於沒建出 task** —— 它的條件是 `is_failed or not task_id`,而
+  「有 id + failed」在 SDK 路徑上可達(`_parse_generation_result`:有 artifact_id 就回),
+  那種形狀 rotate 重送會產生**第二個 artifact**;只有真的沒有 id 才算零副作用。
+  `tests/test_pool_gaps.py`(經突變驗證)是這區最敏感的守門員。
 - 命名鐵律(每集 mp3 回錄 + 工作室 artifact **完全同名** `EP{n:02d} 標題`)的正本在 skill
   §Episodic;**實作上唯一要記的是命名邏輯集中在 `_episode_label()`**,改流程時對照那裡,別各處自己拼字串。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`

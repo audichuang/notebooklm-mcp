@@ -33,6 +33,9 @@ REQUIRED_CONTRACT_TERMS = (
     "input_bundle_path", # podcast_episode 的凍結輸入;相對路徑契約呼叫端猜不到
     "max_report_chars",  # research_wait 預設不回報告本文
     "source_ids",        # v0.5.0 起 generate_audio/slides/report 與 podcast_episode 可指名來源
+    "already_shared",    # notebook_share_with_pool 的回傳:VIEWER 不算「已分享」是硬契約
+    "abandon_in_flight", # podcast_attempt_retract:呼叫端宣告的外部知識,狀態推導不出來
+    "notebook_access_denied",  # series 安全停點裡「要人工補分享」的那一種,不可原樣重呼
 )
 
 

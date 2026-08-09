@@ -906,3 +906,57 @@ async def test_legacy_adopt_source_replacement_queues_previous_for_cleanup(
     episode = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]
     assert episode["pending_source_cleanup"] == [old_source_id]
     assert episode["previous_feedback_source_ids"] == [old_source_id]
+
+
+async def test_retract_abandons_an_in_flight_attempt_when_the_caller_declares_it(
+    fake_client, tmp_path
+):
+    """`abandon_in_flight=True`:輸入就是錯的那一種作廢。
+
+    真實事故形狀:伺服器已受理生成(dispatch=accepted),但送進去的 brief 是失真版,
+    等它跑完毫無意義。這個狀態與「第一次 dispatch、還在飛」在 manifest 裡**逐欄位相同**
+    ——差別只在呼叫端握有的外部知識,所以只能顯式宣告(上一條測試鎖住預設不開)。
+
+    沒有這條出路時五條路全被擋死:retract 撞「只有 promoted output 才能 retract」、
+    傳乾淨 brief 撞「already has durable active attempt」、原樣重呼被
+    `_is_resendable_same_request` 擋(dispatch 已 accepted)、傳 supersedes_attempt_id
+    撞「is not terminal」、adopt/reconcile 都要求已 finalize。唯一走得通的是讓錯的版本
+    跑完 → promote → retract → source_delete → 重生。
+    """
+    manifest_path = str(tmp_path / "series_manifest.json")
+    fake_client.artifacts.fail_wait_on = 1        # 等待階段逾時 → attempt 在飛但沒 output
+    stopped = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
+    assert stopped["complete"] is False
+    attempt_id = stopped["attempt_id"]
+
+    result = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="brief 失真", abandon_in_flight=True
+    )
+
+    assert result["attempt_id"] == attempt_id
+    assert result["observed_state"] == "retracted"
+    episode = _episode(manifest_path)
+    # 作廢的是「無人授權的 candidate」:它從 active 位置被摘掉,而這集本來就沒有 output。
+    assert episode.get("active_attempt_id") is None
+    assert episode.get("output_attempt_id") is None
+    assert attempt_id in episode.get("retracted_attempt_ids", [])
+    retracted = next(a for a in episode["attempts"] if a["attempt_id"] == attempt_id)
+    assert retracted["retraction"]["reason"] == "brief 失真"
+    # 沒有 finalize checkpoint ⇒ 沒有回錄 source 要刪(生成還沒跑完就被作廢)。
+    assert result["stale_source_ids"] == []
+
+
+async def test_abandon_in_flight_still_refuses_a_foreign_attempt(fake_client, tmp_path):
+    """旗標只放行「作用中那一顆」——它不是萬用的 manifest 改寫鍵。
+
+    ADR-0009 的其餘不變式照舊:不是 active、也不是 output 的 attempt,宣告了也不能作廢,
+    否則這個旗標會變成繞過 tombstone 三層 default-deny 的後門。
+    """
+    manifest_path = str(tmp_path / "series_manifest.json")
+    fake_client.artifacts.fail_wait_on = 1
+    await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
+
+    with pytest.raises(ValueError, match="is missing from episode 1"):
+        await p.podcast_attempt_retract(
+            manifest_path, 1, "att-does-not-belong", reason="亂試", abandon_in_flight=True
+        )

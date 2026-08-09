@@ -10,6 +10,7 @@ from notebooklm._types.research import (
     ResearchStatus,
     ResearchTask,
 )
+from notebooklm.rpc.types import SharePermission
 from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import runtime
@@ -491,23 +492,60 @@ class FakeResearch:
 
 
 class FakeSharing:
+    """真 `SharingAPI` 的 fake。**三處刻意與真 SDK 同形**,因為它們各自對應一個
+    「fake 說謊 ⇒ bug 溜過去」的事故形狀(AGENTS.md 的 `Source.created_at` tz 那課):
+
+    1. `SharedUser` **有 `permission` 欄位**。舊版 fake 只吐 email,於是「已分享但只是
+       VIEWER」與「已分享且是 EDITOR」在測試裡長得一樣,`notebook_share_with_pool`
+       把前者當成完成也沒有任何測試會紅。
+    2. `add_user` 的 `permission` **預設是 VIEWER**(`_sharing.py:144`),不是 None ——
+       真 SDK 的預設值正是上面那個 bug 的成因。
+    3. `add_user` 回的是 `get_status()` 的結果(真 SDK 最後一行就是
+       `return await self.get_status(notebook_id)`),**含完整 shared_users**。舊版回空
+       list,讓「檢查回傳值確認生效」這種後檢寫了也測不出差別。
+    """
+
     def __init__(self):
         self.calls: list[tuple] = []
         self.add_user_exc = None
-        # 既有共享者(email 字串);notebook_share_with_pool 靠它判斷誰不用再分享。
-        self.existing: list[str] = []
+        # 只對這個 email 失敗(部分成功的進度回報要測得到「已經完成到哪裡」)。
+        self.fail_on_email: str | None = None
+        # 既有共享者。寫 `"a@x.com"` 等同 `("a@x.com", SharePermission.EDITOR)`;
+        # 要測 VIEWER 就寫 tuple。
+        self.existing: list = []
+        # 伺服器靜默忽略(不 raise、也沒真的生效)的 email —— 對應 add_user 的
+        # `allow_null=True`:RPC 回 null 不會拋,只有讀回傳值才看得出來。
+        self.silently_ignore: set[str] = set()
 
-    async def add_user(self, notebook_id, email, permission=None, notify=True, welcome_message=""):
-        if self.add_user_exc is not None:
+    @staticmethod
+    def _entry(item) -> tuple:
+        return (item, SharePermission.EDITOR) if isinstance(item, str) else tuple(item)
+
+    async def add_user(
+        self,
+        notebook_id,
+        email,
+        permission=SharePermission.VIEWER,
+        notify=True,
+        welcome_message="",
+    ):
+        if self.add_user_exc is not None and (
+            self.fail_on_email is None or self.fail_on_email == email
+        ):
             raise self.add_user_exc
         self.calls.append((notebook_id, email, permission, notify))
-        self.existing.append(email)
-        return SimpleNamespace(notebook_id=notebook_id, shared_users=[])
+        if email not in self.silently_ignore:
+            self.existing = [e for e in self.existing if self._entry(e)[0] != email]
+            self.existing.append((email, permission))
+        return await self.get_status(notebook_id)
 
     async def get_status(self, notebook_id):
         return SimpleNamespace(
             notebook_id=notebook_id,
-            shared_users=[SimpleNamespace(email=e) for e in self.existing],
+            shared_users=[
+                SimpleNamespace(email=email, permission=permission)
+                for email, permission in (self._entry(e) for e in self.existing)
+            ],
         )
 
 

@@ -4,6 +4,13 @@
 **狀態**：設計定案（待寫實作計畫）
 **作者**：audichuang（與 Claude 協作 brainstorming + 多輪 ultracode 研究）
 
+> ⚠️ **這是當時的設計快照,內文刻意不回填**。有一條已經被實作推翻,而它看起來仍像可行方案:
+> **`NOTEBOOKLM_REFRESH_CMD` 自癒掛鉤(§4、§9 的表格)在 v0.9.0 起被 inline auth 模式顯式
+> 壓成不設定**。理由:它會走到 SDK 帶 recovery 的 cookie loader,而多帳號 pool 改用
+> storage_state 檔之後那條路會在本 process 內重鑄 cookie —— 新 cookie 只活在 temp 檔裡、
+> 寫不回 Doppler,另外兩台 VM 下次啟動就掛。**憑證過期的正解仍然只有 GUI 機重登 +
+> `scripts/sync-auth.sh`**(見 AGENTS.md §Gotchas 的 v0.9.0 那條)。
+
 ---
 
 ## 1. 背景與動機

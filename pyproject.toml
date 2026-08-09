@@ -1,6 +1,6 @@
 [project]
 name = "notebooklm-mcp"
-version = "0.8.2"
+version = "0.9.0"
 description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -11,7 +11,10 @@ dependencies = [
     "notebooklm-py>=0.8,<0.9",
     # 上界是硬需求:`uv tool install git+…` **不讀 uv.lock**,消費端每次安裝都自由解析成
     # 當下最新,所以無上界的話 mcp 2.0 一出來,四台機器下一次重裝就靜默吃到 breaking 版本。
-    # 下界 1.27 = 實測過的最舊版(1.27.2 為 lock、1.28.1 為生產實裝,兩者全套測試皆綠)。
+    # 下界 1.27 = 實測過的最舊版。**實際跑過的組合會漂,這裡要跟著更新**:2026-08-09
+    # 一度漂成「lock 1.28.1 / 生產實裝 1.29.0」,已把 lock 拉到 1.29.0 對齊並跑過全套。
+    # (1.29.0 啟動多印一行 pydantic_settings 的 IncompleteFieldDefinitionWarning,
+    #  走 stderr 不影響 stdio 協定 —— 但它正是「測試與實跑不同版」會漏掉的那種差異。)
     "mcp[cli]>=1.27,<2",
     "Pillow>=10,<12",
     "httpx>=0.27,<1",

@@ -106,36 +106,115 @@ async def auth_check() -> dict:
     return await probe_auth(runtime.get_client())
 
 
-def _pool_peers(notebook_id: str) -> list[str]:
-    """pool 裡除了作用中之外的帳號 email。
+def _pool_peers(context: str, active_label: str) -> list[str]:
+    """pool 裡除了 `active_label` 之外的帳號 email。
+
+    `active_label` 由呼叫端 `runtime.snapshot()` 一次取好傳進來,這裡不回頭讀
+    `runtime.active_account()`——雖然目前所有呼叫點在讀 snapshot 到呼叫這支之間
+    都沒有 await(這段本身是乾淨的),但把「排除誰」的決定權放在參數上,下一個
+    改動就算在中間插進一個 await 也不會又踩回同一種縫。
+
+    `dict.fromkeys` 去重是 defense-in-depth,**不是生產可達路徑**:`app.py` 的
+    `_reject_duplicate_accounts` 在 `runtime.set_clients()` 之前就擋掉重複帳號
+    的 pool,production 的 `_POOL` 不可能出現重複 label。這裡留著只防**繞過
+    lifespan 直接呼叫 `runtime.set_clients()`** 的呼叫端——測試就是這樣做的
+    (`test_duplicate_pool_slots_are_deduped`),那條路徑上 server 本來就不會啟動。
 
     label 退回 "#N" 表示啟動時拿不到那個帳號的 email,分享不了。靜默略過會讓它
     永遠沒有權限,而症狀要等 failover 換過去才出現——中間隔著整段生成時間。
+
+    `context` 只用來組錯誤訊息:`notebook_create` 的驗證在 create() 之前跑,
+    還沒有 notebook_id,傳 title;`notebook_share_with_pool` 傳真正的 notebook_id。
     """
-    others = [a for a in runtime.all_accounts() if a != runtime.active_account()]
+    others = list(dict.fromkeys(
+        a for a in runtime.all_accounts() if a != active_label
+    ))
     unresolved = [a for a in others if "@" not in a]
     if unresolved:
         raise RuntimeError(
-            f"notebook {notebook_id!r}:pool 裡的 {unresolved} 沒有可用的帳號 email,"
+            f"{context!r}:pool 裡的 {unresolved} 沒有可用的帳號 email,"
             "無法分享 —— 這些槽位在 server 啟動時取不到 email。請手動分享或重啟 server。"
         )
     return others
 
 
-async def _share_each(notebook_id: str, emails: list[str]) -> list[str]:
-    """逐一分享,失敗時說出已經完成到哪裡。"""
-    client = runtime.get_client()
+def _has_sufficient_permission(status, email: str) -> bool:
+    """email 在 ShareStatus.shared_users 裡是否已經是 EDITOR 或以上(含 OWNER)。
+
+    email 比對用 `.casefold()`:大小寫不同不該恆為 False——比對永遠失敗會讓
+    `add_user` 明明成功、後檢卻判定「未生效」而 raise,留下孤兒分享(P2,
+    fail-closed,不影響安全,只是多噴一次錯誤)。**刻意不**額外正規化
+    dot/plus-alias(Gmail 個人帳號的 `a.b@x.com`==`ab@x.com`、
+    `a+tag@x.com`==`a@x.com`)——那是 Google 個人帳號的規則,不是所有 workspace
+    網域都遵守,做了等於替對方猜信箱政策,過猶不及。
+
+    只認 email 不夠:`add_user` 的預設是 VIEWER(`_sharing.py:144`),使用者在
+    NotebookLM 網頁上手動分享過的既有 notebook 極可能就是 VIEWER,那樣 pool 其實
+    還是壞的(failover 換過去一樣 permission denied)。把 OWNER 也算進「已足夠」
+    順帶擋掉另一件事:`_pool_peers` 只排除作用中帳號、不知道誰是 notebook owner,
+    failover 之後 peers 可能含 owner 本人——SDK 只擋 `permission==OWNER` 這個
+    **參數**,不擋「對象就是 owner」,對 owner 呼叫 add_user(EDITOR) 等於把他降權。
+
+    ⚠️ **P1,未被離線證明的前提**:上面這條 OWNER 豁免整個地基建立在
+    `get_status()` 回的 `shared_users` **含 owner 那一列**這個假設上。fake 證不了
+    這件事——它吐的就是測試自己 seed 進去的東西,不代表伺服器的真實回應形狀。
+    若真實 API 其實**不**把 owner 列進 `shared_users`:failover 後 active=B、
+    對 A 擁有的既有 notebook 跑 `notebook_share_with_pool` 時,A 會落進 `todo`
+    (這裡的 any() 在 shared_users 裡找不到 A → 判定「不夠」),於是 B 對 owner A
+    打 `add_user(A, EDITOR)`——若伺服器真的照做,這是**整個分享機制唯一一條會
+    靜默把使用者既有權限改壞的路徑**(owner 被降成 EDITOR),而且事後的後檢看到
+    A 變成 EDITOR 會判定「已生效」直接放行,不 raise、也不留下任何痕跡。
+    結案方式:對真帳號跑一次唯讀 `sharing.get_status()`,直接讀 owner 是否出現在
+    `shared_users` 裡(不需要真的呼叫 add_user,不會動到任何人的權限)。
+    **不要為了「安全」而先改行為**——那會把已知正確的 VIEWER 升權修正也一起關掉。
+    """
+    target = email.casefold()
+    return any(
+        (getattr(u, "email", None) or "").casefold() == target
+        and getattr(u, "permission", None) in (SharePermission.EDITOR, SharePermission.OWNER)
+        for u in getattr(status, "shared_users", [])
+    )
+
+
+async def _share_each(notebook_id: str, emails: list[str], client) -> list[str]:
+    """逐一分享,失敗時說出已經完成到哪裡。
+
+    `client` 由呼叫端 `runtime.snapshot()` 一次取好傳進來,這裡不回頭讀
+    `runtime.get_client()`。呼叫端與這裡之間隔著至少一次 await
+    (`notebooks.create()` 或 `sharing.get_status()`),MCP 是並行的
+    (`mcp/server/lowlevel/server.py` 對每則 message `tg.start_soon`),另一個工具
+    呼叫可能在那個 await 裡撞到配額並 `rotate_client()`——回頭讀全域會讓分享由
+    **跟建立/查詢時不同的帳號**發出,對方甚至還看不到這個剛建的 notebook。
+    """
     shared: list[str] = []
     for email in emails:
         try:
-            await client.sharing.add_user(
+            status = await client.sharing.add_user(
                 notebook_id, email, SharePermission.EDITOR, notify=False
             )
-        except Exception as exc:
-            raise RuntimeError(
+        except (Exception, asyncio.CancelledError) as exc:
+            # 5 帳號 pool 的自動分享 = 4×(SHARE_NOTEBOOK+GET_SHARE_STATUS) = 8 趟
+            # RPC,外層 client timeout 砍掉時呼叫端拿到的是裸例外——不吞掉
+            # CancelledError(繼續往外拋才對),但要讓 notebook id + 已完成進度
+            # 帶得出來,否則雲端留下部分共享的孤兒卻找不回來(這支工具沒有任何
+            # 冪等/對帳機制)。
+            exc.args = (
                 f"notebook {notebook_id!r} 分享給 {email} 失敗({exc})。已分享:{shared}。"
-                "手動補分享(EDITOR)——沒分享到的帳號在 failover 換過去時會 permission denied。"
-            ) from exc
+                "手動補分享(EDITOR),或改跑 notebook_share_with_pool 重試——"
+                "沒分享到的帳號在 failover 換過去時會 permission denied。",
+            )
+            raise
+        if not _has_sufficient_permission(status, email):
+            # add_user 回傳的 ShareStatus 是零成本的後檢(那趟 RPC 本來就打了):
+            # workspace 網域政策擋外部分享、email 打錯字、或伺服器靜默忽略,都不會
+            # raise,回應成功但實際沒生效——根因在這裡,症狀要等十幾分鐘後
+            # failover 才爆(source_add_file 的 title= 後檢立的同一條紀律)。
+            raise RuntimeError(
+                f"notebook {notebook_id!r} 分享給 {email} 呼叫成功但未生效"
+                "(get_status 後檢仍不是 EDITOR/OWNER——可能是 workspace 網域政策"
+                f"擋外部分享,或伺服器靜默忽略)。已分享:{shared}。"
+                "請確認 email 正確後改跑 notebook_share_with_pool 重試。"
+            )
         shared.append(email)
     return shared
 
@@ -148,18 +227,20 @@ async def notebook_share_with_pool(notebook_id: str) -> dict:
     ——v0.8.1 之前建的、或在 NotebookLM 網頁上手動建的。沒有這個前置狀態,配額耗盡
     後 failover 換帳號時會 `NotebookAccessDenied`。
 
-    **冪等**:已經有權限的帳號直接跳過,重跑安全。單帳號模式是 no-op(不打任何 RPC)。
+    **冪等**:已經是 EDITOR/OWNER 的帳號直接跳過,重跑安全。單帳號模式是
+    no-op(不打任何 RPC)。
     """
-    peers = _pool_peers(notebook_id)
+    # 一次 snapshot,全程不再回頭讀全域(理由見 `_share_each` docstring)。
+    label, client = runtime.snapshot()
+    peers = _pool_peers(notebook_id, label)
     if not peers:
         return {"notebook_id": notebook_id, "shared_with": [], "already_shared": []}
-    status = await runtime.get_client().sharing.get_status(notebook_id)
-    existing = {getattr(u, "email", None) for u in getattr(status, "shared_users", [])}
-    already = [e for e in peers if e in existing]
-    todo = [e for e in peers if e not in existing]
+    status = await client.sharing.get_status(notebook_id)
+    already = [e for e in peers if _has_sufficient_permission(status, e)]
+    todo = [e for e in peers if e not in already]
     return {
         "notebook_id": notebook_id,
-        "shared_with": await _share_each(notebook_id, todo),
+        "shared_with": await _share_each(notebook_id, todo, client),
         "already_shared": already,
     }
 
@@ -173,13 +254,26 @@ async def notebook_create(title: str) -> dict:
     (v0.8.0 驗收 F-2:實測其餘帳號 `notebooks.get` 一律 permission denied)。
     單帳號模式完全不打額外 RPC,行為不變。既有 notebook 用 `notebook_share_with_pool`。
     """
-    nb = await runtime.get_client().notebooks.create(title)
-    # notebook 已經建出來了,分享失敗必須說清楚這件事 —— 否則呼叫端不知道雲端多了
-    # 一個孤兒 notebook,也無從手動補分享。
+    # 驗證一律先於變更:_pool_peers 是純本機檢查(只讀 runtime.all_accounts()),
+    # 卻原本放在 create() 之後——某槽位啟動時拿不到 email 是**決定性**失敗
+    # (重啟前不會變),放在 create 之後等於「呼叫端每重試一次就多一個雲端孤兒
+    # notebook」。這裡還沒有 notebook_id,錯誤訊息用 title 代替。
+    #
+    # `runtime.snapshot()` 只取一次:create() 是 await,MCP 並行——另一個工具
+    # 呼叫可能在這個 await 裡撞到配額並 rotate_client(),之後若再回頭讀
+    # `runtime.get_client()` 分享,就會變成用**換過去那個帳號**去分享一個它自己
+    # 都還看不到的 notebook(而且 `rotate_client()` 不會回頭,重啟前這個 process
+    # 全部後續呼叫都錯位)。`label`/`client` 綁死在這一次呼叫上,全程不再回頭讀。
+    label, client = runtime.snapshot()
+    peers = _pool_peers(title, label)
+    nb = await client.notebooks.create(title)
     try:
-        shared = await _share_each(nb.id, _pool_peers(nb.id))
-    except RuntimeError as exc:
-        raise RuntimeError(f"notebook {nb.id!r} **已建立**,但{exc}") from exc
+        shared = await _share_each(nb.id, peers, client)
+    except (Exception, asyncio.CancelledError) as exc:
+        # notebook 已經建出來了,分享失敗(含 CancelledError)必須說清楚這件事
+        # —— 否則呼叫端不知道雲端多了一個孤兒 notebook,也無從手動補分享。
+        exc.args = (f"notebook {nb.id!r} **已建立**,但{exc}",)
+        raise
     return {
         "notebook_id": nb.id,
         "title": getattr(nb, "title", title),

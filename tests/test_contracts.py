@@ -337,6 +337,43 @@ def test_quota_rescue_signatures():
     assert _params(ArtifactsAPI.retry_failed) == ["self", "notebook_id", "artifact_id"]
 
 
+def test_share_permission_importable_from_rpc_types():
+    """`tools_basic` 在 module level `from notebooklm.rpc.types import
+    SharePermission`——上游搬家 = 整個 tools_basic import 失敗 = server 起不來。
+    數值也鎖住:`_has_sufficient_permission` 靠 OWNER(1) < EDITOR(2) < VIEWER(3)
+    的排序把 OWNER 也歸進「已足夠」。"""
+    from notebooklm.rpc.types import SharePermission
+
+    assert SharePermission.OWNER.value == 1
+    assert SharePermission.EDITOR.value == 2
+    assert SharePermission.VIEWER.value == 3
+
+
+def test_add_user_permission_is_positional():
+    """`tools_basic._share_each` 位置傳
+    `add_user(notebook_id, email, SharePermission.EDITOR, notify=False)`。
+    0.7.0 曾把 source add 的尾端參數改成 keyword-only 過一次(上面已鎖),同樣的事
+    發生在 sharing 就是 TypeError——這裡先紅,而不是等到呼叫時才炸。"""
+    from notebooklm._sharing import SharingAPI
+
+    assert _params(SharingAPI.add_user) == [
+        "self", "notebook_id", "email", "permission", "notify", "welcome_message",
+    ]
+    kind = inspect.signature(SharingAPI.add_user).parameters["permission"].kind
+    assert kind is not inspect.Parameter.KEYWORD_ONLY
+
+
+def test_share_status_and_shared_user_fields():
+    """`notebook_share_with_pool` / `_has_sufficient_permission` 依賴
+    `ShareStatus.shared_users[].email` / `.permission` 這兩個欄位形狀。"""
+    import dataclasses
+
+    from notebooklm.types import ShareStatus, SharedUser
+
+    assert "shared_users" in {f.name for f in dataclasses.fields(ShareStatus)}
+    assert {"email", "permission"} <= {f.name for f in dataclasses.fields(SharedUser)}
+
+
 def test_research_api_surface():
     """research_start / research_wait / research_import 依賴的 ResearchAPI 契約。
 

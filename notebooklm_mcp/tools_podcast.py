@@ -614,22 +614,29 @@ def _rotate_for_quota(
     episode_n: int,
     attempt_id: str,
     reason: object,
-) -> bool:
-    """還有沒試過的帳號就換過去,回 True 表示「可以原地重送」。
+    from_account: str | None,
+) -> tuple[str | None, object] | None:
+    """還有沒試過的帳號就換過去,回**換過去那一個**的 `(label, client)`;沒有就回 None。
 
     `store is None`(standalone、沒有 manifest)一律不換:沒有地方寫稽核紀錄,
     靜默換帳號違反 ADR-0010 自己立的「對紀錄不透明」。
+
+    **回 (label, client) 而不是 bool**:呼叫端要拿著這一份往下送,不能回頭再讀一次
+    全域(`rotate_client()` 與下一次 `get_client()` 之間有 await,並行的另一次
+    rotate 會落在那個縫裡)。`from_account` 也由呼叫端傳進來、不在這裡重讀,理由同上
+    ——`_record_dispatch_failover` 記的「從哪個帳號換到哪個」必須是**這次 dispatch
+    實際用過的**那一個,不是「此刻剛好輪到誰」。
     """
     if store is None:
-        return False
-    from_account = runtime.active_account()
+        return None
     to_account = runtime.rotate_client()
     if to_account is None:
-        return False
+        return None
     _record_dispatch_failover(
         store, episode_n, attempt_id, reason, from_account, to_account
     )
-    return True
+    # rotate_client() 與 snapshot() 之間沒有 await,所以取到的必然是剛換過去那個槽位。
+    return runtime.snapshot()
 
 
 async def _dispatch_audio_with_failover(
@@ -637,7 +644,10 @@ async def _dispatch_audio_with_failover(
     episode_n: int,
     attempt_id: str,
     generate,
-) -> str:
+    *,
+    account: str | None,
+    client: object,
+) -> tuple[str, str | None, object]:
     """送出音檔生成並回傳 artifact_id;配額拒絕就換帳號**原地重送同一個 attempt**。
 
     兩條路徑收在同一個函式裡是刻意的:同一個「伺服器拒絕、沒建出 task」語意有兩種
@@ -653,15 +663,33 @@ async def _dispatch_audio_with_failover(
     原樣重呼自己,`podcast_series` 是重呼整季 —— 而 `_mark_not_accepted` 會把
     `str(exc)` 寫進 `remote.error` 與 `errors[]`,寫死一種指引等於讓**錯的**工具名
     落進 manifest,事後查錯的人會照著跑錯的東西。
+
+    **`account` / `client` 由呼叫端用 `runtime.snapshot()` 一次取好傳進來**,函式內
+    不再自己讀全域。MCP 是並行的(每則 message 一個 task),而記帳點
+    `_claim_prepared_dispatch(..., account=…)` 與這裡真正的 `generate(client)` 之間
+    隔著至少一次 await —— 分兩次讀全域時,另一個工具呼叫在那個縫裡撞到配額並 rotate,
+    manifest 就會記下 A、實際卻由 B 送出。ADR-0010 §Transparency 說 manifest 是
+    **唯一**的稽核憑據,記錯帳等於憑據失真,而且事後無法發現(兩個帳號都成功,只是
+    掛在錯的名下)。failover 換帳號時 `account`/`client` 一起換,兩者永遠同源。
+
+    **回 `(artifact_id, account, client)`,呼叫端必須接住後兩個往下用。** 只回 artifact_id
+    的話,呼叫端要做 finalize 只能回頭 `runtime.get_client()` —— 又變成「此刻游標指到誰」
+    而不是「這次是誰送的」,而且**風險視窗幾乎全落在那一半**:dispatch 只有幾秒,
+    finalize(等生成 → 下載 → 回錄上傳 → rename)是數十分鐘。分享不完整時症狀是十幾分鐘後
+    在 finalize 爆 401、根因在遠處(正是 ADR-0010 以為已經退休掉的那個);分享完整時退化成
+    稽核失真:manifest 記 A 生成、實際下載與回錄上傳的是 B,而 finalize 身分不寫進任何欄位,
+    事後查不出來。
     """
     while True:
         try:
-            status = await generate(runtime.get_client())
+            status = await generate(client)
         except _REFUSED_WITHOUT_DISPATCH as exc:
             # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
             # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」——標成
             # not_accepted 讓呼叫端可以直接重試,不必先跑一次註定撈不到東西的對帳。
-            if _rotate_for_quota(store, episode_n, attempt_id, exc):
+            rotated = _rotate_for_quota(store, episode_n, attempt_id, exc, account)
+            if rotated is not None:
+                account, client = rotated
                 continue
             if store is not None:
                 _mark_not_accepted(store, episode_n, attempt_id, exc)
@@ -673,14 +701,23 @@ async def _dispatch_audio_with_failover(
                 # acceptance_unknown,把呼叫端叫去跑一次註定撈不到東西的 reconcile。
                 # **不 rotate**:權限是設定問題不是暫時性問題,一個一個帳號試過去
                 # 只會掩蓋根因,還每次多燒一輪 RPC。
+                denied = NotebookAccessDenied(
+                    # 用這次 dispatch 實際持有的 account,不重讀全域:並行 rotate 會
+                    # 讓訊息指認錯的帳號,而這條訊息會被寫進 manifest 當稽核紀錄。
+                    f"{exc}\n帳號 {account!r} 對這個 notebook 沒有存取權。"
+                    "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— 呼叫 "
+                    "notebook_share_with_pool(notebook_id=...) 補分享給其餘帳號"
+                    "(EDITOR)後再重試;MCP 自建 notebook(v0.8.1 起)已自動分享,"
+                    "這通常是舊版建立或在網頁上手動建立的既有 notebook。"
+                )
+                # 先建好帶指引的例外、再標 manifest —— manifest 的 remote.error／
+                # errors[] 記下的要是**這份帶著下一步動作**的訊息,不是上游原始的
+                # "permission denied"。呼叫端事後只看得到 manifest 時(例如
+                # podcast_series 的結構化 partial 只回訊息不回原始例外),指引才不會
+                # 整條蒸發。
                 if store is not None:
-                    _mark_not_accepted(store, episode_n, attempt_id, exc)
-                raise NotebookAccessDenied(
-                    f"{exc}\n帳號 {runtime.active_account()!r} 對這個 notebook 沒有存取權。"
-                    "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— "
-                    "把它**分享**給其餘帳號(EDITOR)之後再重試;"
-                    "MCP 自己建的 notebook 預設只屬於建立它的那個帳號。"
-                ) from exc
+                    _mark_not_accepted(store, episode_n, attempt_id, denied)
+                raise denied from exc
             if store is not None:
                 _mark_acceptance_unknown(store, episode_n, attempt_id, exc)
             raise
@@ -691,9 +728,25 @@ async def _dispatch_audio_with_failover(
         # (otherwise download falls back to "latest" and rename targets None).
         # ensure_started guards the failed/empty-task_id case (rate limit / quota / refusal).
         try:
-            return ensure_started(status)
+            return ensure_started(status), account, client
         except RuntimeError:
-            if _rotate_for_quota(store, episode_n, attempt_id, status):
+            if getattr(status, "task_id", None):
+                # 有 id 卻 is_failed=True:這**不是**零副作用拒絕。SDK
+                # `_artifact/generation.py:586-590` 明寫「有 artifact_id 就回
+                # GenerationStatus(task_id=artifact_id, status=...)」,而
+                # `_ARTIFACT_STATUS_MAP` 含 FAILED → "failed",所以「有 id + failed」
+                # 這個形狀在上游可達。rotate 重送在這個形狀下會產生第二個 artifact:
+                # A 已經建出 task,manifest 卻只綁得到 B 那個,第一個不在
+                # artifact_ids_before 基線裡,日後 reconcile 會撞成
+                # reconciliation_ambiguous、還多燒一次配額——正是 ADR-0010 紀律②要擋
+                # 的「把已受理誤判成拒絕」。標成 acceptance_unknown(不是
+                # not_accepted)讓呼叫端先對帳,而不是盲目重試。
+                if store is not None:
+                    _mark_acceptance_unknown(store, episode_n, attempt_id, status)
+                raise
+            rotated = _rotate_for_quota(store, episode_n, attempt_id, status, account)
+            if rotated is not None:
+                account, client = rotated
                 continue
             if store is not None:
                 _mark_not_accepted(store, episode_n, attempt_id, status)
@@ -1438,8 +1491,13 @@ async def _run_episode(
             notebook_id, prior_src.id, f"EP{episode_n - 1:02d}", return_object=False
         )
 
+    # 一次取好「送出這次生成的帳號 + 它的 client」:baseline / 記帳 / 實際送出三者
+    # 必須同源。分開讀 `active_account()` 與 `get_client()` 中間隔著 await,並行的
+    # 另一個工具呼叫在那個縫裡 rotate,就會變成 baseline 是 A 看到的、manifest 記 A、
+    # 實際卻由 B 送出(ADR-0010 §Transparency:manifest 是唯一的稽核憑據)。
+    dispatch_account, dispatch_client = runtime.snapshot()
     if store is not None:
-        baseline = await client.artifacts.list(
+        baseline = await dispatch_client.artifacts.list(
             notebook_id, artifact_type=ArtifactType.AUDIO
         )
         claimed = _claim_prepared_dispatch(
@@ -1447,7 +1505,7 @@ async def _run_episode(
             episode_n,
             attempt_id,
             [artifact.id for artifact in baseline],
-            account=runtime.active_account(),
+            account=dispatch_account,
         )
         if not claimed:
             raise RuntimeError(
@@ -1465,8 +1523,15 @@ async def _run_episode(
         )
 
     try:
-        artifact_id = await _dispatch_audio_with_failover(
-            store, episode_n, attempt_id, _generate
+        # 三元組的後兩個是**實際送出這次生成的**帳號與 client(failover 換過就是換過
+        # 之後那個)。finalize 一定要用它們 —— 見下方 `client = …` 那行的註解。
+        artifact_id, dispatch_account, client = await _dispatch_audio_with_failover(
+            store,
+            episode_n,
+            attempt_id,
+            _generate,
+            account=dispatch_account,
+            client=dispatch_client,
         )
     except _REFUSED_WITHOUT_DISPATCH as exc:
         # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經被
@@ -1480,19 +1545,40 @@ async def _run_episode(
                 "同一個 attempt 重送——不會新建 attempt、也不會多燒一次配額。",
             )
         raise
-    except RuntimeError:
-        raise  # ensure_started 判定的 not_accepted;訊息已由 ensure_started 給
     except (Exception, asyncio.CancelledError) as exc:
+        # 是不是「乾淨的 not_accepted」不能只看例外型別:`RuntimeError` 既是
+        # `ensure_started`/`NotebookAccessDenied` 判定的 not_accepted(訊息已經自帶
+        # 指引,bare raise 即可),也可能是 `_dispatch_audio_with_failover` 的泛用
+        # except 分支剛好撞上這個型別、被標成 acceptance_unknown 的失敗 —— 只看型別
+        # 分不出來,會讓後者的續跑指引被前者的 bare-raise 攔住(v0.7.2 舊碼走
+        # `except Exception` 才拿得到這段指引,這是重構帶進來的回歸)。真正的
+        # 判準是 manifest 裡記下的 dispatch 狀態,例外型別只是入場券——not_accepted
+        # 才 bare-raise,其餘一律補上 reconcile 指引。
         if store is not None:
-            exc.args = (
-                f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
-                "先對帳，禁止直接重生："
-                f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
-                f"episode_n={episode_n}, attempt_id={attempt_id!r})",
-            )
+            # 讀 manifest 只為了「要不要貼指引」,不能讓它自己變成新的失敗來源:
+            # `_attempt_record` 對已 retract 的 attempt 會 raise,而
+            # `abandon_in_flight` 讓「並行 retract 掉一個還在飛的 attempt」成為**受支援
+            # 的操作**——`_active_attempt_or_reraise` 當初判定「可達性極低」的前提不再
+            # 成立。在 except handler 裡再拋會蓋掉真正該讓人看到的那個例外
+            # (與 `generation_input.rollback` 的清理失敗同一條紀律)。
+            try:
+                current = store.read()
+                _, stopped_attempt = _attempt_record(current, episode_n, attempt_id)
+                unknown = stopped_attempt["dispatch"]["status"] != "not_accepted"
+            except Exception:
+                unknown = False
+            if unknown:
+                exc.args = (
+                    f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
+                    "先對帳，禁止直接重生："
+                    f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
+                    f"episode_n={episode_n}, attempt_id={attempt_id!r})",
+                )
         raise
-    # failover 可能已經換過帳號 —— 後面的 finalize/下載要用實際送出的那一個。
-    client = runtime.get_client()
+    # `client` 已由上面的三元組換成**實際送出這次生成的**那一個。這裡曾經是
+    # `client = runtime.get_client()`,註解宣稱「用實際送出的那一個」,但那行結構上
+    # 給不出這個保證:它讀的是「此刻游標指到誰」。而 finalize(等生成 → 下載 → 回錄
+    # 上傳 → rename)是數十分鐘,並行的另一集在這段期間 rotate 掉游標是常態不是意外。
     if store is not None:
         _bind_accepted_artifact(store, episode_n, attempt_id, artifact_id)
 
@@ -2312,11 +2398,24 @@ async def podcast_attempt_retract(
     episode_n: int,
     attempt_id: str,
     reason: str,
+    abandon_in_flight: bool = False,
 ) -> dict:
     """QA 拒收的唯一正門：純本機 manifest mutation，不打 RPC、不動遠端或本機檔案。
 
     ``attempt_id`` 必須是該集的 ``output_attempt_id``，或掛在 ``active_attempt_id`` 但
     從未 promote 的未授權 candidate；``reason`` 必填非空。
+
+    ``abandon_in_flight=True`` 是「**輸入就是錯的**」那一種作廢：伺服器已經受理生成
+    （dispatch=accepted），但送進去的 brief 本身有問題，等它跑完也沒有意義。這件事
+    manifest **推導不出來**——它與「第一次 dispatch、還在飛」的狀態逐欄位相同，差別只在
+    呼叫端握有的外部知識，所以必須顯式宣告，預設不開。沒有這個旗標時那個狀態刻意留給
+    ``podcast_episode_reconcile`` / ``podcast_episode_resume``。
+
+    **它省不了配額**：生成已經在燒，retract 是純本機動作、取消不了遠端。省的是整整
+    一輪 finalize（下載 mp3 → 上傳回錄 source → promote → 再 retract → ``source_delete``）
+    以及那筆回錄 source 對後續各集 context 的污染。遠端那個 artifact 會成為孤兒，但
+    ``_claimed_artifact_ids`` 掃所有 attempt（含 retracted），所以它不會被後續 reconcile
+    誤 claim。
 
     retract 後必須把回傳的 ``stale_source_ids`` 逐一 ``source_delete``：下一次生成或
     resume 前會實際查 notebook 驗證，還在就 fail-closed。標題不可在取代時改。同一
@@ -2333,6 +2432,8 @@ async def podcast_attempt_retract(
     if not isinstance(reason, str) or not reason.strip():
         # retract 是審計事件:沒有理由的作廢等於無聲覆寫,正是本工具要取代的東西。
         raise ValueError("reason must be a non-empty string")
+    if not isinstance(abandon_in_flight, bool):
+        raise ValueError("abandon_in_flight must be a bool")
     _require_existing_manifest(manifest_path)
 
     _RETRACTED_EPISODE_KEYS = (
@@ -2364,14 +2465,42 @@ async def podcast_attempt_retract(
 
         output_attempt_id = episode.get("output_attempt_id")
         active_attempt_id = episode.get("active_attempt_id")
-        # 受審計的 abandon:active=B／output=A 的分岔狀態(舊版工具或手改造出的——現在
-        # `_ensure_resume_attempt` 兩條分支都擋掉了)否則無路可走:retract A 被 active B
-        # 卡、retract B 不是 output 也被卡、promote B 因歸屬失敗、series 只看 A。允許作廢
-        # 那個「從未 promote、無人授權」的 candidate 就是唯一出口,而且留下理由。
+        # 受審計的 abandon 涵蓋兩種無路可走的分岔(ADR-0009 補記:output=None 也可以是
+        # active/output divergence 的一種——「這集從沒有過任何合法輸出,卻已經有 legacy
+        # 硬證據卡在 episode 級投影上」——不是全新分支):
+        #  (1) active=B／output=A(舊版工具或手改造出的——現在 `_ensure_resume_attempt`
+        #      兩條分支都擋掉了)。
+        #  (2) active=B、output_attempt_id 是 None,但 episode 已有
+        #      `has_hard_output_evidence`(v0.5.0 前直接掛在 episode 上的
+        #      artifact_id/mp3_path 等):B 的 dispatch 已 accepted(伺服器已受理生成)
+        #      但從未 promote(真實事故:透過 `podcast_episode_resume` 接上錯的
+        #      artifact,brief 失真但已經送出)。這個 legacy 證據存在,結構上只有
+        #      `_ensure_resume_attempt` 的新建分支能繞過 `has_hard_output_evidence`
+        #      guard 造出來(`_create_audio_attempt` 一律先擋掉),不會跟「單純第一次
+        #      dispatch、還在飛」混在一起。
+        # **刻意不是「output_attempt_id is None 就算」**:一個全新 episode 的第一顆
+        # attempt 剛 dispatch、`wait_for_completion` 還沒回來,同樣是
+        # active=self／output=None,但那是 reconcile／resume 的守備範圍,不是
+        # retract 的(`test_retract_refuses_an_attempt_that_is_not_the_durable_output`
+        # 鎖著)——沒有任何 legacy 證據時,「還沒完成」不等於「無路可走的分岔」。
+        # 兩種都無路可走時:retract 被「只有 promoted output 才能 retract」卡、原樣
+        # 重呼被 `_is_resendable_same_request` 擋(dispatch 已 accepted)、傳
+        # supersedes_attempt_id 撞「is not terminal」、adopt/reconcile 都要求已
+        # finalize。允許作廢這個「從未 promote、無人授權」的 candidate 就是唯一出口,
+        # 而且留下理由。
+        # (3) `abandon_in_flight`:呼叫端顯式宣告「這顆的**輸入**就是錯的」。
+        # 那是 manifest 推導不出來的外部知識——(2) 之外的 in-flight 第一顆 attempt 與
+        # 「正常還在跑」逐欄位相同,所以只能由呼叫端說,不能由狀態猜。預設 False 讓
+        # reconcile/resume 的守備範圍原封不動;宣告了就等同 (2):從未 promote、無人
+        # 授權的 candidate,作廢它並留下理由。
         abandons_unauthorized_candidate = (
             attempt_id == active_attempt_id
-            and output_attempt_id is not None
             and output_attempt_id != attempt_id
+            and (
+                output_attempt_id is not None
+                or has_hard_output_evidence(episode)
+                or abandon_in_flight
+            )
         )
         if output_attempt_id != attempt_id and not abandons_unauthorized_candidate:
             raise ValueError(
@@ -2387,11 +2516,15 @@ async def podcast_attempt_retract(
                 f"{active_attempt_id!r}; retract that unauthorized candidate first "
                 "(it was never promoted), then retract the output"
             )
-        if abandons_unauthorized_candidate:
-            # episode 級投影屬於現任 output(A),一個字都不能動。
+        if abandons_unauthorized_candidate and output_attempt_id is not None:
+            # (1):episode 級投影屬於現任 output(A),一個字都不能動。
             retracted_output: dict = {}
             del episode["active_attempt_id"]
         else:
+            # 正常 retract,或 (2):這集從沒有過合法輸出,episode 級投影(若有,通常是
+            # v0.5.0 前直接掛在 episode 上的 legacy 硬證據)不屬於任何人,必須跟著清掉
+            # ——否則下一次重生會撞上 `has_hard_output_evidence` 的另一個死路(補一半的
+            # 又一例:只開了 retract 這道門,沒清 legacy 欄位等於換了個地方繼續擋死)。
             # pop 而非設 None:_promote_attempt_output 用 setdefault 寫 published_at,
             # 留一個 None 值會讓取代版補不回真正的產製時間(publish 有 fallback、不會爆,
             # 只會靜默發出假日期,而 podcast-lab 的完成門會先擋下來)。
@@ -2469,6 +2602,26 @@ def _active_attempt_or_reraise(current: dict, episode_n: int) -> str:
     if attempt_id is None:
         raise
     return attempt_id
+
+
+def _classify_not_accepted_stop(exc: BaseException) -> tuple[str, dict]:
+    """回 (observed_state, extra) 給 `partial()`,分辨『等配額』與『notebook 沒分享給
+    這個帳號』——manifest 的 dispatch.status 對兩者都寫 not_accepted(契約上都是零
+    副作用拒絕,這個分類本身沒有錯),但呼叫端拿到的結構化停點如果也只寫
+    `not_accepted`,兩者長得一模一樣。權限問題不 rotate(見
+    `_dispatch_audio_with_failover`),於是呼叫端拿工具自己給的 `safe_next_action`
+    (`podcast_series`)原樣重呼,只會撞回同一個沒權限的帳號,而
+    `attempt_count`/`superseded_attempt_count`(partial() 註解說的唯一『有沒有在原地
+    打轉』依據)兩輪都是 1/0——跟等配額完全同一組數字。
+
+    **刻意不新增 `safe_next_action` 字面值**:`SAFE_NEXT_ACTIONS` 是「一定是真的
+    MCP 工具名」的白名單(`tests/test_series_durable_resume.py` 鎖著逐字集合),
+    這裡分辨兩者靠 observed_state 與帶著下一步(`notebook_share_with_pool`)的
+    error 訊息,不靠新增一個字面值去改變那個集合。
+    """
+    if isinstance(exc, NotebookAccessDenied):
+        return "notebook_access_denied", {"error": str(exc)}
+    return "not_accepted", {}
 
 
 @mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
@@ -2566,6 +2719,12 @@ async def podcast_series(
     await probe_auth(client)
 
     for episode_n in range(start, len(episodes) + 1):
+        # 前一集可能已經 failover 換過帳號 —— `client` 是函式開頭抓的區域變數,不會
+        # 自動跟著 runtime 的作用中帳號走。每集開頭重新抓一次,否則清理義務對帳／
+        # drift 複驗／baseline `artifacts.list`／認證預檢會繼續打在被拒帳號上
+        # (v0.8.1 的自動分享讓 pool 全員都看得到 notebook,這件事被巧合遮住,
+        # 不是設計上安全)。
+        client = runtime.get_client()
         plan = episodes[episode_n - 1]
         expected_title = plan["title"].strip()
         expected_brief_hash = hashlib.sha256(
@@ -2789,7 +2948,10 @@ async def podcast_series(
                     _assert_series_owns_attempt(
                         attempt, series_settings, episode_n, active_attempt_id
                     )
-                    baseline = await client.artifacts.list(
+                    # baseline / 記帳 / 實際送出三者同源,理由同 `_run_episode`
+                    # 那條路徑(並行 rotate 會讓 manifest 記 A、實際 B 送出)。
+                    dispatch_account, dispatch_client = runtime.snapshot()
+                    baseline = await dispatch_client.artifacts.list(
                         notebook_id, artifact_type=ArtifactType.AUDIO
                     )
                     claimed = _claim_prepared_dispatch(
@@ -2797,7 +2959,7 @@ async def podcast_series(
                         episode_n,
                         active_attempt_id,
                         [row.id for row in baseline],
-                        account=runtime.active_account(),
+                        account=dispatch_account,
                     )
                     if not claimed:
                         latest = store.read()
@@ -2824,20 +2986,67 @@ async def podcast_series(
                     # 例外翻成 series 的**結構化安全停點**(return partial,不外拋),
                     # 那是 podcast_series 對呼叫端的契約。
                     try:
-                        artifact_id = await _dispatch_audio_with_failover(
-                            store, episode_n, active_attempt_id, _generate_resend
+                        # 後兩個是實際送出的帳號與 client,finalize 必須用它們
+                        # (理由見 helper 的 docstring)。
+                        (
+                            artifact_id,
+                            dispatch_account,
+                            client,
+                        ) = await _dispatch_audio_with_failover(
+                            store,
+                            episode_n,
+                            active_attempt_id,
+                            _generate_resend,
+                            account=dispatch_account,
+                            client=dispatch_client,
                         )
                     except asyncio.CancelledError:
                         raise
-                    except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH):
-                        # 明確拒絕(配額/限流)沒有建出 task,或 ensure_started 判定的
-                        # 同一件事:回 not_accepted + ACTION_SERIES,呼叫端稍後原樣重跑
-                        # 整季即可。歸成 acceptance_unknown 會逼出一次撈不到東西的對帳。
+                    except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH) as exc:
+                        # 明確拒絕(配額/限流/權限)沒有建出 task,或 ensure_started
+                        # 判定的同一件事——但**不能無條件回 not_accepted**(跟
+                        # `_run_episode` 那圈同一種「補一半」):
+                        # `_dispatch_audio_with_failover` 的泛用 except 分支也可能把
+                        # 一個 acceptance_unknown 的普通失敗包成 RuntimeError 重新拋出。
+                        # 真正的判準是 manifest 裡記下的狀態,例外型別只是入場券,與
+                        # 下面 `_run_episode` 分支的判準完全同一個道理(F-4 的姊妹修正:
+                        # 這裡曾經是唯一沒有覆核 manifest 就回報的分支)。
+                        # 讀 manifest 不能自己變成新的失敗來源:`abandon_in_flight` 讓
+                        # 並行 retract 掉在飛的 attempt 成為受支援操作,`_attempt_record`
+                        # 因此會對 tombstone raise,而在 except handler 裡再拋會蓋掉
+                        # 原例外。**三態,不是 bool**:
+                        #   not_accepted → 結構化停點(可直接重跑整季)
+                        #   讀得到、但不是 not_accepted → 一樣回結構化停點,只是要先對帳
+                        #   讀不到       → 我們什麼都不知道,原例外原樣交出去
+                        # 中間那一態原本是 bare raise,於是同一個 acceptance_unknown 只因
+                        # 例外型別是不是 RuntimeError 就分岔:一邊裸拋(**前面幾集已經跑完
+                        # 的 run_results 整份丟掉**),一邊回 partial。而 series 對呼叫端的
+                        # 契約是「預期內的停止用回傳值表達」,下面那個 `except Exception`
+                        # 也正是這樣做的。
+                        try:
+                            current = store.read()
+                            _, stopped_attempt = _attempt_record(
+                                current, episode_n, active_attempt_id
+                            )
+                            recorded = stopped_attempt["dispatch"]["status"]
+                        except Exception:
+                            recorded = None
+                        if recorded is None:
+                            raise
+                        if recorded != "not_accepted":
+                            return partial(
+                                episode_n,
+                                active_attempt_id,
+                                "acceptance_unknown",
+                                ACTION_RECONCILE,
+                            )
+                        observed_state, extra = _classify_not_accepted_stop(exc)
                         return partial(
                             episode_n,
                             active_attempt_id,
-                            "not_accepted",
+                            observed_state,
                             ACTION_SERIES,
+                            **extra,
                         )
                     except Exception:
                         return partial(
@@ -2846,6 +3055,9 @@ async def podcast_series(
                             "acceptance_unknown",
                             ACTION_RECONCILE,
                         )
+                    # `client` 已由上面的三元組換成實際送出的那一個。這裡曾經是
+                    # `client = runtime.get_client()` —— 以「殺掉分開讀全域」為目的的
+                    # 那一輪修正,自己在這條路上又種了一顆同型的(補一半的又一例)。
                     _bind_accepted_artifact(
                         store, episode_n, active_attempt_id, artifact_id
                     )
@@ -2983,7 +3195,7 @@ async def podcast_series(
         # 呼叫端,而不是回這裡的結構化安全停點 —— podcast_series「預期內的停止用回傳
         # 值表達」這個契約就破了。真正的判準是下面那行「attempt 是不是 not_accepted」,
         # 例外型別只是入場券,所以兩種形狀都收。
-        except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH):
+        except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH) as exc:
             current = store.read()
             attempt_id = _active_attempt_or_reraise(current, episode_n)
             _, stopped_attempt = _attempt_record(
@@ -2991,11 +3203,15 @@ async def podcast_series(
             )
             if stopped_attempt["dispatch"]["status"] != "not_accepted":
                 raise
+            # 「等配額」與「notebook 沒分享給這個帳號」manifest 都寫 not_accepted,
+            # 但呼叫端拿到的結構化停點要分得出來(見 `_classify_not_accepted_stop`)。
+            observed_state, extra = _classify_not_accepted_stop(exc)
             return partial(
                 episode_n,
                 attempt_id,
-                "not_accepted",
+                observed_state,
                 ACTION_SERIES,
+                **extra,
             )
         except (TimeoutError, ConnectionError):
             current = store.read()

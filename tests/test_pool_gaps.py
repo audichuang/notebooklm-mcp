@@ -18,6 +18,7 @@ import json
 import os
 
 import pytest
+from conftest import FakeClient
 from notebooklm.exceptions import RateLimitError
 
 from notebooklm_mcp import runtime
@@ -144,42 +145,137 @@ async def test_rotation_persists_across_separate_tool_calls(fake_client, tmp_pat
     )
 
 
-async def test_download_after_failover_uses_the_new_accounts_credential(
+async def test_download_after_failover_runs_on_the_new_accounts_client(
     fake_client, tmp_path, monkeypatch
 ):
-    """換帳號之後,finalize 的下載必須以**新帳號**的身分發出(F-1 ∩ failover)。
+    """換帳號之後,finalize 的下載必須由**新帳號的 client** 發出(F-1 ∩ failover)。
 
-    SDK 的媒體下載在下載當下重讀 `NOTEBOOKLM_AUTH_JSON`,不是用 client 自己的 session。
-    v0.8.0 的 bug 是 env 停在 pool 最後一個槽位;修法是 `set_clients`/`rotate_client`
-    都同步 env。既有的 env 測試只驗 pool 層 rotate,沒有驗「一集真的撞到配額換帳號後,
-    十幾分鐘後的下載用的是誰」——而那正是 v0.8.0 症狀出現的地方。
+    v0.8.0 的 bug:身分放在 process 全域 `NOTEBOOKLM_AUTH_JSON`(SDK 的媒體下載在
+    下載當下重讀它),pool 建完停在最後一個槽位 → 整個 server 生命週期所有下載都以
+    那個帳號發出,而症狀十幾分鐘後才在 finalize 浮現。當時的修法是「set_clients /
+    rotate_client 同步 env」,測試也就只驗 env。
+
+    v0.9.0 換成 client 自帶 storage_path(`from_storage(path=…)`,SDK 只有
+    `_storage_path is None` 才回頭讀 env)。**保證因此變強而不是變弱**:env 只證明
+    「當下那一刻的全域變數是對的」,這裡證明的是**實際收到這通 download 的物件**。
+    非做不可的理由是並行:MCP 對每則 message `tg.start_soon`,一個全域槽沒辦法同時
+    是兩個值 —— EP05 正在 finalize(client 已 pin 住)、EP06 撞配額 rotate,
+    EP05 的下載就以別人的身分發出。同步 env 修不掉這個,因為它本來就是同一個變數。
+
+    所以兩個槽位必須是**不同的 fake 物件**:pool 測試長期以來每格塞同一個 fake,
+    「這通 RPC 實際發給誰」這一維在測試裡根本不存在。
 
     **實跑驗不到這一項**:v0.8.1 的自動分享讓 pool 全員都看得到 notebook,
-    身分錯了照樣下載成功。只有在這裡才能把 artifact 屬於誰和 env 是誰分開來看。
+    身分錯了照樣下載成功。
     """
-    monkeypatch.setenv(runtime.AUTH_JSON_ENV, "CRED_ORIGINAL")
-    runtime.set_clients(
-        [("a@x", fake_client, "CRED_A"), ("b@x", fake_client, "CRED_B")]
-    )
-    assert os.environ[runtime.AUTH_JSON_ENV] == "CRED_A", "裝完 pool 就該是第一格"
-
-    seen: list[str] = []
-    original_download = fake_client.artifacts.download_audio
-
-    async def recording_download(*args, **kwargs):
-        seen.append(os.environ[runtime.AUTH_JSON_ENV])
-        return await original_download(*args, **kwargs)
-
-    fake_client.artifacts.download_audio = recording_download
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "CRED_ORIGINAL")
+    account_b = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
 
     calls: list = []
-    _flaky_generate(fake_client, calls, fail_first_n=1)
+    _flaky_generate(fake_client, calls, fail_first_n=99)  # a@x 一律配額耗盡
+    _flaky_generate(account_b, calls, fail_first_n=0)  # b@x 照常受理
     manifest_path = tmp_path / "series_manifest.json"
 
     await _run(tmp_path, manifest_path)
 
     assert calls == ["a@x", "b@x"], "前提:這一集確實 failover 到 b@x 才生成成功"
-    assert seen == ["CRED_B"], (
-        "下載身分必須跟著作用中帳號走 —— 停在 CRED_A 就是「A 生的、B 抓的」那種"
-        "事後查不回來的稽核失真"
+
+    def downloads(client):
+        return [c for c in client.artifacts.calls if c[0] == "download"]
+
+    assert downloads(account_b), "下載必須由實際生成那一集的 client 發出"
+    assert not downloads(fake_client), (
+        "停在 a@x 就是「B 生的、A 抓的」那種事後查不回來的稽核失真"
+    )
+    # 身分不再是 process 全域狀態 —— pool 從頭到尾不碰這個 env。
+    assert os.environ["NOTEBOOKLM_AUTH_JSON"] == "CRED_ORIGINAL"
+
+
+async def test_failover_credits_the_account_that_actually_dispatched(fake_client, tmp_path):
+    """並行的另一個呼叫在 `generate` 的 await 期間 rotate 掉全域游標時,failover 紀錄的
+    `from_account` 必須是**這次實際送出**的那個帳號。
+
+    `generate` 是一趟真 RPC(數秒到數十秒),而 MCP 是並行的(每則 message 一個 task,
+    `notebooklm_mcp` 全域零鎖)。舊碼在那個 await **之後**才用 `runtime.active_account()`
+    讀 `from_account`,讀到的是「此刻剛好輪到誰」而不是「這次是誰被拒的」——稽核紀錄
+    於是指認一個根本沒參與這次 dispatch 的帳號,而且兩個帳號後來都成功,事後無從發現
+    (ADR-0010 §Transparency:manifest 是唯一的稽核憑據)。
+
+    修法是呼叫端 `runtime.snapshot()` 一次取好 (label, client) 往下傳,failover 換帳號時
+    兩者一起換 —— 全程不回頭讀全域。
+    """
+    account_b, account_c = FakeClient(), FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b), ("c@x", account_c)])
+    manifest_path = tmp_path / "series_manifest.json"
+
+    async def rotated_away_mid_flight(*args, **kwargs):
+        # 模擬「另一個工具呼叫在這趟 RPC 期間撞到配額並換了帳號」:全域游標被推到 b@x,
+        # 而**這次** dispatch 用的自始至終是 a@x 的 client。
+        runtime.rotate_client()
+        raise RateLimitError("每日配額已用盡")
+
+    fake_client.artifacts.generate_audio = rotated_away_mid_flight
+
+    await _run(tmp_path, manifest_path)
+
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
+    failovers = [e for e in attempt["errors"] if e["phase"] == "dispatch_failover"]
+    assert len(failovers) == 1, "只有 a@x 被拒,應該只有一筆 failover"
+    assert failovers[0]["from_account"] == "a@x", (
+        "被拒的是 a@x;記成 b@x 表示讀的是『此刻輪到誰』而不是『這次是誰送的』"
+    )
+    assert failovers[0]["to_account"] == "c@x"
+    assert attempt["dispatch"]["account"] == "c@x", "最終成功送出的帳號"
+    # 生成必須真的由 c@x 的 client 發出——不是靠全域碰巧對上。
+    assert any(c[0] == "generate_audio" for c in account_c.artifacts.calls)
+    assert not account_b.artifacts.calls, "b@x 只是被並行呼叫推到的游標位置,不該參與這次 dispatch"
+
+
+async def test_dispatch_and_finalize_both_ride_the_snapshotted_client(fake_client, tmp_path):
+    """並行 rotate 落在 **snapshot 之後、dispatch 之前**那個縫時,這一集的 dispatch
+    與 finalize 都必須留在快照到的那個 client 上。
+
+    這是整個「身分跟著 client 走」重構的核心斷言,而它需要**這個**時序才驗得到:
+    `runtime.snapshot()` 之後到 `generate` 之間隔著 baseline `artifacts.list` 與
+    `_claim_prepared_dispatch`,並行的另一個工具呼叫正是在這裡把全域游標換掉。
+    (在 `generate_audio` **內部**才 rotate 的測試驗不到這件事——那時 client 已經
+    傳進去了,`generate(runtime.get_client())` 這個突變照樣會綠。)
+
+    三個突變都必須讓這條紅:
+    ①`generate(client)` → `generate(runtime.get_client())`
+    ②`account=dispatch_account` → `account=runtime.active_account()`
+    ③finalize 前補回 `client = runtime.get_client()`
+    """
+    account_b = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
+    manifest_path = tmp_path / "series_manifest.json"
+
+    original_list = fake_client.artifacts.list
+    rotated: list[str] = []
+
+    async def list_then_rotate(*args, **kwargs):
+        # 模擬並行呼叫在 baseline 這個 await 裡撞到配額、把全域游標換到 b@x。
+        if not rotated:
+            rotated.append(runtime.rotate_client())
+        return await original_list(*args, **kwargs)
+
+    fake_client.artifacts.list = list_then_rotate
+
+    await _run(tmp_path, manifest_path)
+
+    assert rotated == ["b@x"], "前提:全域游標確實在 dispatch 之前就被換走了"
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["account"] == "a@x", (
+        "記帳要記快照到的帳號;記成 b@x 表示 claim 回頭讀了全域"
+    )
+    kinds = [c[0] for c in account_b.artifacts.calls]
+    assert not kinds, (
+        f"b@x 只是游標被推到的位置,這一集不該碰它——實際收到 {kinds}。"
+        "generate 落在它身上 = dispatch 讀了全域;wait/download/rename 落在它身上 = "
+        "finalize 讀了全域(而 finalize 是數十分鐘的長窗口,風險幾乎全在那一半)"
+    )
+    assert any(c[0] == "generate_audio" for c in fake_client.artifacts.calls)
+    assert any(c[0] == "download" for c in fake_client.artifacts.calls), (
+        "finalize 的下載也要留在同一個 client 上"
     )
