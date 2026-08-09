@@ -515,8 +515,14 @@ def _claim_prepared_dispatch(
     episode_n: int,
     attempt_id: str,
     artifact_ids: list[str],
+    account: str | None = None,
 ) -> bool:
-    """原子保存 baseline 並取得 prepared attempt 的 dispatch ownership。"""
+    """原子保存 baseline 並取得 prepared attempt 的 dispatch ownership。
+
+    `account` 是「這次由哪個帳號送出」(ADR-0010 的 pool)。單帳號時它只是一條事實,
+    多帳號 failover 時它會被 `_record_dispatch_failover` 更新成實際成功的那個 ——
+    沒有它,「EP35 是誰生的」事後答不出來。
+    """
 
     def mutate(manifest: dict) -> bool:
         _, attempt = _attempt_record(manifest, episode_n, attempt_id)
@@ -530,10 +536,137 @@ def _claim_prepared_dispatch(
                 "dispatched_at": datetime.now(timezone.utc).isoformat(),
             }
         )
+        if account is not None:
+            dispatch["account"] = account
         return True
 
     _, claimed = store.update(mutate)
     return claimed
+
+
+def _record_dispatch_failover(
+    store: ManifestStore,
+    episode_n: int,
+    attempt_id: str,
+    reason: object,
+    from_account: str | None,
+    to_account: str,
+) -> None:
+    """記下「A 拒絕 → 改用 B 重送」,並把 dispatch 的 account 換成 B。
+
+    **對 client 透明可以,對稽核紀錄不行**(ADR-0010)。errors[] 是唯一只 append、
+    從不被清除的欄位 —— `_reset_attempt_for_resend` 會把 dispatch/remote 清回
+    prepared,診斷放那裡會被抹掉,放這裡不會。
+    """
+
+    def mutate(manifest: dict) -> None:
+        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
+        if isinstance(reason, BaseException):
+            message = str(reason) or type(reason).__name__
+            reason_type = type(reason).__name__
+        else:
+            message = getattr(reason, "error", None) or getattr(reason, "status", "failed")
+            reason_type = getattr(reason, "error_code", None) or "not_accepted"
+        attempt["dispatch"]["account"] = to_account
+        attempt["errors"].append(
+            {
+                "phase": "dispatch_failover",
+                "type": reason_type,
+                "message": message,
+                "from_account": from_account,
+                "to_account": to_account,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    store.update(mutate)
+
+
+def _rotate_for_quota(
+    store: ManifestStore | None,
+    episode_n: int,
+    attempt_id: str,
+    reason: object,
+) -> bool:
+    """還有沒試過的帳號就換過去,回 True 表示「可以原地重送」。
+
+    `store is None`(standalone、沒有 manifest)一律不換:沒有地方寫稽核紀錄,
+    靜默換帳號違反 ADR-0010 自己立的「對紀錄不透明」。
+    """
+    if store is None:
+        return False
+    from_account = runtime.active_account()
+    to_account = runtime.rotate_client()
+    if to_account is None:
+        return False
+    _record_dispatch_failover(
+        store, episode_n, attempt_id, reason, from_account, to_account
+    )
+    return True
+
+
+async def _dispatch_audio_with_failover(
+    store: ManifestStore | None,
+    episode_n: int,
+    attempt_id: str,
+    manifest_path: str | None,
+    generate,
+) -> str:
+    """送出音檔生成並回傳 artifact_id;配額拒絕就換帳號**原地重送同一個 attempt**。
+
+    兩條路徑收在同一個函式裡是刻意的:同一個「伺服器拒絕、沒建出 task」語意有兩種
+    形狀進來(0.8.0 起 raise,0.7.x 回 `task_id=""` 由 `ensure_started` 判定),分兩處
+    各補一次 failover 正是本 repo 反覆出事的「補一半」。
+
+    **除了那兩種,一律不換帳號**:其餘失敗都可能發生在伺服器已經受理之後,重送會變成
+    重複 artifact + 重燒配額(`_REFUSED_WITHOUT_DISPATCH` 刻意不長大的同一個理由)。
+    """
+    while True:
+        try:
+            status = await generate(runtime.get_client())
+        except _REFUSED_WITHOUT_DISPATCH as exc:
+            # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
+            # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」——標成
+            # not_accepted 讓呼叫端可以直接重試,不必先跑一次註定撈不到東西的對帳。
+            if _rotate_for_quota(store, episode_n, attempt_id, exc):
+                continue
+            if store is not None:
+                _mark_not_accepted(store, episode_n, attempt_id, exc)
+                # 比照下面的 acceptance_unknown 分支把 attempt_id 與下一步塞進訊息:
+                # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經
+                # 被持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。docstring 承諾「依錯誤中的
+                # attempt_id 續跑」,兩個分支都要兌現。
+                exc.args = (
+                    f"{exc}\n伺服器拒絕了這次生成,**沒有**建立任何 artifact"
+                    f"(attempt_id={attempt_id!r},已標記 not_accepted)。"
+                    "配額/限流回復後,用**完全相同的參數**重呼 podcast_episode 即可沿用"
+                    "同一個 attempt 重送——不會新建 attempt、也不會多燒一次配額。",
+                )
+            raise
+        except (Exception, asyncio.CancelledError) as exc:
+            if store is not None:
+                _mark_acceptance_unknown(store, episode_n, attempt_id, exc)
+                exc.args = (
+                    f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
+                    "先對帳，禁止直接重生："
+                    f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
+                    f"episode_n={episode_n}, attempt_id={attempt_id!r})",
+                )
+            raise
+
+        # task_id IS the artifact_id — notebooklm-py _types/artifacts.py:421 states
+        # "task_id and artifact_id are the same identifier"; GenerationStatus has NO
+        # artifact_id field, so we must use task_id for the download/rename targeting
+        # (otherwise download falls back to "latest" and rename targets None).
+        # ensure_started guards the failed/empty-task_id case (rate limit / quota / refusal).
+        try:
+            return ensure_started(status)
+        except RuntimeError:
+            if _rotate_for_quota(store, episode_n, attempt_id, status):
+                continue
+            if store is not None:
+                _mark_not_accepted(store, episode_n, attempt_id, status)
+            raise
 
 
 def _mark_acceptance_unknown(
@@ -1280,14 +1413,15 @@ async def _run_episode(
             episode_n,
             attempt_id,
             [artifact.id for artifact in baseline],
+            account=runtime.active_account(),
         )
         if not claimed:
             raise RuntimeError(
                 f"attempt {attempt_id!r} is no longer prepared; retry by its durable state"
             )
 
-    try:
-        status = await client.artifacts.generate_audio(
+    async def _generate(dispatch_client: object):
+        return await dispatch_client.artifacts.generate_audio(
             notebook_id,
             source_ids=selected_source_ids,
             language=resolved_language,
@@ -1295,45 +1429,12 @@ async def _run_episode(
             audio_format=resolved_audio_format,
             audio_length=resolved_audio_length,
         )
-    except _REFUSED_WITHOUT_DISPATCH as exc:
-        # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
-        # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」——標成
-        # not_accepted 讓呼叫端可以直接重試,不必先跑一次註定撈不到東西的對帳。
-        if store is not None:
-            _mark_not_accepted(store, episode_n, attempt_id, exc)
-            # 比照下面的 acceptance_unknown 分支把 attempt_id 與下一步塞進訊息:
-            # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經
-            # 被持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。docstring 承諾「依錯誤中的
-            # attempt_id 續跑」,兩個分支都要兌現。
-            exc.args = (
-                f"{exc}\n伺服器拒絕了這次生成,**沒有**建立任何 artifact"
-                f"(attempt_id={attempt_id!r},已標記 not_accepted)。"
-                "配額/限流回復後,用**完全相同的參數**重呼 podcast_episode 即可沿用"
-                "同一個 attempt 重送——不會新建 attempt、也不會多燒一次配額。",
-            )
-        raise
-    except (Exception, asyncio.CancelledError) as exc:
-        if store is not None:
-            _mark_acceptance_unknown(store, episode_n, attempt_id, exc)
-            exc.args = (
-                f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
-                "先對帳，禁止直接重生："
-                f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
-                f"episode_n={episode_n}, attempt_id={attempt_id!r})",
-            )
-        raise
 
-    # task_id IS the artifact_id — notebooklm-py _types/artifacts.py:421 states
-    # "task_id and artifact_id are the same identifier"; GenerationStatus has NO
-    # artifact_id field, so we must use task_id for the download/rename targeting
-    # (otherwise download falls back to "latest" and rename targets None).
-    # ensure_started guards the failed/empty-task_id case (rate limit / quota / refusal).
-    try:
-        artifact_id = ensure_started(status)
-    except RuntimeError:
-        if store is not None:
-            _mark_not_accepted(store, episode_n, attempt_id, status)
-        raise
+    artifact_id = await _dispatch_audio_with_failover(
+        store, episode_n, attempt_id, manifest_path, _generate
+    )
+    # failover 可能已經換過帳號 —— 後面的 finalize/下載要用實際送出的那一個。
+    client = runtime.get_client()
     if store is not None:
         _bind_accepted_artifact(store, episode_n, attempt_id, artifact_id)
 
