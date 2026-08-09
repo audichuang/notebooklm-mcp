@@ -8,6 +8,59 @@
 
 ---
 
+## v0.8.1
+
+v0.8.0 的真實驗收(stg 三個免費帳號,三個帳號全部打爆)抓到的三個 P0 + 一個設計缺口。
+**核心命題成立**:EP04 撞到 A 的配額 → 1.43 秒同步拒絕 → 換到 B → 4.4 秒後受理。
+notebook 的 owner 是 A,以 EDITOR 身分的 B 送出就過了 ⇒ **配額算發起者不算 owner**,
+ADR-0010 標成「操作者拍板但未實測」的前提現在是事實,這一版不作廢。
+兩次 failover(A→B、B→C)都拿到,per-process 輪替不回頭撞舊帳號也實測成立。
+
+### 修正
+
+- **下載身分綁死在 pool 最後一個槽位**(F-1,P0)。pool 建構把 `NOTEBOOKLM_AUTH_JSON`
+  當暫存槽,迴圈結束後 env 停在最後一個憑證,而還原寫在 lifespan 最外層的 `finally`
+  —— 那是 **server 關閉**才跑。而 notebooklm-py 的媒體下載**在下載當下重讀那個 env**,
+  不是用 client 自己的 session(驗收已隔離重現:同一個 client 只要換掉 env,下載身分
+  就跟著換)。結果:不管作用中的是哪個帳號,**下載永遠以最後一個槽位的身分發出**,
+  notebook 沒分享給它就一律 401,而症狀出現在十幾分鐘後的 finalize。
+  修法:憑證跟 client 一起存進 pool,`set_clients()`/`rotate_client()` 同步 env。
+  只「建完還原成第一個」不夠 —— failover 換到 B 之後 artifact 屬於 B。
+  **測試盲區一併修**:原測試在 `async with` **退出後**才斷言 env,那時最外層 finally
+  已經還原過,bug 正是從這個縫溜過去的。
+- **重送/supersede 路徑沒 failover 也沒記帳號**(F-4,P0)。`podcast_series` 有兩條
+  dispatch 路徑,v0.8.0 只補了「全新一集」那條。於是配額耗盡後隔天原樣重呼
+  (**工具自己給的 `safe_next_action`**)不會換帳號,pool 對「重試」這條最需要它的路
+  完全無效;`dispatch.account` 落地是 null,那一集永久答不出誰生的。
+  修法:兩條路徑共用 `_dispatch_audio_with_failover`,只把例外翻成 series 的結構化
+  安全停點。`_reset_attempt_for_resend` 也 pop 掉 `account`(留著會變成**過期值**,
+  比缺漏危險)。續跑指引從 helper 拉回呼叫端 —— `_mark_not_accepted` 會把 `str(exc)`
+  寫進 `remote.error`,寫死一種指引等於讓**錯的**工具名落進 manifest。
+- **換到的帳號沒權限被誤標成 `acceptance_unknown`**(F-2,P0)。permission denied
+  (`ClientError` rpc_code=7)掉進泛用 except → 「先對帳、禁止直接重生」,把一個
+  **確定沒發出去**的請求叫去跑註定撈不到東西的 reconcile,正是 v0.7.1 那類死鎖的形狀。
+  新增 `NotebookAccessDenied`,**刻意繼承 `RuntimeError`** —— 兩個 dispatch 呼叫端
+  本來就把它當「沒建出 task 的乾淨終態」,分類自動正確,不必兩處各加分支。
+  **不放進 `_REFUSED_WITHOUT_DISPATCH`**(那個集合的契約是配額/限流),**也不 rotate**
+  (權限是設定問題,逐一試過去只會掩蓋根因)。
+
+### 新增
+
+- **`notebook_create` 在 pool 模式自動分享給其餘帳號**(EDITOR,`notify=False`)。
+  failover 的前置狀態先前沒有任何機制建立 —— 驗收時是人工用 SDK 補上才走得動。
+  回傳值新增 `shared_with`。**單帳號時完全不打 RPC**,現行機器行為不變。
+  既有的 notebook(v0.8.1 之前建的、或手動建的)仍需自行分享一次。
+
+### 待確認(不在這一版)
+
+- finalize 階段的失敗原因沒有落進 `errors[]`(F-3):`download` 失敗時 manifest 只記
+  `status="failed"`,「為什麼」只存在於工具回傳的例外訊息裡,session 一結束就沒了。
+- 暫時性生成失敗的 `remote.error` 只有一句 `failed`(F-5)。配額拒絕那筆是完整的。
+
+兩者都是既有行為、不是 v0.8.0 引入的回歸。
+
+---
+
 ## v0.8.0
 
 多帳號配額 pool。Google One 家庭方案下有 5 個付費帳號,但一個 process 只綁一份
