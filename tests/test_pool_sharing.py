@@ -329,6 +329,31 @@ async def test_share_reraises_non_permission_errors_instead_of_walking_the_pool(
     assert not other.sharing.calls, "不該繼續往下試"
 
 
+async def test_share_reraises_a_client_error_whose_rpc_code_is_not_permission_denied(
+    fake_client,
+):
+    """真實環境裡「非權限錯誤」的形狀是 **ClientError rpc_code=5**,不是別的型別。
+
+    v0.9.1 驗收 Phase 2-2 實測:不存在的 notebook id 讓第一個槽位就回 rpc_code=5
+    (not found),9 個帳號的 pool 只打了 1 趟 `get_status`。上面那個測試用
+    `RuntimeError`,連 `is_permission_denied` 的 `isinstance(exc, ClientError)` 都不過,
+    **走不到 `rpc_code` 的比較** —— 判準退化成「是不是 ClientError」時它仍然全綠,
+    而那個退化正好把 not-found 當成權限問題,繼續掃 pool。
+
+    `other` 刻意**看得到** notebook:掃下去的話這支工具會成功回傳,測試就是
+    「DID NOT RAISE」——比讓兩邊都被拒更靈敏。
+    """
+    other = FakeClient()
+    fake_client.sharing.get_status_exc = ClientError(
+        "The server rejected this request (not found).", rpc_code=5
+    )
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+
+    with pytest.raises(ClientError, match="not found"):
+        await basic.notebook_share_with_pool("nb-1")
+    assert not other.sharing.calls, "not found 不是權限問題,不該換帳號再試"
+
+
 async def test_share_fails_loud_when_nobody_in_the_pool_can_see_it(fake_client):
     """pool 全員都看不到 = 這個 notebook 不屬於這個 pool,沒有人分享得動。
 
