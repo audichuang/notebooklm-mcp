@@ -42,6 +42,45 @@ _INLINE_AUTH_ENV_OVERRIDES: dict[str, str | None] = {
 }
 
 
+# pool 掃描的上限。只是「打錯字偵測」的搜尋範圍,不是帳號數上限的產品決策。
+_MAX_POOL_SLOTS = 20
+
+
+def _pooled_auth_json(env: dict[str, str] | os._Environ) -> list[str]:
+    """依序取出 pool 的憑證:`NOTEBOOKLM_AUTH_JSON`, `_2`, `_3`…(ADR-0010)。
+
+    **缺號一律 fail-loud**:`_2` 沒設但 `_4` 有,是 Doppler 打錯一個字的形狀。
+    靜默跳過的話那個付費帳號永遠不進 pool,而症狀只是「配額比預期早用完」——
+    幾乎不可能回頭查到根因。空字串同理(key 在、值沒設好)。
+    """
+    first = env.get(_AUTH_JSON_ENV)
+    if first is None:
+        return []
+    creds = [first]
+    slot = 2
+    while (value := env.get(f"{_AUTH_JSON_ENV}_{slot}")) is not None:
+        if not value.strip():
+            raise RuntimeError(f"{_AUTH_JSON_ENV}_{slot} 是空的——憑證沒設好,不是「沒有這個帳號」")
+        creds.append(value)
+        slot += 1
+    for higher in range(slot + 1, _MAX_POOL_SLOTS + 1):
+        if env.get(f"{_AUTH_JSON_ENV}_{higher}") is not None:
+            raise RuntimeError(
+                f"{_AUTH_JSON_ENV}_{higher} 存在,但編號在 _{slot} 就斷了。"
+                f"補上 {_AUTH_JSON_ENV}_{slot} 或把編號接連續——靜默跳過會讓那個帳號永遠不進 pool"
+            )
+    return creds
+
+
+async def _account_label(client: object, slot: int) -> str:
+    """稽核用的帳號標籤。拿不到 email 不該讓 server 起不來,退回槽位編號。"""
+    try:
+        email = await client.get_account_email()  # type: ignore[attr-defined]
+    except Exception:
+        return f"#{slot}"
+    return email or f"#{slot}"
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
     # notebooklm-py 0.8.x:from_storage() 是同步函式,回傳可直接 async with 的
@@ -49,6 +88,7 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
     # MCP 一律**不傳 keepalive=**,再加上下面這組 env override(理由見上)。
     inline_auth = _AUTH_JSON_ENV in os.environ
     saved = {name: os.environ.get(name) for name in _INLINE_AUTH_ENV_OVERRIDES}
+    saved_auth = os.environ.get(_AUTH_JSON_ENV)
     if inline_auth:
         for name, value in _INLINE_AUTH_ENV_OVERRIDES.items():
             if value is None:
@@ -56,8 +96,22 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
             else:
                 os.environ[name] = value
     try:
-        async with NotebookLMClient.from_storage() as client:
-            runtime.set_client(client)
+        # 驗證先於任何 client 建立(打錯字要在第一個連線之前就爆)。
+        creds = _pooled_auth_json(os.environ) if inline_auth else []
+        async with contextlib.AsyncExitStack() as stack:
+            pool: list[tuple[str, object]] = []
+            if creds:
+                # SDK 只認不帶後綴的 `NOTEBOOKLM_AUTH_JSON`(`_auth/cookies.py`),而
+                # `AuthTokens` 沒有 from_json —— 所以輪流覆寫這個 env 再 from_storage()。
+                # 啟動期單線程、建完就還原,憑證也不必落到檔案系統。
+                for slot, cred in enumerate(creds, start=1):
+                    os.environ[_AUTH_JSON_ENV] = cred
+                    client = await stack.enter_async_context(NotebookLMClient.from_storage())
+                    pool.append((await _account_label(client, slot), client))
+            else:
+                client = await stack.enter_async_context(NotebookLMClient.from_storage())
+                pool.append((await _account_label(client, 1), client))
+            runtime.set_clients(pool)
             try:
                 yield
             finally:
@@ -69,6 +123,12 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = old
+            # pool 掃描把這個 env 當成暫存槽用過,一定要還原成呼叫端給的那一份
+            # ——包含失敗路徑,否則中間狀態會留給下一段程式。
+            if saved_auth is None:
+                os.environ.pop(_AUTH_JSON_ENV, None)
+            else:
+                os.environ[_AUTH_JSON_ENV] = saved_auth
 
 
 # Protocol-level server instructions: surfaced to ANY MCP client (even one
