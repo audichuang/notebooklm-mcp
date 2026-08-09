@@ -41,7 +41,7 @@ id,下載到的會是**沒改過的舊那份**,而且看起來完全成功。修
 動作,而且新的萬一有問題,舊的是唯一退路)。連續 revise 會堆出 `(2)`、`(3)`… 而標題
 只差一個序號,正好放大文件自己承認的「`artifact_list` 分不出哪一集」風險。
 
-### 一條未結案、已記進 AGENTS.md 的事實
+### 那條「未結案」的事實 —— 已結案(2026-08-10,離線)
 
 `source_delete` 之後 `source_list` 確實看不到那筆,但 **`source_fulltext` 用同一個
 `source_id` 在 55 分鐘後仍讀得回完整內容**。所以「從筆記本移除」與「後端不再持有」
@@ -80,6 +80,20 @@ targeted 一輪,只驗 FAIL-1 —— 核心機制沿用 v0.9.0 的結論(v0.9.1 
 突變驗證:判準退化成「只看型別」時只有新那條紅,舊那條仍綠。
 
 
+
+**結案方式不是再燒配額,是把 SDK 的三環釘住(全部離線可驗)**:
+①`generate_audio(source_ids=None)` 在 **client 端**呼叫 `notebooks.get_source_ids()` 拿
+清單、再把明確 id 列表送進 RPC —— **不是讓伺服器自己挑**;②`get_source_ids` 走 `get_raw()`
+→ `GET_NOTEBOOK`,而 `sources.list`(我方 `source_list`)走的**也是** `GET_NOTEBOOK`,
+同一支 RPC、同一份資料 ⇒ **`source_list` 看不到 ⟺ 生成的清單裡也沒有它**;
+③`get_fulltext` 的 params 是 `[[source_id]]`、**不帶 notebook_id**,直接查 source 物件、
+繞過 notebook。
+
+**所以「刪掉還讀得回」是預期的,不是清理失敗** —— 那是兩個不同層級的查詢,而 ADR-0009
+的清理義務有效。三環由 `test_generation_takes_its_source_list_from_the_notebook_not_the_server`
+釘住:任一環被上游改掉就會紅,提醒重新論證。**它證明的是推導的前提,不是端到端行為**
+——真要端到端仍得用兩個內容互斥的來源做一次生成對照,但在三環成立的前提下那只是加強,
+不是必要條件。
 ## v0.9.0
 
 一輪多 agent 深度審查的產出。**主軸是一件架構級的事:帳號身分不再放在 process 全域**

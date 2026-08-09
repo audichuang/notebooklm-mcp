@@ -286,14 +286,19 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - `sources.delete` 是 **idempotent**(0.7.0 起):刪不存在的 source 也「成功」不 raise。
   `source_delete` 回的 `deleted` 只代表「呼叫後該 id 已不在筆記本」,**不保證它先前存在**
   (打錯 id 也回 deleted)。要確認刪掉某既有來源,先用 `source_list` 拿真實 `source_id`。
-  ⚠️ **「刪掉」的語意到哪一層,目前是未結案的問題**(v0.9.0 真實驗收,標 INCONCLUSIVE
-  而非 PASS):刪除後 `source_list` 確實看不到它,但 **`source_fulltext` 用同一個
-  `source_id` 在 55 分鐘後仍讀得回完整內容**。所以「從筆記本移除」與「後端不再持有」
-  不是同一件事,而 **ADR-0009 那條「重生前必須刪掉舊回錄 source,否則污染後續各集
-  context」的清理義務,效果因此沒有被證明** —— 它擋得住「同名 source 出現兩筆」是確定的
-  (那是 `_assert_source_cleanup_done` 真正在驗的),但擋不擋得住內容仍進生成 context
-  無法從外部觀察。**不要因此鬆掉那條 precondition**(它至少擋住可觀測的那一半);
-  要結案得用兩個內容互斥的來源做一次生成對照,見 `docs/acceptance-v0.9.0.md`。
+  ⚠️ **「刪掉」有兩層,而它們是不同的 RPC** —— v0.9.0 驗收看到「刪除後 `source_list`
+  看不到,但 `source_fulltext` 用同一個 `source_id` 在 55 分鐘後仍讀得回全文」,當時
+  判 INCONCLUSIVE。**已由 SDK 三環結案(2026-08-10,離線可驗)**:
+  ①`generate_audio(source_ids=None)` 是在 **client 端**呼叫 `notebooks.get_source_ids()`
+  拿清單、再把明確 id 列表送進 RPC,**不是讓伺服器自己挑**;②`get_source_ids` 走
+  `get_raw()` → `GET_NOTEBOOK`,而 `sources.list`(我方 `source_list`)走的**也是**
+  `GET_NOTEBOOK` —— 同一支 RPC、同一份資料,所以 **`source_list` 看不到 ⟺ 生成的清單裡
+  也沒有它**;③`get_fulltext` 的 params 是 `[[source_id]]`、**不帶 notebook_id**,直接查
+  source 物件、繞過 notebook。**所以「刪掉還讀得回」是預期的,不是清理失敗**,ADR-0009
+  的清理義務有效。
+  三環由 `test_generation_takes_its_source_list_from_the_notebook_not_the_server` 釘住
+  ——**任何一環被上游改掉,這個推導就失效、清理義務要重新論證**。注意它證明的是**推導的
+  前提**,不是端到端行為:真要端到端,得用兩個內容互斥的來源做一次生成對照。
 - **upload endpoint 的副檔名地雷**:`.json`/`.ts`/`.py`/`.yaml` 直接 400 Bad Request(上游只
   提前擋 HTML family:`_source/upload.py:262` 的 `_HTML_UPLOAD_SUFFIXES`)。v0.3.3 起
   `source_add_file` 自動把讀得開的小 UTF-8 文字檔複製成 `<原檔名>.md` 上傳並回

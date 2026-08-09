@@ -506,3 +506,46 @@ def test_relogin_hint_does_not_point_at_the_broken_login_command():
     for line in RELOGIN_HINT.splitlines():
         if "notebooklm login" in line:
             assert "不要用" in line, f"這行像是在叫人跑壞掉的登入指令:{line!r}"
+
+
+def test_generation_takes_its_source_list_from_the_notebook_not_the_server():
+    """不傳 `source_ids` 時,生成用的來源清單是**在 client 端從 notebook 撈出來的**。
+
+    這條是「`source_delete` 之後那筆不會再進入生成」的**唯一依據**,而那件事無法從
+    外部觀察 —— v0.9.0 驗收就卡在這裡判 INCONCLUSIVE:刪掉之後 `source_list` 看不到它,
+    但 `source_fulltext` 55 分鐘後仍讀得回全文,所以「從筆記本移除」與「後端不再持有」
+    顯然不是同一件事,而 ADR-0009 那條清理義務的效果因此證不出來。
+
+    解法不是再燒配額做生成對照,是把三環釘住(全部可離線驗):
+
+    1. `generate_audio(source_ids=None)` 會呼叫 `notebooks.get_source_ids()` 拿清單,
+       再把**明確的 id 列表**送進 RPC —— 不是讓伺服器自己挑。
+    2. `get_source_ids` 走 `get_raw()` → **`GET_NOTEBOOK`**,而 `sources.list`
+       (我方 `source_list`)走的**也是** `GET_NOTEBOOK`。同一支 RPC、同一份資料 ⇒
+       `source_list` 看不到 ⟺ 生成的清單裡也沒有它。
+    3. `get_fulltext` 的 params **只有 source_id、沒有 notebook_id** —— 它直接查 source
+       物件,繞過 notebook。所以「刪掉還讀得回」是預期的,不是清理失敗。
+
+    三環有任何一環被上游改掉,這個推導就失效,清理義務要重新論證 —— 那正是這條測試
+    要攔的。**不要因為它綠就以為驗過了生成端**:它證明的是推導的前提,不是端到端行為。
+    """
+    from notebooklm._artifact.generation import ArtifactGenerationService
+    from notebooklm._notebooks import NotebooksAPI
+    from notebooklm._source.content import SourceContentRenderer
+    from notebooklm._source.listing import SourceLister
+
+    gen = inspect.getsource(ArtifactGenerationService.generate_audio)
+    assert "get_source_ids" in gen, (
+        "生成不再於 client 端撈 notebook 的來源清單 —— 若改成伺服器自己挑,"
+        "『source_delete 之後不會進生成』就完全失去依據"
+    )
+
+    assert "GET_NOTEBOOK" in inspect.getsource(NotebooksAPI.get_raw)
+    assert "GET_NOTEBOOK" in inspect.getsource(SourceLister.list), (
+        "sources.list 與 get_source_ids 不再同源 —— source_list 的觀察結果推不出生成端行為"
+    )
+
+    fulltext = inspect.getsource(SourceContentRenderer)
+    assert "[[source_id]" in fulltext and "notebook_id" not in fulltext.split("params =")[1][:120], (
+        "get_fulltext 開始帶 notebook_id 了 —— 那樣『刪掉還讀得回』就變成真的異常,要重查"
+    )
