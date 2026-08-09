@@ -1,5 +1,14 @@
 # v0.9.0 驗收劇本:身分跟著 client 走
 
+> ✅ **已執行(2026-08-09/10,`stg` 9 帳號 pool,35/35 工具覆蓋)。結果見
+> [acceptance-v0.9.0-findings.md](acceptance-v0.9.0-findings.md)。**
+> 核心改動全綠,且是用「新舊行為的判別實驗」證的而不只是「沒壞」。抓到 2 個 FAIL
+> (都不在核心機制上,已修進 **v0.9.1**)、2 個 INCONCLUSIVE。
+>
+> **下面的內文保留成當時的計畫,不回填** —— 但有兩節的前提已經被結果推翻,重跑時直接跳:
+> §5 的「`get_share_status` 列不列 owner」**已結案:會列,且 `permission=OWNER`**;
+> §7-1 的指引問題**已修**(`notebook_share_with_pool` 現在自己找看得到 notebook 的帳號)。
+
 環境怎麼搭、測資怎麼設計、哪五類事只有真帳號測得到 —— 正本在
 [acceptance-testing.md](acceptance-testing.md),**先讀那份**。這裡只回答一件事:
 **v0.9.0 改了什麼,所以這一輪要驗什麼**。
@@ -31,9 +40,9 @@
   隔天再跑**,不要硬撐。
 
 ```bash
-uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.0"
+uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.1"
 ~/.local/share/uv/tools/notebooklm-mcp/bin/python -c \
-  "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"   # 必須印 0.9.0
+  "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"   # 必須印 0.9.1（驗收發現的兩個 FAIL 已修進這一版）
 ```
 
 **驗版本號不能省**:uv 的 git cache 壞掉時會 `fatal: unable to read tree` 然後**裝成舊版**,

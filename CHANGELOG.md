@@ -8,7 +8,50 @@
 
 ---
 
-## v0.9.0(未發布)
+## v0.9.1
+
+v0.9.0 真實驗收(2026-08-09/10)抓到的兩個 FAIL。**都不在核心機制上** ——
+核心改動的驗收結果寫在下面 v0.9.0 節的〈真實驗收〉。
+
+
+驗收本身的結論在下方「驗收結果」節;這裡是**照著結論改的兩件事**。兩個 FAIL 都不在
+核心機制上,但都是「照著文件做會走進死路或拿到錯東西」。
+
+**`notebook_access_denied` 的指引在它自己產生的狀態下不可執行。** 停點完全正確,
+但 `error` 叫呼叫端跑 `notebook_share_with_pool`,而那支工具用**作用中帳號**執行 ——
+正是那個看不到 notebook 的帳號(配額 failover 剛換過去)。於是指引自己也 permission
+denied,呼叫端只是從一個死路換到另一個。而這正是文件描述的典型情境:既有 notebook 的
+owner 通常是 slot 1,pool 卻會 rotate 走。
+
+修法是讓那支工具**自己找得動手的帳號**:先試作用中的(絕大多數就是它,零額外成本),
+permission denied 才依槽位順序試其餘的,回傳多一個 `shared_by`。**只對 permission
+denied 往下試** —— 網路錯誤、認證過期每個槽位都會遇到,一路吞下去只會把根因埋掉。
+掃描全是唯讀 `get_status`,而且**不動輪替游標**(`_ACTIVE` 的語意是「配額走到哪」,
+借去做別的事會讓 failover 的帳號記帳失去意義),所以 runtime 新增的是
+`all_clients()` 而**不是**「切到某個槽位」的 API。全員都看不到時 fail-loud,訊息說出
+唯一出路(用真正的擁有者帳號在網頁上分享)。順帶把 `NotebookAccessDenied` /
+`is_permission_denied` 抽到 `_errors.py`:兩個模組要判同一件事,各寫一份等於埋一顆
+「上游改了 `rpc_code` 只會有一處被改到」的地雷。
+
+**`artifact_revise_slide` 的「artifact 不變、就地改版」是錯的。** 實測遠端會 fork 出
+一顆 `<原標題> (2)`,傳進去那顆原封不動還在。**實作本來就是對的** —— 它一律用回傳的
+id 而不假設相等,那個「不自己假設」的寫法救了這支工具:當初若照 docstring 寫死用輸入
+id,下載到的會是**沒改過的舊那份**,而且看起來完全成功。修的是文件,外加回傳
+`superseded_artifact_id` 讓呼叫端知道 id 換了、舊的還在(**刻意不自動刪**:遠端破壞性
+動作,而且新的萬一有問題,舊的是唯一退路)。連續 revise 會堆出 `(2)`、`(3)`… 而標題
+只差一個序號,正好放大文件自己承認的「`artifact_list` 分不出哪一集」風險。
+
+### 一條未結案、已記進 AGENTS.md 的事實
+
+`source_delete` 之後 `source_list` 確實看不到那筆,但 **`source_fulltext` 用同一個
+`source_id` 在 55 分鐘後仍讀得回完整內容**。所以「從筆記本移除」與「後端不再持有」
+不是同一件事,而 ADR-0009 那條「重生前必須刪掉舊回錄 source」的清理義務,**效果因此
+沒有被證明**(判 INCONCLUSIVE,不寫成 PASS)。它擋得住可觀測的那一半(同名 source
+出現兩筆)是確定的,所以那條 precondition 不鬆;要結案得用兩個內容互斥的來源做一次
+生成對照。
+
+
+## v0.9.0
 
 一輪多 agent 深度審查的產出。**主軸是一件架構級的事:帳號身分不再放在 process 全域**
 ——其餘都是同一輪審查在 pool / failover / sharing / retract 四條路上找到的實際 bug。
@@ -192,77 +235,6 @@ server 起不來)、`permission` 用位置參數傳(0.7.0 對 source add 做過 
 同型風險)。另補「正常關閉時 N 個 client 都被關掉」——此前在 `set_clients` 前插一行
 `stack.pop_all()`,38 條測試照樣全綠。
 
-### 真實驗收(2026-08-09/10)之後的兩個修正
-
-驗收本身的結論在下方「驗收結果」節;這裡是**照著結論改的兩件事**。兩個 FAIL 都不在
-核心機制上,但都是「照著文件做會走進死路或拿到錯東西」。
-
-**`notebook_access_denied` 的指引在它自己產生的狀態下不可執行。** 停點完全正確,
-但 `error` 叫呼叫端跑 `notebook_share_with_pool`,而那支工具用**作用中帳號**執行 ——
-正是那個看不到 notebook 的帳號(配額 failover 剛換過去)。於是指引自己也 permission
-denied,呼叫端只是從一個死路換到另一個。而這正是文件描述的典型情境:既有 notebook 的
-owner 通常是 slot 1,pool 卻會 rotate 走。
-
-修法是讓那支工具**自己找得動手的帳號**:先試作用中的(絕大多數就是它,零額外成本),
-permission denied 才依槽位順序試其餘的,回傳多一個 `shared_by`。**只對 permission
-denied 往下試** —— 網路錯誤、認證過期每個槽位都會遇到,一路吞下去只會把根因埋掉。
-掃描全是唯讀 `get_status`,而且**不動輪替游標**(`_ACTIVE` 的語意是「配額走到哪」,
-借去做別的事會讓 failover 的帳號記帳失去意義),所以 runtime 新增的是
-`all_clients()` 而**不是**「切到某個槽位」的 API。全員都看不到時 fail-loud,訊息說出
-唯一出路(用真正的擁有者帳號在網頁上分享)。順帶把 `NotebookAccessDenied` /
-`is_permission_denied` 抽到 `_errors.py`:兩個模組要判同一件事,各寫一份等於埋一顆
-「上游改了 `rpc_code` 只會有一處被改到」的地雷。
-
-**`artifact_revise_slide` 的「artifact 不變、就地改版」是錯的。** 實測遠端會 fork 出
-一顆 `<原標題> (2)`,傳進去那顆原封不動還在。**實作本來就是對的** —— 它一律用回傳的
-id 而不假設相等,那個「不自己假設」的寫法救了這支工具:當初若照 docstring 寫死用輸入
-id,下載到的會是**沒改過的舊那份**,而且看起來完全成功。修的是文件,外加回傳
-`superseded_artifact_id` 讓呼叫端知道 id 換了、舊的還在(**刻意不自動刪**:遠端破壞性
-動作,而且新的萬一有問題,舊的是唯一退路)。連續 revise 會堆出 `(2)`、`(3)`… 而標題
-只差一個序號,正好放大文件自己承認的「`artifact_list` 分不出哪一集」風險。
-
-### 一條未結案、已記進 AGENTS.md 的事實
-
-`source_delete` 之後 `source_list` 確實看不到那筆,但 **`source_fulltext` 用同一個
-`source_id` 在 55 分鐘後仍讀得回完整內容**。所以「從筆記本移除」與「後端不再持有」
-不是同一件事,而 ADR-0009 那條「重生前必須刪掉舊回錄 source」的清理義務,**效果因此
-沒有被證明**(判 INCONCLUSIVE,不寫成 PASS)。它擋得住可觀測的那一半(同名 source
-出現兩筆)是確定的,所以那條 precondition 不鬆;要結案得用兩個內容互斥的來源做一次
-生成對照。
-
-## v0.8.2
-
-v0.8.1 的真實驗收(stg 四個命題全綠 + prd 端到端四集回歸)之後的補完。
-
-### 新增
-
-- **`notebook_share_with_pool`** —— 把**既有** notebook 補分享給 pool 其餘帳號(EDITOR)。
-  v0.8.1 的自動分享只對 `notebook_create` 生效,而正在跑的專案 notebook 都是既有的;
-  沒有這個前置狀態,配額耗盡 failover 換帳號時會 `NotebookAccessDenied`,而在這支工具
-  之前唯一的補法是自己寫 SDK 腳本。**冪等**(已有權限的帳號跳過),單帳號是 no-op。
-
-### 修正
-
-- `notebook_get` 的 docstring 講明 **`is_owner` 在 notebook 有共享者時一律回 `False`**
-  (驗收 G-1:同一份 owner 憑證,移除共享者後同一欄位才變 `True`)。多帳號 pool 下自動
-  分享是常態,這個欄位實務上恆為 `False`,**不能拿來判斷歸屬**。行為來自上游 SDK,
-  沒有任何生產邏輯依賴它,所以照實轉發 + 文件說清楚,不悄悄拿掉欄位。
-- 補上 v0.8.1 漏 commit 的 `uv.lock` 版本號。
-
-### 驗收結果(v0.8.1,四個命題全綠)
-
-- **重送/supersede 路徑也 failover、也記帳號**(F-4 的修正成立):同一 attempt 重呼後
-  `errors[]` 3→6,新增兩筆新時間戳的 `dispatch_failover`,`attempts` 仍是 1、無 supersede。
-- **下載用作用中帳號的身分**(F-1):把舊 notebook 的共享移除到只剩 owner,下載仍成功。
-- **自動分享**(F-2)在 pool=5 下也成立(`shared_with` 回 4 個帳號)。
-- **permission denied → `not_accepted`**,訊息指名要分享;不再往下 rotate。
-- 走錯路兩條都安全:對 `not_accepted` 跑 reconcile 是純本機拒絕、manifest 一個位元沒動。
-
-### 仍待確認(不在這一版)
-
-F-3(finalize 失敗原因不進 `errors[]`)、F-5(暫時性失敗的 `remote.error` 只有一句
-`failed`)。兩者都是既有行為,影響的是出事後的可查性,不是成功路徑。
-
 ### 真實驗收(v0.9.0,2026-08-09,`stg` 9 帳號 pool,35/35 工具覆蓋)
 
 劇本 [docs/acceptance-v0.9.0.md](docs/acceptance-v0.9.0.md)。**核心改動全綠,而且是用
@@ -322,6 +294,40 @@ F-3(finalize 失敗原因不進 `errors[]`)、F-5(暫時性失敗的 `remote.err
 —— 呼叫端很容易誤判成「再等一下」而無限重試。
 
 ---
+
+
+## v0.8.2
+
+v0.8.1 的真實驗收(stg 四個命題全綠 + prd 端到端四集回歸)之後的補完。
+
+### 新增
+
+- **`notebook_share_with_pool`** —— 把**既有** notebook 補分享給 pool 其餘帳號(EDITOR)。
+  v0.8.1 的自動分享只對 `notebook_create` 生效,而正在跑的專案 notebook 都是既有的;
+  沒有這個前置狀態,配額耗盡 failover 換帳號時會 `NotebookAccessDenied`,而在這支工具
+  之前唯一的補法是自己寫 SDK 腳本。**冪等**(已有權限的帳號跳過),單帳號是 no-op。
+
+### 修正
+
+- `notebook_get` 的 docstring 講明 **`is_owner` 在 notebook 有共享者時一律回 `False`**
+  (驗收 G-1:同一份 owner 憑證,移除共享者後同一欄位才變 `True`)。多帳號 pool 下自動
+  分享是常態,這個欄位實務上恆為 `False`,**不能拿來判斷歸屬**。行為來自上游 SDK,
+  沒有任何生產邏輯依賴它,所以照實轉發 + 文件說清楚,不悄悄拿掉欄位。
+- 補上 v0.8.1 漏 commit 的 `uv.lock` 版本號。
+
+### 驗收結果(v0.8.1,四個命題全綠)
+
+- **重送/supersede 路徑也 failover、也記帳號**(F-4 的修正成立):同一 attempt 重呼後
+  `errors[]` 3→6,新增兩筆新時間戳的 `dispatch_failover`,`attempts` 仍是 1、無 supersede。
+- **下載用作用中帳號的身分**(F-1):把舊 notebook 的共享移除到只剩 owner,下載仍成功。
+- **自動分享**(F-2)在 pool=5 下也成立(`shared_with` 回 4 個帳號)。
+- **permission denied → `not_accepted`**,訊息指名要分享;不再往下 rotate。
+- 走錯路兩條都安全:對 `not_accepted` 跑 reconcile 是純本機拒絕、manifest 一個位元沒動。
+
+### 仍待確認(不在這一版)
+
+F-3(finalize 失敗原因不進 `errors[]`)、F-5(暫時性失敗的 `remote.error` 只有一句
+`failed`)。兩者都是既有行為,影響的是出事後的可查性,不是成功路徑。
 
 ## v0.8.1
 
