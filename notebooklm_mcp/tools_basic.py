@@ -13,6 +13,7 @@ from mcp.types import ToolAnnotations
 from notebooklm.rpc.types import SharePermission
 
 from . import runtime
+from ._errors import NotebookAccessDenied, is_permission_denied
 from ._sources import assert_sources_exist, to_source_ids
 from ._status import ensure_completed, ensure_started
 from ._text import _CITATION_RE, norm as _norm
@@ -155,24 +156,65 @@ def _has_sufficient_permission(status, email: str) -> bool:
     failover 之後 peers 可能含 owner 本人——SDK 只擋 `permission==OWNER` 這個
     **參數**,不擋「對象就是 owner」,對 owner 呼叫 add_user(EDITOR) 等於把他降權。
 
-    ⚠️ **P1,未被離線證明的前提**:上面這條 OWNER 豁免整個地基建立在
-    `get_status()` 回的 `shared_users` **含 owner 那一列**這個假設上。fake 證不了
-    這件事——它吐的就是測試自己 seed 進去的東西,不代表伺服器的真實回應形狀。
-    若真實 API 其實**不**把 owner 列進 `shared_users`:failover 後 active=B、
-    對 A 擁有的既有 notebook 跑 `notebook_share_with_pool` 時,A 會落進 `todo`
-    (這裡的 any() 在 shared_users 裡找不到 A → 判定「不夠」),於是 B 對 owner A
-    打 `add_user(A, EDITOR)`——若伺服器真的照做,這是**整個分享機制唯一一條會
-    靜默把使用者既有權限改壞的路徑**(owner 被降成 EDITOR),而且事後的後檢看到
-    A 變成 EDITOR 會判定「已生效」直接放行,不 raise、也不留下任何痕跡。
-    結案方式:對真帳號跑一次唯讀 `sharing.get_status()`,直接讀 owner 是否出現在
-    `shared_users` 裡(不需要真的呼叫 add_user,不會動到任何人的權限)。
-    **不要為了「安全」而先改行為**——那會把已知正確的 VIEWER 升權修正也一起關掉。
+    ✅ **前提已於 v0.9.0 真實驗收結案(2026-08-09)**:`get_status()` 回的
+    `shared_users` **確實包含 owner 自己那一列**,`permission` 就是
+    `SharePermission.OWNER`。9 帳號 pool 的實測回應:owner 一列 OWNER + 其餘 8 列
+    EDITOR,共 9 列(唯讀 `sharing.get_status()`,沒有動到任何人的權限)。
+    所以這條 OWNER 豁免是對的,而它要防的那件事**真的會發生**——同一輪的實跑反例:
+    pool 因配額 rotate 到 slot 4 之後,對 slot 1 擁有的既有 notebook 跑
+    `notebook_share_with_pool`,owner 確實落進 peers,而它被判定「已足夠」放進
+    `already_shared`、**沒有**被打 `add_user(EDITOR)`。少了這條豁免,那次呼叫就會
+    把 owner 降權,且後檢看到 EDITOR 會判定「已生效」直接放行——不 raise、無痕跡。
+    離線側由 `tests/test_pool_gaps.py` 釘住(fake 也必須帶 `permission` 欄位,
+    否則 VIEWER 那個 P0 沒有任何測試會紅)。
     """
     target = email.casefold()
     return any(
         (getattr(u, "email", None) or "").casefold() == target
         and getattr(u, "permission", None) in (SharePermission.EDITOR, SharePermission.OWNER)
         for u in getattr(status, "shared_users", [])
+    )
+
+
+async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object]:
+    """找出 pool 裡**看得到這個 notebook** 的帳號,回 `(label, client, share_status)`。
+
+    存在理由是一個真實驗收抓到的死路(v0.9.0 Phase 9-1):`podcast_series` 因權限被拒
+    停下,停點的 `error` 指引呼叫端來跑 `notebook_share_with_pool` —— 但當時作用中帳號
+    **正是那個看不到 notebook 的**(配額 failover 換過去了),於是那支工具自己也
+    permission denied,呼叫端只是換一個死路。既有 notebook 只有能看到它的帳號分享得動。
+
+    **先試作用中的**(絕大多數情況就是它,零額外成本),permission denied 才依槽位順序
+    試其餘的。**只對 permission denied 往下試** —— 網路錯誤、認證過期之類的問題,每個
+    槽位都會遇到,一路吞下去只會把真正的根因埋掉,所以原樣拋出。
+
+    掃描全是唯讀 `get_status`,而且**不動輪替游標**(`_ACTIVE` 的語意是「配額走到哪」,
+    借去做別的事會讓 failover 的帳號記帳失去意義)。
+    """
+    active_label, active_client = runtime.snapshot()
+    ordered: list[tuple[str, object]] = [(active_label, active_client)]
+    ordered += [
+        (label, client)
+        for label, client in runtime.all_clients()
+        if label != active_label
+    ]
+
+    denied: list[str] = []
+    for label, client in ordered:
+        try:
+            status = await client.sharing.get_status(notebook_id)
+        except Exception as exc:  # noqa: BLE001 —— 下一行就把非權限問題原樣拋回去
+            if not is_permission_denied(exc):
+                raise
+            denied.append(label)
+            continue
+        return label, client, status
+
+    raise NotebookAccessDenied(
+        f"notebook {notebook_id!r}:pool 裡**沒有任何帳號**看得到它({denied} 全部 "
+        "permission denied),所以沒有人分享得動。這個 notebook 不屬於這個 pool ——"
+        "請用它真正的擁有者帳號在 NotebookLM 網頁上分享給 pool 成員(EDITOR),"
+        "或改用 notebook_create 建一個新的(pool 模式下會自動分享)。"
     )
 
 
@@ -229,18 +271,26 @@ async def notebook_share_with_pool(notebook_id: str) -> dict:
 
     **冪等**:已經是 EDITOR/OWNER 的帳號直接跳過,重跑安全。單帳號模式是
     no-op(不打任何 RPC)。
+
+    **自己找得動手的那個帳號,不看游標。** 這支工具的典型使用時機,就是
+    `podcast_series` 因為權限被拒而停下、指引呼叫端來跑它 —— 而那個當下,
+    作用中帳號**正好是看不到這個 notebook 的那一個**(配額 failover 換過去了)。
+    照著游標走的話,指引自己也 permission denied,呼叫端只是從一個死路換到另一個
+    (v0.9.0 真實驗收 Phase 9-1 實測)。所以這裡改成掃 pool 找出**看得到它**的
+    帳號來執行:先試作用中的(最常見、零額外成本),不行就依槽位順序試其餘的。
+    掃描只打唯讀 `get_status`,而且**不動輪替游標** —— 那個游標的語意是「配額走到
+    哪」,借去做別的事會讓 failover 的帳號記帳失去意義。
     """
-    # 一次 snapshot,全程不再回頭讀全域(理由見 `_share_each` docstring)。
-    label, client = runtime.snapshot()
-    peers = _pool_peers(notebook_id, label)
+    executor_label, executor_client, status = await _resolve_share_executor(notebook_id)
+    peers = _pool_peers(notebook_id, executor_label)
     if not peers:
         return {"notebook_id": notebook_id, "shared_with": [], "already_shared": []}
-    status = await client.sharing.get_status(notebook_id)
     already = [e for e in peers if _has_sufficient_permission(status, e)]
     todo = [e for e in peers if e not in already]
     return {
         "notebook_id": notebook_id,
-        "shared_with": await _share_each(notebook_id, todo, client),
+        "shared_by": executor_label,
+        "shared_with": await _share_each(notebook_id, todo, executor_client),
         "already_shared": already,
     }
 

@@ -192,6 +192,44 @@ server 起不來)、`permission` 用位置參數傳(0.7.0 對 source add 做過 
 同型風險)。另補「正常關閉時 N 個 client 都被關掉」——此前在 `set_clients` 前插一行
 `stack.pop_all()`,38 條測試照樣全綠。
 
+### 真實驗收(2026-08-09/10)之後的兩個修正
+
+驗收本身的結論在下方「驗收結果」節;這裡是**照著結論改的兩件事**。兩個 FAIL 都不在
+核心機制上,但都是「照著文件做會走進死路或拿到錯東西」。
+
+**`notebook_access_denied` 的指引在它自己產生的狀態下不可執行。** 停點完全正確,
+但 `error` 叫呼叫端跑 `notebook_share_with_pool`,而那支工具用**作用中帳號**執行 ——
+正是那個看不到 notebook 的帳號(配額 failover 剛換過去)。於是指引自己也 permission
+denied,呼叫端只是從一個死路換到另一個。而這正是文件描述的典型情境:既有 notebook 的
+owner 通常是 slot 1,pool 卻會 rotate 走。
+
+修法是讓那支工具**自己找得動手的帳號**:先試作用中的(絕大多數就是它,零額外成本),
+permission denied 才依槽位順序試其餘的,回傳多一個 `shared_by`。**只對 permission
+denied 往下試** —— 網路錯誤、認證過期每個槽位都會遇到,一路吞下去只會把根因埋掉。
+掃描全是唯讀 `get_status`,而且**不動輪替游標**(`_ACTIVE` 的語意是「配額走到哪」,
+借去做別的事會讓 failover 的帳號記帳失去意義),所以 runtime 新增的是
+`all_clients()` 而**不是**「切到某個槽位」的 API。全員都看不到時 fail-loud,訊息說出
+唯一出路(用真正的擁有者帳號在網頁上分享)。順帶把 `NotebookAccessDenied` /
+`is_permission_denied` 抽到 `_errors.py`:兩個模組要判同一件事,各寫一份等於埋一顆
+「上游改了 `rpc_code` 只會有一處被改到」的地雷。
+
+**`artifact_revise_slide` 的「artifact 不變、就地改版」是錯的。** 實測遠端會 fork 出
+一顆 `<原標題> (2)`,傳進去那顆原封不動還在。**實作本來就是對的** —— 它一律用回傳的
+id 而不假設相等,那個「不自己假設」的寫法救了這支工具:當初若照 docstring 寫死用輸入
+id,下載到的會是**沒改過的舊那份**,而且看起來完全成功。修的是文件,外加回傳
+`superseded_artifact_id` 讓呼叫端知道 id 換了、舊的還在(**刻意不自動刪**:遠端破壞性
+動作,而且新的萬一有問題,舊的是唯一退路)。連續 revise 會堆出 `(2)`、`(3)`… 而標題
+只差一個序號,正好放大文件自己承認的「`artifact_list` 分不出哪一集」風險。
+
+### 一條未結案、已記進 AGENTS.md 的事實
+
+`source_delete` 之後 `source_list` 確實看不到那筆,但 **`source_fulltext` 用同一個
+`source_id` 在 55 分鐘後仍讀得回完整內容**。所以「從筆記本移除」與「後端不再持有」
+不是同一件事,而 ADR-0009 那條「重生前必須刪掉舊回錄 source」的清理義務,**效果因此
+沒有被證明**(判 INCONCLUSIVE,不寫成 PASS)。它擋得住可觀測的那一半(同名 source
+出現兩筆)是確定的,所以那條 precondition 不鬆;要結案得用兩個內容互斥的來源做一次
+生成對照。
+
 ## v0.8.2
 
 v0.8.1 的真實驗收(stg 四個命題全綠 + prd 端到端四集回歸)之後的補完。
@@ -224,6 +262,64 @@ v0.8.1 的真實驗收(stg 四個命題全綠 + prd 端到端四集回歸)之後
 
 F-3(finalize 失敗原因不進 `errors[]`)、F-5(暫時性失敗的 `remote.error` 只有一句
 `failed`)。兩者都是既有行為,影響的是出事後的可查性,不是成功路徑。
+
+### 真實驗收(v0.9.0,2026-08-09,`stg` 9 帳號 pool,35/35 工具覆蓋)
+
+劇本 [docs/acceptance-v0.9.0.md](docs/acceptance-v0.9.0.md)。**核心改動全綠,而且是用
+「新舊行為的判別實驗」證的,不只是「沒壞」。**
+
+- **身分跟著 client 走 —— 決定性證明(不燒配額)**:同一個 process、同一顆 audio artifact,
+  兩個不同 storage_state 檔各建一個 client;把其中一個帳號 `remove_user` 出共享名單後,
+  它的下載失敗、另一個成功。**再把 process 全域 `NOTEBOOKLM_AUTH_JSON` 換成沒權限那份憑證,
+  用有權限的 path 建 client 仍下載成功** —— 舊機制(env 當身分)在這裡必敗。
+- **並行時序真的排出來了**(以往每輪都是單線):A 集 `accepted` 在 slot 4 進入 finalize
+  期間,B 集撞配額把全域游標推到 slot 5;A 的 `dispatch.account` 沒有被改寫,兩集各自
+  指向真的送出它的帳號。三支寫 manifest 的附件工具同時在飛,沒有一次覆寫遺失。
+- **failover 記帳鏈式接龍**:`(pool-account-1→pool-account-2)`、`(pool-account-2→pool-account-3)`、`(pool-account-3→pool-account-4)`,
+  每筆 `from_account` 都是**該次實際被拒**的帳號,`attempts` 全程 1。配額拒絕是同步
+  `RateLimitError`,每次 rotate 約 0.7 秒(實測每帳號每天 3 次生成)。
+- **五條 dispatch 路徑全部真的走到**,含 v0.8.0 漏補過的 series inline 重送;
+  supersede 用**真的遠端 `artifacts.delete()`** 製造 `removed`,舊 attempt 完整保留。
+- **reconcile 的三態全部走到**(零候選 / 唯一候選補綁 / `reconciliation_ambiguous` → adopt),
+  dispatch 視窗判準與 artifact claim 唯一性都實測有效。`acceptance_unknown` 是用 MCP 協定層
+  `notifications/cancelled` 逼出來的。
+- **`abandon_in_flight` 含反向**:不帶旗標照舊拒絕;帶旗標成功,retraction 與理由留存,
+  標題不變,取代版落在 `attempts/<attempt_id>/`。三支續跑工具對已 retract 的 attempt
+  都回同一句可讀的 tombstone 拒絕。
+- **啟動期 guard 6 種情境全部當場 raise 並指名槽位**;9 槽位 = 9 個 `0600` 檔於 `0700` 目錄,
+  正常結束(stdin EOF)後目錄消失;`mcp` 1.29.0 的 pydantic 警告只在 stderr,
+  stdout 非 JSON 行數 **0**。
+
+**⛔ 抓到的兩個 FAIL(都是契約/指引與行為不符,不在核心機制上):**
+
+1. **`notebook_access_denied` 的指引在它自己產生的狀態下不可執行。** 停點與 `error`
+   都正確(指名 `notebook_share_with_pool`、寫出被拒帳號、`attempt_count=1`),但那支工具
+   用**作用中帳號**執行 `sharing.get_status()`,而作用中帳號正是看不到這個 notebook 的那個
+   → 同樣 permission denied。只有 owner 分享得動,而 MCP 沒有指定槽位的方式。
+   文件描述的典型情境(既有 notebook + pool 已 rotate)**就是這個死路的常態**。
+   至少要在錯誤訊息補一句「請用 owner 帳號分享(重啟 server 讓游標回 slot 1,或在網頁上手動
+   分享)」;進階做法是 `get_status` 吃到 permission denied 時自動換槽位試一輪。
+2. **`artifact_revise_slide` 的「artifact 不變」是錯的。** 實測回傳的 `artifact_id` 與輸入
+   不同,遠端多出一顆 `System Latency Realities (2)`,舊的還在。實裝碼 docstring 與 skill
+   `tool-reference.md` 都這樣寫,所以不是快照過期。它放大了文件自己承認的「artifact ↔ episode
+   binding 未驗證、分不出是哪一集的 deck 就別猜」風險 —— 順手把 `slides_artifact_id`
+   回寫 manifest 就能解掉(工具已經知道新 id)。
+
+**兩個 INCONCLUSIVE(不寫成通過)**:① `artifact_retry_failed` 的成功路徑 —— 這一輪 11 次
+生成沒有自然產生 `failed` artifact,而遠端刪除得到的是 `removed` 不是 `failed`,無法可靠製造;
+只驗到負向 fail-loud。② `source_delete` 之後那筆 source 對**生成端 context** 的影響 ——
+`source_list` 已看不到它,但 `source_fulltext` 55 分鐘後仍讀得回全文,所以 retract 流程
+「清掉 stale 回錄 source 以免污染後續各集」的效果未被證明。
+
+**`publish_series` 的成功路徑依使用者要求不測**(uploader 不刪檔、上傳即永久)。
+已驗三層 preflight 全部 fail-closed 在第一個 PUT 之前(`cover_path` → `description` →
+`slides_pdf_path`),並用 feed URL `HTTP 404` 證明沒有任何 blob 上傳。
+
+**附帶觀察**:`serverInfo.version` 回的是 `mcp` SDK 版本(`1.29.0`)而非 `notebooklm-mcp`
+版本 —— 本 repo 最痛的失敗模式正是「uv git cache 壞掉靜默裝成舊版」,而呼叫端從 handshake
+看不出來;建議 `FastMCP(version=importlib.metadata.version("notebooklm-mcp"))`。
+沒權限的帳號下載 artifact 時,SDK 回的是 `ArtifactNotReadyError`(「還沒生好」)而非權限錯誤
+—— 呼叫端很容易誤判成「再等一下」而無限重試。
 
 ---
 

@@ -79,6 +79,21 @@ def all_accounts() -> list[str]:
     return [label for label, _ in _POOL]
 
 
+def all_clients() -> list[tuple[str, Any]]:
+    """pool 裡每個 `(label, client)`,依槽位順序 —— **不動作用中游標**。
+
+    給「這件事只有某個特定帳號做得到」的操作用,目前唯一的呼叫端是
+    `notebook_share_with_pool`:既有 notebook 只有能看到它的那個帳號分享得動,
+    而作用中帳號在 failover 之後**正好是看不到它的那一個**(v0.9.0 真實驗收
+    Phase 9-1 抓到:停點的指引叫人跑那支工具,那支工具自己也 permission denied)。
+
+    **刻意不提供「切到某個槽位」的 API**:`_ACTIVE` 的語意是「配額輪替走到哪」,
+    讓別的功能去挪它會讓 failover 的帳號記帳失去意義。要用特定帳號就直接拿它的
+    client 呼叫,游標不動。
+    """
+    return list(_POOL)
+
+
 def rotate_client() -> str | None:
     """切到下一個還沒用過的帳號,回傳它的 label;沒有下一個就回 None。
 

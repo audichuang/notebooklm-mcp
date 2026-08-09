@@ -108,9 +108,10 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
 **怎麼搭環境、測資怎麼設計、以及「哪五類事只有真帳號測得到」的分工線**見
 [docs/acceptance-testing.md](docs/acceptance-testing.md)(不變的方法論),
 **這一版要驗什麼**則每版一份 —— v0.9.0 是 [docs/acceptance-v0.9.0.md](docs/acceptance-v0.9.0.md)
-(⚠️ **v0.9.0 尚未跑真實驗收**;含一條離線證不了、必須那輪收掉的前提:
-`get_share_status` 到底列不列 owner —— 若不列,`notebook_share_with_pool` 會在 failover
-之後把 owner 降權,而後檢會判定「已生效」放行)。
+(✅ **已於 2026-08-09 跑完真實驗收**,35/35 工具覆蓋;結論見 CHANGELOG v0.9.0 §真實驗收。
+那條離線證不了的前提**已結案**:`get_share_status` 的 `shared_users` **會**列 owner 且
+`permission=OWNER`,所以 `_has_sufficient_permission` 的 OWNER 豁免正確,failover 之後
+不會把 owner 降權)。
 **驗收完要回收**:抓到的東西凡是寫得成離線測試的,一律補進 `tests/`(收之前先做突變驗證,
 確認它真的會紅)——否則下一輪還要再燒一次真實配額去發現同一件事。
 
@@ -285,6 +286,14 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - `sources.delete` 是 **idempotent**(0.7.0 起):刪不存在的 source 也「成功」不 raise。
   `source_delete` 回的 `deleted` 只代表「呼叫後該 id 已不在筆記本」,**不保證它先前存在**
   (打錯 id 也回 deleted)。要確認刪掉某既有來源,先用 `source_list` 拿真實 `source_id`。
+  ⚠️ **「刪掉」的語意到哪一層,目前是未結案的問題**(v0.9.0 真實驗收,標 INCONCLUSIVE
+  而非 PASS):刪除後 `source_list` 確實看不到它,但 **`source_fulltext` 用同一個
+  `source_id` 在 55 分鐘後仍讀得回完整內容**。所以「從筆記本移除」與「後端不再持有」
+  不是同一件事,而 **ADR-0009 那條「重生前必須刪掉舊回錄 source,否則污染後續各集
+  context」的清理義務,效果因此沒有被證明** —— 它擋得住「同名 source 出現兩筆」是確定的
+  (那是 `_assert_source_cleanup_done` 真正在驗的),但擋不擋得住內容仍進生成 context
+  無法從外部觀察。**不要因此鬆掉那條 precondition**(它至少擋住可觀測的那一半);
+  要結案得用兩個內容互斥的來源做一次生成對照,見 `docs/acceptance-v0.9.0.md`。
 - **upload endpoint 的副檔名地雷**:`.json`/`.ts`/`.py`/`.yaml` 直接 400 Bad Request(上游只
   提前擋 HTML family:`_source/upload.py:262` 的 `_HTML_UPLOAD_SUFFIXES`)。v0.3.3 起
   `source_add_file` 自動把讀得開的小 UTF-8 文字檔複製成 `<原檔名>.md` 上傳並回

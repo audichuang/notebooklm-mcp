@@ -169,8 +169,10 @@ async def test_revise_slide_revises_then_redownloads_without_regenerating(fake_c
 
 
 async def test_revise_slide_follows_the_returned_id_not_the_input(fake_client, tmp_path):
-    """SDK **沒有保證** REVISE_SLIDE 回傳的 task_id 等於傳入的 artifact_id(它只是 parse
-    RPC 回來的那個 id)。實作因此一律用回傳值——餵一個不同的 id 證明沒有依賴那個假設。"""
+    """REVISE_SLIDE **不是就地改版** —— v0.9.0 真實驗收實測:伺服器會 fork 出一顆
+    `<原標題> (2)`,傳入那顆原封不動留在遠端。實作一律用回傳的 id,所以行為本來就對
+    (當初若照舊 docstring 寫死用輸入 id,下載到的會是**沒改過的舊那份**、而且看起來
+    完全成功);這條測試連同回報面一起鎖住,讓呼叫端知道 id 換了、舊的還在。"""
     m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
     fake_client.artifacts.seed_artifact("deck-1")
     fake_client.artifacts.revise_slide_returns_id = "deck-2"
@@ -179,6 +181,23 @@ async def test_revise_slide_follows_the_returned_id_not_the_input(fake_client, t
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
     assert dl["artifact_id"] == "deck-2"          # 下載改版後那份,不是原 id
     assert res["artifact_id"] == "deck-2"
+    # 舊那顆仍在遠端,呼叫端要拿得到它才有辦法自己決定清不清。
+    assert res["superseded_artifact_id"] == "deck-1"
+
+
+async def test_revise_slide_omits_superseded_id_when_the_artifact_really_is_reused(
+    fake_client, tmp_path
+):
+    """id 沒換的時候不要無中生有一個 `superseded_artifact_id`。
+
+    上游哪天真的改成就地改版,這個欄位就該消失而不是指著自己 —— 呼叫端若照它去刪,
+    刪掉的正是剛改好的那一顆。"""
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("deck-1")
+    res = await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
+
+    assert res["artifact_id"] == "deck-1"
+    assert "superseded_artifact_id" not in res
 
 
 async def test_revise_slide_requires_artifact_id_and_prompt(fake_client, tmp_path):

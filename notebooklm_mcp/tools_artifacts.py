@@ -220,9 +220,19 @@ async def artifact_revise_slide(
 ) -> dict:
     """改**已生成簡報中的單一頁**(0-based `slide_index`),再重新下載回寫 manifest。
 
-    省配額用:一頁改一句話不必整份重生(那還會連帶改動其他頁)。artifact 不變、其餘
-    頁面不動,結束後走與生成相同的尾段(等完成→原子換檔下載→回寫 `slides_pdf_path`)。
-    `artifact_id` 用 `artifact_list(kind="slide_deck")` 找。"""
+    省配額用:一頁改一句話不必整份重生(那還會連帶改動其他頁)。結束後走與生成相同的
+    尾段(等完成→原子換檔下載→回寫 `slides_pdf_path`)。
+    `artifact_id` 用 `artifact_list(kind="slide_deck")` 找。
+
+    ⚠️ **這不是就地修改:遠端會多出一顆新 artifact,舊的留著。** v0.9.0 真實驗收實測
+    (本 docstring 原本寫「artifact 不變」,是錯的):revise 之後 `artifact_list` 多一顆
+    `<原標題> (2)`,原本那顆**原封不動還在**。回傳的 `artifact_id` 是**新的那顆**
+    (manifest 也回寫成它),`superseded_artifact_id` 是被取代的舊那顆。
+
+    所以連續 revise 會讓遠端堆出 `(2)`、`(3)`… 而它們**標題只差一個序號**——正好放大
+    「artifact_list 分不出這是哪一集的 deck」那個既有風險。要清乾淨的話,拿
+    `superseded_artifact_id` 自己決定要不要刪(本工具刻意不自動刪:那是遠端破壞性動作,
+    而且萬一新的那顆有問題,舊的是唯一的退路)。"""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")
     artifact_id = _require_artifact_id(artifact_id)
@@ -235,11 +245,17 @@ async def artifact_revise_slide(
     status = await runtime.get_client().artifacts.revise_slide(
         notebook_id, artifact_id, slide_index, prompt.strip()
     )
-    # REVISE_SLIDE 是就地改版,回傳的 task_id 應該就是同一個 artifact;仍以回傳值為準
-    # (真的換了 id 也照樣下載得到對的那份),不自己假設。
+    # **以回傳值為準,不假設它是同一顆** —— 這個「不自己假設」的寫法救了這支工具:
+    # v0.9.0 真實驗收證明 REVISE_SLIDE **不是**就地改版,伺服器會 fork 出一顆新的
+    # `<原標題> (2)`,舊的留著。當初若照 docstring 寫死用輸入的 artifact_id,下載到的
+    # 會是**沒改過的舊那份**,而且看起來完全成功。
     revised_id = ensure_started(status)
     out = await _finish_slides(notebook_id, manifest_path, episode_n, revised_id, wait_timeout)
     out["slide_index"] = slide_index
+    # 讓呼叫端看得出 id 換了、舊的還在遠端 —— 否則它只會拿到一個「artifact_id 跟我傳的
+    # 不一樣」的回傳值,無從判斷是 fork 還是自己記錯。
+    if revised_id != artifact_id:
+        out["superseded_artifact_id"] = artifact_id
     return out
 
 

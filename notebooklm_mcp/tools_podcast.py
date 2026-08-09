@@ -29,6 +29,7 @@ from .audio_finalize import (
     has_hard_output_evidence,
     new_finalize_state,
 )
+from ._errors import NotebookAccessDenied, is_permission_denied
 from .app import mcp
 from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
@@ -56,28 +57,10 @@ _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
 # 對帳(便宜),把已受理誤判成拒絕是真的損失,所以這個集合只放契約講死的那兩種。
 _REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
 
-# gRPC PERMISSION_DENIED。pool 換到的帳號看不到那個 notebook 時就是這個。
-_RPC_PERMISSION_DENIED = 7
-
-
-class NotebookAccessDenied(RuntimeError):
-    """pool 裡的這個帳號看不到目標 notebook(v0.8.0 驗收 F-2)。
-
-    **刻意繼承 `RuntimeError`**:兩個 dispatch 呼叫端本來就把 `RuntimeError` 當作
-    「沒建出 task 的乾淨終態」處理(`podcast_series` 回結構化安全停點、
-    `_run_episode` 原樣重拋),所以分類自動正確,不必在兩處各加一個分支——那正是
-    本 repo 反覆出事的「補一半」。
-
-    **不放進 `_REFUSED_WITHOUT_DISPATCH`**:那個集合的契約是「配額/限流」,
-    AGENTS.md 明令它不准長大;而且權限問題不該觸發 failover(見下)。
-    """
-
-
-def _is_permission_denied(exc: BaseException) -> bool:
-    if not isinstance(exc, ClientError):
-        return False
-    code = getattr(exc, "rpc_code", None)
-    return code == _RPC_PERMISSION_DENIED or str(code) == str(_RPC_PERMISSION_DENIED)
+# `NotebookAccessDenied` / `_is_permission_denied` 已移到 `_errors.py`:v0.9.0 起
+# `tools_basic.notebook_share_with_pool` 也要判同一件事,各寫一份等於埋一顆「上游改了
+# rpc_code 只會有一處被改到」的地雷。這裡保留同名以免動到既有呼叫點。
+_is_permission_denied = is_permission_denied
 
 ACTION_ADOPT = "podcast_attempt_adopt"
 ACTION_RECONCILE = "podcast_episode_reconcile"

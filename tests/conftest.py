@@ -516,6 +516,9 @@ class FakeSharing:
         # 伺服器靜默忽略(不 raise、也沒真的生效)的 email —— 對應 add_user 的
         # `allow_null=True`:RPC 回 null 不會拋,只有讀回傳值才看得出來。
         self.silently_ignore: set[str] = set()
+        # 這個 client 看不到 notebook 時 get_status 要拋什麼。pool 裡不同槽位對同一個
+        # notebook 的可見性不同,是 v0.9.0 Phase 9-1 那個死路的前提。
+        self.get_status_exc: BaseException | None = None
 
     @staticmethod
     def _entry(item) -> tuple:
@@ -540,6 +543,8 @@ class FakeSharing:
         return await self.get_status(notebook_id)
 
     async def get_status(self, notebook_id):
+        if self.get_status_exc is not None:
+            raise self.get_status_exc
         return SimpleNamespace(
             notebook_id=notebook_id,
             shared_users=[

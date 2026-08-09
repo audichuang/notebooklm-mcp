@@ -6,6 +6,8 @@ failover 換帳號後是拿新帳號對**同一個 notebook_id** 送出 —— �
 """
 import pytest
 from conftest import FakeClient
+from notebooklm.exceptions import ClientError
+from notebooklm_mcp._errors import NotebookAccessDenied
 
 from notebooklm.rpc.types import SharePermission
 
@@ -274,3 +276,68 @@ async def test_cancelled_during_share_still_carries_notebook_id(fake_client):
     message = str(excinfo.value)
     assert "已建立" in message
     assert fake_client.notebooks.created[-1] in message
+
+
+def _denied() -> ClientError:
+    """SDK 對「這個帳號看不到那個 notebook」回的形狀(gRPC PERMISSION_DENIED)。"""
+    return ClientError("The server rejected this request (permission denied).", rpc_code=7)
+
+
+async def test_share_runs_on_whichever_account_can_actually_see_the_notebook(fake_client):
+    """作用中帳號看不到這個 notebook 時,要自己找到看得到的那個來分享。
+
+    這是 v0.9.0 真實驗收 Phase 9-1 抓到的死路:`podcast_series` 因權限被拒停下,
+    停點的 `error` 指引呼叫端跑 `notebook_share_with_pool` —— 而那個當下作用中帳號
+    **正是看不到 notebook 的那一個**(配額 failover 換過去了),於是指引自己也
+    permission denied,呼叫端只是從一個死路換到另一個。
+
+    典型情境正是文件描述的那種:既有 notebook 的 owner 通常是 slot 1,而 pool 會
+    rotate 走 —— 所以「照著指引做」必須真的解得開。
+    """
+    owner = fake_client                       # slot 1,notebook 的實際擁有者
+    rotated_to = FakeClient()                 # slot 2,配額 failover 換過去的那個
+    rotated_to.sharing.get_status_exc = _denied()
+    runtime.set_clients([("owner@x", owner), ("rotated@x", rotated_to)])
+    runtime.rotate_client()                   # 模擬「已經因為配額換到 slot 2」
+    assert runtime.active_account() == "rotated@x", "前提:作用中的是看不到 notebook 那個"
+
+    out = await basic.notebook_share_with_pool("nb-1")
+
+    assert out["shared_by"] == "owner@x", "必須由看得見 notebook 的帳號執行"
+    assert out["shared_with"] == ["rotated@x"], "要分享給的是另一個(執行者不分享給自己)"
+    assert owner.sharing.calls, "分享必須由 owner 的 client 發出"
+    assert not rotated_to.sharing.calls, "沒權限的那個不該被拿來打 add_user"
+    # 游標不可以被借去做別的事 —— 它的語意是「配額輪替走到哪」。
+    assert runtime.active_account() == "rotated@x", "掃描不得改動輪替游標"
+
+
+async def test_share_reraises_non_permission_errors_instead_of_walking_the_pool(
+    fake_client,
+):
+    """非權限問題不可以被「換一個帳號再試」吞掉。
+
+    網路中斷、認證整個過期這類問題**每個槽位都會遇到**,一路吞下去只會把真正的根因
+    埋掉,最後拋一個「沒有人看得到」的誤導訊息。
+    """
+    other = FakeClient()
+    fake_client.sharing.get_status_exc = RuntimeError("connection reset")
+    other.sharing.get_status_exc = _denied()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await basic.notebook_share_with_pool("nb-1")
+    assert not other.sharing.calls, "不該繼續往下試"
+
+
+async def test_share_fails_loud_when_nobody_in_the_pool_can_see_it(fake_client):
+    """pool 全員都看不到 = 這個 notebook 不屬於這個 pool,沒有人分享得動。
+
+    訊息要說出唯一的出路(用真正的擁有者帳號在網頁上分享),而不是只說「失敗」。
+    """
+    other = FakeClient()
+    fake_client.sharing.get_status_exc = _denied()
+    other.sharing.get_status_exc = _denied()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+
+    with pytest.raises(NotebookAccessDenied, match="沒有任何帳號"):
+        await basic.notebook_share_with_pool("nb-1")
