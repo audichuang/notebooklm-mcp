@@ -44,3 +44,6 @@ downloads/
 
 # SDD scratch (ledger + task reports)
 .superpowers/
+
+# CodeGraph 索引(4MB SQLite,可從原始碼重建;每次索引都會變動)
+.codegraph/
