@@ -249,6 +249,62 @@ async def test_resend_path_rotates_and_records_the_account_too(fake_client, tmp_
     assert failovers[-1]["to_account"] == "b@x"
 
 
+async def test_permission_denied_is_not_acceptance_unknown(fake_client, tmp_path):
+    """換到的帳號看不到那個 notebook(v0.8.0 驗收 F-2)。
+
+    pool 建的 notebook 只屬於當下作用中的帳號;failover 換帳號後拿新帳號對**同一個
+    notebook_id** 送出,新帳號可能根本看不到它。permission denied 走的是泛用 except
+    → `acceptance_unknown` → 「先對帳、禁止直接重生」,把一個**確定沒發出去**的請求
+    叫去跑一次註定撈不到東西的 reconcile —— 正是 v0.7.1 那類死鎖的形狀。
+
+    **不繼續 rotate**:權限是設定問題不是暫時性問題,一個一個試過去只會掩蓋根因,
+    還每次多燒一輪 RPC。
+    """
+    from notebooklm.exceptions import ClientError
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    calls: list = []
+
+    async def denied(*args, **kwargs):
+        calls.append(runtime.active_account())
+        raise ClientError("permission denied", rpc_code=7)
+
+    fake_client.artifacts.generate_audio = denied
+    manifest_path = tmp_path / "series_manifest.json"
+
+    with pytest.raises(p.NotebookAccessDenied, match="分享"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="心法篇", brief="第一集",
+            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        )
+
+    assert calls == ["a@x"], "權限問題不該一個一個帳號試過去"
+    attempt = _attempts(manifest_path)[0]
+    assert attempt["dispatch"]["status"] == "not_accepted", (
+        "確定沒建出 task,不是受理不明"
+    )
+    assert "permission denied" in attempt["remote"]["error"]
+
+
+async def test_permission_denied_in_series_returns_a_safe_stop(fake_client, tmp_path):
+    """series 路徑上同一件事要回結構化安全停點,而不是 acceptance_unknown/reconcile。"""
+    from notebooklm.exceptions import ClientError
+
+    runtime.set_clients([("a@x", fake_client)])
+
+    async def denied(*args, **kwargs):
+        raise ClientError("permission denied", rpc_code=7)
+
+    fake_client.artifacts.generate_audio = denied
+
+    out = await p.podcast_series(
+        "nb-1", episodes=[{"title": "心法篇", "brief": "1"}],
+        output_dir=str(tmp_path), start=1,
+    )
+    assert out["observed_state"] == "not_accepted"
+    assert out["safe_next_action"] != "podcast_episode_reconcile"
+
+
 async def test_reset_for_resend_clears_the_stale_account(fake_client, tmp_path):
     """attempt 被 rearm 回 prepared 時,舊的 `account` 必須清掉。
 

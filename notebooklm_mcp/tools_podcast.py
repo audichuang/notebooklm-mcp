@@ -13,7 +13,11 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 from mcp.types import ToolAnnotations
-from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
+from notebooklm.exceptions import (
+    ArtifactFeatureUnavailableError,
+    ClientError,
+    RateLimitError,
+)
 from notebooklm.types import ArtifactType
 
 from . import runtime
@@ -51,6 +55,29 @@ _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
 # 重燒配額。兩種誤判的代價不對稱——把拒絕誤判成 unknown 只是多跑一次撈不到東西的
 # 對帳(便宜),把已受理誤判成拒絕是真的損失,所以這個集合只放契約講死的那兩種。
 _REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
+
+# gRPC PERMISSION_DENIED。pool 換到的帳號看不到那個 notebook 時就是這個。
+_RPC_PERMISSION_DENIED = 7
+
+
+class NotebookAccessDenied(RuntimeError):
+    """pool 裡的這個帳號看不到目標 notebook(v0.8.0 驗收 F-2)。
+
+    **刻意繼承 `RuntimeError`**:兩個 dispatch 呼叫端本來就把 `RuntimeError` 當作
+    「沒建出 task 的乾淨終態」處理(`podcast_series` 回結構化安全停點、
+    `_run_episode` 原樣重拋),所以分類自動正確,不必在兩處各加一個分支——那正是
+    本 repo 反覆出事的「補一半」。
+
+    **不放進 `_REFUSED_WITHOUT_DISPATCH`**:那個集合的契約是「配額/限流」,
+    AGENTS.md 明令它不准長大;而且權限問題不該觸發 failover(見下)。
+    """
+
+
+def _is_permission_denied(exc: BaseException) -> bool:
+    if not isinstance(exc, ClientError):
+        return False
+    code = getattr(exc, "rpc_code", None)
+    return code == _RPC_PERMISSION_DENIED or str(code) == str(_RPC_PERMISSION_DENIED)
 
 ACTION_ADOPT = "podcast_attempt_adopt"
 ACTION_RECONCILE = "podcast_episode_reconcile"
@@ -640,6 +667,20 @@ async def _dispatch_audio_with_failover(
                 _mark_not_accepted(store, episode_n, attempt_id, exc)
             raise
         except (Exception, asyncio.CancelledError) as exc:
+            if _is_permission_denied(exc):
+                # 這個帳號看不到那個 notebook —— 伺服器沒建出任何 task,所以是
+                # **乾淨的終態**而不是「受理不明」。走泛用分支會把它標成
+                # acceptance_unknown,把呼叫端叫去跑一次註定撈不到東西的 reconcile。
+                # **不 rotate**:權限是設定問題不是暫時性問題,一個一個帳號試過去
+                # 只會掩蓋根因,還每次多燒一輪 RPC。
+                if store is not None:
+                    _mark_not_accepted(store, episode_n, attempt_id, exc)
+                raise NotebookAccessDenied(
+                    f"{exc}\n帳號 {runtime.active_account()!r} 對這個 notebook 沒有存取權。"
+                    "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— "
+                    "把它**分享**給其餘帳號(EDITOR)之後再重試;"
+                    "MCP 自己建的 notebook 預設只屬於建立它的那個帳號。"
+                ) from exc
             if store is not None:
                 _mark_acceptance_unknown(store, episode_n, attempt_id, exc)
             raise
