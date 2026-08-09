@@ -46,7 +46,7 @@ RotateCookies/keepalive for that inline read-only auth source.
 For HTTP transport:
 
 ```bash
-doppler run -p notebooklm -c dev -- \
+doppler run -p notebooklm -c prd -- \
   nblm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
 ```
 
@@ -60,7 +60,7 @@ bash scripts/sync-auth.sh
 Live server boot smoke test:
 
 ```bash
-timeout 8 doppler run -p notebooklm -c dev -- \
+timeout 8 doppler run -p notebooklm -c prd -- \
   nblm-mcp --transport stdio < /dev/null
 ```
 

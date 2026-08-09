@@ -33,13 +33,13 @@ The install exposes `nblm-mcp` and `notebooklm-cover` on PATH.
 ## Run the MCP server
 
 ```bash
-doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio
+doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 ```
 
 HTTP mode for trusted private networks:
 
 ```bash
-doppler run -p notebooklm -c dev -- nblm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
+doppler run -p notebooklm -c prd -- nblm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
 ```
 
 ## Auth refresh
@@ -61,7 +61,7 @@ shared across machines.
 ## Local smoke
 
 ```bash
-timeout 8 doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio < /dev/null
+timeout 8 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio < /dev/null
 ```
 
 Expected: no traceback and no auth error. Stdio may exit when stdin closes.

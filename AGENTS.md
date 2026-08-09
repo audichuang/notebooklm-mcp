@@ -21,7 +21,7 @@ uv run pytest -q
 uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.8.2"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
-doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio
+doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 #   HTTP 模式：--transport streamable-http --host 127.0.0.1 --port 8484
 #   ⚠️ streamable-http / sse「無認證」——勿綁非 loopback host(同網段可驅動帳號)。
 #   repo 內開發時亦可 uv run python -m notebooklm_mcp.server --transport stdio
@@ -29,7 +29,7 @@ doppler run -p notebooklm -c dev -- nblm-mcp --transport stdio
 # 註冊進 Claude Code（細節見 docs/mcp-setup.md）。CLI 2.1.201 的 `claude mcp add … -- …`
 # 會把 `--` 後整串當 prompt，改用 add-json：
 claude mcp add-json notebooklm -s local \
-  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","nblm-mcp","--transport","stdio"]}'
+  '{"command":"doppler","args":["run","-p","notebooklm","-c","prd","--","nblm-mcp","--transport","stdio"]}'
 ```
 
 ### 認證（Doppler，3 VM 同步）
@@ -49,8 +49,7 @@ bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次�
 |---|---|---|
 | `prd` | 正式環境 | 5 個**付費**帳號:`NOTEBOOKLM_AUTH_JSON` + `_2`…`_5` |
 | `stg` | 測試環境 | 3 個**免費**帳號:`NOTEBOOKLM_AUTH_JSON` + `_2`/`_3` |
-| `dev` / `dev_personal` | 舊的生產入口 | 主力帳號,**刻意原封不動** |
-| `dev_alt` | 備援帳號的臨時入口 | pool 落地那天刪掉(見下) |
+| `dev` / `dev_personal` | 舊的生產入口 | 單一主力帳號,**刻意原封不動**(遷移的退路;pool 等於沒開) |
 
 `_2`/`_3`… 是 client pool 的憑證格式(**[ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**)。
 SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生效、也不影響任何機器 ——
@@ -65,9 +64,10 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
   cookie 值裡的 `$` 被當 secret reference 吃掉:實測 16137 bytes 的 storage_state 上傳後
   變成 16103 bytes 的**無效 JSON**,而指令回報成功。複製後**驗 hash 還不夠**,要真的跑一次
   RPC(`await client.get_account_email()`)。
-- **branch config 會繼承 root 的未覆寫 secret**。`dev_alt` 是 `dev` 的 branch,它自己的
-  `NOTEBOOKLM_AUTH_JSON` 是帳號 2,卻會**繼承 `dev` 的 `_2`(也是帳號 2)**→ pool 變成同一個
-  帳號輪兩次,failover 看起來像壞掉。pool 落地時直接刪掉 `dev_alt`,別留著當陷阱。
+- **branch config 會繼承 root 的未覆寫 secret** —— 建 branch config 放 pool 憑證是陷阱:
+  它會把 root 的 `_2`/`_3` 一起繼承進來,pool 於是輪到同一個帳號兩次,failover 看起來像壞掉。
+  (`dev_alt` 就是這樣,pool 落地後已刪。**刪 config 會弄壞任何指向它的 MCP 註冊** ——
+  刪之前先 `claude mcp list` 掃一遍每一台。)
 
 **登入為什麼不用原生 `notebooklm login`**(2026-08):Google 把未認證的登入流程轉到
 `notebook.google.com`(少了 `lm`),而 SDK 的偵測寫死等 `notebooklm.google.com/**`,
@@ -84,9 +84,12 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
 網域了」,實際只是 CLI 太舊(**同一份 storage_state 用 0.7.3 就正常**)。那份全域安裝已
 移除,PATH 上不再有 `notebooklm`;`uv run` 保證用的是 pin 的版本。
 
-**每個 release 要跑一次真實驗收** —— 離線測試用 mock client,結構上找不到「配額真的被拒」
-那一類 bug(v0.7.1 那輪抓到三個,含一個死鎖)。**怎麼搭環境、測資怎麼設計才能讓失敗變成
-可比對的事實、場景怎麼按配額排序**見 [docs/acceptance-testing.md](docs/acceptance-testing.md)。
+**改到 pool / dispatch / 認證 / 發布就要跑一次真實驗收** —— 離線測試用 mock client,
+結構上找不到「配額真的被拒」那一類 bug(v0.7.1 抓到三個含一個死鎖;v0.8.0 抓到三個 P0)。
+**怎麼搭環境、測資怎麼設計、以及「哪五類事只有真帳號測得到」的分工線**見
+[docs/acceptance-testing.md](docs/acceptance-testing.md)。
+**驗收完要回收**:抓到的東西凡是寫得成離線測試的,一律補進 `tests/`(收之前先做突變驗證,
+確認它真的會紅)——否則下一輪還要再燒一次真實配額去發現同一件事。
 
 **真實驗收走測試帳號,不要打主力帳號**(會污染正式資料、且共用同一份每日生成配額):
 獨立 Google 帳號 + Doppler `notebooklm/stg` + **另一組 `PODCAST_TOKEN_SALT`**(salt 不同 ⇒
@@ -189,7 +192,7 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
 
 ### 發布(podcast RSS → Apple Podcast)
 
-`publish_series` 讀 4 個 Doppler secret(同 `-p notebooklm -c dev` 注入):
+`publish_series` 讀 4 個 Doppler secret(同 `-p notebooklm -c prd` 注入):
 `PODCAST_PUBLIC_BASE_URL`(公開 URL 根,無尾斜線)、`PODCAST_TOKEN_SALT`(token HMAC salt;
 **洩漏會讓 feed URL 可被推算**)、`PODCAST_UPLOAD_URL`(NAS uploader 內網 base,無尾斜線)、
 `PODCAST_UPLOAD_TOKEN`(bearer,**必須 = NAS `.env` 的 `UPLOAD_TOKEN`**)。MCP 不再掛載 NAS
@@ -291,6 +294,17 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   ——命名鐵律靠顯式 rename 的 fail-loud 後檢守著。
 - `wait_for_completion` 的 `poll_interval` 已移除(0.7.x);呼叫只用 `timeout=`。
 - 改 contract 測試時對「**實裝版本**」跑,別信 `_research/` 的 HEAD clone。
+- **多帳號 pool(v0.8.x)動 dispatch 前必讀 [ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**。
+  三條實作紀律(每條都被真實事故驗證過):
+  ①**`podcast_series` 有兩條 dispatch 路徑**(全新一集走 `_run_episode`、重送/supersede 是
+  series 自己 inline),兩條共用 `_dispatch_audio_with_failover` —— v0.8.0 只補了一條,
+  於是 pool 對「重試」這條最需要它的路完全無效,而那正是工具自己給的 `safe_next_action`。
+  ②**`NOTEBOOKLM_AUTH_JSON` 必須隨時等於作用中帳號**(`runtime._sync_auth_env`):SDK 的媒體
+  下載在下載當下**重讀這個 env**,不是用 client 自己的 session。把它當暫存槽用會讓所有下載
+  以最後一個槽位的身分發出,而症狀出現在十幾分鐘後的 finalize。③failover **只掛在
+  `_REFUSED_WITHOUT_DISPATCH` 那一條 except**(契約保證沒建出 task);已 dispatch 之後換帳號
+  等於 retract + 取代版,是 ADR-0009 禁止的「MCP 在背後改寫因果紀錄」。
+  `tests/test_pool_gaps.py` 那四條(經突變驗證)是這區最敏感的守門員。
 - 命名鐵律(每集 mp3 回錄 + 工作室 artifact **完全同名** `EP{n:02d} 標題`)的正本在 skill
   §Episodic;**實作上唯一要記的是命名邏輯集中在 `_episode_label()`**,改流程時對照那裡,別各處自己拼字串。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`
@@ -473,6 +487,10 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 
 **tag 之前**:CI 綠(它含 wheel 的 `uv tool install` + `--help` 冒煙),
 **tag 之後**:照 pin 用 tag 真的裝一次再收工 —— v0.7.0 的撞名就是這一步才發現的。
+**「裝完」要驗版本號,不能只看它印 `Installed 2 executables`**:uv 的 git cache 壞掉時會
+`fatal: unable to read tree` 然後**裝成舊版**(v0.8.1 實測踩到)。收工前跑
+`~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"`;
+數字不對就 `uv cache clean notebooklm-mcp` 再 `--force --reinstall`。
 
 驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab ../../audi-skill | grep -v docs/superpowers`
 (`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實)。

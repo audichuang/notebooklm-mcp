@@ -72,11 +72,11 @@ cp -r "$SRC/references" .claude/skills/notebooklm/
 diff -rq "$SRC" .claude/skills/notebooklm --exclude=.mcp.json   # 必須無輸出
 ```
 
-快照裡的 §Auth 與 troubleshooting 範例寫的是 `-c dev`(**主力帳號**)。看起來很想改成 `stg`,
+快照裡的 §Auth 與 troubleshooting 範例寫的是 `-c prd`(**正式帳號 pool**)。看起來很想改成 `stg`,
 **但改了就不是在驗使用者拿到的那份 skill 了** —— skill 自己有問題也測不出來。
 
 帳號政策改放**工作區自己的 `CLAUDE.md`**:那是真實專案表達專案級政策的方式,是加法不是修改。
-`.mcp.json` 只會從專案根載入,所以快照裡那份 `-c dev` 的 example 不會被吃到。
+`.mcp.json` 只會從專案根載入,所以快照裡那份 `-c prd` 的 example 不會被吃到。
 
 **② 每次重跑驗收都要重新複製快照。** 它是快照不是連結——寫這份文件時就發現上一輪的快照已經
 過時了(skill 後來改過,快照沒跟上)。**先同步再開 session**,否則你驗的是舊文件。

@@ -59,14 +59,14 @@ doppler run -p notebooklm -c stg -- nblm-mcp --transport stdio   # 起得來即�
 
 ## 平常怎麼用
 
-驗收工作區 `../nblm-acceptance-v0.6.0/.mcp.json` 已經指向 `-c stg`,在那個目錄開 Claude Code
-就是測試帳號。**正式流程(podcast-lab 等)仍然是 `-c dev`,不受影響。**
+驗收工作區的 `.mcp.json` 指向 `-c stg`,在那個目錄開 Claude Code 就是測試帳號。
+**正式流程(podcast-lab 等)走 `-c prd`,不受影響。**
 
 想手動跑單一指令:
 
 ```bash
 doppler run -p notebooklm -c stg -- notebooklm list        # 測試帳號
-doppler run -p notebooklm -c dev -- notebooklm list        # 主力帳號
+doppler run -p notebooklm -c prd -- notebooklm list        # 正式(多帳號 pool)
 ```
 
 ## 認證過期時
