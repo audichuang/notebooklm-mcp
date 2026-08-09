@@ -507,6 +507,11 @@ class FakeSharing:
 
     def __init__(self):
         self.calls: list[tuple] = []
+        # `get_status` 另記一份,**刻意不併進 `calls`**:既有測試用 `calls == []` 表達
+        # 「沒打 add_user」(冪等那條),混在一起會讓那個意思消失。而分開之後
+        # 「單帳號模式不打任何 RPC」才第一次真的測得到 —— 舊斷言 `calls == []` 對
+        # 一支只打 `get_status` 的實作永遠是綠的。
+        self.status_calls: list[str] = []
         self.add_user_exc = None
         # 只對這個 email 失敗(部分成功的進度回報要測得到「已經完成到哪裡」)。
         self.fail_on_email: str | None = None
@@ -543,6 +548,7 @@ class FakeSharing:
         return await self.get_status(notebook_id)
 
     async def get_status(self, notebook_id):
+        self.status_calls.append(notebook_id)
         if self.get_status_exc is not None:
             raise self.get_status_exc
         return SimpleNamespace(

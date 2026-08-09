@@ -176,8 +176,39 @@ def _has_sufficient_permission(status, email: str) -> bool:
     )
 
 
+def _owner_slot(status) -> tuple[str, object] | None:
+    """`status` 裡的 owner 若正好是 pool 的某個槽位,回它的 `(label, client)`。
+
+    **一趟 `get_status` 就能定位 owner,不必逐槽掃**:回傳的 `shared_users` 含 owner
+    自己那一列(v0.9.0 真實驗收實測,`_has_sufficient_permission` 的 docstring 記著
+    那次 9 帳號 pool 的回應形狀)。分享狀態是 notebook 的屬性、與誰查無關,所以
+    **owner 的 client 不必再查一次** —— 手上這份就是它會看到的那份。
+
+    找不到(owner 不在 pool——notebook 是外部帳號分享進來的)回 None,呼叫端就退回
+    「看得到的那個」去試。那可能被伺服器拒絕,但那是遠端的答案,不該預先替它判死。
+    """
+    owner = next(
+        (
+            (getattr(u, "email", None) or "")
+            for u in getattr(status, "shared_users", [])
+            if getattr(u, "permission", None) == SharePermission.OWNER
+        ),
+        "",
+    ).casefold()
+    if not owner:
+        return None
+    return next(
+        (
+            (label, client)
+            for label, client in runtime.all_clients()
+            if label.casefold() == owner
+        ),
+        None,
+    )
+
+
 async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object]:
-    """找出 pool 裡**看得到這個 notebook** 的帳號,回 `(label, client, share_status)`。
+    """找出 pool 裡**分享得動這個 notebook** 的帳號,回 `(label, client, share_status)`。
 
     存在理由是一個真實驗收抓到的死路(v0.9.0 Phase 9-1):`podcast_series` 因權限被拒
     停下,停點的 `error` 指引呼叫端來跑 `notebook_share_with_pool` —— 但當時作用中帳號
@@ -187,6 +218,12 @@ async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object
     **先試作用中的**(絕大多數情況就是它,零額外成本),permission denied 才依槽位順序
     試其餘的。**只對 permission denied 往下試** —— 網路錯誤、認證過期之類的問題,每個
     槽位都會遇到,一路吞下去只會把真正的根因埋掉,所以原樣拋出。
+
+    **查得到 ≠ 改得動:成功之後還要換到 owner。** 作用中帳號在 pool 裡通常是個
+    EDITOR(owner 早就把 notebook 分享給全 pool 了,所以它看得到),而改分享設定要的
+    是 owner。只認「`get_status` 過得了」就挑中它,`add_user` 會由一個很可能無權的
+    帳號發出,而 pool 裡真正的 owner 從沒被試過——症狀還會偽裝成「這個 notebook
+    沒救」。owner 由手上這份 status 直接定位(見 `_owner_slot`),不需要額外 RPC。
 
     掃描全是唯讀 `get_status`,而且**不動輪替游標**(`_ACTIVE` 的語意是「配額走到哪」,
     借去做別的事會讓 failover 的帳號記帳失去意義)。
@@ -208,7 +245,8 @@ async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object
                 raise
             denied.append(label)
             continue
-        return label, client, status
+        owner = _owner_slot(status)
+        return (*owner, status) if owner else (label, client, status)
 
     raise NotebookAccessDenied(
         f"notebook {notebook_id!r}:pool 裡**沒有任何帳號**看得到它({denied} 全部 "
@@ -261,6 +299,18 @@ async def _share_each(notebook_id: str, emails: list[str], client) -> list[str]:
     return shared
 
 
+def _nothing_to_share(notebook_id: str, executor_label: str | None) -> dict:
+    """沒有 peers 要分享時的回傳。**欄位必須與正常路徑完全一致**——少一個
+    `shared_by` 就等於呼叫端統一讀它時會 KeyError,而那條路徑(單帳號)最常見。
+    """
+    return {
+        "notebook_id": notebook_id,
+        "shared_by": executor_label,
+        "shared_with": [],
+        "already_shared": [],
+    }
+
+
 @mcp.tool()
 async def notebook_share_with_pool(notebook_id: str) -> dict:
     """把**既有** notebook 分享給多帳號 pool 裡的其餘帳號(EDITOR)。
@@ -276,15 +326,21 @@ async def notebook_share_with_pool(notebook_id: str) -> dict:
     `podcast_series` 因為權限被拒而停下、指引呼叫端來跑它 —— 而那個當下,
     作用中帳號**正好是看不到這個 notebook 的那一個**(配額 failover 換過去了)。
     照著游標走的話,指引自己也 permission denied,呼叫端只是從一個死路換到另一個
-    (v0.9.0 真實驗收 Phase 9-1 實測)。所以這裡改成掃 pool 找出**看得到它**的
-    帳號來執行:先試作用中的(最常見、零額外成本),不行就依槽位順序試其餘的。
-    掃描只打唯讀 `get_status`,而且**不動輪替游標** —— 那個游標的語意是「配額走到
-    哪」,借去做別的事會讓 failover 的帳號記帳失去意義。
+    (v0.9.0 真實驗收 Phase 9-1 實測)。所以這裡改成掃 pool 找出**分享得動它**的
+    帳號來執行(見 `_resolve_share_executor`:先試作用中的,再依槽位順序,成功之後
+    還要換到 owner)。掃描只打唯讀 `get_status`,而且**不動輪替游標** —— 那個游標的
+    語意是「配額走到哪」,借去做別的事會讓 failover 的帳號記帳失去意義。
     """
+    # **順序有意義:沒有 peers 就先走人,不要用一趟遠端呼叫換一個純本機的答案。**
+    # v0.9.1 一度把 executor 掃描擺在這之前,於是單帳號模式對一個不屬於自己的
+    # notebook 呼叫這支工具,會從「安靜回 no-op」變成拋 NotebookAccessDenied,
+    # 而那個訊息還叫人「分享給 pool 成員」——單帳號模式根本沒有 pool。
+    if runtime.account_count() == 1:
+        return _nothing_to_share(notebook_id, runtime.active_account())
     executor_label, executor_client, status = await _resolve_share_executor(notebook_id)
     peers = _pool_peers(notebook_id, executor_label)
     if not peers:
-        return {"notebook_id": notebook_id, "shared_with": [], "already_shared": []}
+        return _nothing_to_share(notebook_id, executor_label)
     already = [e for e in peers if _has_sufficient_permission(status, e)]
     todo = [e for e in peers if e not in already]
     return {

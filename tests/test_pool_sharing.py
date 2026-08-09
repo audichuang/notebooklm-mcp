@@ -112,10 +112,23 @@ async def test_share_with_pool_is_idempotent(fake_client):
 
 
 async def test_share_with_pool_on_single_account_is_a_noop(fake_client):
+    """單帳號模式**不打任何 RPC**,連唯讀的 `get_status` 都不打。
+
+    這不只是省一趟:v0.9.1 把 executor 掃描擺到 peers 計算之前,於是單帳號模式下對
+    一個**不屬於自己**的 notebook 呼叫這支工具,會從「安靜回 no-op」變成拋
+    `NotebookAccessDenied`,而錯誤訊息還叫人「分享給 pool 成員」—— 根本沒有 pool。
+    沒有 peers 就沒有事情可做,這個判斷是純本機的,不該用一趟遠端呼叫換答案。
+
+    斷言必須看 `status_calls`:舊版只斷言 `calls == []`(那只記 `add_user`),
+    對一支「先打 get_status」的實作永遠是綠的 —— 正是它讓這個回歸溜過 591 個測試。
+    """
     runtime.set_client(fake_client)
     out = await basic.notebook_share_with_pool("nb-old")
     assert out["shared_with"] == [] and out["already_shared"] == []
     assert fake_client.sharing.calls == []
+    assert fake_client.sharing.status_calls == [], "單帳號沒有 peers,不該打任何 RPC"
+    # 回傳欄位在每條成功路徑上都要一致,否則呼叫端讀 `shared_by` 會 KeyError。
+    assert out["shared_by"] == "#1"
 
 
 async def test_unresolvable_account_label_fails_loud(fake_client):
@@ -167,19 +180,29 @@ async def test_existing_viewer_is_not_counted_as_already_shared(fake_client):
     ], "升級成 EDITOR 不需要新路徑——add_user 本身就是 upsert"
 
 
-async def test_owner_peer_is_not_re_shared(fake_client):
-    """failover 之後 pool 裡的 peer 可能就是那個 notebook 的 owner——SDK 只擋
-    `permission==OWNER` 這個參數,不擋「對象就是 owner」,對 owner 呼叫
-    add_user(EDITOR) 等於把他背後降權。OWNER 必須跟 EDITOR 一樣算「已足夠」。
+async def test_owner_is_never_the_target_of_add_user(fake_client):
+    """對 owner 打 `add_user(EDITOR)` = 把他降權。SDK 只擋 `permission==OWNER` 這個
+    **參數**,不擋「對象就是 owner」,所以這件事得由我們自己保證。
+
+    **兩層防線,這裡鎖的是不變式而不是某一層**:owner 優選(`_owner_slot`)讓 owner
+    成為 executor,而 executor 不分享給自己 —— 於是「owner 落進 peers」在這支工具
+    上已不可達;真正落進 peers 那條由 `_has_sufficient_permission` 的 OWNER 豁免
+    擋著,退成最後防線(兩者用同一個 `SharePermission` 比對,上游改了 permission
+    的形狀是一起失效的,所以下面兩個斷言要一起看)。
     """
     runtime.set_clients([("a@x.com", fake_client), ("b@x.com", fake_client)])
     fake_client.sharing.existing = [("b@x.com", SharePermission.OWNER)]
 
     out = await basic.notebook_share_with_pool("nb-old")
 
-    assert out["already_shared"] == ["b@x.com"]
-    assert out["shared_with"] == []
-    assert fake_client.sharing.calls == [], "不能對 owner 打 add_user(EDITOR)"
+    assert out["shared_by"] == "b@x.com", "owner 是唯一改得動分享設定的那個"
+    assert "b@x.com" not in [c[1] for c in fake_client.sharing.calls], (
+        "不能對 owner 打 add_user(EDITOR)"
+    )
+    # 最後防線本身:OWNER 必須跟 EDITOR 一樣算「已足夠」。主路徑攔掉之後,只剩
+    # 這一層擋得住降權,而它已經沒有整合層測試會走到——所以直接釘判準。
+    status = await fake_client.sharing.get_status("nb-old")
+    assert basic._has_sufficient_permission(status, "b@x.com")
 
 
 async def test_permission_check_is_case_insensitive(fake_client):
@@ -309,6 +332,65 @@ async def test_share_runs_on_whichever_account_can_actually_see_the_notebook(fak
     assert not rotated_to.sharing.calls, "沒權限的那個不該被拿來打 add_user"
     # 游標不可以被借去做別的事 —— 它的語意是「配額輪替走到哪」。
     assert runtime.active_account() == "rotated@x", "掃描不得改動輪替游標"
+
+
+async def test_share_is_executed_by_the_owner_not_merely_someone_who_can_see_it(
+    fake_client,
+):
+    """「看得到」不等於「分享得動」:`get_status` 過得了的帳號可能只是 EDITOR。
+
+    v0.9.1 的掃描挑**第一個 `get_status` 成功的**帳號,而作用中帳號在 pool 裡通常
+    正是一個 EDITOR(它看得到 —— owner 早就把 notebook 分享給全 pool 了)。挑中它
+    就停手,於是 `add_user` 由一個很可能無權改分享設定的帳號發出,而 pool 裡真正的
+    owner **從沒被試過**。症狀還會偽裝成「這個 notebook 沒救」。
+
+    修法不必逐槽掃:`get_status` 回的 `shared_users` **含 owner 那一列**(v0.9.0
+    真實驗收實測,`_has_sufficient_permission` 的 docstring 記著),所以第一趟成功的
+    查詢就足以定位 owner —— 命中 pool 就換它的 client,總成本仍是 1 趟 RPC。
+
+    這裡三個槽位刻意是不同的 fake 物件:唯一測得到「這通 add_user 實際由誰發出」
+    的方式(同型手法見上面 dispatch 那條)。
+    """
+    owner_c, editor_c, third_c = fake_client, FakeClient(), FakeClient()
+    # 作用中的 EDITOR 看得到 notebook,而它查回來的狀態帶著 owner 那一列。
+    editor_c.sharing.existing = [
+        ("owner@x", SharePermission.OWNER), ("editor@x", SharePermission.EDITOR),
+    ]
+    owner_c.sharing.existing = list(editor_c.sharing.existing)
+    runtime.set_clients(
+        [("owner@x", owner_c), ("editor@x", editor_c), ("third@x", third_c)]
+    )
+    runtime.rotate_client()
+    assert runtime.active_account() == "editor@x", "前提:作用中的是 EDITOR,不是 owner"
+
+    out = await basic.notebook_share_with_pool("nb-1")
+
+    assert out["shared_by"] == "owner@x", "只有 owner 改得動分享設定"
+    assert out["already_shared"] == ["editor@x"], "作用中那個已經是 EDITOR,不必重打"
+    assert out["shared_with"] == ["third@x"]
+    assert [c[1] for c in owner_c.sharing.calls] == ["third@x"]
+    assert editor_c.sharing.calls == [], "EDITOR 不該被拿來打 add_user"
+    assert runtime.active_account() == "editor@x", "定位 owner 不得改動輪替游標"
+
+
+async def test_share_falls_back_to_a_viewer_when_the_owner_is_outside_the_pool(
+    fake_client,
+):
+    """owner 不在 pool 裡(notebook 是別人分享進來的)時,不能因此放棄。
+
+    這是上面那條 owner 優選的必要邊界:找不到 owner 就退回「看得到的那個」去試 ——
+    它可能被伺服器拒絕,但那是遠端的答案,不該由我們預先替它判死。
+    """
+    outsider_owned = fake_client
+    outsider_owned.sharing.existing = [
+        ("someone@else", SharePermission.OWNER), ("a@x", SharePermission.EDITOR),
+    ]
+    runtime.set_clients([("a@x", outsider_owned), ("b@x", FakeClient())])
+
+    out = await basic.notebook_share_with_pool("nb-1")
+
+    assert out["shared_by"] == "a@x"
+    assert out["shared_with"] == ["b@x"]
 
 
 async def test_share_reraises_non_permission_errors_instead_of_walking_the_pool(

@@ -13,11 +13,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 from mcp.types import ToolAnnotations
-from notebooklm.exceptions import (
-    ArtifactFeatureUnavailableError,
-    ClientError,
-    RateLimitError,
-)
+from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
 from notebooklm.types import ArtifactType
 
 from . import runtime

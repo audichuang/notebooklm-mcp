@@ -8,6 +8,39 @@
 
 ---
 
+## v0.9.2
+
+**v0.9.1 的 `notebook_share_with_pool` 修法本身帶進三個缺陷**(2026-08-10,離線 review
++ Codex 獨立複審,兩邊各自指出同一組問題)。都在同一支工具上,根因是**新的 executor
+掃描被擺在錯的位置、而挑選條件只驗了一半**。
+
+**「看得到」不等於「分享得動」。** 掃描挑第一個 `get_status` 成功的帳號 —— 但作用中
+帳號在 pool 裡通常正是一個 EDITOR(owner 早就把 notebook 分享給全 pool,所以它看得到),
+於是 `add_user` 由一個很可能無權改分享設定的帳號發出,而 pool 裡真正的 owner **從沒被
+試過**,症狀還偽裝成「這個 notebook 沒救」。修法不必逐槽掃:`get_status` 回的
+`shared_users` 含 owner 那一列(v0.9.0 真實驗收實測的形狀),第一趟成功的查詢就足以
+定位 owner,命中 pool 就換它的 client,總成本仍是 1 趟 RPC(`_owner_slot`)。owner 不在
+pool 時退回「看得到的那個」去試 —— 那可能被伺服器拒絕,但那是遠端的答案,不該預先替它
+判死。副作用:「owner 落進 peers」這條路因此不可達,`_has_sufficient_permission` 的
+OWNER 豁免退成最後防線(兩者用同一個 `SharePermission` 比對,上游改形狀是一起失效的)。
+
+**單帳號模式不再是零 RPC,還多長出一個失敗模式。** 掃描被擺在 peers 計算之前,於是
+單帳號對一個**不屬於自己**的 notebook 呼叫這支工具,會從「安靜回 no-op」變成拋
+`NotebookAccessDenied`,而訊息還叫人「分享給 pool 成員」——單帳號根本沒有 pool。
+沒有 peers 就沒有事情可做,這個判斷是純本機的,不該用一趟遠端呼叫換答案:順序改回
+「先算有沒有 peers」。
+
+**為什麼 591 個測試全綠。** `test_..._single_account_is_a_noop` 斷言的是
+`sharing.calls == []`,而 fake 只在 `add_user` 裡記錄 —— 對一支「只打 `get_status`」
+的實作永遠是綠的。fake 現在另記 `status_calls`(**刻意不併進 `calls`**:既有測試用
+`calls == []` 表達「沒打 add_user」,混在一起那個意思會消失)。同型的一課第 N 次:
+**觀測面沒有涵蓋到的行為,測試寫了也是綠的**。
+
+**回傳 schema 不一致**:no-op 路徑少了 `shared_by`,呼叫端統一讀它時 `KeyError`,
+而那條路徑(單帳號)最常見。所有成功路徑收斂到 `_nothing_to_share`。
+
+順帶:`tools_podcast.py` 在 `_errors.py` 抽取後留下的 `ClientError` dead import。
+
 ## v0.9.1
 
 v0.9.0 真實驗收(2026-08-09/10)抓到的兩個 FAIL。**都不在核心機制上** ——
