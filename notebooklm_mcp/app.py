@@ -99,7 +99,7 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
         # 驗證先於任何 client 建立(打錯字要在第一個連線之前就爆)。
         creds = _pooled_auth_json(os.environ) if inline_auth else []
         async with contextlib.AsyncExitStack() as stack:
-            pool: list[tuple[str, object]] = []
+            pool: list[tuple[str, object, str | None]] = []
             if creds:
                 # SDK 只認不帶後綴的 `NOTEBOOKLM_AUTH_JSON`(`_auth/cookies.py`),而
                 # `AuthTokens` 沒有 from_json —— 所以輪流覆寫這個 env 再 from_storage()。
@@ -107,10 +107,12 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 for slot, cred in enumerate(creds, start=1):
                     os.environ[_AUTH_JSON_ENV] = cred
                     client = await stack.enter_async_context(NotebookLMClient.from_storage())
-                    pool.append((await _account_label(client, slot), client))
+                    pool.append((await _account_label(client, slot), client, cred))
             else:
                 client = await stack.enter_async_context(NotebookLMClient.from_storage())
-                pool.append((await _account_label(client, 1), client))
+                pool.append((await _account_label(client, 1), client, None))
+            # set_clients 會把 env 同步成**作用中**那個帳號的憑證,順帶還原掉上面
+            # 這圈把 env 當暫存槽的痕跡(v0.8.0 驗收 F-1)。
             runtime.set_clients(pool)
             try:
                 yield

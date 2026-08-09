@@ -103,6 +103,34 @@ async def test_lifespan_builds_one_client_per_credential(monkeypatch):
     assert app.os.environ["NOTEBOOKLM_AUTH_JSON"] == '{"cookies":[1]}'
 
 
+async def test_auth_env_tracks_the_active_account_inside_the_lifespan(monkeypatch):
+    """`NOTEBOOKLM_AUTH_JSON` 必須**隨時**等於作用中帳號的憑證(v0.8.0 驗收 F-1)。
+
+    SDK 的媒體下載在下載當下重讀這個 env,**不是**用 client 自己的 session。原本
+    pool 建完 env 停在最後一個槽位、還原寫在 lifespan 最外層的 finally(server 關閉
+    才跑),於是整個 server 生命週期裡所有下載都以**最後一個帳號**的身分發出:notebook
+    沒分享給它就一律 401,而症狀出現在十幾分鐘後的 finalize,根因在這裡。
+
+    **斷言必須在 `async with` 內部**——原本的測試在退出後才檢查 env,那時最外層
+    finally 已經還原過,bug 正是從這個縫溜過去的。
+    """
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", '{"cookies":[1]}')
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", '{"cookies":[2]}')
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_3", '{"cookies":[3]}')
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage_recording([]))
+
+    async with app._lifespan(app.mcp):
+        assert app.os.environ["NOTEBOOKLM_AUTH_JSON"] == '{"cookies":[1]}', (
+            "pool 建完就要還原成作用中的那一個,不能停在最後一個槽位"
+        )
+        runtime.rotate_client()
+        assert app.os.environ["NOTEBOOKLM_AUTH_JSON"] == '{"cookies":[2]}', (
+            "failover 換到 B 之後,下載也必須以 B 的身分發出"
+        )
+        runtime.rotate_client()
+        assert app.os.environ["NOTEBOOKLM_AUTH_JSON"] == '{"cookies":[3]}'
+
+
 async def test_lifespan_without_extra_credentials_is_a_single_account(monkeypatch):
     monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", '{"cookies":[1]}')
     monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON_2", raising=False)
