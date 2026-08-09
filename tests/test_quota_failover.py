@@ -20,10 +20,15 @@ def _flaky_generate(fake_client, calls, fail_first_n):
 
     每次呼叫記下**當下作用中的帳號**——這是「第二次真的換了帳號發出去」的直接證據,
     比檢查 manifest 欄位更難造假。
+
+    可重入(同一個 fake 上套第二次不會層層包住前一個 wrapper)。
     """
     from notebooklm.exceptions import RateLimitError
 
-    original = fake_client.artifacts.generate_audio
+    original = getattr(fake_client.artifacts, "_pristine_generate", None)
+    if original is None:
+        original = fake_client.artifacts.generate_audio
+        fake_client.artifacts._pristine_generate = original
 
     async def flaky(*args, **kwargs):
         calls.append(runtime.active_account())
@@ -197,6 +202,73 @@ async def test_rotation_persists_across_the_rest_of_a_series(fake_client, tmp_pa
         (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
     )["episodes"]
     assert [e["attempts"][-1]["dispatch"]["account"] for e in episodes] == ["b@x", "b@x"]
+
+
+async def test_resend_path_rotates_and_records_the_account_too(fake_client, tmp_path):
+    """**失敗後重跑**那條路徑(v0.8.0 驗收 F-4)。
+
+    `podcast_series` 有兩條 dispatch 路徑:全新一集走 `_run_episode`,而「已有 prepared
+    attempt(重送/supersede)」是 `podcast_series` 自己 inline 送出的。v0.8.0 只補了
+    前者 —— 於是配額耗盡後隔天原樣重呼(**工具自己給的 `safe_next_action`**)不會換帳號,
+    pool 對「重試」這條最需要它的路完全無效,而 `dispatch.account` 也是 null。
+
+    既有的 series 測試跑的是兩集**全新生成**,兩集都走路徑 1,所以斷言會過 —— 這條
+    測試專門對準那個盲區。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    episodes = [{"title": "心法篇", "brief": "1"}]
+
+    # 第一輪:兩個帳號都被拒 → 安全停點,留下一個 not_accepted 的 attempt。
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    calls: list = []
+    _flaky_generate(fake_client, calls, fail_first_n=99)
+    stopped = await p.podcast_series(
+        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
+    )
+    assert stopped["observed_state"] == "not_accepted"
+    assert calls == ["a@x", "b@x"]
+
+    # 第二輪(隔天配額回來):原樣重呼。attempt 被 rearm 成 prepared → 走**路徑 2**。
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    calls.clear()
+    _flaky_generate(fake_client, calls, fail_first_n=1)
+    await p.podcast_series(
+        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
+    )
+
+    assert calls == ["a@x", "b@x"], "重送路徑也必須 failover,否則 pool 對重試無效"
+    attempts = _attempts(manifest_path)
+    assert len(attempts) == 1, "沿用同一個 attempt 重送,不得新建"
+    dispatch = attempts[0]["dispatch"]
+    # 過期值比缺漏危險:缺漏看得出來,錯的帳號看不出來。
+    assert dispatch["account"] == "b@x", "重送要記下**這次**實際送出的帳號"
+    failovers = [
+        e for e in attempts[0]["errors"] if e["phase"] == "dispatch_failover"
+    ]
+    assert failovers[-1]["from_account"] == "a@x"
+    assert failovers[-1]["to_account"] == "b@x"
+
+
+async def test_reset_for_resend_clears_the_stale_account(fake_client, tmp_path):
+    """attempt 被 rearm 回 prepared 時,舊的 `account` 必須清掉。
+
+    留著會變成**過期值**:manifest 說 A 生的,實際是 B 送出的。缺漏至少看得出來,
+    錯的值看不出來。
+    """
+    attempt = {
+        "dispatch": {
+            "status": "not_accepted",
+            "account": "a@x",
+            "artifact_ids_before": ["x"],
+            "dispatched_at": "2026-08-09T00:00:00+00:00",
+            "accepted_at": None,
+        },
+        "remote": {"status": "failed", "error": "boom", "error_code": "RateLimitError",
+                   "artifact_id": None, "observed_at": "2026-08-09T00:00:00+00:00"},
+        "errors": [],
+    }
+    p._reset_attempt_for_resend(attempt)
+    assert "account" not in attempt["dispatch"], "過期的帳號要 pop 掉,不是留著"
 
 
 async def test_single_account_records_the_account_without_any_failover(

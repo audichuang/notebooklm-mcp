@@ -609,17 +609,23 @@ async def _dispatch_audio_with_failover(
     store: ManifestStore | None,
     episode_n: int,
     attempt_id: str,
-    manifest_path: str | None,
     generate,
 ) -> str:
     """送出音檔生成並回傳 artifact_id;配額拒絕就換帳號**原地重送同一個 attempt**。
 
     兩條路徑收在同一個函式裡是刻意的:同一個「伺服器拒絕、沒建出 task」語意有兩種
     形狀進來(0.8.0 起 raise,0.7.x 回 `task_id=""` 由 `ensure_started` 判定),分兩處
-    各補一次 failover 正是本 repo 反覆出事的「補一半」。
+    各補一次 failover 正是本 repo 反覆出事的「補一半」。**兩個呼叫端也共用它**:
+    `_run_episode`(全新一集)與 `podcast_series` 的重送/supersede 分支
+    (v0.8.0 只補了前者,於是 pool 對「重試」這條最需要它的路完全無效 —— 驗收 F-4)。
 
     **除了那兩種,一律不換帳號**:其餘失敗都可能發生在伺服器已經受理之後,重送會變成
     重複 artifact + 重燒配額(`_REFUSED_WITHOUT_DISPATCH` 刻意不長大的同一個理由)。
+
+    **續跑指引由呼叫端各自加在例外訊息上**,不在這裡:`podcast_episode` 的續跑動作是
+    原樣重呼自己,`podcast_series` 是重呼整季 —— 而 `_mark_not_accepted` 會把
+    `str(exc)` 寫進 `remote.error` 與 `errors[]`,寫死一種指引等於讓**錯的**工具名
+    落進 manifest,事後查錯的人會照著跑錯的東西。
     """
     while True:
         try:
@@ -632,26 +638,10 @@ async def _dispatch_audio_with_failover(
                 continue
             if store is not None:
                 _mark_not_accepted(store, episode_n, attempt_id, exc)
-                # 比照下面的 acceptance_unknown 分支把 attempt_id 與下一步塞進訊息:
-                # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經
-                # 被持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。docstring 承諾「依錯誤中的
-                # attempt_id 續跑」,兩個分支都要兌現。
-                exc.args = (
-                    f"{exc}\n伺服器拒絕了這次生成,**沒有**建立任何 artifact"
-                    f"(attempt_id={attempt_id!r},已標記 not_accepted)。"
-                    "配額/限流回復後,用**完全相同的參數**重呼 podcast_episode 即可沿用"
-                    "同一個 attempt 重送——不會新建 attempt、也不會多燒一次配額。",
-                )
             raise
         except (Exception, asyncio.CancelledError) as exc:
             if store is not None:
                 _mark_acceptance_unknown(store, episode_n, attempt_id, exc)
-                exc.args = (
-                    f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
-                    "先對帳，禁止直接重生："
-                    f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
-                    f"episode_n={episode_n}, attempt_id={attempt_id!r})",
-                )
             raise
 
         # task_id IS the artifact_id — notebooklm-py _types/artifacts.py:421 states
@@ -795,6 +785,9 @@ def _reset_attempt_for_resend(attempt: dict) -> None:
         }
     )
     dispatch.pop("candidate_artifact_ids", None)
+    # 帳號也要 pop:留著會變成**過期值**——manifest 說 A 生的,實際是重送時的 B 送出的。
+    # 缺漏至少看得出來,錯的值看不出來(v0.8.0 驗收 F-4)。
+    dispatch.pop("account", None)
     attempt["remote"].update(
         {
             "status": "unknown",
@@ -1430,9 +1423,33 @@ async def _run_episode(
             audio_length=resolved_audio_length,
         )
 
-    artifact_id = await _dispatch_audio_with_failover(
-        store, episode_n, attempt_id, manifest_path, _generate
-    )
+    try:
+        artifact_id = await _dispatch_audio_with_failover(
+            store, episode_n, attempt_id, _generate
+        )
+    except _REFUSED_WITHOUT_DISPATCH as exc:
+        # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經被
+        # 持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。docstring 承諾「依錯誤中的
+        # attempt_id 續跑」,兩個分支都要兌現。
+        if store is not None:
+            exc.args = (
+                f"{exc}\n伺服器拒絕了這次生成,**沒有**建立任何 artifact"
+                f"(attempt_id={attempt_id!r},已標記 not_accepted)。"
+                "配額/限流回復後,用**完全相同的參數**重呼 podcast_episode 即可沿用"
+                "同一個 attempt 重送——不會新建 attempt、也不會多燒一次配額。",
+            )
+        raise
+    except RuntimeError:
+        raise  # ensure_started 判定的 not_accepted;訊息已由 ensure_started 給
+    except (Exception, asyncio.CancelledError) as exc:
+        if store is not None:
+            exc.args = (
+                f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
+                "先對帳，禁止直接重生："
+                f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
+                f"episode_n={episode_n}, attempt_id={attempt_id!r})",
+            )
+        raise
     # failover 可能已經換過帳號 —— 後面的 finalize/下載要用實際送出的那一個。
     client = runtime.get_client()
     if store is not None:
@@ -2739,6 +2756,7 @@ async def podcast_series(
                         episode_n,
                         active_attempt_id,
                         [row.id for row in baseline],
+                        account=runtime.active_account(),
                     )
                     if not claimed:
                         latest = store.read()
@@ -2751,53 +2769,41 @@ async def podcast_series(
                             latest_attempt["dispatch"]["status"],
                             ACTION_SERIES,
                         )
-                    try:
-                        started = await client.artifacts.generate_audio(
+                    async def _generate_resend(dispatch_client: object):
+                        return await dispatch_client.artifacts.generate_audio(
                             notebook_id,
                             language=series_settings["language"],
                             instructions=plan["brief"],
                             audio_format=to_audio_format(audio_format),
                             audio_length=to_audio_length(audio_length),
                         )
-                    except asyncio.CancelledError as exc:
-                        _mark_acceptance_unknown(
-                            store, episode_n, active_attempt_id, exc
+
+                    # 與 `_run_episode` 共用同一個 dispatch helper —— 它負責配額
+                    # failover 與 not_accepted / acceptance_unknown 的落盤。這裡只把
+                    # 例外翻成 series 的**結構化安全停點**(return partial,不外拋),
+                    # 那是 podcast_series 對呼叫端的契約。
+                    try:
+                        artifact_id = await _dispatch_audio_with_failover(
+                            store, episode_n, active_attempt_id, _generate_resend
                         )
+                    except asyncio.CancelledError:
                         raise
-                    except _REFUSED_WITHOUT_DISPATCH as exc:
-                        # 明確拒絕(配額/限流)沒有建出 task:回 not_accepted +
-                        # ACTION_SERIES,呼叫端稍後原樣重跑整季即可。歸成
-                        # acceptance_unknown 會逼出一次撈不到東西的對帳。
-                        _mark_not_accepted(
-                            store, episode_n, active_attempt_id, exc
-                        )
+                    except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH):
+                        # 明確拒絕(配額/限流)沒有建出 task,或 ensure_started 判定的
+                        # 同一件事:回 not_accepted + ACTION_SERIES,呼叫端稍後原樣重跑
+                        # 整季即可。歸成 acceptance_unknown 會逼出一次撈不到東西的對帳。
                         return partial(
                             episode_n,
                             active_attempt_id,
                             "not_accepted",
                             ACTION_SERIES,
                         )
-                    except Exception as exc:
-                        _mark_acceptance_unknown(
-                            store, episode_n, active_attempt_id, exc
-                        )
+                    except Exception:
                         return partial(
                             episode_n,
                             active_attempt_id,
                             "acceptance_unknown",
                             ACTION_RECONCILE,
-                        )
-                    try:
-                        artifact_id = ensure_started(started)
-                    except RuntimeError:
-                        _mark_not_accepted(
-                            store, episode_n, active_attempt_id, started
-                        )
-                        return partial(
-                            episode_n,
-                            active_attempt_id,
-                            "not_accepted",
-                            ACTION_SERIES,
                         )
                     _bind_accepted_artifact(
                         store, episode_n, active_attempt_id, artifact_id
