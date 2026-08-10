@@ -1,6 +1,6 @@
 [project]
 name = "notebooklm-mcp"
-version = "0.9.5"
+version = "0.9.6"
 description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
 requires-python = ">=3.12,<3.13"
 dependencies = [
