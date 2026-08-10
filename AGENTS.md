@@ -122,7 +122,6 @@ claude mcp add-json notebooklm -s local \
   與 `source_list` 同走 `GET_NOTEBOOK`。所以 ADR-0009 的清理義務有效。推導的三個前提由
   `tests/test_contracts.py::test_generation_takes_its_source_list_from_the_notebook_not_the_server`
   釘住(**它紅就代表推導失效、清理義務要重新論證**),完整論證在該測試的 docstring。
-- 改 contract 測試時對「**實裝版本**」跑,別信 `_research/` 的 HEAD clone。
 - **多帳號 pool 動 dispatch/認證前必讀 [ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**
   (含 v0.9.0 amendment)。四條實作紀律,每條都被真實事故驗證過、都有測試鎖:
   ①**`podcast_series` 有兩條 dispatch 路徑**(全新一集走 `_run_episode`、重送/supersede 是
@@ -171,11 +170,17 @@ claude mcp add-json notebooklm -s local \
 
 - 全程繁體中文註解/文件。TDD:測試先紅再綠,每任務一 commit。
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
+- **要不要真實驗收,看改動有沒有碰到遠端副作用路徑**(`generate` / `add_user` / `delete`
+  這類會在雲端留下東西的呼叫)。沒碰 → 離線測試 + 用既有實測前提推導結案(`source_delete`
+  的清理義務、v0.9.2 的 owner 定位都是這樣結的);碰了 → 開 `acceptance-workspace`。
+  **推導要逐條指出前提在哪次實測被證明**,不能只說「應該沒事」。
 - 不污染 `_research/`(唯讀參考 clone)。
 - **大型修復輪派 agent 時:Sonnet 實作 → Opus 審查 → 主模型裁決**(採納/駁回 findings、
   最終驗證、commit 留在主迴圈)。這個分層被實績驗證過:Opus 抓到的正是本 repo 反覆出現的
   **「補一半」**——guard 放進上傳迴圈內、`except Exception` 漏掉 `CancelledError`、
-  測試只鎖三個 handler 之一。兩條操作紀律:①**同一個檔案不可讓兩個 agent 並行編輯**,
+  測試只鎖三個 handler 之一。三條操作紀律:①**同一個檔案不可讓兩個 agent 並行編輯**,
   按檔案分區,小雜項主迴圈自己 inline 改;②修正輪要把「審查者的具體建議 + 裁決取捨」
-  寫進 agent prompt,別讓它重新發明一次。
+  寫進 agent prompt,別讓它重新發明一次;③**派獨立複審時不要先餵自己的 findings** ——
+  v0.9.2 那輪刻意沒餵,兩邊各自指出同一組問題,那個「獨立收斂」才是信號;先餵只會
+  換到一份同意書。
 

@@ -492,8 +492,9 @@ class FakeResearch:
 
 
 class FakeSharing:
-    """真 `SharingAPI` 的 fake。**三處刻意與真 SDK 同形**,因為它們各自對應一個
-    「fake 說謊 ⇒ bug 溜過去」的事故形狀(AGENTS.md 的 `Source.created_at` tz 那課):
+    """真 `SharingAPI` 的 fake。**三處刻意與真 SDK 同形,外加一條觀測面紀律**,因為它們
+    各自對應一個「fake 說謊 ⇒ bug 溜過去」的事故形狀(AGENTS.md 的 `Source.created_at`
+    tz 那課):
 
     1. `SharedUser` **有 `permission` 欄位**。舊版 fake 只吐 email,於是「已分享但只是
        VIEWER」與「已分享且是 EDITOR」在測試裡長得一樣,`notebook_share_with_pool`
@@ -503,6 +504,11 @@ class FakeSharing:
     3. `add_user` 回的是 `get_status()` 的結果(真 SDK 最後一行就是
        `return await self.get_status(notebook_id)`),**含完整 shared_users**。舊版回空
        list,讓「檢查回傳值確認生效」這種後檢寫了也測不出差別。
+    4. **觀測面要涵蓋你想斷言的呼叫**(上面三條講回傳值,這條講記錄)。`calls` 只記
+       `add_user`,於是「不打任何 RPC」寫成 `assert calls == []` 時,對一支**只打
+       `get_status`** 的實作永遠是綠的 —— v0.9.1 的單帳號回歸就這樣溜過 591 個測試。
+       `get_status` 因此另記 `status_calls`,**刻意不併進 `calls`**:既有測試用
+       `calls == []` 表達「沒打 add_user」(冪等那條),混在一起那個意思會消失。
     """
 
     def __init__(self):

@@ -29,6 +29,8 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 4. `docs/mcp-setup.md`
 5. `audi-skill/notebooklm/SKILL.md` §Auth
 6. `../podcast-lab/AGENTS.md` §更新 notebooklm-mcp
+   ⚠️ 那個工作樹**常有進行中的 EP 目錄與 manifest 改動**,只 commit 這一個檔
+   (`git commit AGENTS.md -m …`),別 `git add -A`。
 
 **外加一件不算 pin 但一定要做的**:在 `CHANGELOG.md` 開一節寫「改了什麼、為什麼、
 踩到什麼事故」。版本敘事只寫在那裡 —— **不要回填進本檔**。
