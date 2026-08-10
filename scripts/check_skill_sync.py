@@ -36,6 +36,7 @@ REQUIRED_CONTRACT_TERMS = (
     "already_shared",    # notebook_share_with_pool 的回傳:VIEWER 不算「已分享」是硬契約
     "abandon_in_flight", # podcast_attempt_retract:呼叫端宣告的外部知識,狀態推導不出來
     "notebook_access_denied",  # series 安全停點裡「要人工補分享」的那一種,不可原樣重呼
+    "too_many_sources",  # v0.9.3 的來源筆數守門停點;safe_next_action 分兩種,照做才走得出去
 )
 
 

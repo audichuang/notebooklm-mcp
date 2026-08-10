@@ -208,7 +208,16 @@ async def test_concurrent_resume_only_one_caller_uploads_feedback_source(
     manifest_path = tmp_path / "series_manifest.json"
     original_list = fake_client.sources.list
 
-    async def fail_before_upload(_notebook_id):
+    async def fail_before_upload(notebook_id):
+        # 這個測試要攔的是 **finalize 階段**那一次 `sources.list`。但生成前另有一道
+        # 來源筆數守門也打 `list`,無條件 raise 會提前擋在生成之前 —— 連 manifest 都
+        # 不會被建出來,測的就不是原本那件事了。
+        #
+        # **用階段判準,不是數第幾次呼叫**:守門跑在建 attempt 之前(manifest 還不存在),
+        # finalize 那次必定在之後。數次數的話,將來任何人在守門前後多加一趟無害的 list,
+        # fault 就會靜默打在錯的位置,而測試照樣是綠的。
+        if not manifest_path.exists():
+            return await original_list(notebook_id)
         raise ConnectionError("stop before feedback upload")
 
     monkeypatch.setattr(fake_client.sources, "list", fail_before_upload)

@@ -960,3 +960,41 @@ async def test_abandon_in_flight_still_refuses_a_foreign_attempt(fake_client, tm
         await p.podcast_attempt_retract(
             manifest_path, 1, "att-does-not-belong", reason="亂試", abandon_in_flight=True
         )
+
+
+async def test_retract_clears_an_attempt_that_never_left_this_machine(
+    fake_client, tmp_path
+):
+    """`prepared` / `not_accepted` 的 attempt **不需要 `abandon_in_flight`** 就能作廢。
+
+    真實死結,撞過三次:一次 dispatch 被配額或 502 同步拒絕後,attempt 停在
+    `not_accepted`;retract 拒收它,而 `podcast_episode` 給的唯一出路「用 identical
+    arguments 重送」要求 brief 逐字相同 —— 中途改過 brief 產生器就重現不了。呼叫端
+    只剩「低階 `generate_audio` + `podcast_attempt_adopt`」這條繞路,還多燒一次生成配額。
+
+    准入判準原本掛在「該集有沒有其他 output 證據」這個 **proxy** 上,而真正的變因是
+    **這顆有沒有可能在遠端留下東西** —— 那件事 manifest 自己就記著(`dispatch.status`),
+    契約保證 `prepared`/`not_accepted` 沒有建出 task,不需要呼叫端提供任何外部知識。
+
+    放寬**只涵蓋這兩種狀態**:`acceptance_unknown` / 已 dispatch 還在飛的仍然要顯式
+    宣告,由 `test_retract_refuses_an_attempt_that_is_not_the_durable_output` 鎖著。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path = str(tmp_path / "series_manifest.json")
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+    stopped = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
+    assert stopped["observed_state"] == "not_accepted"
+
+    out = await p.podcast_attempt_retract(
+        manifest_path, 1, stopped["attempt_id"], reason="brief 寫錯了,重寫一份"
+    )
+
+    assert out["observed_state"] == "retracted"
+    # 從沒產出過音檔,所以沒有回錄 source 要清 —— 清理義務不會擋住下一步。
+    assert out["stale_source_ids"] == []
+
+    # 作廢之後這一集回到乾淨狀態:重生走得通,而且全程不必碰 `abandon_in_flight`。
+    fake_client.artifacts.generate_audio_exc = None
+    again = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
+    assert again["complete"] is True

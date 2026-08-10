@@ -26,8 +26,16 @@ def _generate_briefs(fake_client, start: int = 0) -> list[str]:
 async def test_safe_next_action_vocabulary_names_public_mcp_tools():
     assert p.SAFE_NEXT_ACTIONS == {
         "podcast_attempt_adopt",
+        # 來源筆數守門的停點:series 生不出帶 `source_ids` 的 settings,所以下一步
+        # 只能換工具。指回 `podcast_series` 會叫呼叫端撞回同一道牆,而 `attempt_count`
+        # 兩輪都不變 —— 正是 `partial()` 註解說的「看不出自己在原地打轉」。
+        "podcast_episode",
         "podcast_episode_reconcile",
         "podcast_episode_resume",
+        # 筆數守門撞上既有 active attempt 時的停點:那顆 attempt 的 settings 是
+        # 「不指名來源」,指回 `podcast_episode` 會被 `_is_resendable_same_request`
+        # 拒絕、不指名又撞回守門 —— 得先 tombstone 才走得出去。
+        "podcast_attempt_retract",
         "podcast_series",
         "source_delete",
     }

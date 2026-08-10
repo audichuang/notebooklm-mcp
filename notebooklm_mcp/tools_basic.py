@@ -14,7 +14,11 @@ from notebooklm.rpc.types import SharePermission
 
 from . import runtime
 from ._errors import NotebookAccessDenied, is_permission_denied
-from ._sources import assert_sources_exist, to_source_ids
+from ._sources import (
+    assert_source_count_is_safe,
+    assert_sources_exist,
+    to_source_ids,
+)
 from ._status import ensure_completed, ensure_started
 from ._text import _CITATION_RE, norm as _norm
 from .auth_probe import probe_auth
@@ -492,9 +496,15 @@ async def generate_audio(
     """Generate an audio overview. Defaults to zh_Hant and returns task_id.
 
     ``source_ids`` 指名只讀哪幾筆來源(用 source_list 取得真實 id);省略則用筆記本
-    全部來源。要排除哪些是呼叫端的政策。"""
+    全部來源。要排除哪些是呼叫端的政策。
+
+    ⚠️ **帶進生成的來源 >= 10 筆會在打 RPC 之前 raise**,與 ``podcast_episode`` 同一道
+    守門(實測 11–15 筆會讓模型拿別的來源內容填空,而 task_id／時長全部正常)。
+    這支是低階救援入口,但**失效模式跟高階完全一樣**——守門只掛在 podcast 家族的話,
+    這裡就是繞過它的公開後門。"""
     selected = to_source_ids(source_ids)
     client = runtime.get_client()
+    await assert_source_count_is_safe(client, notebook_id, selected)
     if selected is not None:
         await assert_sources_exist(client, notebook_id, selected)
     status = await client.artifacts.generate_audio(
@@ -581,7 +591,13 @@ async def artifact_retry_failed(notebook_id: str, artifact_id: str) -> dict:
     再用對應的 download 工具。
 
     注意 SDK 對伺服器端的同步拒絕(rate limit / 配額 / 不可重試的 artifact)是
-    **raise**(不像 generate_* 吞成 failed status),所以拒絕會直接冒出來。"""
+    **raise**(不像 generate_* 吞成 failed status),所以拒絕會直接冒出來。
+
+    ⚠️ **未驗證的邊界**:AUDIO 的 retry 這裡**沒有**來源筆數守門(`generate_audio` /
+    `podcast_episode` 都有)。RETRY_ARTIFACT 只送 artifact_id,伺服器**應該**沿用該
+    artifact 原本的來源集合而不是重抓筆記本當下全部;但那是推測,沒有實測前提,所以
+    既不加守門(會廢掉一條救援路)也不宣稱安全。要重跑一顆來源集合已經過期的 failed
+    AUDIO,走 `podcast_episode(..., source_ids=[...])` 重生比較保險。"""
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id must be a non-empty string")
     artifact_id = artifact_id.strip()

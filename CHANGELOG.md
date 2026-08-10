@@ -8,6 +8,99 @@
 
 ---
 
+## v0.9.3
+
+**一個 host 跑了 14 集,13 集裡 9 集內容錯置,而工具全程回報成功**(2026-08-10)。
+這一版把那件事變成呼叫不到的組合,並修掉一路挖出來的四個相鄰缺陷。
+
+### 症狀為什麼查不出來
+
+模型講不出某一項時,會**從 context 撈一個前面集數講過的內容填進那個位置**。聽起來很順,
+證據還全部找得到出處(某集的四項捏造分別來自 EP01/EP02/EP12 的考點,一字不差)。而
+**任何成功訊號都看不出來** —— 音檔存在、sha 相符、時長正常、`ok=true`;只有拿
+`source_fulltext` 對逐字稿提問「該篇獨有的事實」才驗得出來。
+
+實測分界(同一節目、同一 brief):11–15 筆 → 6 教錯 + 4 捏造;6 筆 → 0;1 筆 → 0。
+所以量到的是「≤9 乾淨、≥11 出事」——**10 這一格從來沒量過**,從 10 起拒絕是 fail-closed
+的政策選擇,不是實驗結論。程式碼與訊息都照這樣寫,免得下一個調閾值的人把政策當量測。
+
+### 守門:判準是「帶進去幾筆」,不是「有沒有指名」
+
+第一版把守門掛在 `source_ids is None` 上,而那只是 proxy —— 指名 12 筆與不指名 12 筆
+對模型是同一件事。host 讀了 skill 知道要指名、卻把「本集 + 最近 5 集」做成「本集 +
+全部前集」時,掛在 proxy 上的守門會全程沉默而事故照樣發生。改成一律算 effective count:
+指名時是純本地的 `len()`(超標連對帳 RPC 都不打),沒指名才去問筆記本。
+
+**三個公開入口各一道**,都在該路徑最早的零副作用位置:`tools_basic.generate_audio`
+(低階救援入口,但失效模式一模一樣 —— 只守 podcast 家族的話它就是公開後門)、
+`_run_episode`(建 attempt 之前)、`podcast_series` 的 `refuse_if_too_many_sources`
+(**任何 manifest mutation 之前**)。
+
+`prior_mp3_path` 會在守門**之後**、生成之前再上傳一筆,所以現在預先計入 —— 否則 9 筆
+放行、上傳完以 10 筆送出,剛好落在拒絕線上。那是同一個函式內的確定性順序,不是競態。
+
+### series 停在**結構化停點**,而且那個停點走得出去
+
+守門一開始是裸拋 `ValueError`。而 series 的 except 分支收的是 `RuntimeError` /
+`_REFUSED_WITHOUT_DISPATCH` / `(TimeoutError, ConnectionError)` —— 裸拋會直接冒泡,
+**把前面幾集已經跑完的 `run_results` 整份丟掉**。F-4 修過同一個形狀,這次用專屬型別
+(`TooManySourcesError`)擋在再犯之前。
+
+觸發時序是常態不是邊角:逐集加原文時 EP_n 開始前有 `2n-1` 筆,`2n-1 >= 10` 解出 **n=6**
+—— 正好是 skill 說的「EP06 起改用單集入口」。
+
+**停點位置與 `safe_next_action` 都改過一輪**,因為第一版兩者都是錯的:
+
+- 守門原本擺在 dispatch 前,但 `not_accepted` 已經先被 re-arm 成 `prepared`、
+  `failed/removed` 已經先建好 superseding attempt(`attempt_count` 白長一格)。
+  等於「先把狀態改成準備送出、再拒絕送出」。已移到 re-arm/supersede 的共同上游。
+- `safe_next_action` 原本一律指 `podcast_episode`。但既有 attempt 的 settings 是
+  「不指名來源」,呼叫端拿指名版進來會被 `_is_resendable_same_request` 拒絕
+  (`already has durable active attempt`),不指名又撞回守門 —— **死路**,正是 v0.9.1
+  修過的「指引在它自己產生的狀態下不可執行」。改成:沒有 attempt → `podcast_episode`;
+  有 attempt → `podcast_attempt_retract`(新增進 `SAFE_NEXT_ACTIONS`)。
+  測試現在**真的照著 `safe_next_action` 走一遍**,不只斷言字串。
+
+### `podcast_attempt_retract` 對「從沒送出去」的 attempt 不再要求外部宣告
+
+上一條的出路要能走,retract 得先能收下那顆 attempt —— 而它拒收。准入判準問的是
+「**這一集有沒有其他 output 證據**」,該問的是「**這顆有沒有可能在遠端留下東西**」。
+後者 manifest 自己就記著:`dispatch.status` 是 `prepared` / `not_accepted` 時,契約
+保證伺服器沒建出 task(`_REFUSED_WITHOUT_DISPATCH` 與 ADR-0010 紀律④整條立論都建在
+這上面),作廢它是純本機、零遠端後果。
+
+**又是把 proxy 當判準**,而真實後果撞過三次:一次 dispatch 被配額或 502 拒絕後 attempt
+停在 `not_accepted`,retract 拒收它,而 `podcast_episode` 給的唯一出路「用 identical
+arguments 重送」要求 brief **逐字相同** —— 中途改過 brief 產生器就重現不了。呼叫端只剩
+「低階 `generate_audio` + `podcast_attempt_adopt`」這條繞路,還多燒一次生成配額。
+
+放寬**只涵蓋那兩種狀態**。`acceptance_unknown` / `dispatching` / `accepted` 仍然只能走
+`abandon_in_flight=True` —— 那個是真的不知道有沒有受理,需要外部知識。同時補上 docstring:
+原本只寫「伺服器已經受理生成(dispatch=accepted)」,讀起來像不適用於 `acceptance_unknown`,
+於是撞上死結的人不知道正門就在那個旗標後面。
+
+### preflight 前移不可以繞掉權限分類
+
+守門的 `sources.list` 現在是整條路徑上**第一個**遠端呼叫,而權限分類原本只長在
+`_dispatch_audio_with_failover` 裡。pool 剛 rotate 到看不到 notebook 的帳號時,真實的
+`ClientError(rpc_code=7)` 會在 helper 外裸拋 —— 前面幾集的 `run_results` 一起丟掉,
+而且拿不到「去 `notebook_share_with_pool`」那條指引(v0.9.0/v0.9.1 花了兩輪才做出來的)。
+`_list_sources` 統一翻譯,只轉權限那一種:網路錯誤、認證過期一路吞下去只會把根因埋掉。
+
+### 仍未守的一處(刻意)
+
+`artifact_retry_failed` 對 failed AUDIO 的原地重跑**沒有**筆數守門。RETRY_ARTIFACT 只送
+artifact_id,伺服器**應該**沿用該 artifact 原本的來源集合而不是重抓筆記本當下全部 ——
+但那是推測、沒有實測前提,所以既不加守門(會廢掉一條救援路)也不宣稱安全。已寫進該工具
+docstring,列入 v0.9.3 驗收。
+
+### 這一輪的分工
+
+離線 review + **Codex 獨立複審**(沒有先餵它我方 findings,兩邊各自收斂)。Codex 抓到的
+三條是我方沒看到的:低階入口的公開後門、`prior_mp3_path` 的確定性順序、以及那條死路。
+它也做了判別實驗——把權限錯誤掛在 `sources.list` 上,證明既有測試因為只把錯誤掛在
+`generate_audio` 而全綠。四道新守門各做過突變驗證。
+
 ## v0.9.2
 
 **v0.9.1 的 `notebook_share_with_pool` 修法本身帶進三個缺陷**(2026-08-10,離線 review

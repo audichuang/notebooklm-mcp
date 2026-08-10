@@ -17,7 +17,12 @@ from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitErro
 from notebooklm.types import ArtifactType
 
 from . import runtime
-from ._sources import assert_sources_exist, to_source_ids
+from ._sources import (
+    TooManySourcesError,
+    assert_source_count_is_safe,
+    assert_sources_exist,
+    to_source_ids,
+)
 from ._status import TerminalGenerationError, ensure_completed, ensure_started
 from .audio_finalize import (
     finalize_attempt,
@@ -59,15 +64,29 @@ _REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
 _is_permission_denied = is_permission_denied
 
 ACTION_ADOPT = "podcast_attempt_adopt"
+ACTION_EPISODE = "podcast_episode"
 ACTION_RECONCILE = "podcast_episode_reconcile"
 ACTION_RESUME = "podcast_episode_resume"
+ACTION_RETRACT = "podcast_attempt_retract"
 ACTION_SERIES = "podcast_series"
 ACTION_SOURCE_DELETE = "source_delete"
 SAFE_NEXT_ACTIONS = frozenset(
     {
         ACTION_ADOPT,
+        # 來源筆數守門的停點。`_classify_not_accepted_stop` 刻意不為「權限 vs 配額」
+        # 新增字面值(那兩者的下一步都仍是 podcast_series),但這裡不同:series 生不出
+        # 帶 `source_ids` 的 settings,所以**下一步真的是另一支工具**。指回
+        # `podcast_series` 會叫呼叫端撞回同一道牆,而 `attempt_count` 兩輪都不變 ——
+        # 正是 `partial()` 註解說的「看不出自己在原地打轉」。
+        ACTION_EPISODE,
         ACTION_RECONCILE,
         ACTION_RESUME,
+        # 筆數守門撞上**既有 active attempt** 時的停點。不能指回 `ACTION_EPISODE`:
+        # 那顆 attempt 的 settings 是「不指名來源」,呼叫端拿指名版進來會被
+        # `_is_resendable_same_request` 判成不同請求而拒絕(`already has durable
+        # active attempt`),不指名又撞回守門 —— **死路**。retract 是純本機動作,
+        # 那顆從未 dispatch 的 attempt 沒有 stale source 要清,tombstone 掉才走得出去。
+        ACTION_RETRACT,
         ACTION_SERIES,
         ACTION_SOURCE_DELETE,
     }
@@ -1386,7 +1405,17 @@ async def _run_episode(
     settings = _audio_settings(
         resolved_language, audio_format, audio_length, selected_source_ids
     )
-    # 唯讀對帳,在建 attempt 與任何副作用之前:一筆打錯/已刪的 id 不會被伺服器擋下來。
+    # 兩道都在建 attempt 與任何副作用之前。**筆數先驗**:指名時它是純本地的 len(),
+    # 超標可以連對帳那趟 RPC 都不打就秒退;沒指名時它自己去問筆記本現有幾筆。
+    # `prior_mp3_path` 會在守門之後、生成之前再上傳一筆(下面那段 standalone 續集),
+    # 所以**現在就要把它算進去**——否則 9 筆放行、上傳完以 10 筆送出。
+    await assert_source_count_is_safe(
+        client,
+        notebook_id,
+        selected_source_ids,
+        pending_uploads=1 if prior_mp3_path else 0,
+    )
+    # 唯讀對帳:一筆打錯/已刪的 id 不會被伺服器擋下來。
     if selected_source_ids is not None:
         await assert_sources_exist(client, notebook_id, selected_source_ids)
 
@@ -1635,6 +1664,11 @@ async def podcast_episode(
     筆記本全部來源。**回頭重生某一集時要傳**：筆記本此時已有後續各集的題目與音檔回錄，
     不指名就會讓那些內容洩進這一集。它與 language／format／length 一樣算生成輸入，會存進
     attempt settings，resume 時不得改動。
+
+    ⚠️ **帶進生成的來源 >= 10 筆會在任何副作用之前 raise**（實測 11–15 筆會讓模型拿前面
+    集數的內容填空，而音檔／sha／時長全部正常，事後只有逐字稿提問驗得出來）。判準是
+    **筆數**不是「有沒有指名」：指名 12 筆與不指名 12 筆一樣被擋。抓約 6 筆——本集自己的
+    來源 + 最近 5 集的音檔回錄，集號比本集大的回錄一律排除。
     """
     # 本地驗證先行(壞參數 ValueError 秒退,不浪費 RPC),再做認證預檢:
     # 單集也要等最多 20 分鐘,cookie 死了先秒退(見 auth_probe docstring)。
@@ -2384,11 +2418,20 @@ async def podcast_attempt_retract(
     ``attempt_id`` 必須是該集的 ``output_attempt_id``，或掛在 ``active_attempt_id`` 但
     從未 promote 的未授權 candidate；``reason`` 必填非空。
 
-    ``abandon_in_flight=True`` 是「**輸入就是錯的**」那一種作廢：伺服器已經受理生成
-    （dispatch=accepted），但送進去的 brief 本身有問題，等它跑完也沒有意義。這件事
-    manifest **推導不出來**——它與「第一次 dispatch、還在飛」的狀態逐欄位相同，差別只在
-    呼叫端握有的外部知識，所以必須顯式宣告，預設不開。沒有這個旗標時那個狀態刻意留給
-    ``podcast_episode_reconcile`` / ``podcast_episode_resume``。
+    **要不要 ``abandon_in_flight``，看那顆 attempt 的 ``dispatch.status``：**
+
+    - ``prepared`` / ``not_accepted``（配額被拒、502 同步拒絕……）——**不需要旗標**。
+      契約保證伺服器沒建出 task，作廢它是純本機、零遠端後果，manifest 自己就知道。
+    - ``acceptance_unknown`` / ``dispatching`` / ``accepted``——**需要 ``abandon_in_flight=True``**。
+      這幾種 manifest **推導不出來**有沒有東西在跑：它與「第一次 dispatch、還在飛」逐欄位
+      相同，差別只在呼叫端握有的外部知識（例如 ``artifact_list`` 實際查過雲端零 artifact，
+      或明知送進去的 brief 本身就是錯的、等它跑完也沒有意義）。所以必須顯式宣告，預設不開；
+      不宣告時那個狀態刻意留給 ``podcast_episode_reconcile`` / ``podcast_episode_resume``。
+
+    ⚠️ ``acceptance_unknown`` 撞上「原樣重呼」死結時就是走這條：``podcast_episode`` 會擋、
+    而它給的出路「用 identical arguments 重送」要求 brief 逐字相同——中途改過產生器就重現
+    不了。查過 ``artifact_list`` 確認雲端零 artifact 之後，``abandon_in_flight=True`` 是正門；
+    低階 ``generate_audio`` + ``podcast_attempt_adopt`` 也走得通，但會多燒一次生成配額。
 
     **它省不了配額**：生成已經在燒，retract 是純本機動作、取消不了遠端。省的是整整
     一輪 finalize（下載 mp3 → 上傳回錄 source → promote → 再 retract → ``source_delete``）
@@ -2472,12 +2515,29 @@ async def podcast_attempt_retract(
         # 「正常還在跑」逐欄位相同,所以只能由呼叫端說,不能由狀態猜。預設 False 讓
         # reconcile/resume 的守備範圍原封不動;宣告了就等同 (2):從未 promote、無人
         # 授權的 candidate,作廢它並留下理由。
+        # (4) **dispatch 從未離開本機**:`prepared` / `not_accepted` 是契約保證沒有建出
+        # 遠端 task 的狀態(`_REFUSED_WITHOUT_DISPATCH` 與 ADR-0010 紀律④整條立論都建在
+        # 這上面)。作廢這種 attempt 是純本機動作、零遠端後果,而且**manifest 自己就知道**
+        # ——不需要呼叫端提供任何外部知識,所以不該經過 `abandon_in_flight`。
+        #
+        # 上面 (2) 用「該集有沒有其他 output 證據」當准入判準,但真正的變因是「這顆有沒有
+        # 可能在遠端留下東西」——**把 proxy 當判準**,於是零副作用的 attempt 被一起關在
+        # 門外。真實後果撞過三次:一次 dispatch 被配額/502 拒絕後 attempt 停在
+        # not_accepted,retract 拒收它、原樣重呼又要求逐字相同的 brief(重現不了就死結),
+        # 呼叫端只能用低階 `generate_audio` + `podcast_attempt_adopt` 繞出去、多燒一次
+        # 生成配額。**`acceptance_unknown` 不在這裡面**:那個是真的不知道有沒有受理,
+        # 需要外部知識,仍然只能走 `abandon_in_flight`。
+        never_dispatched = attempt.get("dispatch", {}).get("status") in (
+            "prepared",
+            "not_accepted",
+        )
         abandons_unauthorized_candidate = (
             attempt_id == active_attempt_id
             and output_attempt_id != attempt_id
             and (
                 output_attempt_id is not None
                 or has_hard_output_evidence(episode)
+                or never_dispatched
                 or abandon_in_flight
             )
         )
@@ -2614,7 +2674,20 @@ async def podcast_series(
     audio_length: str | None = "long",
     wait_timeout: float = 1200.0,
 ) -> dict:
-    """依 manifest 的安全續點，確定性地生成整季 podcast。"""
+    """依 manifest 的安全續點，確定性地生成整季 podcast。
+
+    ⚠️ **一次呼叫會連續生成到 `episodes` 清單結束或外層 timeout 砍掉**，不是「推進一集
+    就回來」。timeout 只殺 MCP request——已經送出的下一集在遠端照樣生完。所以**清單裡
+    只放你真的要生成的集**；還沒把來源放進筆記本的集數先別放進來，否則它會用「筆記本
+    此刻的來源」生成，而那不是那一集該聽的東西（2026-08 有 host 因此 13 集裡 9 集內容
+    錯置，工具全程回報成功）。
+
+    ⚠️ **這支工具不能指名來源**：每一集都用筆記本當下的**全部**來源。超過 9 筆會讓模型
+    拿前面集數的內容填空，所以生成前有一道 fail-closed 的筆數守門。超標時**不外拋**，
+    而是回結構化安全停點（`observed_state="too_many_sources"`、
+    `safe_next_action="podcast_episode"`，已跑完的集仍在 `episodes` 裡）——照著改用
+    `podcast_episode(..., source_ids=[...])`。實務上就是**從 EP06 起改用單集入口**
+    （本集來源 + 最近 5 集回錄 ≈ 6 筆）；重呼本工具只會停在同一集。"""
     # start 是執行下界，不是重生旗標；N 以前的 plan 是 caller 明示的 trust
     # boundary，不讀、不驗證。範圍錯誤仍須在任何遠端副作用前失敗。
     if start < 1:
@@ -2692,6 +2765,51 @@ async def podcast_series(
             ),
             **extra,
         }
+
+    async def refuse_if_too_many_sources(
+        episode_n: int, attempt_id: str | None, guard_client: object
+    ) -> dict | None:
+        """**即將 dispatch 前**的來源筆數守門:回 partial 表示要停,回 None 表示放行。
+
+        擺在 series 這一層而不是只擺在兩條 dispatch 點,是因為擋得夠早才不會留半成品:
+        `not_accepted` 會被 re-arm 成 prepared、`failed/removed` 會建一顆 superseding
+        attempt(`attempt_count` 因此 +1)。先改狀態再拒絕送出,留下的東西要另外收拾,
+        而 `attempt_count` 是呼叫端判斷「有沒有在原地打轉」的唯一依據。
+
+        **`safe_next_action` 依有沒有既有 attempt 分岔,這不是風格問題**:
+        - 沒有 attempt(全新一集)→ `podcast_episode`,呼叫端帶 `source_ids` 直接進來即可。
+        - 已有 attempt → **`podcast_attempt_retract`**。那顆 attempt 的 settings 是
+          「不指名來源」,呼叫端拿指名版進來會被 `_is_resendable_same_request` 判成不同
+          請求而拒絕(`already has durable active attempt`),不指名又撞回這道守門 ——
+          **那是死路**,正是 v0.9.1 修過的「指引在它自己產生的狀態下不可執行」。
+
+        權限錯誤也要在這裡分類:`_list_sources` 把它翻成 `NotebookAccessDenied`,而這道
+        preflight 現在跑在 dispatch helper **之前** —— 不接住的話 series 會裸拋,連前面
+        幾集跑完的 `run_results` 一起丟掉。
+        """
+        try:
+            await assert_source_count_is_safe(guard_client, notebook_id)
+        except TooManySourcesError as exc:
+            if attempt_id is None:
+                return partial(
+                    episode_n, None, "too_many_sources", ACTION_EPISODE, error=str(exc)
+                )
+            return partial(
+                episode_n,
+                attempt_id,
+                "too_many_sources",
+                ACTION_RETRACT,
+                error=(
+                    f"{exc}\n這一集已經有 active attempt {attempt_id!r},而它的 settings "
+                    "是「不指名來源」——直接改呼 podcast_episode(..., source_ids=[...]) 會被"
+                    "拒絕(already has durable active attempt)。先 podcast_attempt_retract "
+                    "掉它(純本機動作;它從未 dispatch,沒有 stale source 要清),再用指名版重生。"
+                ),
+            )
+        except NotebookAccessDenied as exc:
+            observed_state, extra = _classify_not_accepted_stop(exc)
+            return partial(episode_n, attempt_id, observed_state, ACTION_SERIES, **extra)
+        return None
 
     # Resume/finalize 也需要有效認證；每個新 generation 前會再 probe 一次，
     # 避免數小時 series 中途 cookie 失效後仍燒 submit。
@@ -2873,6 +2991,22 @@ async def podcast_series(
                     _assert_series_owns_attempt(
                         attempt, series_settings, episode_n, active_attempt_id
                     )
+                # 這三種狀態接下來都會產生新的 dispatch(`prepared` 直接送、
+                # `not_accepted` 先 re-arm 再送、`failed`/`removed` 建 superseding
+                # attempt 再送),所以守門擺在它們的**共同上游**、在任何 manifest
+                # mutation 之前。擺在各自的 dispatch 點會先 re-arm/先建 attempt 才拒絕,
+                # 留下半成品狀態、還讓 `attempt_count` 白長一格。
+                # 已經 dispatch 出去、只等 finalize 的 attempt 不在這裡面 —— 它不會再
+                # 生成一次,擋它只會把一集卡在半路。
+                if dispatch_state in ("prepared", "not_accepted") or remote_state in (
+                    "failed",
+                    "removed",
+                ):
+                    stop = await refuse_if_too_many_sources(
+                        episode_n, active_attempt_id, client
+                    )
+                    if stop is not None:
+                        return stop
                 if dispatch_state == "not_accepted":
                     rearmed = _rearm_not_accepted_attempt(
                         store, episode_n, active_attempt_id
@@ -2930,6 +3064,11 @@ async def podcast_series(
                     # baseline / 記帳 / 實際送出三者同源,理由同 `_run_episode`
                     # 那條路徑(並行 rotate 會讓 manifest 記 A、實際 B 送出)。
                     dispatch_account, dispatch_client = runtime.snapshot()
+                    # 來源筆數守門**不在這裡**:它在上面 re-arm/supersede 的共同上游,
+                    # 也就是任何 manifest mutation 之前(`refuse_if_too_many_sources`)。
+                    # 曾經擺在這一行,結果是「先把 not_accepted re-arm 成 prepared、
+                    # 先建好 superseding attempt,然後才拒絕送出」——半成品狀態留在
+                    # manifest 裡,而呼叫端唯一的出路訊息還指向一支會拒收它的工具。
                     baseline = await dispatch_client.artifacts.list(
                         notebook_id, artifact_type=ArtifactType.AUDIO
                     )
@@ -3142,6 +3281,15 @@ async def podcast_series(
 
         # candidate range 內完全沒有 attempt 才能產生新的遠端副作用。
         await probe_auth(client)
+        # 全新一集的守門。`_run_episode` 內部還有一道(那道是給 `podcast_episode` 直呼
+        # 用的,series 走到那裡時會冗餘再打一次唯讀 list —— 一集要跑二十分鐘,一趟
+        # list 換「兩個入口各自守得住」很划算)。這裡先擋是因為**例外分類走不通**:
+        # 守門在建 attempt 之前拋,而下面的 `except (RuntimeError, ...)` 會先呼叫
+        # `_active_attempt_or_reraise` —— 沒有 attempt 就原樣重拋,`NotebookAccessDenied`
+        # 於是裸奔出去,連前面幾集的 run_results 都一起丟掉。
+        stop = await refuse_if_too_many_sources(episode_n, None, client)
+        if stop is not None:
+            return stop
         try:
             result = await _run_episode(
                 notebook_id,
@@ -3155,6 +3303,18 @@ async def podcast_series(
                 audio_length,
                 wait_timeout,
                 manifest_path=manifest_path,
+            )
+        except TooManySourcesError as exc:
+            # 守門擋在建 attempt 之前,所以這一集**沒有** attempt —— 下面每個 handler
+            # 都用的 `_active_attempt_or_reraise` 在這裡不適用,`attempt_id` 回 None。
+            # 而**必須翻成結構化停點**:裸拋會把前面幾集已經跑完的 run_results 整份
+            # 丟掉,那正是 F-4 修過的形狀(見 inline dispatch 分支那段長註解)。
+            return partial(
+                episode_n,
+                None,
+                "too_many_sources",
+                ACTION_EPISODE,
+                error=str(exc),
             )
         except TerminalGenerationError:
             current = store.read()

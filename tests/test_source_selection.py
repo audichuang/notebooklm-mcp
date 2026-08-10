@@ -299,3 +299,321 @@ async def test_failed_series_call_does_not_wipe_the_refusal_evidence(
     after_attempt = after["episodes"][0]["attempts"][0]
     assert after_attempt["remote"] == before_remote, "失敗的呼叫抹掉了拒絕證據"
     assert after_attempt["dispatch"]["status"] == "not_accepted"
+
+
+# ---------------------------------------------------------------------------
+# 不指名來源時的筆數守門。已實測的邊界(同一節目、同一 brief):11–15 筆 → 6 項教錯
+# + 4 項捏造;6 筆 → 0;量到的分界是「≤9 乾淨、≥11 出事」。而錯法是**模型從 context
+# 撈前面集數講過的內容填進講不出來的位置**——聽起來很順、證據全部找得到出處,
+# 從任何成功訊號(音檔存在、sha 相符、時長正常)都看不出來。所以這裡 fail-closed。
+
+
+def _seed_sources(fake_client, n: int) -> None:
+    fake_client.sources.seed(*[f"EP{i:02d} 題目" for i in range(1, n + 1)])
+
+
+async def test_episode_refuses_to_generate_when_the_notebook_holds_too_many_sources(
+    fake_client, tmp_path
+):
+    """單集入口不指名 + 超標筆記本 = 保證產出假內容,那個組合必須呼叫不到,
+    不能靠 host 讀完 skill 才避開。
+
+    真實事故(2026-08,別的 host 跑 14 集):13 集裡 9 集內容錯置,工具全程 `ok=true`。
+    只有對逐字稿提問該篇獨有的事實才驗得出來。
+
+    `podcast_episode` **外拋**——它沒有 series 那種「回傳值表達安全停止」的契約,
+    整支呼叫只做一集,拋出去就是完整的答案(對照
+    `test_series_stops_structurally_instead_of_throwing_away_finished_episodes`)。
+    """
+    _seed_sources(fake_client, 10)
+
+    with pytest.raises(ValueError, match="source_ids") as excinfo:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(tmp_path / "series_manifest.json"),
+        )
+
+    assert "10" in str(excinfo.value), "要說出實際筆數,否則 host 不知道差多少"
+    assert not any(c[0] == "generate_audio" for c in fake_client.artifacts.calls)
+    # 零副作用:連 attempt 都不該建 —— 留一筆沒 dispatch 的 attempt 會讓 host 的
+    # `attempt_count` 一直長,而 skill 教它把那個當成「配額原地打轉」。
+    assert not (tmp_path / "series_manifest.json").exists()
+
+
+async def test_series_stops_structurally_instead_of_throwing_away_finished_episodes(
+    fake_client, tmp_path
+):
+    """**守門在 series 裡是結構化安全停點,不是裸拋。**
+
+    這是 F-4 修過的同一個形狀:`podcast_series` 對呼叫端的契約是「預期內的停止用
+    回傳值表達」,裸拋會把**前面幾集已經跑完的 `run_results` 整份丟掉** —— 呼叫端
+    看不到自己跑到哪、也拿不到 `safe_next_action`,重呼只會再拋一次。
+
+    而且這裡的觸發時序是**常態而非邊角**:逐集加原文時 EP_n 開始前有 `2n-1` 筆
+    (n 集原文 + n-1 集回錄),`2n-1 >= 10` 解出 n=6 —— 也就是 skill 說的「EP06 起
+    改用單集入口」。本測試把回錄遞增壓縮成兩集來重現同一個交界。
+
+    `safe_next_action` 必須是 `podcast_episode`:回 `podcast_series` 等於叫呼叫端
+    撞回同一道牆,而 `attempt_count` 兩輪都不會變 —— 正是 `partial()` 註解說的
+    「看不出自己在原地打轉」。
+    """
+    # 9 筆通過(實測乾淨的上緣),EP01 完成後自己的回錄讓筆記本變 10 筆 → EP02 被擋。
+    _seed_sources(fake_client, 9)
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[
+            {"title": "心法篇", "brief": "第一集"},
+            {"title": "實戰篇", "brief": "第二集"},
+        ],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 2
+    assert out["observed_state"] == "too_many_sources"
+    assert out["safe_next_action"] == "podcast_episode"
+    assert len(out["episodes"]) == 1, "EP01 已經跑完,結果不可以被丟掉"
+    assert out["episodes"][0]["episode"] == 1
+    # 停在 EP02 之前:第二集連 attempt 都沒建,generate_audio 只發生過一次。
+    assert out["attempt_id"] is None
+    assert len(
+        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
+    ) == 1
+    # 訊息要留在回傳值裡 —— 裸拋時指引在 exception,回 partial 就只剩這個欄位。
+    assert "source_ids" in out["error"]
+
+
+async def test_the_count_guard_also_covers_the_series_resend_path(
+    fake_client, tmp_path
+):
+    """**兩條 dispatch 路徑都要守。** 全新一集走 `_run_episode`,重送/supersede 是
+    `podcast_series` 自己 inline —— v0.8.0 的 failover 只補了前者,於是 pool 對「重試」
+    這條最需要它的路完全無效(ADR-0010 紀律①)。同一個形狀在這裡會重演:筆記本的
+    來源是**隨每集回錄遞增**的,所以「上次 dispatch 時還沒超標、這次重送時超了」
+    正是那個 14 集事故的實際時序。
+
+    這條路徑上已經有一個既有 attempt,所以停點要指認得出是**哪一個** attempt
+    (`attempt_id` 非 None),而不是像全新一集那樣回 None。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path = tmp_path / "series_manifest.json"
+    _seed_sources(fake_client, 3)
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+    # series 撞配額**不外拋**,回結構化安全停點——那是它對呼叫端的契約。
+    blocked = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+    assert blocked["observed_state"] == "not_accepted"
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["attempts"][0]["dispatch"]["status"] == "not_accepted"
+    existing_attempt_id = stored["episodes"][0]["active_attempt_id"]
+    fake_client.artifacts.generate_audio_exc = None
+    before = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
+
+    # 之後又上傳了幾集回錄,筆記本超標 —— 重送這個既有 attempt 一樣會生出假內容。
+    # (`seed` 是累加,所以這裡總數是 3 + 12 = 15 筆。)
+    _seed_sources(fake_client, 12)
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is False
+    assert out["observed_state"] == "too_many_sources"
+    assert out["attempt_id"] == existing_attempt_id
+    after = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
+    assert after == before, "重送路徑也不得 dispatch"
+
+    # **擋在任何 manifest mutation 之前**:attempt 還是原本的 `not_accepted`,沒有被
+    # re-arm 成 prepared,也沒有多生一顆 superseding attempt。先改狀態再拒絕送出會留下
+    # 半成品,而 `attempt_count` 是呼叫端判斷「有沒有在原地打轉」的唯一依據。
+    reread = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert reread["episodes"][0]["attempts"][0]["dispatch"]["status"] == "not_accepted"
+    assert out["attempt_count"] == 1, "被拒絕的呼叫不該讓 attempt_count 長一格"
+
+    # **照著 `safe_next_action` 做必須真的能離開停點。** 只斷言字串會漏掉 v0.9.1 那種
+    # 「指引在它自己產生的狀態下不可執行」:這顆 attempt 的 settings 是「不指名來源」,
+    # 直接改呼指名版會被 `_is_resendable_same_request` 判成不同請求而拒絕。
+    assert out["safe_next_action"] == "podcast_attempt_retract"
+    with pytest.raises(ValueError, match="already has durable active attempt"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+            source_ids=["src-1", "src-2", "src-3"],
+        )
+
+    retracted = await p.podcast_attempt_retract(
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=existing_attempt_id,
+        reason="筆記本來源已超標,改用指名版重生",
+    )
+    # 它從未 dispatch,所以沒有回錄 source 要清 —— 清理義務不會擋住下一步。
+    assert retracted["stale_source_ids"] == []
+
+    revived = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+        source_ids=["src-1", "src-2", "src-3"],
+    )
+    assert revived["artifact_id"], "retract 之後指名版必須跑得起來,否則停點是死路"
+    # 取**最後**一次 dispatch:第一次是上面被配額拒絕的那顆(source_ids=None)。
+    resent = [c[1] for c in fake_client.artifacts.calls if c[0] == "generate_audio"][-1]
+    assert resent["source_ids"] == ["src-1", "src-2", "src-3"]
+
+
+async def test_naming_the_sources_lifts_the_count_guard(fake_client, tmp_path):
+    """指名少少幾筆就放行 —— 守門防的是「帶太多筆進 context」,不是「筆記本很大」。
+
+    這是唯一的出路,所以它必須真的走得通:skill 教的 EP06+ 流程就是筆記本很大、
+    但只挑 6 筆(本集原文 + 最近 5 集回錄)。
+    """
+    _seed_sources(fake_client, 15)
+
+    out = await p.podcast_episode(
+        "nb-1",
+        episode_n=6,
+        title="心法篇",
+        brief="第六集",
+        output_dir=str(tmp_path),
+        manifest_path=str(tmp_path / "series_manifest.json"),
+        source_ids=["src-1", "src-2", "src-3", "src-4", "src-5", "src-6"],
+    )
+
+    assert out["artifact_id"]
+    assert _audio_call(fake_client)["source_ids"] == [
+        "src-1", "src-2", "src-3", "src-4", "src-5", "src-6",
+    ]
+
+
+async def test_naming_too_many_sources_is_refused_the_same_way(fake_client, tmp_path):
+    """**實測的變因是「帶進去幾筆」,不是「有沒有指名」。** 指名 10 筆與不指名 10 筆
+    對模型是同一件事(實測那一列寫的就是「11–15 筆(全部前集)→ 6 教錯 + 4 捏造」),
+    所以把守門掛在「有沒有指名」這個 proxy 上會漏掉真正的變因。
+
+    現實觸發:host 讀了 skill 知道要指名,卻把「本集 + 最近 5 集」做成「本集 +
+    全部前集」,或重生時多帶幾筆 —— 守門全程沉默,而事故照樣發生。
+    """
+    _seed_sources(fake_client, 15)
+
+    with pytest.raises(ValueError, match="10") as excinfo:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=6,
+            title="心法篇",
+            brief="第六集",
+            output_dir=str(tmp_path),
+            manifest_path=str(tmp_path / "series_manifest.json"),
+            source_ids=[f"src-{i}" for i in range(1, 11)],
+        )
+
+    assert "最近 5 集" in str(excinfo.value), "指名版的指引要教它砍到幾筆,不是叫它去指名"
+    assert not any(c[0] == "generate_audio" for c in fake_client.artifacts.calls)
+    assert not (tmp_path / "series_manifest.json").exists()
+    # 筆數是純本地判斷,擺在對帳之前:指名一堆 id 卻超標時,連 `assert_sources_exist`
+    # 那趟 `sources.list` 都不必打就秒退。
+    assert not any(c[0] == "list" for c in fake_client.sources.calls)
+
+
+async def test_the_low_level_entry_point_is_guarded_too(fake_client):
+    """**低階 `generate_audio` 是公開 MCP 工具,失效模式與高階一模一樣。**
+
+    守門只掛在 podcast 家族的話,它就是繞過去的公開後門 —— host 手動組裝或救援時
+    正好會用到它,而那時筆記本通常已經堆滿前面各集的回錄。
+    """
+    _seed_sources(fake_client, 12)
+
+    with pytest.raises(ValueError, match="10"):
+        await b.generate_audio("nb-1")
+
+    assert not fake_client.artifacts.calls, "守門在打 RPC 之前"
+
+
+async def test_a_pending_prior_upload_counts_toward_the_limit(fake_client, tmp_path):
+    """`prior_mp3_path` 會在守門**之後**、生成之前再上傳一筆(standalone 續集路徑)。
+
+    這是同一個函式內的確定性順序,不是競態:不把它算進去的話,守門看到 9 筆放行、
+    上傳完以 10 筆送出 —— 剛好落在拒絕線上,守門等於沒守。
+    """
+    _seed_sources(fake_client, 9)
+
+    with pytest.raises(ValueError, match="10"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=2,
+            title="心法篇",
+            brief="第二集",
+            output_dir=str(tmp_path),
+            prior_mp3_path=str(tmp_path / "ep01.mp3"),
+        )
+
+    assert not any(c[0] == "add_file" for c in fake_client.sources.calls), (
+        "連那筆上傳都不該發生 —— 守門要在所有副作用之前"
+    )
+    assert not fake_client.artifacts.calls
+
+
+async def test_a_preflight_permission_error_still_becomes_a_structured_stop(
+    fake_client, tmp_path, monkeypatch
+):
+    """守門的 `sources.list` 現在是整條路徑上**第一個**遠端呼叫,而權限分類原本只長在
+    dispatch helper 裡(`_dispatch_audio_with_failover`)。
+
+    不在 preflight 轉的話:pool 剛 rotate 到看不到 notebook 的帳號時,`podcast_series`
+    會裸拋上游的 `ClientError` —— 前面幾集跑完的 `run_results` 一起丟掉,而且拿不到
+    「去 `notebook_share_with_pool`」那條指引。v0.9.0/v0.9.1 花了兩輪才把那條路做成
+    「結構化停點 + 可執行的指引」,preflight 前移不可以把它繞掉。
+    """
+    from notebooklm.exceptions import ClientError
+
+    async def denied(_notebook_id):
+        raise ClientError("permission denied", rpc_code=7)
+
+    monkeypatch.setattr(fake_client.sources, "list", denied)
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is False
+    assert out["observed_state"] == "notebook_access_denied"
+    assert "notebook_share_with_pool" in out["error"]
+    assert not fake_client.artifacts.calls
+
+
+async def test_nine_sources_still_pass_so_early_episodes_keep_working(
+    fake_client, tmp_path
+):
+    """邊界要落在實測值上。9 筆是量到「乾淨」的上緣 —— 擋在這裡以下會把 EP01–05
+    的正常整季流程一起關掉,而那條路徑實測 0 教錯 0 捏造。
+    """
+    _seed_sources(fake_client, 9)
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is True
+    assert _audio_call(fake_client)["source_ids"] is None

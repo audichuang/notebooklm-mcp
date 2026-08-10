@@ -90,7 +90,19 @@ async def test_inline_resend_finalize_uses_the_rotated_client_not_the_stale_one(
     assert any(call[0] == "add_file" for call in client_b.sources.calls), (
         "回錄 source 的自我上傳也要用 B 的身分"
     )
-    assert not client_a.sources.calls, "A 完全不該收到任何 sources RPC"
+    # A 只收得到**來源筆數守門的唯讀 `list`**,一共三趟,每一趟都在 dispatch 之前、
+    # 那時作用中帳號還是 A:①第一輪是全新一集,series 迴圈與 `_run_episode` 各驗一次
+    # (兩個入口各自守得住,代價是同一集冗餘一趟唯讀 list);②第二輪走 inline 重送
+    # 分支,只有 series 迴圈那一道。
+    #
+    # 這條紀律真正要防的是**寫入與 finalize 打在 stale client 上** —— 回錄上傳
+    # (`add_file`)、改名、下載。原本寫成「完全空」是因為當時 A 一次都收不到,那是表象;
+    # 但放寬成「只要都是 list 就好」又太鬆:finalize 階段的來源對帳若偷跑到 stale A、
+    # 而後續寫入仍在 B,測試會照樣綠 —— 那正是這支測試要抓的東西。所以逐字鎖住次數
+    # 與種類;之後誰改動守門位置,這裡會紅,而那時本來就該重新確認這條紀律。
+    assert [call[0] for call in client_a.sources.calls] == ["list", "list", "list"], (
+        f"A 只該收到守門的唯讀 list,實際收到:{client_a.sources.calls}"
+    )
 
 
 async def test_cross_episode_probe_auth_follows_the_rotated_account(tmp_path):
