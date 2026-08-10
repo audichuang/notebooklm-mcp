@@ -8,6 +8,78 @@
 
 ---
 
+## v0.9.6
+
+**第五次現形,而且是 v0.9.5 自己種的。** 那一版的 commit 訊息寫著「這次連根拔」——
+獨立複審把那個宣稱推翻了,窮盡掃描(318 個 `raise`、20 個 `partial()`、9 個直接
+safe-action 出口、16 個含動作序列的 docstring)找出 10 條,3 條 High。所以這一版改的
+不只是那 10 條,是**產生它們的結構**。
+
+### 第五次現形長什麼樣
+
+`_outcome_is_settled()` 回答的是「retract 需不需要旗標」,v0.9.5 卻拿它當「可不可以原樣
+重送」的判準。而 `failed`/`removed` 這兩個問題的答案**相反**:結果已定所以免旗標 retract
+可以,但重送走的是 supersede 建新 attempt,`_is_resendable_same_request()` 只收
+`prepared`/`not_accepted`。於是訊息教「參數完全相同就原樣重呼」,照做必然撞
+`already has durable active attempt` —— 又一次「指引在它自己產生的狀態下不可執行」。
+
+另外兩條 High 同型:`origin="explicit_resume"` 的 attempt 沒有來源 provenance,卻被
+`_regeneration_entry_point()` 武斷判成 series,又生出 `[["src-1"], None]`(同一個內容錯置
+形狀,換一條路徑);frozen bundle 的 retract 指引說「用同一份 bundle」,而 binding 刻意
+只能建立一次,照做必撞 tombstone、新 dispatch 數 = 0。
+
+### 為什麼要改結構而不是再補一輪
+
+五次的形狀完全一樣,而每次的修法都是「補那一格」。判斷分散在三個各自為政的布林
+(`_outcome_is_settled` / `_is_resendable_same_request` / `abandons_unauthorized_candidate`)
+加十幾處手寫訊息裡 —— **只要保持那個結構,修第 N 條時就會在新訊息裡種下第 N+1 條**,
+而這已經連續發生三輪。
+
+`_attempt_capabilities()` 把「這顆 attempt 現在能做什麼」變成單一純函式:輸入
+(dispatch.status, remote.status, 是否 active/output, settings 形狀),輸出每個動作可不可以
+(`can_resend` / `can_resume` / `can_reconcile` / `authorization_basis` / `regeneration_entry`)。
+`_attempt_next_step()` 把結論翻成一句可執行的話。retract 的准入與拒絕訊息、
+`_create_audio_attempt` 與 `_ensure_resume_attempt`(**兩個分支**,v0.9.5 只修了一個)的
+拒絕訊息,全部改讀它。
+
+**`_regeneration_entry_point()` 的判準從黑名單改成白名單**:只有「認得出是 series 自己
+建的 settings 形狀」才回 series,其餘一律回 `podcast_episode`(它會要求明示來源,不可能
+靜默擴大)。黑名單版本漏過 `explicit_resume` 與 `source_ids=[]` / `input_bundle={}` 這類
+falsy-but-present 的舊 manifest。fail-safe 的方向是「不確定就要求明示」。
+
+### 驗證方法也換了 —— 這比那 10 條重要
+
+前幾輪都做過突變驗證卻照樣漏,因為**突變只打在我想得到的那幾處**。獨立複審用兩個突變
+證明了這個盲區:把 `input_bundle` 判斷整個拿掉、把 `removed` 從 settled 集合刪掉,既有
+測試都全綠(fixture 只造了另一半)。
+
+`tests/test_attempt_capabilities.py` 改走**狀態組合的笛卡爾積**(6 dispatch × 5 remote ×
+3 role × 6 settings 形狀),對每一格驗不變式:訊息教的每個動作在該狀態下都必須真的做得到。
+它上線後**立刻抓出 75 個我沒想到的組合** —— 已 promote 的 output attempt 不需要旗標,
+而 next_step 在 reconcile/resume 分支無條件教「帶 abandon_in_flight=true」。
+
+**但不變式測試也有盲區**,而且是複審實測出來的:把 `removed` 從 settled 拿掉時所有不變式
+仍然自洽(它只是變成「需要旗標」,訊息跟著改口)。不變式抓「自相矛盾」,抓不到「語意
+選擇錯了」。所以另加一條顯式的單向包含斷言:**來源守門會停在 retract 的每一個狀態,
+retract 都必須免旗標收下它** —— 那兩份程式碼分處兩地,動一邊沒動另一邊就是死路。
+
+### 其餘
+
+- 稽核多存 `authorization_basis`(`settled` / `output_owner` / `legacy_evidence` /
+  `abandon_in_flight`)與 `remote_status_at_retraction`。`abandon_in_flight` 只是「傳了
+  什麼」,結果已定的 attempt 就算傳 `true` 也是白傳,兩種語意不同的 retract 原本存成
+  一模一樣的紀錄。
+- 修掉 v0.9.5 那句過度宣稱:守門條件與免旗標條件是**單向包含**不是「完全等價」——
+  後者還涵蓋 `output_owner` 與 `legacy_evidence`。安全性只需要單向。
+- `_classify_not_accepted_stop` 的 annotation 補成三元組(實作 v0.9.5 就改了,契約描述沒跟上)。
+- 兩支公開 docstring(它們會成為 MCP tool description)修正:retract 的狀態表補齊五種
+  情況;`podcast_series` 的 too-many-sources 說明改成「`safe_next_action` 分兩種,照回傳
+  的那個做」。
+- **`uv.lock` 修正**:v0.9.5 的 tag 裡 lock 還停在 `0.9.4`(bump 之後沒重跑 `uv run` 就
+  commit),任何人 clone 那個 tag 跑一次就立刻髒掉。
+
+2129 passed + 12 skipped。
+
 ## v0.9.5
 
 **同一個根因的第四次現形,這次連根拔**:`safe_next_action` 與錯誤訊息**沒有跟著 attempt

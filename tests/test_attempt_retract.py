@@ -1164,3 +1164,48 @@ async def test_retract_does_not_offer_the_flag_to_a_superseded_attempt(
     assert "abandon_in_flight=True" not in msg, f"對歷史 attempt 教了無效的旗標: {msg}"
     assert "只放行 active" in msg, f"沒說清楚旗標為什麼對它無效: {msg}"
     assert output_attempt_id in msg, f"沒指出現在真正的 output 是哪顆: {msg}"
+
+
+async def test_a_retracted_frozen_bundle_is_not_offered_for_reuse(
+    fake_client, tmp_path
+):
+    """**frozen bundle 的重生指引不能說「用同一份 bundle」。**
+
+    `attempt-binding.json` 刻意只能建立一次,而它綁的正是這顆已成為 tombstone 的
+    attempt —— 沿用同一份 bundle 重生會撞 `was retracted`,**新 dispatch 數 = 0**。
+    v0.9.5 的 `next_step` 卻寫著「或同一份 frozen bundle」,照做完全生不出東西。
+    """
+    from test_generation_input_bundle import _write_bundle
+    from notebooklm.exceptions import RateLimitError
+
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "manifest" / "series_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    bundle, _ = _write_bundle(workspace)
+    args = dict(
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(workspace / "output"),
+        manifest_path=str(manifest_path),
+        input_bundle_path=str(bundle.relative_to(workspace)),
+    )
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+    with pytest.raises(RateLimitError):
+        await p.podcast_episode("nb-1", **args)
+    fake_client.artifacts.generate_audio_exc = None
+    attempt_id = _episode(str(manifest_path))["active_attempt_id"]
+
+    out = await p.podcast_attempt_retract(
+        str(manifest_path), 1, attempt_id, reason="輸入要重做"
+    )
+
+    assert out["safe_next_action"] == "podcast_episode"
+    assert "新的、尚未綁定" in out["next_step"], out["next_step"]
+    assert "同一份 frozen bundle" not in out["next_step"], out["next_step"]
+    # 而且真的照舊 bundle 做會被 tombstone 擋 —— 證明那句指引若沒改就是死路。
+    before = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
+    with pytest.raises(ValueError, match="retracted"):
+        await p.podcast_episode("nb-1", **args)
+    after = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
+    assert after == before, "撞 tombstone 時不該有任何新 dispatch"

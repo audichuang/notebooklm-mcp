@@ -102,20 +102,14 @@ SAFE_NEXT_ACTIONS = frozenset(
 )
 
 
-def _outcome_is_settled(attempt: dict) -> bool:
-    """manifest 自己就知道這顆 attempt 的遠端結果 —— 不需要呼叫端提供外部知識。
+# `podcast_series` 不指名來源時產生的 settings 形狀(由
+# `test_unpinned_settings_stay_shaped_like_pre_source_ids_manifests` 逐字鎖著)。
+_SERIES_SETTINGS_KEYS = frozenset({"language", "audio_format", "audio_length"})
 
-    兩種:①**dispatch 從沒離開本機**(`prepared` / `not_accepted`,契約保證伺服器沒
-    建出 task);②**遠端已經給出終態**(`failed` / `removed`)—— 那不是「可能還在飛」,
-    是伺服器已經回報過的結果,同樣沒有 in-flight 的外部知識可言。
-
-    v0.9.4 只涵蓋 ①,於是 `podcast_series` 的筆數守門在 `failed`/`removed` 那條路徑上
-    給出的 `podcast_attempt_retract` 指引**照做會被拒**(那時 `dispatch.status` 是
-    `accepted`)——又一次「指引在它自己產生的狀態下不可執行」。
-    """
-    if attempt.get("dispatch", {}).get("status") in ("prepared", "not_accepted"):
-        return True
-    return attempt.get("remote", {}).get("status") in ("failed", "removed")
+# 遠端已經回報終態:不存在「可能還在飛」,manifest 自己就知道結果。
+_TERMINAL_REMOTE = frozenset({"failed", "removed"})
+# dispatch 從沒離開本機:契約保證伺服器沒建出 task(ADR-0010 紀律④的立論基礎)。
+_NEVER_DISPATCHED = frozenset({"prepared", "not_accepted"})
 
 
 def _regeneration_entry_point(attempt: dict) -> str:
@@ -124,13 +118,134 @@ def _regeneration_entry_point(attempt: dict) -> str:
     `podcast_series` 生不出帶 `source_ids` 或 frozen bundle 的 settings,所以那種 attempt
     只有 `podcast_episode` 續得下去。指錯的後果是**靜默改掉生成輸入**:實測
     `podcast_episode(source_ids=["src-1"])` 撞配額 → retract → 照 `safe_next_action` 重呼
-    series,兩次 dispatch 實際送出 `[["src-1"], None]` —— 第二次改讀整本筆記本,而那正是
-    本 repo 最忌諱的內容錯置形狀(skill §Episodic 也明寫這條)。
+    series,兩次 dispatch 送出 `[["src-1"], None]` —— 第二次改讀整本筆記本,正是本 repo
+    最忌諱的內容錯置形狀。
+
+    **判準是白名單不是黑名單**:只有「認得出是 series 自己建的」才回 series,其餘一律回
+    `podcast_episode`(它會要求呼叫端明示來源,不可能靜默擴大)。黑名單版本漏過兩種真實
+    形狀 —— `origin="explicit_resume"` 的 attempt 沒有來源 provenance 卻被判成 series,
+    以及 `source_ids=[]` / `input_bundle={}` 這類 falsy-but-present 的舊 manifest。
+    fail-safe 的方向是「不確定就要求明示」。
     """
-    settings = attempt.get("settings") or {}
-    if settings.get("source_ids") or attempt.get("input_bundle"):
+    if attempt.get("input_bundle") is not None:
         return ACTION_EPISODE
-    return ACTION_SERIES
+    if set(attempt.get("settings") or {}) == _SERIES_SETTINGS_KEYS:
+        return ACTION_SERIES
+    return ACTION_EPISODE
+
+
+def _attempt_capabilities(episode: dict, attempt: dict, attempt_id: str) -> dict:
+    """**「這顆 attempt 現在能做什麼」的單一事實來源。**
+
+    純函式,不打 RPC、不改狀態。所有給呼叫端的 `safe_next_action` 與「下一步」訊息都要
+    從這裡產生,不要各自手寫。
+
+    **為什麼收斂成一顆:同一個根因現形過五次。** 每次的形狀都是「指引在它自己產生的
+    狀態下不可執行」——v0.9.1 FAIL-1(叫人跑一支在該狀態下自己也 permission denied 的
+    工具)、v0.9.3(停點指向會拒收它的工具)、v0.9.4(拒絕訊息那句在該狀態下是假的)、
+    v0.9.5 一次六條(其中三條是修上一條時種的)、以及第五次:把
+    「可免旗標 retract」誤當成「可原樣重送」——`failed`/`removed` 兩者的答案相反,
+    共用一個布林就必然教錯一邊。
+
+    修法每次都是「補那一格」,而判斷分散在三個各自為政的布林
+    (`_outcome_is_settled` / `_is_resendable_same_request` / `abandons_unauthorized_candidate`)
+    加十幾處手寫訊息裡 —— 只要保持那個結構,第六次幾乎必然。這裡把**維度**與**結論**
+    都攤開,由 `tests/test_attempt_capabilities.py` 對狀態組合的**笛卡爾積**逐格鎖住:
+    想不到的組合也不會漏,那正是前幾輪突變驗證照不到的盲區。
+
+    回傳的每個 key 都回答一個**具體可執行的問題**:
+
+    - `authorization_basis`:免旗標 retract 的理由;`None` 代表需要 `abandon_in_flight`。
+    - `can_resend`:原樣重呼建立它的那支工具能不能沿用同一顆重送(**不等於**
+      `authorization_basis` 非 None —— 那正是第五次現形的成因)。
+    - `can_resume` / `can_reconcile`:有沒有 artifact 可續、要不要先對帳。
+    - `regeneration_entry`:作廢之後重生該用哪支工具。
+    """
+    dispatch_status = (attempt.get("dispatch") or {}).get("status")
+    remote = attempt.get("remote") or {}
+    remote_status = remote.get("status")
+    is_active = attempt_id == episode.get("active_attempt_id")
+    output_attempt_id = episode.get("output_attempt_id")
+    is_output = attempt_id == output_attempt_id
+
+    never_dispatched = dispatch_status in _NEVER_DISPATCHED
+    remote_terminal = remote_status in _TERMINAL_REMOTE
+
+    # 免旗標 retract 的理由。順序即優先序,第一個成立的就是稽核要記的那個。
+    if is_output:
+        basis = "output_owner"          # 正常的 QA 拒收,本來就不需要旗標
+    elif not is_active:
+        basis = None                    # 歷史 attempt:誰都動不了它,旗標也無效
+    elif output_attempt_id is not None:
+        basis = "output_owner"          # active/output 分岔,投影屬於現任 output
+    elif never_dispatched or remote_terminal:
+        basis = "settled"               # manifest 自己就知道結果
+    elif has_hard_output_evidence(episode):
+        basis = "legacy_evidence"
+    else:
+        basis = None                    # 真的不知道有沒有東西在跑 —— 要外部知識
+
+    return {
+        "dispatch_status": dispatch_status,
+        "remote_status": remote_status,
+        "is_active": is_active,
+        "is_output": is_output,
+        "authorization_basis": basis,
+        "needs_abandon_flag": basis is None and is_active,
+        # **只有從沒送出去的才重送得了。** 遠端已終態(`failed`/`removed`)雖然同樣
+        # 「結果已定」,重送卻是走 supersede 建新 attempt,不是沿用這顆 ——
+        # `_is_resendable_same_request` 也只收 `_NEVER_DISPATCHED`。
+        "can_resend": never_dispatched and not is_output,
+        "can_resume": bool(remote.get("artifact_id")) and not is_output,
+        "can_reconcile": dispatch_status
+        in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous"),
+        "regeneration_entry": _regeneration_entry_point(attempt),
+    }
+
+
+def _attempt_next_step(caps: dict) -> str:
+    """把 `_attempt_capabilities` 的結論翻成一句**可執行**的話。
+
+    每個分支教的動作都必須在該狀態下真的做得到 —— 這是整顆 helper 存在的理由。
+    """
+    if not caps["is_active"] and not caps["is_output"]:
+        return "它已經被取代,是歷史紀錄 —— 要動的是現在的 active／output attempt。"
+    if caps["is_output"]:
+        return (
+            "它是這一集的正式輸出:要作廢就直接 podcast_attempt_retract"
+            "(**不需要** abandon_in_flight),照回傳的 stale_source_ids 逐一 source_delete,"
+            f"再用 {caps['regeneration_entry']} 重生。"
+        )
+    if caps["can_resend"]:
+        return (
+            "參數完全相同就原樣重呼建立它的那支工具,沿用同一顆重送(不多燒配額);"
+            f"要換 brief 或來源就先 podcast_attempt_retract(**不需要** abandon_in_flight),"
+            f"再用 {caps['regeneration_entry']} 重生。"
+        )
+    if caps["authorization_basis"] == "settled":
+        # 遠端已終態:重送不是沿用這顆,而是作廢後重生(或讓 series 自動 supersede)。
+        return (
+            "遠端已回報終態,這顆沒有東西可續也不能原樣重送:先 podcast_attempt_retract "
+            f"(**不需要** abandon_in_flight),再用 {caps['regeneration_entry']} 重生;"
+            "整季流程也可以直接重呼 podcast_series 讓它自動 supersede。"
+        )
+    # 以下都是「遠端可能還有東西」的狀態。**作廢建議一律跟著 `needs_abandon_flag`**,
+    # 不能寫死 —— 有別的 output 接手、或 legacy 硬證據在場時,這顆的准入早就成立了,
+    # 教人傳旗標等於教一個沒有作用的參數(窮舉測試一次抓出 75 個這種組合)。
+    retract_hint = (
+        "確定那次生成要作廢的話,artifact_list 查過雲端之後帶 abandon_in_flight=true "
+        "呼叫 podcast_attempt_retract。"
+        if caps["needs_abandon_flag"]
+        else "要作廢就直接 podcast_attempt_retract(**不需要** abandon_in_flight)。"
+    )
+    if caps["can_resume"]:
+        return "遠端有 artifact:先 podcast_episode_resume 續完 finalize。" + retract_hint
+    if caps["can_reconcile"]:
+        return (
+            "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完)。"
+            + retract_hint
+        )
+    return retract_hint
 
 
 def _artifact_created_at_utc(value: object) -> datetime | None:
@@ -308,19 +423,9 @@ def _create_audio_attempt(
                     # artifact_id 而它是 null、而「逐字相同」在 brief 產生器改過之後
                     # 重現不了(真實事故:brief 經手動轉錄,三面堵死)。v0.9.3 開的
                     # 新出口(免旗標 retract)沒有寫進這句,等於開了門沒掛路標。
-                    if _outcome_is_settled(prior):
-                        way_out = (
-                            "它的結果 manifest 已經知道了(要嘛沒送出去,要嘛遠端已回報"
-                            "終態)。參數完全相同就原樣重呼本工具沿用它重送,不會多燒配額;"
-                            "要換 brief 或來源就先 podcast_attempt_retract 掉它"
-                            "(純本機動作,**不需要** abandon_in_flight),再重生。"
-                        )
-                    else:
-                        way_out = (
-                            "先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完);"
-                            "確定那次生成要作廢的話,用 artifact_list 查過雲端之後帶 "
-                            "abandon_in_flight=True 呼叫 podcast_attempt_retract。"
-                        )
+                    way_out = _attempt_next_step(
+                        _attempt_capabilities(episode, prior, active_attempt_id)
+                    )
                     raise ValueError(
                         f"episode {episode_n} already has durable active attempt "
                         f"{active_attempt_id!r} (dispatch="
@@ -482,9 +587,18 @@ def _ensure_resume_attempt(
                 and current_active_id != attempt["attempt_id"]
                 and current_active_id != output_attempt_id
             ):
+                # 這一支曾經無條件教「resume it」—— 但那顆 active 可能停在
+                # `not_accepted`(沒有 artifact 可續),照做走不通。與新建分支共用
+                # 同一顆指引產生器,「補一半」就不可能發生(v0.9.5 只修了新建那支)。
+                _, current_active = _attempt_record(
+                    manifest, episode_n, current_active_id
+                )
                 raise ValueError(
                     f"episode {episode_n} has another active attempt "
-                    f"{current_active_id!r}; resume it before switching artifacts"
+                    f"{current_active_id!r}; "
+                    + _attempt_next_step(
+                        _attempt_capabilities(episode, current_active, current_active_id)
+                    )
                 )
             attempt.setdefault("finalize", new_finalize_state())
             episode["active_attempt_id"] = attempt["attempt_id"]
@@ -515,12 +629,8 @@ def _ensure_resume_attempt(
             # (以及遠端已終態的)attempt,「reconcile or resume」兩條都走不了 ——
             # 沒有 artifact 可對帳、也沒有 artifact 可續。
             _, active = _attempt_record(manifest, episode_n, active_attempt_id)
-            hint = (
-                "它沒有可續的 artifact(要嘛沒送出去,要嘛遠端已回報終態)——"
-                "用產生它的那支工具原樣重呼沿用它重送,或先 podcast_attempt_retract "
-                "掉它(純本機,不需要 abandon_in_flight)再重生。"
-                if _outcome_is_settled(active)
-                else "先 podcast_episode_reconcile 對帳,再 resume 對帳到的那顆。"
+            hint = _attempt_next_step(
+                _attempt_capabilities(episode, active, active_attempt_id)
             )
             raise ValueError(
                 f"episode {episode_n} has active attempt {active_attempt_id!r} "
@@ -2489,7 +2599,14 @@ async def podcast_attempt_retract(
 
     - ``prepared`` / ``not_accepted``（配額被拒、502 同步拒絕……）——**不需要旗標**。
       契約保證伺服器沒建出 task，作廢它是純本機、零遠端後果，manifest 自己就知道。
-    - ``acceptance_unknown`` / ``dispatching`` / ``accepted``——**需要 ``abandon_in_flight=True``**。
+    - ``remote`` 已 ``failed`` / ``removed``——**不需要旗標**（遠端已回報終態）。
+      ⚠️ 但它**不能**原樣重送：重送走的是 supersede 建新 attempt，不是沿用這顆。
+    - 已經是該集 ``output_attempt_id`` 的正式輸出，或該集已有**別顆** attempt 接手
+      ——**不需要旗標**（正常的 QA 拒收路徑）。
+    - 已被 supersede 的**歷史** attempt——誰都動不了它，旗標傳了也一樣被拒；
+      工具會告訴你現在真正的 active／output 是哪顆。
+    - 其餘（``acceptance_unknown`` / ``dispatching`` / ``accepted`` 且遠端未回終態）
+      ——**需要 ``abandon_in_flight=True``**。
       這幾種 manifest **推導不出來**有沒有東西在跑：它與「第一次 dispatch、還在飛」逐欄位
       相同，差別只在呼叫端握有的外部知識（例如 ``artifact_list`` 實際查過雲端零 artifact，
       或明知送進去的 brief 本身就是錯的、等它跑完也沒有意義）。所以必須顯式宣告，預設不開；
@@ -2551,7 +2668,11 @@ async def podcast_attempt_retract(
                 if episode.get("active_attempt_id") == attempt_id:
                     del episode["active_attempt_id"]
             # 不重寫 retracted_at／reason;重生入口每次現算(它是導引不是紀錄)。
-            return dict(existing), _regeneration_entry_point(attempt)
+            return (
+                dict(existing),
+                _regeneration_entry_point(attempt),
+                attempt.get("input_bundle") is not None,
+            )
 
         output_attempt_id = episode.get("output_attempt_id")
         active_attempt_id = episode.get("active_attempt_id")
@@ -2595,16 +2716,15 @@ async def podcast_attempt_retract(
         # 呼叫端只能用低階 `generate_audio` + `podcast_attempt_adopt` 繞出去、多燒一次
         # 生成配額。**`acceptance_unknown` 不在這裡面**:那個是真的不知道有沒有受理,
         # 需要外部知識,仍然只能走 `abandon_in_flight`。
-        settled = _outcome_is_settled(attempt)
+        caps = _attempt_capabilities(episode, attempt, attempt_id)
+        # **授權依據 = 免旗標的理由,或呼叫端顯式宣告的旗標。** 這個值就是稽核要記的
+        # 那一個(v0.9.5 只記「傳了什麼」,而結果已定的 attempt 就算傳 true 也是白傳,
+        # 事後分不出哪一次真的動用了外部知識)。
+        basis = caps["authorization_basis"]
+        if basis is None and abandon_in_flight and caps["is_active"]:
+            basis = "abandon_in_flight"
         abandons_unauthorized_candidate = (
-            attempt_id == active_attempt_id
-            and output_attempt_id != attempt_id
-            and (
-                output_attempt_id is not None
-                or has_hard_output_evidence(episode)
-                or settled
-                or abandon_in_flight
-            )
+            caps["is_active"] and not caps["is_output"] and basis is not None
         )
         if output_attempt_id != attempt_id and not abandons_unauthorized_candidate:
             # **先分 ownership,再談旗標。** `abandon_in_flight` 只放行
@@ -2710,24 +2830,46 @@ async def podcast_attempt_retract(
             # —— tombstone 是 default-deny 的,`_attempt_record` 擋掉所有 attempt 級 writer。
             "abandon_in_flight": abandon_in_flight,
             "dispatch_status_at_retraction": attempt.get("dispatch", {}).get("status"),
+            # **實際生效的授權依據**,這才是稽核該讀的那一個:`abandon_in_flight` 只是
+            # 呼叫端傳了什麼,而結果已定的 attempt 就算傳 true 也是白傳 —— 兩種語意
+            # 完全不同的 retract 會存成一模一樣的紀錄。值域:`settled`(manifest 自己
+            # 知道結果)、`output_owner`(正式輸出或已有別顆接手)、`legacy_evidence`、
+            # `abandon_in_flight`(真的動用了外部知識)。
+            "authorization_basis": basis,
+            "remote_status_at_retraction": (attempt.get("remote") or {}).get("status"),
         }
         attempt["retraction"] = retraction
         episode.setdefault("retracted_attempt_ids", []).append(attempt_id)
-        return dict(retraction), _regeneration_entry_point(attempt)
+        return (
+            dict(retraction),
+            _regeneration_entry_point(attempt),
+            attempt.get("input_bundle") is not None,
+        )
 
-    _, (retraction, entry_point) = ManifestStore(manifest_path).update(mutate)
+    _, (retraction, entry_point, retracted_had_bundle) = ManifestStore(
+        manifest_path
+    ).update(mutate)
     needs_cleanup = bool(retraction.get("stale_source_id"))
     # **重生入口跟著被作廢那顆的生成輸入走**,不是一律 `podcast_series`。指名過來源
     # (或用 frozen bundle)的一集只有 `podcast_episode` 生得出相同 settings ——
     # 指回 series 會靜默把「只讀這幾筆」變成「讀整本筆記本」,實測兩次 dispatch 送出
     # `[["src-1"], None]`。清理義務仍然先走:`source_delete` 沒做完,下一次生成會
     # fail-closed。
-    pinned_warning = (
-        "**重生時必須帶回原本那組 `source_ids`**(或同一份 frozen bundle)—— 這一集的"
-        "生成輸入指名了來源,改用 podcast_series 會靜默改成讀整本筆記本。"
-        if entry_point == ACTION_EPISODE
-        else ""
-    )
+    if entry_point != ACTION_EPISODE:
+        pinned_warning = ""
+    elif retracted_had_bundle:
+        # `attempt-binding.json` 刻意只能建立一次,而它還綁著這顆已成為 tombstone 的
+        # attempt —— 沿用同一份 bundle 重生會撞「was retracted」而完全生不出東西
+        # (實測新 dispatch 數 = 0)。所以要的是一份**新的、尚未綁定**的 bundle。
+        pinned_warning = (
+            "**重生要用一份新的、尚未綁定的 frozen bundle** —— 舊 bundle 的 "
+            "attempt-binding.json 還綁著這顆已作廢的 attempt,沿用它會被 tombstone 擋下來。"
+        )
+    else:
+        pinned_warning = (
+            "**重生時必須帶回原本那組 `source_ids`** —— 這一集的生成輸入指名了來源,"
+            "改用 podcast_series 會靜默改成讀整本筆記本。"
+        )
     return {
         **retraction,
         "observed_state": "retracted",
@@ -2765,7 +2907,7 @@ def _active_attempt_or_reraise(current: dict, episode_n: int) -> str:
     return attempt_id
 
 
-def _classify_not_accepted_stop(exc: BaseException) -> tuple[str, dict]:
+def _classify_not_accepted_stop(exc: BaseException) -> tuple[str, str, dict]:
     """回 (observed_state, extra) 給 `partial()`,分辨『等配額』與『notebook 沒分享給
     這個帳號』——manifest 的 dispatch.status 對兩者都寫 not_accepted(契約上都是零
     副作用拒絕,這個分類本身沒有錯),但呼叫端拿到的結構化停點如果也只寫
@@ -2811,9 +2953,11 @@ async def podcast_series(
 
     ⚠️ **這支工具不能指名來源**：每一集都用筆記本當下的**全部**來源。超過 9 筆會讓模型
     拿前面集數的內容填空，所以生成前有一道 fail-closed 的筆數守門。超標時**不外拋**，
-    而是回結構化安全停點（`observed_state="too_many_sources"`、
-    `safe_next_action="podcast_episode"`，已跑完的集仍在 `episodes` 裡）——照著改用
-    `podcast_episode(..., source_ids=[...])`。實務上就是**從 EP06 起改用單集入口**
+    而是回結構化安全停點（`observed_state="too_many_sources"`，已跑完的集仍在
+    `episodes` 裡）。`safe_next_action` **分兩種，照回傳的那個做**：這一集還沒有 attempt
+    時是 `podcast_episode`（直接帶 `source_ids` 進來）；已經有 active attempt 時是
+    `podcast_attempt_retract`——那顆的 settings 是「不指名來源」，直接改呼單集入口會被
+    durable-active-attempt guard 擋掉。實務上就是**從 EP06 起改用單集入口**
     （本集來源 + 最近 5 集回錄 ≈ 6 筆）；重呼本工具只會停在同一集。"""
     # start 是執行下界，不是重生旗標；N 以前的 plan 是 caller 明示的 trust
     # boundary，不讀、不驗證。範圍錯誤仍須在任何遠端副作用前失敗。
@@ -2926,11 +3070,13 @@ async def podcast_series(
                 attempt_id,
                 "too_many_sources",
                 ACTION_RETRACT,
-                # 「不需要旗標」這句話成立,是因為**觸發守門的狀態集合與
-                # `_outcome_is_settled` 完全等價** —— 兩邊都是
-                # 「`prepared`/`not_accepted` 或 `remote` 已 `failed`/`removed`」。
-                # 動其中一邊而不動另一邊,這句指引就會變成死路(v0.9.4 就是這樣:
-                # 守門涵蓋了 failed/removed,而 retract 的免旗標條件沒有,照做被拒)。
+                # 「不需要旗標」這句話成立,靠的是**單向包含**:觸發守門的狀態
+                # (`prepared`/`not_accepted`,或 remote 已 `failed`/`removed`)都會讓
+                # `_attempt_capabilities` 給出 `authorization_basis="settled"`。
+                # **不是等價** —— 免旗標 retract 還涵蓋 `output_owner` 與
+                # `legacy_evidence` 兩種守門碰不到的情況;安全性只需要這個方向。
+                # 動守門那一邊而不看這裡,指引就會變成死路(v0.9.4 就是:守門涵蓋了
+                # failed/removed,而免旗標條件沒有,照做被拒)。
                 error=(
                     f"{exc}\n這一集已經有 active attempt {attempt_id!r},而它的 settings "
                     "是「不指名來源」——直接改呼 podcast_episode(..., source_ids=[...]) 會被"
