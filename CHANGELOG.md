@@ -8,6 +8,62 @@
 
 ---
 
+## v0.9.7
+
+v0.9.6 真實環境驗收(full,35 工具全覆蓋)的四個 FINDING,加上驗收順手推翻的一個
+**既有認知**。核心機制全部 PASS —— 重生入口白名單四種形狀全對、逐字稿隔離拿到
+自家 6/6 對外部 0/6 兩個獨立資料點(其中一集**標題裡就有「碰撞」兩字**,逐字稿仍 0 命中)、
+守門回歸全綠、`_ensure_resume_attempt` 兩個分支都走到。
+
+### `RateLimitError` 不等於「今天已耗盡」——而游標把兩者當同一件事
+
+**實測:同一個帳號被拒後 26 分鐘,在另一個 process 又被受理。** 那是瞬時限流。而
+`rotate_client()` 舊版只有 `_ACTIVE += 1`、**只增不減**,於是一次限流就讓那個帳號在該
+process **餘生**退場;那一輪三個帳號因此提早出局,pool 的有效容量被白白吃掉,
+**而 manifest 看起來一切正常**(每次都成功 failover 了)。走到底之後 `rotate_client()`
+永遠回 `None`,**只有重啟 server 才會回到第一個**(`set_clients()` 重設游標)。
+
+舊 docstring 把它留成已知取捨,理由是「代價只是那一輪少試一個帳號、下一次呼叫照樣會從頭
+輪」—— 26 分鐘那個觀測推翻了前提:代價是整個 process 的餘生。
+
+改成**環狀游標 + 每槽位獨立冷卻**(`time.monotonic()`,10 分鐘,取得比實測值保守 ——
+試錯成本是一次 RPC,丟錯成本是少一個帳號)。終止性不變:被拒的一定進冷卻,繞完一圈自然
+回 `None`。順帶修掉舊 docstring 記載的並行缺陷:**只有真的被拒的槽位進冷卻**,被並行
+rotate 推格跳過的那個下次照樣是候選(舊版會跟著一起燒掉)。
+
+### 四個 FINDING 的共同根因:v0.9.6 的收斂只做了一半
+
+v0.9.6 建了 `_attempt_capabilities` / `_attempt_next_step` 當單一事實來源,但**只把
+「拒絕訊息」那一族出口接上去,沒接「停點回傳」那一族**。四條裡有三條就長在沒接的那些出口:
+
+- **FINDING-4(第六次現形,v0.9.6 自己種的)**:retract 的 `next_step` 是手寫 if/else,
+  對 `settings={"origin": "explicit_resume"}` 的 attempt 說「**必須帶回原本那組
+  `source_ids`**」—— 而那顆 manifest 裡**根本沒有** source_ids。根因是入口判斷用白名單
+  (認不出來就保守導向 `podcast_episode`),而那句話另外用 if/else 猜,猜錯的正好是白名單
+  **特意涵蓋**的那一類。`safe_next_action` 對了,附帶的話還是假的。
+  修法:`_regeneration_hint()` 與 `_regeneration_entry_point()` 同源,三種形狀各有正確的
+  話,認不出來的**明說認不出來**、要呼叫端自己指名。
+- **FINDING-1(中)**:`podcast_episode_reconcile` 零候選時 `safe_next_action` 指回它自己,
+  連呼兩次的回傳**逐欄位相同** —— 照著做就是無限迴圈。而 skill 與 `partial()` 都說
+  「原地打轉」的唯一依據是 `attempt_count` / `superseded_attempt_count` 持續增加,可是
+  reconcile 不建 attempt,這兩個數字**恆為 1 / 0**,偵測條件從不成立。出路只存在於 skill
+  散文,不在工具回傳裡。修法:那個分支也接上 `_attempt_capabilities`,回傳帶 `next_step`
+  (先 `artifact_list` 看雲端 → `abandon_in_flight=true` retract),並明說重呼本工具會得到
+  一模一樣的結果。
+- **FINDING-2(低)**:守門叫你 retract,retract 完卻叫你回去撞同一道牆。retract **不打
+  RPC**(設計如此),看不到筆記本此刻已超標。修法照驗收建議:講在**擋下它的那個工具**的
+  `error` 裡 —— 我們知道超標,retract 不知道。
+- **FINDING-3(文件)**:skill 的 `continuity_unverified` 一行寫成
+  `podcast_attempt_adopt(feedback_source_id=...)`,漏掉必填的位置參數,逐字照做會失敗。
+
+### 窮舉測試也補上一層
+
+`test_attempt_capabilities.py` 新增一條:**警告句宣稱「必須帶回原本那組 `source_ids`」時,
+那顆 attempt 必須真的有**。它把「話」與「事實」綁在一起,而且是窮舉的 —— 突變驗證時
+這一條紅了 **180 個組合**。之後任何新的 settings 形狀進來,都不可能再靠猜。
+
+2583 passed + 12 skipped;四道修正各做過突變驗證。
+
 ## v0.9.6
 
 **第五次現形,而且是 v0.9.5 自己種的。** 那一版的 commit 訊息寫著「這次連根拔」——

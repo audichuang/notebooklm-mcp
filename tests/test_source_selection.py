@@ -445,6 +445,10 @@ async def test_the_count_guard_also_covers_the_series_resend_path(
     # 「指引在它自己產生的狀態下不可執行」:這顆 attempt 的 settings 是「不指名來源」,
     # 直接改呼指名版會被 `_is_resendable_same_request` 判成不同請求而拒絕。
     assert out["safe_next_action"] == "podcast_attempt_retract"
+    # FINDING-2:retract 不打 RPC,看不到筆記本已超標,它的回傳會說 `podcast_series`
+    # —— 照做會再撞一次這道守門(會終止,但白跑一趟)。**擋下它的是我們,我們知道**,
+    # 所以這句警告寫在這裡最便宜。
+    assert "不要" in out["error"] and "podcast_series" in out["error"], out["error"]
     with pytest.raises(ValueError, match="already has durable active attempt"):
         await p.podcast_episode(
             "nb-1",
@@ -737,3 +741,40 @@ async def test_the_permission_stop_points_at_the_tool_that_fixes_it(
     assert out["observed_state"] == "notebook_access_denied"
     assert out["safe_next_action"] == "notebook_share_with_pool"
     assert "notebook_share_with_pool" in out["error"]
+
+
+async def test_the_zero_candidate_reconcile_stop_carries_a_way_out(
+    fake_client, tmp_path
+):
+    """**`acceptance_unknown` 零候選:出路要寫在回傳裡,不能只寫在 skill 散文。**
+
+    v0.9.6 驗收 FINDING-1:這條路的 `safe_next_action` 指回本工具自己,連呼兩次的回傳
+    **逐欄位相同** —— 照著做就是無限迴圈。而「原地打轉」偵測依據的 `attempt_count` /
+    `superseded_attempt_count` 在這裡恆為 1 / 0(reconcile 不建 attempt),**偵測條件
+    從不成立**。ground truth 是 `artifact_list` 證實遠端零 artifact,迴圈永遠不會自己結束。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    _seed_sources(fake_client, 3)
+    # 送出之後失去 response,而遠端**零候選**(dispatch 其實沒被受理)。
+    fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+    with pytest.raises(TimeoutError, match="response lost"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="心法篇", brief="第一集",
+            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        )
+    fake_client.artifacts.generate_audio_exc = None
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "acceptance_unknown", attempt["dispatch"]
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt["attempt_id"]
+    )
+
+    assert out["candidate_artifact_ids"] == []
+    assert "next_step" in out, "零候選停點沒有出路欄位 —— 呼叫端只能無限重呼"
+    step = out["next_step"]
+    assert "artifact_list" in step, step
+    assert "abandon_in_flight" in step, step
+    # 也要說清楚「重呼本工具沒有用」,否則照 safe_next_action 做就是迴圈。
+    assert "一模一樣" in step or "不會動" in step, step

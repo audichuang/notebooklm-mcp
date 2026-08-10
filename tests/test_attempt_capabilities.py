@@ -210,3 +210,33 @@ def test_every_state_that_trips_the_source_guard_retracts_without_a_flag(
         f"守門會停在這裡並指向 retract,但 retract 不肯免旗標收下它({dispatch}/{remote})"
     )
     assert caps["needs_abandon_flag"] is False
+
+
+@pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
+def test_the_regeneration_hint_never_claims_sources_that_are_not_there(
+    dispatch, remote, role, shape
+):
+    """**警告句不可以宣稱 manifest 裡沒有的東西。**
+
+    v0.9.6 驗收 FINDING-4:retract 對 `settings={"origin": "explicit_resume"}` 的 attempt
+    回了「**重生時必須帶回原本那組 `source_ids`**」—— 而那顆根本沒有 source_ids。
+    根因是入口判斷用白名單(認不出來就保守導向 `podcast_episode`),而警告句另外用
+    if/else 猜,猜錯的正好是白名單特意涵蓋的那一類。**收斂做了一半就是這個下場:
+    action 對了,附帶的話還是錯的。**
+
+    這條把「話」與「事實」綁在一起,而且是窮舉的 —— 之後任何新的 settings 形狀進來,
+    都不可能再靠猜。
+    """
+    episode, attempt = _case(dispatch, remote, role, shape)
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    hint = caps["regeneration_hint"]
+
+    if "必須帶回原本那組" in hint:
+        assert (attempt.get("settings") or {}).get("source_ids"), (
+            f"{shape!r} 沒有 source_ids,卻被叫去「帶回原本那組」:{hint}"
+        )
+    if "新的、尚未綁定" in hint:
+        assert attempt.get("input_bundle") is not None, hint
+    # 認不出來的形狀必須**明說認不出來**,不可以靜默當成 series 或假裝知道來源。
+    if shape in ("resume",):
+        assert "認不出" in hint, f"{shape!r} 應該明說 manifest 裡沒有來源紀錄:{hint}"

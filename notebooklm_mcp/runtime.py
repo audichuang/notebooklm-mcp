@@ -16,6 +16,7 @@ incoming message `tg.start_soon`),而 `_ACTIVE` 是全域的 —— 但 pool 的
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 # (label, client);label 是帳號 email(拿不到就退回 "#N"),用於稽核紀錄。
@@ -26,12 +27,21 @@ from typing import Any
 _POOL: list[tuple[str, Any]] = []
 _ACTIVE: int = 0
 
+# 槽位 index → 它上次被伺服器拒絕的 `time.monotonic()` 時刻。**這不是「今天已耗盡」**:
+# v0.9.6 真實驗收量到同一個帳號被拒後 26 分鐘又被受理,所以 `RateLimitError` 常常只是
+# 瞬時限流。冷卻期取得比那個觀測保守 —— 試錯成本是一次 RPC,丟錯成本是整個 process
+# 少一個帳號可用。
+_COOLING: dict[int, float] = {}
+_COOLDOWN_SECONDS: float = 600.0
+
 
 def set_clients(entries: list[tuple[str, Any]]) -> None:
     """裝入整個 pool 並把作用中的位置重設回第一個。entry 是 `(label, client)`。"""
-    global _POOL, _ACTIVE
+    global _POOL, _ACTIVE, _COOLING
     _POOL = [(label, client) for label, client in entries]
     _ACTIVE = 0
+    # 重新裝 pool = 新的一輪(server 重啟走的就是這條),冷卻紀錄一起清掉。
+    _COOLING = {}
 
 
 def set_client(client: Any) -> None:
@@ -95,19 +105,40 @@ def all_clients() -> list[tuple[str, Any]]:
 
 
 def rotate_client() -> str | None:
-    """切到下一個還沒用過的帳號,回傳它的 label;沒有下一個就回 None。
+    """把當前槽位標成冷卻中,切到下一個**不在冷卻中**的帳號;全部都在冷卻就回 None。
 
-    **繞完一圈就停,不回到第一個**:呼叫端(配額 failover)必須能分辨「還有沒試過
-    的帳號」與「全部都拒絕了」,無限輪替會把一次配額耗盡變成永遠重試。
+    **繞完一圈就停**:呼叫端(配額 failover)必須能分辨「還有沒試過的帳號」與「全部
+    都拒絕了」,無限輪替會把一次配額耗盡變成永遠重試。被拒的槽位一定會進冷卻,所以
+    一輪之內繞完自然回 None —— 終止性與舊版相同。
 
-    **已知限制:游標是按「被拒次數」前進,不是按「帳號狀態」。** 兩個並行呼叫同時撞到
-    配額時,游標會被推兩格,第二個呼叫拿到 `None` 就回報「所有帳號都拒絕了」——其實
-    中間那個從來沒被試過。不該用鎖修(問題不是互斥,是這個游標語意本身),真要修得讓
-    每個帳號帶自己的「今天是否已耗盡」狀態。實務上代價只是那一輪少試一個帳號、下一次
-    呼叫(新 process 或隔天)照樣會從頭輪,所以留成已知取捨。
+    **游標按「帳號狀態」走,不再按「被拒次數」走**(v0.9.7)。舊版只有 `_ACTIVE += 1`、
+    只增不減,於是:
+
+    - **一次瞬時限流 = 那個帳號在這個 process 餘生退場。** v0.9.6 真實驗收量到同一個
+      帳號被拒後 **26 分鐘**在另一個 process 又被受理 —— `RateLimitError` **不等於**
+      「今天已耗盡」,而舊版把兩者當同一件事。那一輪實測三個帳號因此提早出局,pool 的
+      有效容量被白白吃掉,**而 manifest 看起來一切正常**(每次都成功 failover 了)。
+      舊 docstring 把它留成已知取捨,理由是「代價只是那一輪少試一個帳號」——26 分鐘
+      那個觀測推翻了前提:代價是整個 process 的餘生。
+    - **並行推兩格會燒掉中間那個從沒被試過的帳號。** 現在只有**真的被拒**的槽位進冷卻,
+      跳過去的那個下次照樣是候選。
+
+    冷卻用 `time.monotonic()`(不受系統時鐘調整影響)。`_COOLDOWN_SECONDS` 取得比實測的
+    26 分鐘**保守**:寧可多花一次 RPC 去試、也不要白白丟掉一個還有額度的帳號 ——
+    試錯成本是一次 RPC,丟錯成本是整個 process 少一個帳號。
+
+    仍然**沒有鎖**,理由見模組 docstring:真正會出事的是呼叫端把 label 與 client 分兩次
+    讀,那個縫由 `snapshot()` 關掉。
     """
     global _ACTIVE
-    if _ACTIVE + 1 >= len(_POOL):
+    if not _POOL:
         return None
-    _ACTIVE += 1
-    return _POOL[_ACTIVE][0]
+    now = time.monotonic()
+    _COOLING[_ACTIVE] = now
+    for step in range(1, len(_POOL) + 1):
+        candidate = (_ACTIVE + step) % len(_POOL)
+        cooled_at = _COOLING.get(candidate)
+        if cooled_at is None or now - cooled_at >= _COOLDOWN_SECONDS:
+            _ACTIVE = candidate
+            return _POOL[candidate][0]
+    return None

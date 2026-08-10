@@ -134,6 +134,39 @@ def _regeneration_entry_point(attempt: dict) -> str:
     return ACTION_EPISODE
 
 
+def _regeneration_hint(attempt: dict) -> str:
+    """重生**這一顆**時要注意什麼 —— 與 `_regeneration_entry_point()` 同源判斷。
+
+    v0.9.6 把入口收斂了,卻讓這句話在 retract 的回傳裡另外用 if/else 猜:「有 bundle」
+    以外一律說「必須帶回原本那組 `source_ids`」。而入口的白名單**特意**把「認不出來的
+    形狀」也導向 `podcast_episode`(保守要求明示),於是那句話對
+    `settings={"origin": "explicit_resume"}` 的 attempt 是**假的** —— manifest 裡根本
+    沒有那組 source_ids(v0.9.6 真實驗收 FINDING-4)。收斂做了一半就是這個下場:
+    action 對了,附帶的話還是錯的。
+    """
+    if attempt.get("input_bundle") is not None:
+        # binding 只能建立一次,而它還綁著這顆即將成為 tombstone 的 attempt。
+        return (
+            "**重生要用一份新的、尚未綁定的 frozen bundle** —— 舊 bundle 的 "
+            "attempt-binding.json 還綁著這顆已作廢的 attempt,沿用它會被 tombstone 擋下來。"
+        )
+    settings = attempt.get("settings") or {}
+    if set(settings) == _SERIES_SETTINGS_KEYS:
+        return ""
+    if settings.get("source_ids"):
+        return (
+            "**重生時必須帶回原本那組 `source_ids`** —— 這一集的生成輸入指名了來源,"
+            "改用 podcast_series 會靜默改成讀整本筆記本。"
+        )
+    # 認不出來的形狀(例如 resume 建的 `{"origin": "explicit_resume"}`)。**不能假裝
+    # 知道**它原本讀了哪幾筆 —— manifest 裡沒有那個資訊。
+    return (
+        f"⚠️ 這顆 attempt 的 settings 認不出原本用了哪些來源(逐字是 {sorted(settings)!r})"
+        " —— **重生時要自己指名 `source_ids`**,不指名會讀整本筆記本。用 source_list "
+        "挑「本集自己的來源 + 最近 5 集的音檔回錄」。"
+    )
+
+
 def _attempt_capabilities(episode: dict, attempt: dict, attempt_id: str) -> dict:
     """**「這顆 attempt 現在能做什麼」的單一事實來源。**
 
@@ -200,6 +233,7 @@ def _attempt_capabilities(episode: dict, attempt: dict, attempt_id: str) -> dict
         "can_reconcile": dispatch_status
         in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous"),
         "regeneration_entry": _regeneration_entry_point(attempt),
+        "regeneration_hint": _regeneration_hint(attempt),
     }
 
 
@@ -2027,6 +2061,18 @@ async def podcast_episode_reconcile(
             "artifact_id": latest_artifact_id,
             "safe_next_action": ACTION_RESUME,
         }
+    # **零候選:出路要寫在回傳裡,不能只寫在 skill 散文。**(v0.9.6 驗收 FINDING-1)
+    # 這條路上 `safe_next_action` 指回本工具自己,而連呼兩次的回傳**逐欄位相同** ——
+    # 呼叫端照著做就是無限迴圈。而 skill 與 `partial()` 都說「原地打轉」的唯一依據是
+    # `attempt_count` / `superseded_attempt_count` 持續增加,但 reconcile 不建 attempt,
+    # 這兩個數字恆為 1 / 0,**偵測條件從不成立**。
+    # 資訊本來就在 —— 同一顆 attempt 餵進 `_attempt_capabilities` 就會得到正確那句;
+    # v0.9.6 只是沒把這個出口接上去(收斂做了一半)。
+    episode_row = next(
+        (row for row in latest.get("episodes", []) if row.get("episode") == episode_n),
+        {},
+    )
+    caps = _attempt_capabilities(episode_row, latest_attempt, attempt_id)
     return {
         "complete": False,
         "episode_n": episode_n,
@@ -2034,6 +2080,13 @@ async def podcast_episode_reconcile(
         "observed_state": latest_attempt["dispatch"]["status"],
         "candidate_artifact_ids": [],
         "safe_next_action": ACTION_RECONCILE,
+        "next_step": (
+            "這次對帳在遠端找到 **0 個候選** —— 可能是那次生成還沒出現,也可能是它"
+            "根本沒被受理。**重呼本工具會得到一模一樣的回傳**(不建 attempt,所以"
+            "`attempt_count` 不會動,原地打轉偵測看不出來)。先用 "
+            'artifact_list(notebook_id, kind="audio") 直接看雲端有沒有這一集,再照這個做:'
+            + _attempt_next_step(caps)
+        ),
     }
 
 
@@ -2671,7 +2724,7 @@ async def podcast_attempt_retract(
             return (
                 dict(existing),
                 _regeneration_entry_point(attempt),
-                attempt.get("input_bundle") is not None,
+                _regeneration_hint(attempt),
             )
 
         output_attempt_id = episode.get("output_attempt_id")
@@ -2843,10 +2896,10 @@ async def podcast_attempt_retract(
         return (
             dict(retraction),
             _regeneration_entry_point(attempt),
-            attempt.get("input_bundle") is not None,
+            _regeneration_hint(attempt),
         )
 
-    _, (retraction, entry_point, retracted_had_bundle) = ManifestStore(
+    _, (retraction, entry_point, regeneration_hint) = ManifestStore(
         manifest_path
     ).update(mutate)
     needs_cleanup = bool(retraction.get("stale_source_id"))
@@ -2855,21 +2908,9 @@ async def podcast_attempt_retract(
     # 指回 series 會靜默把「只讀這幾筆」變成「讀整本筆記本」,實測兩次 dispatch 送出
     # `[["src-1"], None]`。清理義務仍然先走:`source_delete` 沒做完,下一次生成會
     # fail-closed。
-    if entry_point != ACTION_EPISODE:
-        pinned_warning = ""
-    elif retracted_had_bundle:
-        # `attempt-binding.json` 刻意只能建立一次,而它還綁著這顆已成為 tombstone 的
-        # attempt —— 沿用同一份 bundle 重生會撞「was retracted」而完全生不出東西
-        # (實測新 dispatch 數 = 0)。所以要的是一份**新的、尚未綁定**的 bundle。
-        pinned_warning = (
-            "**重生要用一份新的、尚未綁定的 frozen bundle** —— 舊 bundle 的 "
-            "attempt-binding.json 還綁著這顆已作廢的 attempt,沿用它會被 tombstone 擋下來。"
-        )
-    else:
-        pinned_warning = (
-            "**重生時必須帶回原本那組 `source_ids`** —— 這一集的生成輸入指名了來源,"
-            "改用 podcast_series 會靜默改成讀整本筆記本。"
-        )
+    # 注意事項由 `_regeneration_hint()` 產生 —— 它與 `_regeneration_entry_point()`
+    # **同源**。v0.9.6 在這裡自己 if/else 猜,結果對「認不出原本用了哪些來源」那類
+    # (resume 建的 attempt)說了一句事實錯誤的話(驗收 FINDING-4)。
     return {
         **retraction,
         "observed_state": "retracted",
@@ -2880,7 +2921,7 @@ async def podcast_attempt_retract(
                 if needs_cleanup
                 else f"用 {entry_point} 重生。"
             )
-            + pinned_warning
+            + regeneration_hint
         ),
     }
 
@@ -3082,7 +3123,15 @@ async def podcast_series(
                     "是「不指名來源」——直接改呼 podcast_episode(..., source_ids=[...]) 會被"
                     "拒絕(already has durable active attempt)。先 podcast_attempt_retract "
                     "掉它(純本機動作,不需要 abandon_in_flight:這顆要嘛從沒送出去、要嘛"
-                    "遠端已經回報終態,manifest 自己就知道結果),再用指名版重生。"
+                    "遠端已經回報終態,manifest 自己就知道結果),再用 "
+                    "podcast_episode(..., source_ids=[...]) 重生。"
+                    # retract 不打 RPC(設計如此),所以它**看不到筆記本此刻已經超標**,
+                    # 回傳的 safe_next_action 會依那顆 attempt 的 settings 說
+                    # `podcast_series` —— 照做會再撞一次這道守門(會終止,但白跑一趟)。
+                    # 講在這裡最便宜:擋下它的就是我們,我們知道筆記本超標(FINDING-2)。
+                    "⚠️ retract 之後**不要**照它回傳的 safe_next_action 去呼 podcast_series"
+                    " —— 它不打 RPC、看不到筆記本已經超標,照做會再被這道守門擋一次。"
+                    "這個筆記本現在只能走指名版。"
                 ),
             )
         except NotebookAccessDenied as exc:
