@@ -617,3 +617,53 @@ async def test_nine_sources_still_pass_so_early_episodes_keep_working(
 
     assert out["complete"] is True
     assert _audio_call(fake_client)["source_ids"] is None
+
+
+async def test_the_guard_does_not_block_an_attempt_that_only_needs_finalizing(
+    fake_client, tmp_path
+):
+    """**守門不可以擋「已 dispatch、只等 finalize」的那條。**
+
+    那顆 attempt 不會再生成一次 —— 遠端的 artifact 是用 dispatch 當下的來源集合做的,
+    此刻筆記本有幾筆與它無關。擋它不會避免任何假內容,只會把一集永久卡在半路:
+    `podcast_series` 是它唯一的續跑者,而停點會叫呼叫端去 retract 一個**已經在燒配額**
+    的生成。
+
+    位置敏感度就在這裡:守門的條件是
+    `dispatch_state in ("prepared", "not_accepted") or remote_state in ("failed", "removed")`,
+    少寫那個條件、改成無條件擋,這條路就斷了。v0.9.3 真實驗收的情境 C 量的就是這個。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    _seed_sources(fake_client, 3)
+    # dispatch 成功、finalize 前斷線 —— MCP 最常見的失敗形狀(外層 timeout 砍 request)。
+    fake_client.artifacts.fail_wait_on = 1
+    fake_client.artifacts.wait_exc = TimeoutError("client 被砍掉了")
+    interrupted = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+    assert interrupted["complete"] is False
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "accepted", attempt["dispatch"]
+    assert stored["episodes"][0].get("output_attempt_id") is None
+    dispatched = len(
+        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
+    )
+
+    # 中斷期間又上傳了幾集回錄,筆記本現在遠遠超標(3 + 12 = 15 筆)。
+    fake_client.artifacts.wait_exc = None
+    fake_client.artifacts.fail_wait_on = None
+    _seed_sources(fake_client, 12)
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is True, "只等 finalize 的 attempt 不該被筆數守門攔下"
+    assert out["episodes"][0]["episode"] == 1
+    after = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
+    assert after == dispatched, "續跑只做 finalize,不得再 dispatch 一次"

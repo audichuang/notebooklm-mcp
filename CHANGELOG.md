@@ -94,6 +94,48 @@ artifact_id,伺服器**應該**沿用該 artifact 原本的來源集合而不是
 但那是推測、沒有實測前提,所以既不加守門(會廢掉一條救援路)也不宣稱安全。已寫進該工具
 docstring,列入 v0.9.3 驗收。
 
+### 真實驗收(2026-08-10,stg 9 帳號池):守門與停點全部成立,四個 FINDING 都在外圍
+
+完整記錄:[acceptance-v0.9.3-findings.md](docs/acceptance-v0.9.3-findings.md)。full 一輪,
+35 支工具全部呼叫過(`podcast_attempt_adopt` 只走到拒絕路徑、`publish_series` 依使用者
+指示只跑 preflight),13 次真實生成。
+
+**三個驗收問題的答案**:守門擋得住(八個邊界格全中,含「判準是筆數不是指名」與
+`prior_mp3_path` 預先計入)、擋下來照著 `safe_next_action` 走得出去(兩種停點各走完整
+一輪到重生成功,並先刻意照錯的做一次撞出 `already has durable active attempt`)、
+沒有把原本能跑的路關掉(9 筆整季流程照生、**只等 finalize 的 attempt 不被攔**、
+`generate_slides`/`generate_report` 在 15 筆筆記本上照生)。
+
+`prepared` / `acceptance_unknown` / `accepted` 三種既有 attempt 用**可控的 client
+cancellation** 造出來(3.2s / 7s / 45s 三個時點,RPC 全真)。
+
+**`artifact_retry_failed` 從「推測」變成一次實測**:failed AUDIO 之後才加 4 篇全新領域
+來源(筆記本 12 筆、已超標),retry 完逐字稿對 16 個獨有指紋 **0/16**;同一批來源指名
+生成的正向對照 **16/16**。伺服器確實沿用原來源集合,守門維持不加。限制(n=1、只測
+「新增」沒測「刪除」)已寫進該工具 docstring。
+
+**v0.9.2 的 `notebook_share_with_pool` 一併結案**:非 owner 作用中帳號對只有 owner 看得到
+的 notebook 呼叫 → `shared_by` 是真 owner、事後 `OWNER×1 + EDITOR×8`、輪替游標不動;
+單帳號模式 **0 趟** `get_status` 安靜 no-op 且 schema 一致;不存在的 id **1 趟**就原樣
+重拋 `rpc_code=5`。
+
+**四個 FINDING(都不在核心機制上)**:
+
+1. 驗收工作區 CLAUDE.md 的 `fuser` 清理指令偵測不到活著的 server(server 寫完憑證就關
+   FD),照抄會刪掉正在跑的 server 的憑證目錄。
+2. `podcast_attempt_retract` 對 `acceptance_unknown` 不傳旗標時,拒絕訊息是
+   `only a promoted output attempt can be retracted` —— **沒提 `abandon_in_flight`**,
+   而那句話在該狀態下是假的。這一版修了 docstring,沒修 runtime 訊息。
+3. manifest 的 `retraction` 區塊**沒有記下 `abandon_in_flight`**:純本機的 `prepared`
+   retract 與顯式宣告的 in-flight retract 事後在稽核紀錄上分不出來。
+4. 低階 `generate_audio` **沒有配額 failover**(`_rotate_for_quota` 只在 `tools_podcast`),
+   而 SKILL.md §Auth 說「呼叫端不會看到失敗」沒有限定範圍 —— troubleshooting 對
+   `acceptance_unknown` 死結建議的備援路徑正好建在它上面。
+
+**回收成離線測試**:`test_the_guard_does_not_block_an_attempt_that_only_needs_finalizing`
+—— 既有 26 條守門測試只驗「該擋的擋住」,沒有一條驗「不該擋的放過」,把守門條件改成
+無條件擋時全部照樣綠。已做突變驗證(改壞→紅、還原→綠),全套 604 passed。
+
 ### 這一輪的分工
 
 離線 review + **Codex 獨立複審**(沒有先餵它我方 findings,兩邊各自收斂)。Codex 抓到的

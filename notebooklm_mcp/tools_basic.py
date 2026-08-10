@@ -593,11 +593,18 @@ async def artifact_retry_failed(notebook_id: str, artifact_id: str) -> dict:
     注意 SDK 對伺服器端的同步拒絕(rate limit / 配額 / 不可重試的 artifact)是
     **raise**(不像 generate_* 吞成 failed status),所以拒絕會直接冒出來。
 
-    ⚠️ **未驗證的邊界**:AUDIO 的 retry 這裡**沒有**來源筆數守門(`generate_audio` /
-    `podcast_episode` 都有)。RETRY_ARTIFACT 只送 artifact_id,伺服器**應該**沿用該
-    artifact 原本的來源集合而不是重抓筆記本當下全部;但那是推測,沒有實測前提,所以
-    既不加守門(會廢掉一條救援路)也不宣稱安全。要重跑一顆來源集合已經過期的 failed
-    AUDIO,走 `podcast_episode(..., source_ids=[...])` 重生比較保險。"""
+    ⚠️ **部分驗證的邊界**:AUDIO 的 retry 這裡**沒有**來源筆數守門(`generate_audio` /
+    `podcast_episode` 都有)。RETRY_ARTIFACT 只送 artifact_id,伺服器沿用該 artifact
+    原本的來源集合、不重抓筆記本當下全部——**v0.9.3 真實驗收(2026-08-10)實測過一次**:
+    對一顆 failed AUDIO,在失敗之後才把 4 篇全新領域的來源加進筆記本(共 12 筆、已超標),
+    retry 完的逐字稿對那 4 篇的 16 個獨有指紋 **0/16 命中**;同一批來源用
+    `podcast_episode(source_ids=[...])` 生一集當正向對照則 **16/16 命中**(證明探針有效)。
+    所以守門仍然不加(加了會廢掉一條救援路)。
+
+    **但這只結案了一半,別讀成「這支工具安全」**:n=1,而且只測了「失敗**之後新增**
+    來源」。**沒測**失敗之後**刪掉**原來源(原集合的 id 失效時伺服器行為未知)、
+    也沒測跨帳號重跑。要重跑一顆來源集合已經**變動過**的 failed AUDIO,走
+    `podcast_episode(..., source_ids=[...])` 重生仍然比較保險。"""
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id must be a non-empty string")
     artifact_id = artifact_id.strip()
