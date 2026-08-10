@@ -998,3 +998,87 @@ async def test_retract_clears_an_attempt_that_never_left_this_machine(
     fake_client.artifacts.generate_audio_exc = None
     again = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
     assert again["complete"] is True
+
+
+async def test_the_refusal_message_points_at_the_way_out(fake_client, tmp_path):
+    """**拒絕訊息本身要說得出正門。**
+
+    v0.9.3 真實驗收 FINDING-2:訊息逐字是「only a promoted output attempt can be
+    retracted」,而那句話在 `acceptance_unknown` / `accepted` 下**是假的** —— 傳
+    `abandon_in_flight=True` 就 retract 得掉(同一輪驗收下一步就實測了)。只讀工具回傳
+    的呼叫端會判定「這條路關著」,而那正是 v0.9.1 FAIL-1 的同型:**指引在它自己產生的
+    狀態下不可執行**。v0.9.3 修了 docstring,漏了 runtime 訊息 —— 等於修了給人讀的那份、
+    漏了給機器讀的那份。
+
+    訊息要帶兩件事:正門的名字(`abandon_in_flight`),以及**它現在是什麼狀態** ——
+    呼叫端得知道自己落在需要外部知識的那一格,才會先去 `artifact_list` 查雲端。
+    """
+    manifest_path = str(tmp_path / "series_manifest.json")
+    fake_client.artifacts.fail_wait_on = 1        # dispatch 成功、等待階段斷掉
+    stopped = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
+    assert stopped["complete"] is False
+
+    with pytest.raises(ValueError) as caught:
+        await p.podcast_attempt_retract(
+            manifest_path, 1, stopped["attempt_id"], reason="輸入就是錯的"
+        )
+
+    msg = str(caught.value)
+    assert "abandon_in_flight" in msg, f"訊息沒指向正門: {msg}"
+    assert "artifact_list" in msg, f"沒教它先確認雲端有沒有東西: {msg}"
+    # 要說出它落在哪一格,否則呼叫端分不出「該傳旗標」與「真的不該碰」。
+    assert stopped["observed_state"] in msg or "accepted" in msg, msg
+
+
+async def test_the_audit_record_says_whether_the_flag_was_used(fake_client, tmp_path):
+    """**兩種 retract 在稽核紀錄上必須分得出來。**
+
+    v0.9.3 真實驗收 FINDING-3:一次是 `prepared`(純本機、零遠端後果、不需宣告),
+    一次是 `acceptance_unknown` + `abandon_in_flight=True`(呼叫端顯式宣告了 manifest
+    推導不出的外部知識,而且遠端**可能真的有東西在燒**)。兩者的 `retraction` 區塊
+    欄位完全相同,事後只能去讀 `dispatch.status` 反推 —— 而那個欄位在 retract 之後
+    還會被後續操作改動。
+
+    `reason` 必填的理由是「retract 是審計事件」(ADR-0009);同一個理由要求記下
+    **這次動用了哪一種權限**。ADR-0010 §Transparency:manifest 是唯一的稽核憑據。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    # ① 從沒送出去的那種:不需要旗標。
+    plain_path = str(tmp_path / "plain" / "series_manifest.json")
+    (tmp_path / "plain").mkdir()
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+    refused = await p.podcast_series(
+        "nb-1", episodes=[EP], output_dir=str(tmp_path / "plain")
+    )
+    fake_client.artifacts.generate_audio_exc = None
+    plain = await p.podcast_attempt_retract(
+        plain_path, 1, refused["attempt_id"], reason="brief 寫錯"
+    )
+
+    assert plain["abandon_in_flight"] is False
+    assert plain["dispatch_status_at_retraction"] == "not_accepted"
+
+    # ② 需要外部知識的那種:顯式宣告。
+    flagged_dir = tmp_path / "flagged"
+    flagged_dir.mkdir()
+    flagged_path = str(flagged_dir / "series_manifest.json")
+    fake_client.artifacts.fail_wait_on = 1
+    stopped = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(flagged_dir))
+    fake_client.artifacts.fail_wait_on = None
+    flagged = await p.podcast_attempt_retract(
+        flagged_path,
+        1,
+        stopped["attempt_id"],
+        reason="artifact_list 查過雲端零 artifact",
+        abandon_in_flight=True,
+    )
+
+    assert flagged["abandon_in_flight"] is True
+    assert flagged["dispatch_status_at_retraction"] == "accepted"
+
+    # 落盤的也要有 —— 回傳值看得到但 manifest 沒記等於沒記。
+    stored = json.loads(open(flagged_path, encoding="utf-8").read())
+    retraction = stored["episodes"][0]["attempts"][0]["retraction"]
+    assert retraction["abandon_in_flight"] is True
+    assert retraction["dispatch_status_at_retraction"] == "accepted"

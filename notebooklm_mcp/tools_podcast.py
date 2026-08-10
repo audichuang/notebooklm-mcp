@@ -2542,9 +2542,21 @@ async def podcast_attempt_retract(
             )
         )
         if output_attempt_id != attempt_id and not abandons_unauthorized_candidate:
+            # **訊息要說得出正門**(v0.9.3 驗收 FINDING-2)。原本寫的是「only a promoted
+            # output attempt can be retracted」—— 那句話在這個狀態下**是假的**:傳
+            # `abandon_in_flight=True` 就 retract 得掉。只讀工具回傳的呼叫端會判定
+            # 「這條路關著」,而那正是 v0.9.1 FAIL-1 的同型(指引在它自己產生的狀態下
+            # 不可執行)。v0.9.3 修了 docstring 卻漏了這裡 —— 等於修了給人讀的那份、
+            # 漏了給機器讀的那份,而真正的呼叫端讀的是這一句。
+            status = attempt.get("dispatch", {}).get("status")
             raise ValueError(
-                f"attempt {attempt_id!r} is not episode {episode_n}'s durable "
-                "output; only a promoted output attempt can be retracted"
+                f"attempt {attempt_id!r} is not episode {episode_n}'s durable output "
+                f"(dispatch.status={status!r}) —— 它可能還在遠端跑,所以預設不讓作廢。"
+                "確定要作廢的話:先用 artifact_list(notebook_id, kind=\"audio\") 查雲端"
+                "到底有沒有這一集的 artifact,再帶 abandon_in_flight=True 重呼本工具。"
+                "那個旗標的意思就是「我查過了,manifest 推導不出來的那件事我知道」。"
+                "(dispatch.status 是 prepared / not_accepted 時不需要旗標 —— 契約保證"
+                "伺服器沒建出 task。)"
             )
         if not abandons_unauthorized_candidate and active_attempt_id not in (
             None,
@@ -2606,6 +2618,15 @@ async def podcast_attempt_retract(
             "stale_source_ids": stale_source_ids,
             "retracted_mp3_path": retracted_output.get("mp3_path")
             or attempt.get("finalize", {}).get("download", {}).get("path"),
+            # **兩種 retract 在稽核紀錄上要分得出來**(v0.9.3 驗收 FINDING-3)。
+            # 一種是 `prepared`/`not_accepted`:純本機、零遠端後果、manifest 自己就知道;
+            # 另一種是呼叫端**顯式宣告**了推導不出來的外部知識,而遠端可能真的有東西在燒。
+            # 兩者原本的 `retraction` 欄位完全相同,事後只能去讀 `dispatch.status` 反推
+            # —— 而那個欄位在 retract 之後還會被後續操作改動,所以連同當時的值一起存。
+            # `reason` 必填的理由是「retract 是審計事件」(ADR-0009);同一個理由要求記下
+            # 這次動用了哪一種權限(ADR-0010 §Transparency:manifest 是唯一的稽核憑據)。
+            "abandon_in_flight": abandon_in_flight,
+            "dispatch_status_at_retraction": attempt.get("dispatch", {}).get("status"),
         }
         attempt["retraction"] = retraction
         episode.setdefault("retracted_attempt_ids", []).append(attempt_id)

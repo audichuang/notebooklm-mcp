@@ -8,6 +8,63 @@
 
 ---
 
+## v0.9.4
+
+v0.9.3 真實驗收抓到的四個 FINDING,三個修在這裡(第四個的 runtime 半留作單獨決策)。
+**都不在核心機制上** —— 核心的驗收結果寫在下面 v0.9.3 節。
+
+### 拒絕訊息自己是死路(FINDING-2)
+
+`podcast_attempt_retract` 對 `acceptance_unknown` / `accepted` 不傳旗標時,訊息逐字是
+`only a promoted output attempt can be retracted` —— **那句話在那個狀態下是假的**,
+傳 `abandon_in_flight=True` 就 retract 得掉(同一輪驗收下一步就實測了)。只讀工具回傳的
+呼叫端會判定「這條路關著」。
+
+**這是 v0.9.1 FAIL-1 的同型**:指引在它自己產生的狀態下不可執行。而諷刺的是 v0.9.3
+整輪都在修這個形狀 —— 它修了 `abandon_in_flight` 的 **docstring**,漏了 **runtime 訊息**,
+等於修好給人讀的那份、留著給機器讀的那份。真正的呼叫端讀的是後者。
+
+訊息現在帶三件事:那顆 attempt 當下的 `dispatch.status`(呼叫端才知道自己落在哪一格)、
+先去 `artifact_list` 查雲端、然後帶 `abandon_in_flight=True` 重呼;並註明 `prepared` /
+`not_accepted` 不需要旗標。
+
+### 稽核紀錄分不出兩種 retract(FINDING-3)
+
+一次是 `prepared` / `not_accepted`(純本機、零遠端後果、manifest 自己就知道),一次是
+呼叫端**顯式宣告**了推導不出來的外部知識、而遠端可能真的有東西在燒 —— 兩者的
+`retraction` 區塊欄位**完全相同**,事後只能去讀 `dispatch.status` 反推,而那個欄位在
+retract 之後還會被後續操作改動。
+
+`reason` 必填的理由是「retract 是審計事件」(ADR-0009);同一個理由要求記下**這次動用了
+哪一種權限**。`retraction` 現在多存 `abandon_in_flight` 與 `dispatch_status_at_retraction`
+(當時的值,不事後反推)。ADR-0010 §Transparency:manifest 是唯一的稽核憑據。
+
+### 文件:兩處「沒限定範圍」的說法(FINDING-4 / FINDING-1)
+
+- **SKILL.md §Auth 說配額耗盡「呼叫端不會看到失敗」,沒說那只涵蓋 podcast 家族。**
+  `_rotate_for_quota` 只在 `tools_podcast`;低階 `generate_audio` / `generate_slides` /
+  `generate_report` 撞到配額直接拋。這在救援時最容易咬人 —— 配額耗盡正是需要救援的時候,
+  而 troubleshooting 對 `acceptance_unknown` 死結建議的備援路徑(低階 `generate_audio` +
+  `podcast_attempt_adopt`)正好建在沒有 failover 的那一支上。v0.9.3 驗收就因此卡住了
+  `podcast_attempt_adopt` 的正向驗證。兩邊都標註了。
+  **要不要給低階入口也接上 failover 是獨立的設計決策,這一版沒做。**
+- **驗收工作區範本的清理指令會誤刪活著的 server 的憑證目錄。**
+  `fuser "$d" || rm -rf "$d"` 的前提是「活著的 server 持有 open FD」—— 而 server 寫完
+  slot 檔就 `close`,執行期不持有任何 FD,`/proc/<pid>/cwd` 也不在那裡。判別實驗確認
+  `fuser -v` 與 `lsof +D` 對活著的 server 都是空的,所以那條指令對**每一個**活著的
+  server 都判成「沒人持有」。這台當下常有 3 個 server 在跑,其中一個是 `-c prd` 的正式
+  帳號 pool。範本改成「有活的就不自動刪,印 `lstart` 對照表讓人判斷」。
+  ⚠️ **那份範本在 `.claude/skills/acceptance-workspace/`,而 `.claude/` 被 gitignore ——
+  它從來不在版控裡**(`aa81890` 那個「把驗收工作區的做法固化成 skill」的 commit 實際只
+  收了 `tests/` 與 `uv.lock`)。所以這個修正**只存在原作者那台機器**,clone 下來的人
+  既拿不到範本也拿不到修正。要不要把它納入版控是獨立決策,這一版沒動。
+
+### 回收成離線測試
+
+`test_the_refusal_message_points_at_the_way_out`(訊息要說得出正門與當下狀態)、
+`test_the_audit_record_says_whether_the_flag_was_used`(兩種 retract 的稽核紀錄要分得出來,
+回傳值與落盤都驗)。606 passed。
+
 ## v0.9.3
 
 **一個 host 跑了 14 集,13 集裡 9 集內容錯置,而工具全程回報成功**(2026-08-10)。
