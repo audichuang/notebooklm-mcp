@@ -69,6 +69,7 @@ ACTION_RECONCILE = "podcast_episode_reconcile"
 ACTION_RESUME = "podcast_episode_resume"
 ACTION_RETRACT = "podcast_attempt_retract"
 ACTION_SERIES = "podcast_series"
+ACTION_SHARE_WITH_POOL = "notebook_share_with_pool"
 ACTION_SOURCE_DELETE = "source_delete"
 SAFE_NEXT_ACTIONS = frozenset(
     {
@@ -88,9 +89,48 @@ SAFE_NEXT_ACTIONS = frozenset(
         # 那顆從未 dispatch 的 attempt 沒有 stale source 要清,tombstone 掉才走得出去。
         ACTION_RETRACT,
         ACTION_SERIES,
+        # 權限停點的下一步。曾經刻意不放進來(理由是「不想為分辨兩種 not_accepted 而
+        # 新增字面值」),但那個理由只對「下一步仍然是 podcast_series」的情況成立 ——
+        # `notebook_access_denied` 的下一步**真的是另一支工具**,而白名單的意義本來就
+        # 是「一定是真的 MCP 工具名」。回 `podcast_series` 會讓只讀這個欄位的自動化
+        # 原地重試同一個沒權限的帳號,而 error 文字裡寫的才是真正該做的事 —— 同一支
+        # 工具的兩個欄位互相矛盾。v0.9.3 為完全相同的理由加過 ACTION_EPISODE 與
+        # ACTION_RETRACT,那個「不新增」的理由自己已經被推翻。
+        ACTION_SHARE_WITH_POOL,
         ACTION_SOURCE_DELETE,
     }
 )
+
+
+def _outcome_is_settled(attempt: dict) -> bool:
+    """manifest 自己就知道這顆 attempt 的遠端結果 —— 不需要呼叫端提供外部知識。
+
+    兩種:①**dispatch 從沒離開本機**(`prepared` / `not_accepted`,契約保證伺服器沒
+    建出 task);②**遠端已經給出終態**(`failed` / `removed`)—— 那不是「可能還在飛」,
+    是伺服器已經回報過的結果,同樣沒有 in-flight 的外部知識可言。
+
+    v0.9.4 只涵蓋 ①,於是 `podcast_series` 的筆數守門在 `failed`/`removed` 那條路徑上
+    給出的 `podcast_attempt_retract` 指引**照做會被拒**(那時 `dispatch.status` 是
+    `accepted`)——又一次「指引在它自己產生的狀態下不可執行」。
+    """
+    if attempt.get("dispatch", {}).get("status") in ("prepared", "not_accepted"):
+        return True
+    return attempt.get("remote", {}).get("status") in ("failed", "removed")
+
+
+def _regeneration_entry_point(attempt: dict) -> str:
+    """重生這一集要用**哪一支**工具。
+
+    `podcast_series` 生不出帶 `source_ids` 或 frozen bundle 的 settings,所以那種 attempt
+    只有 `podcast_episode` 續得下去。指錯的後果是**靜默改掉生成輸入**:實測
+    `podcast_episode(source_ids=["src-1"])` 撞配額 → retract → 照 `safe_next_action` 重呼
+    series,兩次 dispatch 實際送出 `[["src-1"], None]` —— 第二次改讀整本筆記本,而那正是
+    本 repo 最忌諱的內容錯置形狀(skill §Episodic 也明寫這條)。
+    """
+    settings = attempt.get("settings") or {}
+    if settings.get("source_ids") or attempt.get("input_bundle"):
+        return ACTION_EPISODE
+    return ACTION_SERIES
 
 
 def _artifact_created_at_utc(value: object) -> datetime | None:
@@ -262,13 +302,29 @@ def _create_audio_attempt(
                         # `errors[]`,那份是只 append 的。
                         _reset_attempt_for_resend(prior)
                         return active_attempt_id
+                    # **指引按 attempt 的實際狀態產生。** 原本無條件教「reconcile or
+                    # resume,不然就用 identical arguments 重送」—— 對 `not_accepted`
+                    # 那三條全是死的:reconcile 明說該狀態不可對帳、resume 要
+                    # artifact_id 而它是 null、而「逐字相同」在 brief 產生器改過之後
+                    # 重現不了(真實事故:brief 經手動轉錄,三面堵死)。v0.9.3 開的
+                    # 新出口(免旗標 retract)沒有寫進這句,等於開了門沒掛路標。
+                    if _outcome_is_settled(prior):
+                        way_out = (
+                            "它的結果 manifest 已經知道了(要嘛沒送出去,要嘛遠端已回報"
+                            "終態)。參數完全相同就原樣重呼本工具沿用它重送,不會多燒配額;"
+                            "要換 brief 或來源就先 podcast_attempt_retract 掉它"
+                            "(純本機動作,**不需要** abandon_in_flight),再重生。"
+                        )
+                    else:
+                        way_out = (
+                            "先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完);"
+                            "確定那次生成要作廢的話,用 artifact_list 查過雲端之後帶 "
+                            "abandon_in_flight=True 呼叫 podcast_attempt_retract。"
+                        )
                     raise ValueError(
                         f"episode {episode_n} already has durable active attempt "
                         f"{active_attempt_id!r} (dispatch="
-                        f"{prior['dispatch'].get('status')!r}); reconcile or resume it "
-                        "before creating another attempt. If it never dispatched, "
-                        "re-call with the identical arguments to resend that same "
-                        "attempt instead of creating a new one."
+                        f"{prior['dispatch'].get('status')!r}); {way_out}"
                     )
                 _, prior_attempt = _attempt_record(
                     manifest, episode_n, active_attempt_id
@@ -455,9 +511,20 @@ def _ensure_resume_attempt(
             )
         active_attempt_id = episode.get("active_attempt_id")
         if active_attempt_id:
+            # 同 `_create_audio_attempt` 那句的修正:對 `prepared`/`not_accepted`
+            # (以及遠端已終態的)attempt,「reconcile or resume」兩條都走不了 ——
+            # 沒有 artifact 可對帳、也沒有 artifact 可續。
+            _, active = _attempt_record(manifest, episode_n, active_attempt_id)
+            hint = (
+                "它沒有可續的 artifact(要嘛沒送出去,要嘛遠端已回報終態)——"
+                "用產生它的那支工具原樣重呼沿用它重送,或先 podcast_attempt_retract "
+                "掉它(純本機,不需要 abandon_in_flight)再重生。"
+                if _outcome_is_settled(active)
+                else "先 podcast_episode_reconcile 對帳,再 resume 對帳到的那顆。"
+            )
             raise ValueError(
-                f"episode {episode_n} has active attempt {active_attempt_id!r}; "
-                "reconcile or resume that attempt before supplying another artifact"
+                f"episode {episode_n} has active attempt {active_attempt_id!r} "
+                f"(dispatch={active.get('dispatch', {}).get('status')!r}); {hint}"
             )
         existing_notebook = episode.get("notebook_id")
         if existing_notebook not in (None, notebook_id):
@@ -2483,7 +2550,8 @@ async def podcast_attempt_retract(
                         del episode[key]
                 if episode.get("active_attempt_id") == attempt_id:
                     del episode["active_attempt_id"]
-            return dict(existing)  # 不重寫 retracted_at／reason
+            # 不重寫 retracted_at／reason;重生入口每次現算(它是導引不是紀錄)。
+            return dict(existing), _regeneration_entry_point(attempt)
 
         output_attempt_id = episode.get("output_attempt_id")
         active_attempt_id = episode.get("active_attempt_id")
@@ -2527,21 +2595,30 @@ async def podcast_attempt_retract(
         # 呼叫端只能用低階 `generate_audio` + `podcast_attempt_adopt` 繞出去、多燒一次
         # 生成配額。**`acceptance_unknown` 不在這裡面**:那個是真的不知道有沒有受理,
         # 需要外部知識,仍然只能走 `abandon_in_flight`。
-        never_dispatched = attempt.get("dispatch", {}).get("status") in (
-            "prepared",
-            "not_accepted",
-        )
+        settled = _outcome_is_settled(attempt)
         abandons_unauthorized_candidate = (
             attempt_id == active_attempt_id
             and output_attempt_id != attempt_id
             and (
                 output_attempt_id is not None
                 or has_hard_output_evidence(episode)
-                or never_dispatched
+                or settled
                 or abandon_in_flight
             )
         )
         if output_attempt_id != attempt_id and not abandons_unauthorized_candidate:
+            # **先分 ownership,再談旗標。** `abandon_in_flight` 只放行
+            # `active_attempt_id` 那一顆 —— 對一顆已經被 supersede 的歷史 attempt,
+            # 傳 True 與傳 False 得到**同一句**話。v0.9.4 新寫的訊息卻無條件教它
+            # 「帶旗標重呼」,那是永遠做不到的動作:修死路的那一版自己又給了一條死路。
+            if attempt_id != active_attempt_id:
+                raise ValueError(
+                    f"attempt {attempt_id!r} 已經不是 episode {episode_n} 的 active 或 "
+                    f"output attempt(現在 active={active_attempt_id!r}、"
+                    f"output={output_attempt_id!r})—— 它是歷史紀錄,retract 動不了它,"
+                    "`abandon_in_flight` 也只放行 active 那一顆。要作廢的是現在那顆的話,"
+                    "用它的 id 重呼本工具。"
+                )
             # **訊息要說得出正門**(v0.9.3 驗收 FINDING-2)。原本寫的是「only a promoted
             # output attempt can be retracted」—— 那句話在這個狀態下**是假的**:傳
             # `abandon_in_flight=True` 就 retract 得掉。只讀工具回傳的呼叫端會判定
@@ -2619,25 +2696,49 @@ async def podcast_attempt_retract(
             "retracted_mp3_path": retracted_output.get("mp3_path")
             or attempt.get("finalize", {}).get("download", {}).get("path"),
             # **兩種 retract 在稽核紀錄上要分得出來**(v0.9.3 驗收 FINDING-3)。
-            # 一種是 `prepared`/`not_accepted`:純本機、零遠端後果、manifest 自己就知道;
-            # 另一種是呼叫端**顯式宣告**了推導不出來的外部知識,而遠端可能真的有東西在燒。
-            # 兩者原本的 `retraction` 欄位完全相同,事後只能去讀 `dispatch.status` 反推
-            # —— 而那個欄位在 retract 之後還會被後續操作改動,所以連同當時的值一起存。
+            # 一種是結果已定的(`prepared`/`not_accepted`,或遠端已回報終態):純本機、
+            # 零遠端後果、manifest 自己就知道;另一種是呼叫端**顯式宣告**了推導不出來
+            # 的外部知識,而遠端可能真的有東西在燒。兩者原本的 `retraction` 欄位完全相同。
             # `reason` 必填的理由是「retract 是審計事件」(ADR-0009);同一個理由要求記下
             # 這次動用了哪一種權限(ADR-0010 §Transparency:manifest 是唯一的稽核憑據)。
+            #
+            # **兩個欄位要一起讀**:`abandon_in_flight` 是呼叫端**傳了什麼**,不是「特權
+            # 有沒有生效」—— 結果已定的 attempt 就算傳 `True` 也是白傳(准入早就放行了)。
+            # 判準是 `dispatch_status_at_retraction`:它落在結果已定的那組時,這次 retract
+            # 沒有動用任何外部知識。連同當時的值一起存是為了讓這筆稽核**自我完整**
+            # (不必回頭翻 attempt、也不受手改 manifest 影響),不是因為合法操作會改動它
+            # —— tombstone 是 default-deny 的,`_attempt_record` 擋掉所有 attempt 級 writer。
             "abandon_in_flight": abandon_in_flight,
             "dispatch_status_at_retraction": attempt.get("dispatch", {}).get("status"),
         }
         attempt["retraction"] = retraction
         episode.setdefault("retracted_attempt_ids", []).append(attempt_id)
-        return dict(retraction)
+        return dict(retraction), _regeneration_entry_point(attempt)
 
-    _, retraction = ManifestStore(manifest_path).update(mutate)
+    _, (retraction, entry_point) = ManifestStore(manifest_path).update(mutate)
+    needs_cleanup = bool(retraction.get("stale_source_id"))
+    # **重生入口跟著被作廢那顆的生成輸入走**,不是一律 `podcast_series`。指名過來源
+    # (或用 frozen bundle)的一集只有 `podcast_episode` 生得出相同 settings ——
+    # 指回 series 會靜默把「只讀這幾筆」變成「讀整本筆記本」,實測兩次 dispatch 送出
+    # `[["src-1"], None]`。清理義務仍然先走:`source_delete` 沒做完,下一次生成會
+    # fail-closed。
+    pinned_warning = (
+        "**重生時必須帶回原本那組 `source_ids`**(或同一份 frozen bundle)—— 這一集的"
+        "生成輸入指名了來源,改用 podcast_series 會靜默改成讀整本筆記本。"
+        if entry_point == ACTION_EPISODE
+        else ""
+    )
     return {
         **retraction,
         "observed_state": "retracted",
-        "safe_next_action": (
-            ACTION_SOURCE_DELETE if retraction.get("stale_source_id") else ACTION_SERIES
+        "safe_next_action": ACTION_SOURCE_DELETE if needs_cleanup else entry_point,
+        "next_step": (
+            (
+                f"先把 stale_source_ids 全部 source_delete,再用 {entry_point} 重生。"
+                if needs_cleanup
+                else f"用 {entry_point} 重生。"
+            )
+            + pinned_warning
         ),
     }
 
@@ -2674,14 +2775,19 @@ def _classify_not_accepted_stop(exc: BaseException) -> tuple[str, dict]:
     `attempt_count`/`superseded_attempt_count`(partial() 註解說的唯一『有沒有在原地
     打轉』依據)兩輪都是 1/0——跟等配額完全同一組數字。
 
-    **刻意不新增 `safe_next_action` 字面值**:`SAFE_NEXT_ACTIONS` 是「一定是真的
-    MCP 工具名」的白名單(`tests/test_series_durable_resume.py` 鎖著逐字集合),
-    這裡分辨兩者靠 observed_state 與帶著下一步(`notebook_share_with_pool`)的
-    error 訊息,不靠新增一個字面值去改變那個集合。
+    **`safe_next_action` 也跟著分岔**(v0.9.5):權限那一種回 `notebook_share_with_pool`。
+    這裡曾經刻意不新增字面值,理由是「白名單是真工具名的集合,分辨兩者靠 observed_state
+    與 error 訊息就好」—— 但那個理由只在「下一步仍然是 `podcast_series`」時成立。
+    權限問題的下一步**真的是另一支工具**,而 `notebook_share_with_pool` 本來就是公開
+    MCP 工具、完全符合白名單的意義。留著 `podcast_series` 的後果是同一份回傳裡兩個
+    欄位互相矛盾:`error` 說去補分享,`safe_next_action` 說重呼 series,而 skill 教
+    呼叫端「拿不準就直接照 safe_next_action 做」—— 只讀那個欄位的自動化會原地重試
+    同一個沒權限的帳號。v0.9.3 為完全相同的理由加過 `ACTION_EPISODE` /
+    `ACTION_RETRACT`,那個「不新增」的理由自己已經被推翻。
     """
     if isinstance(exc, NotebookAccessDenied):
-        return "notebook_access_denied", {"error": str(exc)}
-    return "not_accepted", {}
+        return "notebook_access_denied", ACTION_SHARE_WITH_POOL, {"error": str(exc)}
+    return "not_accepted", ACTION_SERIES, {}
 
 
 @mcp.tool(annotations=ToolAnnotations(openWorldHint=True))
@@ -2820,16 +2926,22 @@ async def podcast_series(
                 attempt_id,
                 "too_many_sources",
                 ACTION_RETRACT,
+                # 「不需要旗標」這句話成立,是因為**觸發守門的狀態集合與
+                # `_outcome_is_settled` 完全等價** —— 兩邊都是
+                # 「`prepared`/`not_accepted` 或 `remote` 已 `failed`/`removed`」。
+                # 動其中一邊而不動另一邊,這句指引就會變成死路(v0.9.4 就是這樣:
+                # 守門涵蓋了 failed/removed,而 retract 的免旗標條件沒有,照做被拒)。
                 error=(
                     f"{exc}\n這一集已經有 active attempt {attempt_id!r},而它的 settings "
                     "是「不指名來源」——直接改呼 podcast_episode(..., source_ids=[...]) 會被"
                     "拒絕(already has durable active attempt)。先 podcast_attempt_retract "
-                    "掉它(純本機動作;它從未 dispatch,沒有 stale source 要清),再用指名版重生。"
+                    "掉它(純本機動作,不需要 abandon_in_flight:這顆要嘛從沒送出去、要嘛"
+                    "遠端已經回報終態,manifest 自己就知道結果),再用指名版重生。"
                 ),
             )
         except NotebookAccessDenied as exc:
-            observed_state, extra = _classify_not_accepted_stop(exc)
-            return partial(episode_n, attempt_id, observed_state, ACTION_SERIES, **extra)
+            observed_state, action, extra = _classify_not_accepted_stop(exc)
+            return partial(episode_n, attempt_id, observed_state, action, **extra)
         return None
 
     # Resume/finalize 也需要有效認證；每個新 generation 前會再 probe 一次，
@@ -3179,12 +3291,12 @@ async def podcast_series(
                                 "acceptance_unknown",
                                 ACTION_RECONCILE,
                             )
-                        observed_state, extra = _classify_not_accepted_stop(exc)
+                        observed_state, action, extra = _classify_not_accepted_stop(exc)
                         return partial(
                             episode_n,
                             active_attempt_id,
                             observed_state,
-                            ACTION_SERIES,
+                            action,
                             **extra,
                         )
                     except Exception:
@@ -3365,12 +3477,12 @@ async def podcast_series(
                 raise
             # 「等配額」與「notebook 沒分享給這個帳號」manifest 都寫 not_accepted,
             # 但呼叫端拿到的結構化停點要分得出來(見 `_classify_not_accepted_stop`)。
-            observed_state, extra = _classify_not_accepted_stop(exc)
+            observed_state, action, extra = _classify_not_accepted_stop(exc)
             return partial(
                 episode_n,
                 attempt_id,
                 observed_state,
-                ACTION_SERIES,
+                action,
                 **extra,
             )
         except (TimeoutError, ConnectionError):

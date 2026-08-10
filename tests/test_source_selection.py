@@ -667,3 +667,73 @@ async def test_the_guard_does_not_block_an_attempt_that_only_needs_finalizing(
     assert out["episodes"][0]["episode"] == 1
     after = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
     assert after == dispatched, "續跑只做 finalize,不得再 dispatch 一次"
+
+
+async def test_the_stop_for_a_terminal_remote_attempt_is_actually_walkable(
+    fake_client, tmp_path
+):
+    """**守門的指引在 `failed`/`removed` 那條路徑上必須真的走得通。**
+
+    守門條件涵蓋 `remote_state in ("failed", "removed")` —— 而那時 `dispatch.status`
+    是 `accepted`。v0.9.4 寫的訊息卻**無條件**說「它從未 dispatch,不需要旗標」,
+    照著做 retract 會被拒:又一個「指引在它自己產生的狀態下不可執行」。
+
+    修法是把「遠端已經給出終態」也算成 manifest 自己就知道結果 —— `failed`/`removed`
+    沒有「還在飛」的可能,不存在需要外部知識的 in-flight 狀態。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    _seed_sources(fake_client, 3)
+    fake_client.artifacts.fail_complete = True       # 遠端回終態失敗
+    first = await p.podcast_series(
+        "nb-1", episodes=[{"title": "心法篇", "brief": "第一集"}], output_dir=str(tmp_path)
+    )
+    assert first["complete"] is False
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert attempt["remote"]["status"] in ("failed", "removed"), attempt["remote"]
+    assert attempt["dispatch"]["status"] == "accepted", attempt["dispatch"]
+
+    fake_client.artifacts.fail_complete = False
+    _seed_sources(fake_client, 12)          # 筆記本超標
+
+    stop = await p.podcast_series(
+        "nb-1", episodes=[{"title": "心法篇", "brief": "第一集"}], output_dir=str(tmp_path)
+    )
+    assert stop["observed_state"] == "too_many_sources"
+
+    # **照著 safe_next_action 做必須走得通** —— 這是整條 finding 的重點。
+    if stop["safe_next_action"] == "podcast_attempt_retract":
+        await p.podcast_attempt_retract(
+            str(manifest_path), 1, stop["attempt_id"], reason="來源超標,改指名版"
+        )
+    else:
+        raise AssertionError(f"未預期的停點: {stop['safe_next_action']}")
+
+
+async def test_the_permission_stop_points_at_the_tool_that_fixes_it(
+    fake_client, tmp_path, monkeypatch
+):
+    """**`safe_next_action` 是決策樹,不能指向必然重複失敗的工具。**
+
+    權限停點的 `error` 說要跑 `notebook_share_with_pool`,而 `safe_next_action` 回的是
+    `podcast_series` —— skill 明說拿不準就直接照 `safe_next_action` 做,於是自動化只讀
+    那個欄位就會原地重試同一個沒權限的帳號。
+
+    舊註解的理由是「不想為此新增白名單字面值」,但白名單的意義是「一定是真的 MCP
+    工具名」,而 `notebook_share_with_pool` 正是 —— v0.9.3 已經為同樣的理由加過
+    `podcast_episode` 與 `podcast_attempt_retract`,那個理由自己被推翻了。
+    """
+    from notebooklm.exceptions import ClientError
+
+    async def denied(_notebook_id):
+        raise ClientError("permission denied", rpc_code=7)
+
+    monkeypatch.setattr(fake_client.sources, "list", denied)
+
+    out = await p.podcast_series(
+        "nb-1", episodes=[{"title": "心法篇", "brief": "第一集"}], output_dir=str(tmp_path)
+    )
+
+    assert out["observed_state"] == "notebook_access_denied"
+    assert out["safe_next_action"] == "notebook_share_with_pool"
+    assert "notebook_share_with_pool" in out["error"]

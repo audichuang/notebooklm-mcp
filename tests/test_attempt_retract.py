@@ -1082,3 +1082,85 @@ async def test_the_audit_record_says_whether_the_flag_was_used(fake_client, tmp_
     retraction = stored["episodes"][0]["attempts"][0]["retraction"]
     assert retraction["abandon_in_flight"] is True
     assert retraction["dispatch_status_at_retraction"] == "accepted"
+
+
+async def test_retract_sends_a_pinned_episode_back_to_the_single_entry_point(
+    fake_client, tmp_path
+):
+    """**`safe_next_action` 不能把帶 `source_ids` 的一集丟回 `podcast_series`。**
+
+    v0.9.4 Codex 複審抓到的最重一條,已重現:`podcast_episode(source_ids=["src-1"])`
+    撞配額停在 `not_accepted` → retract(沒有 stale source)→ 回
+    `safe_next_action="podcast_series"` → 呼叫端照做 → series 建的新 attempt
+    **不帶 source_ids**,兩次 dispatch 實際送出 `[["src-1"], None]`。
+
+    生成輸入被靜默改掉,而那正是本 repo 最忌諱的內容錯置形狀 —— skill 也明寫「帶
+    `source_ids` 的 attempt 不能用 `podcast_series` 續」。`input_bundle` 同理:
+    series 生不出那個形狀。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path = str(tmp_path / "series_manifest.json")
+    fake_client.sources.seed("EP01 題目", "EP01 附錄", "EP01 補充")
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+    with pytest.raises(RateLimitError):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="1",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
+            source_ids=["src-1"],
+        )
+    fake_client.artifacts.generate_audio_exc = None
+    attempt_id = _episode(manifest_path)["active_attempt_id"]
+
+    out = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="brief 改了"
+    )
+
+    assert out["safe_next_action"] == "podcast_episode", (
+        "帶 source_ids 的一集丟回 series 會靜默改掉生成輸入"
+    )
+    assert "source_ids" in out["next_step"]
+
+
+async def test_retract_does_not_offer_the_flag_to_a_superseded_attempt(
+    fake_client, tmp_path
+):
+    """**歷史 attempt 不是旗標的守備範圍,訊息不可以教它傳。**
+
+    `abandon_in_flight` 只放行 `active_attempt_id` 那一顆。A 被 supersede、B 接手之後,
+    拿 A 的 id 來 retract:傳 False 與傳 True 得到**同一句**指引 —— v0.9.4 新寫的訊息
+    卻教它「帶 abandon_in_flight=True 重呼」,那是永遠無效的動作,又一個死路指引。
+
+    正確做法是先講清楚 ownership:它已經被取代,要動的是現在的 active／output。
+    """
+    manifest_path, _ = await _complete_ep1(fake_client, tmp_path)
+    episode = _episode(manifest_path)
+    output_attempt_id = episode["output_attempt_id"]
+    ManifestStore(manifest_path).update(
+        lambda manifest: manifest["episodes"][0]["attempts"].append(
+            {
+                "attempt_id": "att-superseded",
+                "episode": 1,
+                "title": "心法篇",
+                "dispatch": {"status": "accepted"},
+                "remote": {"status": "failed", "artifact_id": None},
+                "finalize": {},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError) as caught:
+        await p.podcast_attempt_retract(
+            manifest_path, 1, "att-superseded", reason="想清掉歷史"
+        )
+
+    msg = str(caught.value)
+    # 訊息**可以**提到旗標(用來解釋「它對你無效」),但不可以**教它傳** ——
+    # 那才是死路指引。所以禁的是指示形式,不是字眼本身。
+    assert "abandon_in_flight=True" not in msg, f"對歷史 attempt 教了無效的旗標: {msg}"
+    assert "只放行 active" in msg, f"沒說清楚旗標為什麼對它無效: {msg}"
+    assert output_attempt_id in msg, f"沒指出現在真正的 output 是哪顆: {msg}"

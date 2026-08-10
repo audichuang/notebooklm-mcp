@@ -31,6 +31,10 @@ async def test_safe_next_action_vocabulary_names_public_mcp_tools():
         # 兩輪都不變 —— 正是 `partial()` 註解說的「看不出自己在原地打轉」。
         "podcast_episode",
         "podcast_episode_reconcile",
+        # 權限停點的下一步。`error` 說去補分享而 `safe_next_action` 卻回 podcast_series
+        # 的話,只讀後者的自動化會原地重試同一個沒權限的帳號 —— 同一份回傳的兩個欄位
+        # 互相矛盾。白名單的意義是「一定是真的 MCP 工具名」,這支正是。
+        "notebook_share_with_pool",
         "podcast_episode_resume",
         # 筆數守門撞上既有 active attempt 時的停點:那顆 attempt 的 settings 是
         # 「不指名來源」,指回 `podcast_episode` 會被 `_is_resendable_same_request`

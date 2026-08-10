@@ -8,6 +8,77 @@
 
 ---
 
+## v0.9.5
+
+**同一個根因的第四次現形,這次連根拔**:`safe_next_action` 與錯誤訊息**沒有跟著 attempt
+的實際狀態走**。v0.9.1 FAIL-1(停點叫人跑一支在該狀態下自己也 permission denied 的工具)、
+v0.9.3(停點指向會拒收它的工具)、v0.9.4 FINDING-2(拒絕訊息那句在該狀態下是假的)都是它,
+而每一次的修法都是「補那一格」—— 然後在新寫的訊息裡又種一個。Codex 獨立複審抓出 6 條,
+**其中三條是 v0.9.4 自己新種的**。
+
+### 最重的一條:retract 之後的指引會靜默改掉生成輸入
+
+`podcast_episode(source_ids=["src-1"])` 撞配額停在 `not_accepted` → retract(沒有 stale
+source)→ 回 `safe_next_action="podcast_series"` → 呼叫端照做 → **series 建的新 attempt
+不帶 `source_ids`**。實測兩次 dispatch 送出 `[["src-1"], null]`:第二次改讀整本筆記本,
+而那正是 v0.9.3 花整輪在防的內容錯置形狀。skill 也明寫「帶 `source_ids` 的 attempt 只有
+`podcast_episode` 續得下去」——工具自己的指引卻反著教。
+
+修法是 `_regeneration_entry_point()`:重生入口跟著**被作廢那顆的生成輸入**走,
+`settings.source_ids` 或 `input_bundle` 存在就回 `podcast_episode`。回傳另加 `next_step`
+一句話寫明「必須帶回原本那組 source_ids」。
+
+### `failed`/`removed` 的停點指引照做會被拒
+
+筆數守門的條件涵蓋 `remote_state in ("failed","removed")` —— 而那時 `dispatch.status` 是
+`accepted`。v0.9.4 寫的停點訊息卻**無條件**說「它從未 dispatch,不需要旗標」,照著
+`podcast_attempt_retract` 做必然被拒。
+
+修法把「manifest 自己就知道結果」抽成 `_outcome_is_settled()`:除了 `prepared`/
+`not_accepted`(沒建出 task),**遠端已回報終態(`failed`/`removed`)也算** —— 那不是
+「可能還在飛」,不存在需要外部知識的 in-flight 狀態。這讓守門的觸發條件與 retract 的
+免旗標條件**完全等價**,所以停點指引一定走得通;等價關係寫進兩邊註解,免得日後只改一邊。
+
+### 對歷史 attempt 教一個永遠無效的旗標
+
+`abandon_in_flight` 只放行 `active_attempt_id` 那一顆。A 被 supersede、B 接手之後,拿 A 的
+id 來 retract,傳 `True` 與傳 `False` 得到**同一句**話 —— 而 v0.9.4 新寫的訊息無條件教它
+「帶旗標重呼」。修死路的那一版自己又給了一條死路。現在先分 ownership:歷史 attempt 直接
+說清楚它已被取代,並指出現在真正的 active/output 是哪顆。
+
+### 權限停點的 `safe_next_action` 指向必然重複失敗的工具
+
+`notebook_access_denied` 的 `error` 說去跑 `notebook_share_with_pool`,而 `safe_next_action`
+回 `podcast_series` —— 同一份回傳的兩個欄位互相矛盾,而 skill 教呼叫端「拿不準就直接照
+`safe_next_action` 做」,只讀那個欄位的自動化會原地重試同一個沒權限的帳號。
+
+程式碼註解承認這個矛盾,理由是「白名單只放真工具名,不想為此新增字面值」。**但那個理由
+在 v0.9.3 就被自己推翻了** —— 那一版為了完全相同的道理加過 `ACTION_EPISODE` 與
+`ACTION_RETRACT`,而 `notebook_share_with_pool` 本來就是公開 MCP 工具。新增
+`ACTION_SHARE_WITH_POOL`,`_classify_not_accepted_stop` 改回三元組。
+
+### 其餘兩條
+
+- **新出口沒寫進舊訊息**:`podcast_episode` 的「already has durable active attempt」與
+  `_ensure_resume_attempt` 的「has active attempt」都無條件教「reconcile or resume」——
+  對 `not_accepted` 那三條全是死的(reconcile 明說該狀態不可對帳、resume 要 artifact_id
+  而它是 null、identical arguments 在 brief 產生器改過後重現不了)。兩處改成按
+  `_outcome_is_settled` 分岔,把 v0.9.3 開的免旗標 retract 寫進去。
+- **稽核欄位的理由寫錯了**:v0.9.4 說「`dispatch.status` 在 retract 之後還會被後續操作
+  改動,所以連當時的值一起存」—— 與 tombstone 的 default-deny 直接矛盾,`_attempt_record`
+  擋掉所有 attempt 級 writer。真正的理由是「讓這筆稽核自我完整、不受手改 manifest 影響」。
+  同時講明兩個欄位要一起讀:`abandon_in_flight` 是**傳了什麼**而非「特權有沒有生效」,
+  結果已定的 attempt 就算傳 `true` 也是白傳;文件的狀態表也限縮成「active、未 promote」。
+
+### 沒改的一條
+
+Codex 同意 FINDING-4(低階 `generate_audio` 沒有配額 failover)維持不修:風險是中等可用性,
+不會改寫 manifest、重複 claim 或毀損輸出。它也指出真要修不能只包一層 rotate —— 得先有
+durable dispatch receipt 才能滿足 ADR-0010「記帳與送出同源」,否則 response 一遺失稽核也跟著
+消失。**完整修法其實是把低階救援升成 manifest-backed 能力**,在那之前保留現狀比較安全。
+
+四道修正各做過突變驗證。610 passed。
+
 ## v0.9.4
 
 v0.9.3 真實驗收抓到的四個 FINDING,三個修在這裡(第四個的 runtime 半留作單獨決策)。

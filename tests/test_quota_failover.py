@@ -386,8 +386,14 @@ async def test_permission_denied_in_series_returns_a_safe_stop(fake_client, tmp_
     `attempt_count`/`superseded_attempt_count`(partial() 唯一的『有沒有在原地打轉』
     依據)兩輪都是 1/0,跟等配額完全同一組數字,看不出自己在原地打轉。修法是給權限
     問題自己的 observed_state,並把帶著 `notebook_share_with_pool` 指引的
-    `NotebookAccessDenied` 訊息透過 `error` 欄位帶出來(不新增 `safe_next_action`
-    字面值——那個集合是白名單,見 `_classify_not_accepted_stop` 的說明)。
+    `NotebookAccessDenied` 訊息透過 `error` 欄位帶出來。
+
+    **v0.9.5 起 `safe_next_action` 也跟著分岔。** 原本刻意留 `podcast_series`,理由是
+    「白名單只放真工具名,分辨兩者靠 observed_state 與 error 就好」—— 但那讓同一份回傳
+    的兩個欄位互相矛盾:`error` 說去補分享,`safe_next_action` 說重呼 series,而 skill
+    教呼叫端「拿不準就直接照 safe_next_action 做」。只讀那個欄位的自動化會原地重試同一
+    個沒權限的帳號。`notebook_share_with_pool` 本來就是公開 MCP 工具,完全符合白名單的
+    意義;v0.9.3 為完全相同的理由加過 `podcast_episode` / `podcast_attempt_retract`。
     """
     from notebooklm.exceptions import ClientError
 
@@ -405,7 +411,9 @@ async def test_permission_denied_in_series_returns_a_safe_stop(fake_client, tmp_
     assert out["observed_state"] == "notebook_access_denied", (
         "不能跟『等配額』長得一樣——否則原樣重呼會在同一集永遠卡死而看不出來"
     )
-    assert out["safe_next_action"] == "podcast_series"
+    assert out["safe_next_action"] == "notebook_share_with_pool", (
+        "只讀 safe_next_action 的自動化會照它做 —— 指回 series 等於叫它重試同一個沒權限的帳號"
+    )
     assert "notebook_share_with_pool" in out["error"]
 
 
