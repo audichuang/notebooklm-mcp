@@ -1045,14 +1045,11 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     assert stopped["observed_state"] == "reconciliation_ambiguous"
     assert stopped["safe_next_action"] == p.ACTION_ADOPT, stopped
     # **只用公開回傳取身分,不從 manifest 私下讀**(docs/gotchas-attempt.md「回傳要
-    # 自足」那條紅線)——`stopped["attempt_id"]` 本來就帶著正確的值,舊版在這裡繞過去
-    # 直接讀 manifest,連「回傳給不給得出這個 id」都沒被驗到。
+    # 自足」那條紅線)——`stopped["attempt_id"]` / `stopped["candidate_source_ids"]`
+    # 本來就帶著正確的值,舊版在候選清單這裡繞過去直接讀 manifest,連「回傳給不給得出
+    # 這份候選」都沒被驗到(P1 修復)。
     attempt_id = stopped["attempt_id"]
-    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    candidates = (
-        stored["episodes"][0]["attempts"][0]["finalize"]
-        ["feedback_source_upload"]["candidate_source_ids"]
-    )
+    candidates = stopped["candidate_source_ids"]
     assert len(candidates) == 2
     candidate_a, candidate_b = candidates
 

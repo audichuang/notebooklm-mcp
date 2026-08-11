@@ -437,13 +437,11 @@ async def test_ambiguous_uploaded_source_candidate_can_be_adopted_before_rename(
     assert stopped["safe_next_action"] == "podcast_attempt_adopt"
 
     # **只用公開回傳取身分**(docs/gotchas-attempt.md「回傳要自足」那條紅線)——
-    # `stopped["attempt_id"]` 本來就帶著正確的值,不必也不該從 manifest 私下讀。
+    # `stopped["attempt_id"]` / `stopped["candidate_source_ids"]` 本來就帶著正確的值,
+    # 不必也不該從 manifest 私下讀(P1 修復:候選清單原本沒有進公開回傳,這裡曾經
+    # 繞過去直接讀 manifest,「回傳給不給得出候選」從未被驗證過)。
     attempt_id = stopped["attempt_id"]
-    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    candidates = (
-        stored["episodes"][0]["attempts"][0]["finalize"]
-        ["feedback_source_upload"]["candidate_source_ids"]
-    )
+    candidates = stopped["candidate_source_ids"]
     add_boundary = len(
         [call for call in fake_client.sources.calls if call[0] == "add_file"]
     )

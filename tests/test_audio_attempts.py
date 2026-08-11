@@ -459,10 +459,15 @@ async def test_tombstone_blocker_offers_and_executes_the_negative_candidate_path
             artifact_id="late-orphan-from-tombstone",
         )
 
+    # **只用公開回傳取身分**(docs/gotchas-attempt.md「回傳要自足」那條紅線)——
+    # `out["attempt_id"]` 本來就帶著正確的值,不必也不該沿用 setup 階段私讀的
+    # `attempt_a`(P3 修復:私讀值恰好與公開回傳相同,曾讓「回傳給不給得出這個 id」
+    # 從未被驗證過——`tools_podcast.py` 那個回傳點的 `attempt_id` 被突變成假字串時,
+    # 舊寫法完全看不見)。
     retracted = await p.podcast_attempt_retract(
         str(manifest_path),
         1,
-        attempt_a,
+        out["attempt_id"],
         reason="已確認候選不屬於這次",
         abandon_in_flight=True,
     )

@@ -3355,8 +3355,14 @@ async def podcast_attempt_retract(
     ``safe_next_action`` 會撞 tombstone（``podcast_episode_reconcile``）或冪等重跑成
     無限迴圈（``podcast_attempt_retract`` 撞回一模一樣的回傳）。所以回傳額外帶
     ``safe_next_attempt_id`` / ``safe_next_artifact_id``：**執行 ``safe_next_action``
-    一律用這兩個欄位，不要用 ``attempt_id``**（兩者在委派情況下不同；沒有委派時
-    ``safe_next_attempt_id`` 就等於 ``attempt_id``）。``safe_next_artifact_id`` 只在
+    一律用這兩個欄位，不要用 ``attempt_id``**（兩者在委派情況下不同；沒有委派、且
+    ``safe_next_action`` 本身認的就是「這顆 attempt」的身分——``podcast_episode_resume``
+    ／``podcast_attempt_retract``／``podcast_episode_reconcile``／``podcast_attempt_adopt``
+    ——時，``safe_next_attempt_id`` 才等於 ``attempt_id``；``safe_next_action`` 是全新
+    呼叫（``podcast_series``／``podcast_episode`` 這類 regeneration entry）或
+    ``source_delete``／``notebook_share_with_pool`` 這類認的是別種身分（source_id／
+    notebook_id）時，``safe_next_attempt_id`` 是 ``null``——P3 修復，見
+    ``docs/gotchas-attempt.md``，這句先前寫反了）。``safe_next_artifact_id`` 只在
     下一步是 ``podcast_episode_resume`` 時非空（該工具認的是 artifact_id）。
 
     詳見 skill ``references/tool-reference.md`` 與 ADR-0009。
@@ -3678,7 +3684,13 @@ async def podcast_series(
     時是 `podcast_episode`（直接帶 `source_ids` 進來）；已經有 active attempt 時是
     `podcast_attempt_retract`——那顆的 settings 是「不指名來源」，直接改呼單集入口會被
     durable-active-attempt guard 擋掉。實務上就是**從 EP06 起改用單集入口**
-    （本集來源 + 最近 5 集回錄 ≈ 6 筆）；重呼本工具只會停在同一集。"""
+    （本集來源 + 最近 5 集回錄 ≈ 6 筆）；重呼本工具只會停在同一集。
+
+    ⚠️ **回錄 source 上傳撞 `reconciliation_ambiguous` 時**（`observed_state` 是這個值、
+    `safe_next_action` 是 `podcast_attempt_adopt`），回傳會帶 `candidate_source_ids`
+    （與 artifact 對帳歧義的 `candidate_artifact_ids` 同一個家族）：`podcast_attempt_adopt`
+    必填 `feedback_source_id` 或 `artifact_id` 之一，只讀 `safe_next_action` 不夠，要從
+    這個欄位挑一個候選傳進去。"""
     # start 是執行下界，不是重生旗標；N 以前的 plan 是 caller 明示的 trust
     # boundary，不讀、不驗證。範圍錯誤仍須在任何遠端副作用前失敗。
     if start < 1:
@@ -4279,9 +4291,10 @@ async def podcast_series(
                     _, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
                     )
-                    upload_state = stopped_attempt.get("finalize", {}).get(
+                    upload = stopped_attempt.get("finalize", {}).get(
                         "feedback_source_upload", {}
-                    ).get("status")
+                    )
+                    upload_state = upload.get("status")
                     if upload_state in (
                         "acceptance_unknown",
                         "reconciliation_ambiguous",
@@ -4291,11 +4304,29 @@ async def podcast_series(
                             if upload_state == "reconciliation_ambiguous"
                             else ACTION_SERIES
                         )
+                        # P1(Codex 獨立審查實跑驗證,同一根因第十二次現形):action 是
+                        # `podcast_attempt_adopt` 時,那支工具必填 `feedback_source_id`
+                        # 或 `artifact_id`(見它的 docstring「provide exactly one」)——
+                        # 只回動作名沒有候選身分,呼叫端讀公開回傳完全執行不了這句指引。
+                        # 候選清單本來就存在 manifest 的
+                        # `finalize.feedback_source_upload.candidate_source_ids`
+                        # （`_reconcile_source_upload` 寫入），跟 `candidate_artifact_ids`
+                        # 是同一個家族，一併帶出。
+                        extra = (
+                            {
+                                "candidate_source_ids": upload.get(
+                                    "candidate_source_ids", []
+                                )
+                            }
+                            if upload_state == "reconciliation_ambiguous"
+                            else {}
+                        )
                         return partial(
                             episode_n,
                             active_attempt_id,
                             upload_state,
                             action,
+                            **extra,
                         )
                     raise
                 _promote_attempt_output(

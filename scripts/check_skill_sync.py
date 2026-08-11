@@ -43,6 +43,9 @@ REQUIRED_CONTRACT_TERMS = (
                               # safe_next_action 要用的目標身分(不是 attempt_id)
     "safe_next_artifact_id", # 同上,safe_next_action 是 podcast_episode_resume 時
                               # 帶的 artifact_id
+    "candidate_source_ids",  # podcast_series 的 reconciliation_ambiguous 停點(回錄
+                              # source 上傳歧義):podcast_attempt_adopt 必填
+                              # feedback_source_id/artifact_id 之一,單教動作名執行不了
 )
 
 

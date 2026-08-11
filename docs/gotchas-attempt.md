@@ -53,6 +53,20 @@
   **raise 型的停點是例外**:`podcast_episode`/`podcast_series` 因例外中斷時只拋
   `ValueError`/`TimeoutError` 等,不帶結構化 dict,manifest 是當下唯一能拿到 id 的
   地方,讀它不違反這條紅線(這條紅線管的是「有結構化回傳可用卻繞過去」)。
+- **紅線(第十二次現形):`safe_next_action` 認的身分不是 attempt_id 時,那個身分也要
+  進公開回傳。** 前兩條講的都是「attempt 換了一顆」,而 `podcast_attempt_adopt` 必填
+  `feedback_source_id` 或 `artifact_id` **之一**(它認的是候選的身分,不是 attempt 的),
+  所以 `podcast_series` 停在回錄 source 上傳歧義(`observed_state="reconciliation_ambiguous"`、
+  `safe_next_action="podcast_attempt_adopt"`)時只回動作名 = 呼叫端讀公開回傳執行不了。
+  候選本來就存在 manifest 的 `finalize.feedback_source_upload.candidate_source_ids`
+  (`_reconcile_source_upload` 寫入),**跟 artifact 對帳歧義的 `candidate_artifact_ids`
+  是同一個家族,一併帶出**;`scripts/check_skill_sync.py` 的 `REQUIRED_CONTRACT_TERMS`
+  兩個都鎖了。**同一輪要一起判斷的是另外兩個 `ACTION_ADOPT` 停點——它們刻意不帶候選,
+  不是漏補**:`continuity_unverified`(已完成集的 feedback source 在遠端不見了)與
+  `legacy_output_unverified`(舊 flat manifest 沒有明確 `feedback_source_id`)的出路是
+  呼叫端自己 `source_list` 找出正確 id 再 adopt ——**不得以唯一同名來源推定 identity**,
+  server 塞候選就是在幫它推定。判斷準則:候選是 server 自己在對帳時算出來、呼叫端無法
+  重建的(時間窗)→ 必須帶出;身分本來就要人為指名的 → 不准帶。
 - **(0.8.0)生成 kickoff 的同步拒絕改成 raise,不再回 `status="failed"`**(ADR-0019 / #1342)
   ——這會**悄悄改變 attempt 的終態分類**,是本次升級唯一需要動邏輯的地方。
   `_REFUSED_WITHOUT_DISPATCH` 只收契約講死「沒有建出 task」的兩種例外(誤判代價不對稱,
