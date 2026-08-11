@@ -45,3 +45,11 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab ../../audi-skill | grep -v docs/superpowers`
 (`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實)。
 
+⚠️ **那個 grep 會撈到兩類「看起來像第七處 pin、其實不是」的東西,別跟著改**:
+① `.superpowers/sdd/task-*.md`(v0.2.0)與 `docs/acceptance-*.md` 是歷史紀錄,同
+`docs/superpowers/` 的道理;② `../podcast-lab/.agents/skills/notebooklm/SKILL.md`
+是**gitignored、可重生**的本機 docs 快照(`.claude/skills/notebooklm` 是指過去的
+symlink),正本在 `audi-skill/notebooklm/SKILL.md`,也就是清單第 5 項。它的 pin 會
+一直停在快照當時的版本(2026-08-11 實際看到 v0.4.0),那**不是漏改**——要更新是
+重生快照,不是編輯它。改了也不會進版控,下次重生就沒了。
+
