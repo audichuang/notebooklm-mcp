@@ -46,6 +46,11 @@ REQUIRED_CONTRACT_TERMS = (
     "candidate_source_ids",  # podcast_series 的 reconciliation_ambiguous 停點(回錄
                               # source 上傳歧義):podcast_attempt_adopt 必填
                               # feedback_source_id/artifact_id 之一,單教動作名執行不了
+    "was_present",           # source_delete:查無此 id 時不發破壞性 RPC 也不 raise,
+                              # 清理迴圈可以重放。`deleted` 單獨看分不出這兩種情形
+    "source_cleanup_unresolved",  # podcast_attempt_retract:upload 還沒落盤時作廢會留下
+                              # 身分未定的清理義務,safe_next_action 是 null 而重生會被
+                              # 生成前的 gate 擋住 —— 不寫進文件,呼叫端會誤判成死路
 )
 
 

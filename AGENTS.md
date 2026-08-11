@@ -115,9 +115,15 @@ claude mcp add-json notebooklm -s local \
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
 - SDK 的 `sources.delete` 雖是 idempotent(0.7.0 起)，但它的 mutation payload 只有
-  `source_id`；公開工具 `source_delete` 會先用 `source_list` 驗證該 id 屬於指定 notebook。
-  打錯 id／notebook 會在 destructive RPC 前 fail-loud，不會回報 `deleted`；因此工具不再標
-  `idempotentHint`。使用前先用 `source_list` 取得該 notebook 的真實 `source_id`。
+  `source_id`、`notebook_id` 只是 routing header；公開工具 `source_delete` 會先用
+  `source_list` 驗證該 id 屬於指定 notebook，**查無此 id 就不發那個 destructive RPC**
+  (否則打錯 notebook 會刪到別本的來源)，回 `was_present=False`。
+  **刻意不 fail-loud**:`podcast_attempt_retract` 的清理契約要求呼叫端把回傳的
+  `stale_source_ids`「逐一 `source_delete`」，而 response 遺失後重放整個迴圈是預期操作
+  —— 對已刪掉的那一筆拋錯會讓自動化 host 停在半路，剩下的 id 從此沒人刪。安全性質留在
+  「不打 RPC」、冪等留在「不 raise」，所以 `idempotentHint` 保留。
+  `deleted` 只代表「呼叫後該 id 已不在這個 notebook」，要區分「本來就不在」看
+  `was_present`；要確認刪掉某既有來源，先用 `source_list` 取真實 `source_id`。
   ⚠️ **刪除後 `source_fulltext` 用同一個 `source_id` 仍讀得回全文(實測 55 分鐘後仍可)
   —— 那是預期的,不是清理失敗**:它繞過 notebook 直接查 source 物件,而生成用的來源清單
   與 `source_list` 同走 `GET_NOTEBOOK`。所以 ADR-0009 的清理義務有效。推導的三個前提由

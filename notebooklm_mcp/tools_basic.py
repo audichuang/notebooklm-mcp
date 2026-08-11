@@ -471,23 +471,31 @@ async def source_add_file(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(destructiveHint=True)
+    annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True)
 )
 async def source_delete(notebook_id: str, source_id: str) -> dict:
     """Delete a caller-selected source that is no longer needed.
 
     這是 generic source 管理能力，不代表可覆寫 manifest-backed completed episode。
-    SDK 的 delete 雖然允許刪不存在的 id，但 RPC 只送 source_id；工具會先以
-    source_list 驗證它屬於指定 notebook，避免打錯 notebook 後刪到別本的來源。"""
+    SDK 的 delete 允許刪不存在的 id，但 RPC 只送 source_id、notebook_id 只是 routing
+    header；工具會先以 source_list 驗證它屬於指定 notebook，**查無此 id 時不發那個
+    destructive RPC**（否則打錯 notebook 會刪到別本的來源），回 was_present=False。
+    `deleted` 一律代表「呼叫後該 id 已不在這個 notebook」；要區分「本來就不在」看
+    `was_present`。"""
     client = runtime.get_client()
     sources = await client.sources.list(notebook_id)
     if not any(getattr(source, "id", None) == source_id for source in sources):
-        raise ValueError(
-            f"source {source_id} not in notebook {notebook_id}; "
-            "(use source_list to select a source from that notebook)"
-        )
+        # **查無此 id:不打 RPC,也不 raise。**
+        # 不打 —— 歸屬無法確認時發 DELETE_SOURCE 就是拿別本筆記本的來源賭一把。
+        # 不 raise —— `podcast_attempt_retract` 的清理契約要求呼叫端把回傳的
+        # `stale_source_ids`「逐一 source_delete」,而 response 遺失後重放整個迴圈是
+        # **預期操作**;對已經刪掉的那一筆拋錯會讓自動化 host 停在半路,剩下的 id
+        # 從此沒人刪,而 `_assert_source_cleanup_done` 只列「還在」的 id,不會替它
+        # 補回來。fail-loud 保護的是打錯參數,代價卻是打斷冪等的清理迴圈 —— 這裡
+        # 兩者都要:安全性質留在「不打 RPC」,冪等留在「不 raise」。
+        return {"deleted": source_id, "was_present": False}
     await client.sources.delete(notebook_id, source_id)
-    return {"deleted": source_id}
+    return {"deleted": source_id, "was_present": True}
 
 
 @mcp.tool(annotations=ToolAnnotations(openWorldHint=True))

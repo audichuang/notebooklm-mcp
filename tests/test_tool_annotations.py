@@ -29,10 +29,13 @@ EXPECTED_DESTRUCTIVE = {
     "podcast_attempt_retract",
 }
 
-# source_delete 現在會先驗證 id 屬於指定 notebook，刪除後重呼會 fail-loud，
-# 不再符合 MCP 的 idempotentHint。retract 對同一 attempt 重呼仍沿用既有
-# retraction，不重寫時間戳。
+# source_delete 會先驗證 id 屬於指定 notebook，查無此 id 時**不發** destructive RPC
+# 而回 was_present=False —— 重呼同一個 id 沒有額外後果，符合 MCP 的 idempotentHint。
+# (曾經改成 fail-loud，但那會打斷 retract 的「stale_source_ids 逐一 source_delete」
+# 清理迴圈；安全性質留在「不打 RPC」，冪等留在「不 raise」。)
+# retract 對同一 attempt 重呼仍沿用既有 retraction，不重寫時間戳。
 EXPECTED_IDEMPOTENT = {
+    "source_delete",
     "podcast_attempt_retract",
 }
 
