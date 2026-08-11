@@ -460,10 +460,13 @@ async def test_the_count_guard_also_covers_the_series_resend_path(
             source_ids=["src-1", "src-2", "src-3"],
         )
 
+    # **執行 `safe_next_action` 只用公開回傳裡的 `attempt_id`**(docs/gotchas-attempt.md
+    # 「回傳要自足」那條紅線)——上面 433 行已經驗過 `out["attempt_id"] ==
+    # existing_attempt_id`,這裡改用 `out["attempt_id"]` 驅動,不再從 manifest 私下讀。
     retracted = await p.podcast_attempt_retract(
         str(manifest_path),
         episode_n=1,
-        attempt_id=existing_attempt_id,
+        attempt_id=out["attempt_id"],
         reason="筆記本來源已超標,改用指名版重生",
     )
     # 它從未 dispatch,所以沒有回錄 source 要清 —— 清理義務不會擋住下一步。

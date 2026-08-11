@@ -532,7 +532,14 @@ async def test_idempotent_retract_after_a_stuck_replacement_does_not_point_at_a_
     assert "用 podcast_series 重生" not in again["next_step"], again
     # 照著回傳的下一步做,真的走得通——不是隨便換一個不撞牆的字面值交差。
     assert again["safe_next_action"] == p.ACTION_RECONCILE, again
-    out = await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
+    # **執行下一步只准用公開回傳裡的值**(P1 修復,docs/gotchas-attempt.md「回傳要
+    # 自足」那條紅線):`again["attempt_id"]` 是被 retract 的 A(tombstone,稽核
+    # 主體不會變),真正要用的是 `safe_next_attempt_id`——上一版這裡直接從 manifest
+    # 私下讀 `attempt_b`,連「回傳裡有沒有這顆身分」都沒驗到。
+    assert again["safe_next_attempt_id"] == attempt_b, again   # 交棒對象正是 B,不是 A
+    out = await p.podcast_episode_reconcile(
+        manifest_path, 1, again["safe_next_attempt_id"]
+    )
     assert out["episode_n"] == 1     # 沒有 raise 就是走得通
 
 
@@ -1036,8 +1043,12 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
         "nb-1", episodes=[EP], output_dir=str(tmp_path),
     )
     assert stopped["observed_state"] == "reconciliation_ambiguous"
+    assert stopped["safe_next_action"] == p.ACTION_ADOPT, stopped
+    # **只用公開回傳取身分,不從 manifest 私下讀**(docs/gotchas-attempt.md「回傳要
+    # 自足」那條紅線)——`stopped["attempt_id"]` 本來就帶著正確的值,舊版在這裡繞過去
+    # 直接讀 manifest,連「回傳給不給得出這個 id」都沒被驗到。
+    attempt_id = stopped["attempt_id"]
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    attempt_id = stored["episodes"][0]["active_attempt_id"]
     candidates = (
         stored["episodes"][0]["attempts"][0]["finalize"]
         ["feedback_source_upload"]["candidate_source_ids"]

@@ -436,8 +436,10 @@ async def test_ambiguous_uploaded_source_candidate_can_be_adopted_before_rename(
     assert stopped["observed_state"] == "reconciliation_ambiguous"
     assert stopped["safe_next_action"] == "podcast_attempt_adopt"
 
+    # **只用公開回傳取身分**(docs/gotchas-attempt.md「回傳要自足」那條紅線)——
+    # `stopped["attempt_id"]` 本來就帶著正確的值,不必也不該從 manifest 私下讀。
+    attempt_id = stopped["attempt_id"]
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    attempt_id = stored["episodes"][0]["active_attempt_id"]
     candidates = (
         stored["episodes"][0]["attempts"][0]["finalize"]
         ["feedback_source_upload"]["candidate_source_ids"]

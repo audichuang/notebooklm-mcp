@@ -216,6 +216,48 @@ def _regeneration_hint(attempt: dict, *, resend_possible: bool) -> str:
     )
 
 
+def _safe_next_target(
+    action: str | None,
+    *,
+    attempt_id: str,
+    remote: dict,
+    replacement_caps: dict | None,
+) -> tuple[str | None, str | None]:
+    """把 `safe_next_action` 翻成呼叫端**照做時要傳的目標身分**(attempt_id／artifact_id)。
+
+    P1(Codex 獨立審查實跑驗證):`podcast_attempt_retract` 委派給 sibling(retract 之後
+    發現 `active_attempt_id` 指向另一顆還在飛的 attempt B)時,`safe_next_action` 換成了
+    B 的,但公開回傳的 `attempt_id` 仍是被 retract 的 A(那是 retraction 稽核紀錄的本體,
+    不能改)——呼叫端照著回傳的 `safe_next_action` + `attempt_id` 執行,實際上是拿 A 的
+    id 去做 B 的事:`podcast_episode_reconcile(A)` 撞 tombstone、`podcast_attempt_retract(A)`
+    冪等重跑撞回一模一樣的回傳形成無限迴圈。
+
+    這裡不重覆 `_attempt_capabilities` 那條「哪個動作」的優先序 if/else(重覆等於下一次
+    改優先序時兩邊漏改一邊,正是 docs/gotchas-attempt.md 記錄的第 N 次現形形狀)——只認
+    **已經算好的 `action` 字面值**對應哪種身分,單一映射,呼叫方永遠只有一份。
+
+    sibling 交棒(`replacement_caps` 存在,且它的 `safe_next_action` 就是這裡要用的
+    `action`):目標身分整段換成替代 attempt 自己算出來的身分,不能沿用這顆(A)的
+    `attempt_id`/`remote`——那正是 P1 的根因。
+    """
+    if action is None:
+        return None, None
+    if replacement_caps is not None and action == replacement_caps["safe_next_action"]:
+        return (
+            replacement_caps["safe_next_attempt_id"],
+            replacement_caps["safe_next_artifact_id"],
+        )
+    if action == ACTION_RESUME:
+        # `podcast_episode_resume` 認 artifact_id,不是 attempt_id。
+        return attempt_id, remote.get("artifact_id")
+    if action in (ACTION_RETRACT, ACTION_RECONCILE, ACTION_ADOPT):
+        return attempt_id, None
+    # regeneration entry(series/episode)是全新呼叫,不指名既有 attempt;
+    # source_delete／notebook_share_with_pool 認的是別種身分(source_id／notebook_id),
+    # 兩者都已經在各自的回傳欄位裡(`stale_source_ids`／呼叫端自己的 notebook_id)。
+    return None, None
+
+
 def _attempt_capabilities(
     episode: dict,
     attempt: dict,
@@ -276,6 +318,13 @@ def _attempt_capabilities(
       `output`/`historical`)原本生不出來——can_resend/can_resume/can_reconcile
       對它可能仍算出 True,但 resume 與原樣重呼都會被既有 output 擋下來,唯一出口
       是先 retract 自己,見下面 `elif basis == "output_owner":` 那個分支。
+    - `safe_next_attempt_id` / `safe_next_artifact_id`(P1 修復,見 `_safe_next_target`):
+      `safe_next_action` 這支工具**要用誰的身分呼叫**——一般狀況下就是這顆
+      attempt 自己(`attempt_id`)或它的 `remote.artifact_id`(resume 認的是
+      artifact_id,不是 attempt_id);但 `post_retract` 委派給 sibling(見下面
+      `replacement_caps`)時,身分整段換成替代 attempt 自己的,**不是**這顆(即將
+      被 retract 或已被 retract 的那顆)。回傳裡若同時有 `attempt_id`(稽核主體)
+      與這兩個欄位,呼叫端下一步要用的是這兩個欄位,不是 `attempt_id`。
     """
     dispatch_status = (attempt.get("dispatch") or {}).get("status")
     remote = attempt.get("remote") or {}
@@ -394,6 +443,13 @@ def _attempt_capabilities(
     else:
         safe_next_action = ACTION_RETRACT
 
+    safe_next_attempt_id, safe_next_artifact_id = _safe_next_target(
+        safe_next_action,
+        attempt_id=attempt_id,
+        remote=remote,
+        replacement_caps=replacement_caps,
+    )
+
     return {
         "dispatch_status": dispatch_status,
         "remote_status": remote_status,
@@ -420,6 +476,10 @@ def _attempt_capabilities(
             attempt, resend_possible=can_resend and not post_retract
         ),
         "safe_next_action": safe_next_action,
+        # P1 修復:委派給 sibling 時,呼叫端下一步要用的身分——不是 `attempt_id` 這個
+        # 稽核主體(見上方 docstring)。
+        "safe_next_attempt_id": safe_next_attempt_id,
+        "safe_next_artifact_id": safe_next_artifact_id,
     }
 
 
@@ -3288,6 +3348,17 @@ async def podcast_attempt_retract(
     - 其餘情況才是「重生」：``safe_next_action`` 指回原本建立這顆 attempt 的入口
       （``podcast_series`` 或 ``podcast_episode``）。
 
+    ⚠️ **P1 修復（Codex 獨立審查，同一根因第十一次現形）**：回傳裡的 ``attempt_id``
+    永遠是**這次被 retract 的那一顆**（稽核主體，不會變），但上面第二種情況
+    （委派給還在飛的替代 attempt）時，``safe_next_action`` 教的動作要用的是**那顆
+    替代 attempt 的身分，不是 ``attempt_id``**——原樣拿 ``attempt_id`` 去執行
+    ``safe_next_action`` 會撞 tombstone（``podcast_episode_reconcile``）或冪等重跑成
+    無限迴圈（``podcast_attempt_retract`` 撞回一模一樣的回傳）。所以回傳額外帶
+    ``safe_next_attempt_id`` / ``safe_next_artifact_id``：**執行 ``safe_next_action``
+    一律用這兩個欄位，不要用 ``attempt_id``**（兩者在委派情況下不同；沒有委派時
+    ``safe_next_attempt_id`` 就等於 ``attempt_id``）。``safe_next_artifact_id`` 只在
+    下一步是 ``podcast_episode_resume`` 時非空（該工具認的是 artifact_id）。
+
     詳見 skill ``references/tool-reference.md`` 與 ADR-0009。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
@@ -3525,6 +3596,11 @@ async def podcast_attempt_retract(
         **retraction,
         "observed_state": "retracted",
         "safe_next_action": caps["safe_next_action"],
+        # P1 修復:委派給 sibling 時這兩個欄位跟 `retraction["attempt_id"]`(稽核主體,
+        # 即被 retract 的這一顆)不同——執行 `safe_next_action` 要用這兩個,不是
+        # `attempt_id`(見上方 docstring)。
+        "safe_next_attempt_id": caps["safe_next_attempt_id"],
+        "safe_next_artifact_id": caps["safe_next_artifact_id"],
         "next_step": _attempt_next_step(caps),
     }
 

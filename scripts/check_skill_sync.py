@@ -39,6 +39,10 @@ REQUIRED_CONTRACT_TERMS = (
     "too_many_sources",  # v0.9.3 的來源筆數守門停點;safe_next_action 分兩種,照做才走得出去
     "blocking_attempt_ids",  # v0.9.10 加的 reconcile 回傳欄位(F5/F6 盲審):
                               # 工具名沒變,checker 原本看不到——加進來讓它從此看得到
+    "safe_next_attempt_id",  # podcast_attempt_retract:委派給 sibling 時,執行
+                              # safe_next_action 要用的目標身分(不是 attempt_id)
+    "safe_next_artifact_id", # 同上,safe_next_action 是 podcast_episode_resume 時
+                              # 帶的 artifact_id
 )
 
 

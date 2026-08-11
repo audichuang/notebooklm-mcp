@@ -23,6 +23,36 @@
   一句可執行的話)已經把這個結構收斂掉了:新程式碼要教呼叫端「下一步該做什麼」,
   **先查這兩個函式有沒有覆蓋這個狀態**,沒覆蓋就擴充它們的笛卡爾積或加新 key,
   不要在呼叫點旁邊再長一條 if/else——那條 if/else 就是第八次現形的種子。
+  **這條紅線只管「訊息從哪裡來」,不管「回傳完不完整」——那是下一條的守備範圍**
+  （第十一次現形正是在這條紅線徹底遵守之後才發生的:`safe_next_action` 確實是
+  `_attempt_capabilities()` 算的,但公開回傳漏了那個動作要用的目標身分)。
+- **紅線(第十一次現形):`safe_next_action` 委派給另一顆 attempt 時,目標身分要跟著換,
+  不能只換動作名。** `podcast_attempt_retract` 的 `post_retract` 分支發現
+  `active_attempt_id` 指向另一顆還在飛的 attempt B 時,會遞迴算 B 的 capabilities 並
+  交棒 `safe_next_action`——但上一輪(F1)只交棒了動作名,回傳裡的 `attempt_id`
+  依然是被 retract 的那一顆(A,稽核主體)。呼叫端只讀公開回傳、照著 `safe_next_action`
+  執行,實際上是拿 A 的 id 去做 B 的事:`podcast_episode_reconcile(A)` 撞 tombstone、
+  `podcast_attempt_retract(A)` 冪等重跑撞回一模一樣的回傳形成無限迴圈。
+  修法是 `_attempt_capabilities()` 額外算 `safe_next_attempt_id` / `safe_next_artifact_id`
+  （`_safe_next_target()`,單一映射:認 `safe_next_action` 的字面值對應哪種身分,
+  不重覆那條「哪個動作」的優先序 if/else——重覆等於下一次改優先序時兩邊漏改一邊,
+  就是第十二次現形的種子）。**任何委派/交棒場景(把 `safe_next_action` 換成別顆
+  attempt 算出來的值)都要連目標身分一起換**,回傳的稽核欄位(如 `attempt_id`)與
+  「照做要用的身分」允許不同,但後者必須有自己的欄位,不能要求呼叫端自己去猜或去翻
+  manifest。
+- **紅線:凡是宣稱「照著回傳的下一步做走得通」的 E2E 測試,執行下一步時只准使用
+  公開回傳裡的值,不准從 manifest 或 fixture 私下取 attempt_id / artifact_id。**
+  這是上一條紅線的檢驗端:第十一次現形能夠合併發版都沒被抓到,是因為那條 E2E
+  測試雖然真的呼叫了公開工具,卻在執行下一步時繞過公開回傳去 `_episode(manifest_path)
+  ["active_attempt_id"]` 私下取值——12k+ 測試全綠,沒有一個真的在驗「回傳自不自足」。
+  同一輪盤點另外抓到兩處同型(`test_adopt_source_replacement_queues_stale_ids_for_
+  cleanup`、`test_ambiguous_uploaded_source_candidate_can_be_adopted_before_rename`):
+  `podcast_series` 停在 `reconciliation_ambiguous` 時的公開回傳早就帶了正確的
+  `attempt_id`,測試卻另外從 manifest 讀一次來驅動下一步呼叫——兩條路徑的值當時
+  剛好相同、不影響測試通不通過,但代表「回傳給不給得出這個 id」這件事從來沒被驗證過。
+  **raise 型的停點是例外**:`podcast_episode`/`podcast_series` 因例外中斷時只拋
+  `ValueError`/`TimeoutError` 等,不帶結構化 dict,manifest 是當下唯一能拿到 id 的
+  地方,讀它不違反這條紅線(這條紅線管的是「有結構化回傳可用卻繞過去」)。
 - **(0.8.0)生成 kickoff 的同步拒絕改成 raise,不再回 `status="failed"`**(ADR-0019 / #1342)
   ——這會**悄悄改變 attempt 的終態分類**,是本次升級唯一需要動邏輯的地方。
   `_REFUSED_WITHOUT_DISPATCH` 只收契約講死「沒有建出 task」的兩種例外(誤判代價不對稱,

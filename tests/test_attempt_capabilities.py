@@ -708,3 +708,85 @@ def test_post_retract_defers_to_the_replacement_attempt_already_in_flight():
     step = p._attempt_next_step(caps)
     assert "用 podcast_series 重生" not in step, step
     assert "podcast_episode_reconcile" in step, step
+    # P1(這一輪,同一根因第十一次現形):`safe_next_action` 換成了 B 的,但目標身分
+    # 若還是 A(`attempt_id` 參數本身),`podcast_episode_reconcile(A)` 會撞
+    # tombstone。目標必須是 B。
+    assert caps["safe_next_attempt_id"] == "att-b", caps
+    assert caps["safe_next_attempt_id"] != "att-a", caps
+
+
+def test_post_retract_replacement_identity_wins_even_when_the_replacement_is_settled():
+    """**P1(Codex 獨立審查,同一根因第十一次現形)最硬的同型**:B 的 `remote.status`
+    是 `failed`(結果已定),`safe_next_action` 會是 `podcast_attempt_retract`——若
+    目標身分不是 B、仍是這顆(A)自己,呼叫端照做就是**冪等 retract A、拿到一模
+    一樣的回傳、無限迴圈**(Codex 實跑重現)。上一輪(F1)只把 `safe_next_action`
+    換成 B 的,`attempt_id` 這個參數本身(=A)完全沒有跟著換。
+
+    突變驗證:把 `_safe_next_target()` 裡「sibling 交棒時身分整段換成替代 attempt
+    自己的」那個分支拿掉(退化成永遠用呼叫者自己的 `attempt_id`/`remote`),這條就
+    會紅 —— `safe_next_attempt_id` 會變回 `"att-a"`。
+    """
+    attempt_a = {
+        "attempt_id": "att-a",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "completed", "artifact_id": "art-a"},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+        "retraction": {"stale_source_ids": []},
+    }
+    attempt_b = {
+        "attempt_id": "att-b",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "failed", "artifact_id": None},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+    }
+    episode = {
+        "episode": 1,
+        "active_attempt_id": "att-b",
+        "attempts": [attempt_a, attempt_b],
+    }
+
+    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+
+    assert caps["safe_next_action"] == p.ACTION_RETRACT, caps
+    assert caps["safe_next_attempt_id"] == "att-b", caps
+    assert caps["safe_next_attempt_id"] != "att-a", (
+        "目標身分仍是 A 的話,照著回傳冪等 retract A 會拿到一模一樣的回傳"
+        f":{caps}"
+    )
+
+
+def test_post_retract_replacement_identity_carries_the_artifact_id_for_resume():
+    """**同一根因,resume 分支**:B 已被受理且有 artifact_id(`remote.status` 還沒
+    終態),`safe_next_action` 是 `podcast_episode_resume`——該工具認的是
+    `artifact_id`,不是 `attempt_id`。目標身分必須整組換成 B 的
+    (`safe_next_attempt_id` 與 `safe_next_artifact_id` 都是),否則呼叫端連
+    B 的 artifact_id 都拿不到。
+
+    突變驗證:同上,拿掉 `_safe_next_target()` 的 sibling 交棒分支就會紅
+    ——`safe_next_artifact_id` 會變成 `None`(A 沒有走 resume 分支,`remote` 是
+    `_attempt_capabilities` 這一層自己的 `remote` 變數,不會是 B 的 `art-b`)。
+    """
+    attempt_a = {
+        "attempt_id": "att-a",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "completed", "artifact_id": "art-a"},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+        "retraction": {"stale_source_ids": []},
+    }
+    attempt_b = {
+        "attempt_id": "att-b",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "pending", "artifact_id": "art-b"},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+    }
+    episode = {
+        "episode": 1,
+        "active_attempt_id": "att-b",
+        "attempts": [attempt_a, attempt_b],
+    }
+
+    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+
+    assert caps["safe_next_action"] == p.ACTION_RESUME, caps
+    assert caps["safe_next_attempt_id"] == "att-b", caps
+    assert caps["safe_next_artifact_id"] == "art-b", caps
