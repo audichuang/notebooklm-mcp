@@ -204,3 +204,35 @@ def test_skip_existing_keeps_a_valid_cover_untouched(tmp_path, monkeypatch, caps
 
     assert "SKIP" in capsys.readouterr().out
     assert good.read_bytes() == before
+
+
+def test_skip_existing_does_not_need_chrome_when_every_cover_is_valid(
+    tmp_path, monkeypatch
+):
+    """全部封面都驗得過時,這一輪根本不需要 Chrome —— 不該因為沒裝而失敗。
+
+    Chrome lookup 原本在 main 開頭無條件跑,於是「只是要把既有封面寫回 manifest」也得
+    先有 Chrome。
+    """
+    from PIL import Image
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"episodes": [{"episode": 1, "title": "甲集"}]}),
+        encoding="utf-8",
+    )
+    Image.new("RGB", (1400, 1400)).save(tmp_path / "EP01.jpg", "JPEG", quality=92)
+
+    def no_chrome_on_this_machine(_explicit=None):
+        raise SystemExit("找不到 headless Chrome")
+
+    monkeypatch.setattr(cover_cli, "_find_chrome", no_chrome_on_this_machine)
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--manifest", str(manifest),
+        "--output-dir", str(tmp_path), "--skip-existing",
+    ])
+
+    cover_cli.main()
+
+    stored = json.loads(manifest.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["cover_path"].endswith("EP01.jpg")

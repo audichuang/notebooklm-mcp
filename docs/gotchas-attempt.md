@@ -108,6 +108,19 @@
   連 `podcast_attempt_retract`(修復正門)與回填腳本都打不開,唯一出路變成 ADR-0009 禁止的
   手改 JSON。**壞資料要讀得進來,才修得掉**;retracted tombstone 一律豁免(否則 retract 後
   換 notebook 重生就寫不進去)。
+- **`_assert_source_cleanup_done` 的執行順序本身就是安全性質,動它之前先讀那支的 docstring。**
+  四個階段:①驗身分 → ②一次 `sources.list`、純計算不中途拋 → ③單次 revision-CAS mutation
+  → ④寫完才 raise。每一段都對應一個實際重現過的缺口:身分檢查排在篩選之後 → 會把**別本
+  筆記本裡碰巧同名同時間窗**的來源寫進清理義務、再叫呼叫端刪掉它;迴圈裡直接 raise →
+  前面幾顆撈到的候選永遠沒落盤;`_claimed_source_ids` 用 await 前的 snapshot 而寫入不帶
+  `expected_revision` → 併發 finalizer 剛認領的**合法** continuity source 會被排進待刪清單;
+  清除放在 raise 之後 → 已經刪掉的 id 卡在 `pending_source_cleanup`,冪等 retract 一直教人
+  去刪一個不存在的東西。**CAS 只掛在「有新發現要寫」那條路**:沒有新發現時 settle 對並行
+  天生安全,硬要 CAS 會把「await 期間又有一次 retract 追加新義務」這個本來就被正確吸收的
+  情形變成硬失敗。
+- **清理義務的 notebook 身分以 `attempt["notebook_id"]` 為權威**,episode/manifest 只是
+  fallback ——`manifest_store._validate` 明文允許 tombstone 保留建立時綁的舊 notebook,
+  所以「換一本 notebook 重生」不能把舊本的孤兒洗掉。
 - **作廢一顆「回錄 upload 還沒落盤」的 attempt 之後,最多 12 分鐘不能重生。** upload 停在
   `dispatching`/`acceptance_unknown`/`reconciliation_ambiguous` 且 `source_id` 還沒落盤時,
   retract(要帶 `abandon_in_flight`)會在 tombstone 記一筆 `source_cleanup_unresolved`,

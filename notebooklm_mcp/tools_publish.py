@@ -435,9 +435,9 @@ async def publish_series(
             if path and not (os.path.exists(path) and os.path.getsize(path) > 0):
                 raise ValueError(f"episode {n}: {key} missing file: {path}")
 
-    # Validate only values projected into feed.xml before the first PUT; internal
-    # manifest fields (brief, errors, local paths) are deliberately irrelevant.
-    # build_feed_xml repeats this at its own public boundary.
+    # **只驗真的會投影進 feed.xml 的欄位**,而且在第一個 PUT 之前:manifest 內部欄位
+    # (brief、錯誤訊息、本機路徑)刻意不管 —— 那些不會進 XML,拿它們擋發布是誤殺。
+    # `build_feed_xml` 在它自己的公開邊界會再驗一次(這裡是 preflight,那裡是把關)。
     feed_mod.validate_xml_text((
         base_url,
         show_title,

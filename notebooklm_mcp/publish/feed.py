@@ -17,7 +17,12 @@ def _feed_dir_url(base_url: str, token: str) -> str:
 
 
 def validate_xml_text(value: object) -> None:
-    """Reject characters XML 1.0 cannot represent."""
+    """擋掉 XML 1.0 表達不了的字元。
+
+    這些字元進得了 Python 字串、也進得了 manifest,但寫進 feed.xml 之後整份 feed 對
+    Apple 的 parser 就是壞的 —— 而壞掉的位置在**已發布的** RSS,不是在這裡。所以在
+    組 XML 之前先擋。dict/list/tuple 遞迴檢查(dict 只看 value:key 是我們自己寫死的)。
+    """
     if isinstance(value, str):
         for char in value:
             code = ord(char)
