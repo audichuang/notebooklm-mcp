@@ -2516,39 +2516,56 @@ async def _run_episode(
         # 等 constructor 需 notebook_id/task_id/timeout 多個必填參數,type(exc)(str) 會
         # 反而 TypeError 吞掉真錯;改寫 args 對內建與 SDK 例外都能把 hint 帶進 str(exc))。
         # 呼叫端據此續完(不重生、不燒 quota),不必再 artifact_list 撈 id。
+        # **完整呼叫是 recovery payload,`next_step` 才是狀態權威 —— 兩者並存。**
+        # 只留 next_step 的散文會丟掉 `podcast_episode_resume` 的五個必填參數
+        # (notebook_id / episode_n / title / artifact_id / output_dir),而那份參數
+        # 正是這整段存在的理由:呼叫端據此續完,不必再 artifact_list 撈 id。只留完整
+        # 呼叫又會在「並行 retract 已經把這顆 tombstone 掉」時教一個做不到的動作。
         original_error = str(exc)
+        manifest_argument = (
+            f", manifest_path={manifest_path!r}" if manifest_path else ""
+        )
+        resume_call = (
+            f"podcast_episode_resume(notebook_id={notebook_id!r}, "
+            f"episode_n={episode_n!r}, title={title.strip()!r}, "
+            f"artifact_id={artifact_id!r}, output_dir={output_dir!r}"
+            f"{manifest_argument})"
+        )
+        head = (
+            f"{original_error}\n音檔已在雲端生成(artifact_id={artifact_id!r})但後續步驟失敗。"
+            f"既有 attempt_id={attempt_id!r}。續完(不會重新生成)的完整呼叫:{resume_call}"
+        )
         if store is not None:
-            # 下一步只從 capabilities 產生：同一條 finalize 例外可能仍是 accepted
-            # attempt，也可能已被並行 retract 成 tombstone，不能一律手寫 resume。
+            # 同一條 finalize 例外可能仍是 accepted attempt,也可能已被並行 retract 成
+            # tombstone(`abandon_in_flight` 讓那件事變成受支援的操作),所以現在該做
+            # 什麼一律從 capabilities 算,不手寫。
             try:
                 current = store.read()
-                episode, stopped_attempt = _attempt_record(
+                stopped_episode, stopped_attempt = _attempt_record(
                     current, episode_n, attempt_id, allow_retracted=True
                 )
                 caps = _attempt_capabilities(
-                    episode,
+                    stopped_episode,
                     stopped_attempt,
                     attempt_id,
                     post_retract=bool(stopped_attempt.get("retraction")),
                 )
-                next_step = _attempt_next_step(caps)
-            except Exception:
-                next_step = ""
-            durable_identity = (
-                f", manifest_path={manifest_path!r}" if manifest_path else ""
-            )
-            exc.args = (
-                f"{original_error}\n音檔已在雲端生成(artifact_id={artifact_id!r})但後續步驟失敗。"
-                f"既有 attempt_id={attempt_id!r}{durable_identity}；{next_step}",
-            )
+                next_step = (
+                    "**只有下面這句仍指向 resume 時才執行上面那個呼叫**："
+                    + _attempt_next_step(caps)
+                )
+            except Exception as state_error:
+                # 讀不到最新狀態時**不能留空**(舊版在這裡回空字串,於是訊息以一個
+                # 分號結尾、什麼都沒教)。完整呼叫照給,但要說清楚它未經狀態核對。
+                next_step = (
+                    f"無法計算最新狀態({state_error});執行上面那個呼叫之前先檢查 "
+                    f"manifest_path={manifest_path!r} 裡 episode {episode_n} 的 "
+                    f"attempt {attempt_id!r} 是否已被 retract。"
+                )
+            exc.args = (f"{head}\n{next_step}",)
         else:
-            exc.args = (
-                f"{original_error}\n音檔已在雲端生成(artifact_id={artifact_id!r})但後續步驟失敗。"
-                "用 podcast_episode_resume 續完(不會重新生成):"
-                f"podcast_episode_resume(notebook_id={notebook_id!r}, episode_n={episode_n}, "
-                f"title={title.strip()!r}, artifact_id={artifact_id!r}, "
-                f"output_dir={output_dir!r})",
-            )
+            # standalone(沒有 manifest)只有 best-effort 保證,沒有狀態可以核對。
+            exc.args = (head,)
         raise
 
 

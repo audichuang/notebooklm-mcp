@@ -592,3 +592,134 @@ async def test_promoted_episode_records_the_verified_feedback_source_id(
     episode = stored["episodes"][0]
     assert episode["feedback_source_id"] == output["feedback_source_id"]
     assert "feedback_source_adopted_at" not in episode
+
+
+# ---- finalize 失敗訊息:完整 recovery payload + 狀態權威,兩者並存(F1) ------------
+#
+# 這整段訊息在盲審之前**一條測試都沒有**,所以「把完整呼叫換成 capabilities 散文」這個
+# 回歸(丟掉 `podcast_episode_resume` 的五個必填參數)沒有任何東西看得到。
+
+_RESUME_REQUIRED_ARGS = (
+    "notebook_id",
+    "episode_n",
+    "title",
+    "artifact_id",
+    "output_dir",
+)
+
+
+async def test_finalize_failure_message_carries_every_resume_argument(
+    fake_client, tmp_path
+):
+    """訊息要能直接複製執行 —— 逐一斷言 resume 的五個必填參數 + manifest_path。
+
+    `podcast_episode_resume` 的簽章是五個位置必填參數(即使傳了 manifest_path 也一樣),
+    而這段訊息存在的唯一理由就是「呼叫端據此續完,不必再 artifact_list 撈 id」。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.download_audio_exc = ConnectionError("download interrupted")
+
+    with pytest.raises(ConnectionError) as failure:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=7,
+            title="  心法篇  ",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    message = str(failure.value)
+    for argument in _RESUME_REQUIRED_ARGS:
+        assert f"{argument}=" in message, f"resume 的必填參數 {argument} 不在訊息裡:{message}"
+    assert "podcast_episode_resume(" in message
+    assert repr(str(manifest_path)) in message
+    assert "episode_n=7" in message
+    assert repr("心法篇") in message          # title 已 strip,可直接貼
+    assert "download interrupted" in message  # 原例外訊息不准被蓋掉
+    assert not message.rstrip().endswith("；")
+
+
+async def test_finalize_failure_message_survives_an_unreadable_manifest(
+    fake_client, tmp_path, monkeypatch
+):
+    """capabilities 算不出來時**不能留空**:完整呼叫照給,並說清楚它未經狀態核對。
+
+    舊版在這裡回 `next_step = ""`,訊息以一個分號結尾、什麼都沒教。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    original_read = p.ManifestStore.read
+    calls = {"n": 0}
+
+    def flaky_read(self):
+        calls["n"] += 1
+        # 前幾次(dispatch 前的驗證)正常,之後一律炸掉 —— finalize 本身與錯誤處理那次
+        # 讀取都讀不到,正是「狀態算不出來」那一格。
+        if calls["n"] > 3 and str(self.path) == str(manifest_path):
+            raise OSError("manifest is unreadable")
+        return original_read(self)
+
+    monkeypatch.setattr(p.ManifestStore, "read", flaky_read)
+
+    with pytest.raises(OSError) as failure:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    message = str(failure.value)
+    for argument in _RESUME_REQUIRED_ARGS:
+        assert f"{argument}=" in message
+    assert "無法計算最新狀態" in message
+    assert not message.rstrip().endswith("；")
+
+
+async def test_finalize_failure_message_defers_to_capabilities_after_a_parallel_retract(
+    fake_client, tmp_path, monkeypatch
+):
+    """finalize 失敗與並行 retract 撞在一起時,訊息不准宣稱 resume 是現在可執行的動作。
+
+    完整呼叫仍然附上(它是 recovery payload,不是指令),但狀態權威那句要說「這顆已經
+    被作廢」——`abandon_in_flight` 讓「retract 一顆還在飛的 attempt」變成受支援的操作。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    retracted = {"done": False}
+    original_download = fake_client.artifacts.download_audio
+
+    async def retract_then_fail(*args, **kwargs):
+        if not retracted["done"]:
+            retracted["done"] = True
+            snapshot = p.ManifestStore(manifest_path).read()
+            attempt_id = snapshot["episodes"][0]["active_attempt_id"]
+            await p.podcast_attempt_retract(
+                str(manifest_path),
+                1,
+                attempt_id,
+                reason="並行作廢:輸入本來就錯",
+                abandon_in_flight=True,
+            )
+        raise ConnectionError("download interrupted")
+
+    monkeypatch.setattr(fake_client.artifacts, "download_audio", retract_then_fail)
+
+    with pytest.raises(Exception) as failure:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    message = str(failure.value)
+    assert "podcast_episode_resume(" in message, message
+    assert "只有下面這句仍指向 resume 時才執行" in message
+    # 狀態權威那句必須反映 tombstone,不能教 resume。
+    tail = message.split("只有下面這句仍指向 resume 時才執行")[-1]
+    assert "podcast_episode_resume" not in tail, tail
+    assert original_download is not None
