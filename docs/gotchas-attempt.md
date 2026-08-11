@@ -7,6 +7,22 @@
 
 ---
 
+- **紅線:任何 `safe_next_action` 與狀態相關的指引訊息,一律由 `_attempt_capabilities()` /
+  `_attempt_next_step()` 產生,不准手寫 if/else。** 這個根因已經現形七次,每次的形狀都是
+  「指引在它自己產生的狀態下不可執行」——v0.9.1 FAIL-1(叫人跑一支在該狀態下自己也
+  permission denied 的工具)→ v0.9.3(停點指向會拒收它的工具)→ v0.9.4 FINDING-2
+  (拒絕訊息那句在該狀態下是假的)→ v0.9.5 一次六條(其中三條是修上一條時自己種的)
+  → v0.9.6(把「可免旗標 retract」誤當「可原樣重送」,`failed`/`removed` 兩者答案相反,
+  共用一個布林就必然教錯一邊)→ v0.9.7 FINDING-4 → **這一輪的 `_reuse_frozen_input_attempt`**
+  (rearm 卡住時手寫 `f"frozen attempt is {status!r}; reconcile or resume it instead of
+  redispatching"`,沒有查 `_attempt_capabilities` 就叫呼叫端去做在那個狀態下不一定做得到
+  的事)。**每次的修法都是「補那一格」**——判斷分散在各自為政的布林 + 十幾處手寫訊息裡,
+  永遠會有沒補到的下一格,這條紀律沒寫進常駐文件正是第七次現形的直接原因。
+  `_attempt_capabilities()`(單一事實來源,對狀態組合的笛卡爾積由
+  `tests/test_attempt_capabilities.py` 逐格鎖住)與 `_attempt_next_step()`(把結論翻成
+  一句可執行的話)已經把這個結構收斂掉了:新程式碼要教呼叫端「下一步該做什麼」,
+  **先查這兩個函式有沒有覆蓋這個狀態**,沒覆蓋就擴充它們的笛卡爾積或加新 key,
+  不要在呼叫點旁邊再長一條 if/else——那條 if/else 就是第八次現形的種子。
 - **(0.8.0)生成 kickoff 的同步拒絕改成 raise,不再回 `status="failed"`**(ADR-0019 / #1342)
   ——這會**悄悄改變 attempt 的終態分類**,是本次升級唯一需要動邏輯的地方。
   `_REFUSED_WITHOUT_DISPATCH` 只收契約講死「沒有建出 task」的兩種例外(誤判代價不對稱,
@@ -23,6 +39,12 @@
   ①`_reset_attempt_for_resend` 要 dispatch 與 remote **一起**清(只清一半會讓 series 看到
   `remote.status="failed"` 而誤判該 supersede);②診斷靠 `errors[]`(只 append),不靠
   `remote`;③**驗證一律先於變更**。事故經過見 [CHANGELOG](CHANGELOG.md) v0.7.2。
+  **現況更新**:這支函式現在只做一件事——真的要重送時的逐欄位相等閘門(notebook /
+  標題 / brief 雜湊 / settings / frozen bundle 綁定,少一個都不放行)。它**不再是**
+  「能不能重送」這句指引訊息的來源——那個角色已經被上一條紅線講的 `_attempt_capabilities()`
+  接手,它的 `can_resend` 欄位用的是更粗的判準(`never_dispatched and not is_output`),
+  因為產生指引訊息的當下往往連呼叫端下一次會帶什麼請求都還不知道,沒東西可比對逐字
+  相同。兩者故意不是同一個判準,別把它們合併成一個。
 - **`published_at` 是「首發時間」不是「產製時間」**(v0.6.0):retract 必須把它 pop 進
   `retraction.retracted_output`(它是 `has_hard_output_evidence` 的硬證據,留著會擋死重生),
   但 promote 補回時要走 `_first_published_at()` ——沿 attempts 建立順序找**第一筆非空**的

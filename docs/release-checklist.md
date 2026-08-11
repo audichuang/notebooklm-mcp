@@ -24,7 +24,7 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一次改完:
 
 1. `pyproject.toml` 的 `version`(正本)
-2. 本檔 §Commands 的安裝指令
+2. `AGENTS.md` §Commands 的安裝指令(拆檔時 §Commands 留在 AGENTS.md,沒跟著搬進本檔)
 3. `README.md`
 4. `docs/mcp-setup.md`
 5. `audi-skill/notebooklm/SKILL.md` §Auth

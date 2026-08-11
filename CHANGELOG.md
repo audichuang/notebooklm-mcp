@@ -6,6 +6,129 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.8
+
+兩份**互相獨立**的 v0.9.7 事後審查(本迴圈的三視角 opus 複審、外部 Codex 複審)各自跑完,
+在兩條上收斂到同一個結論 —— 那個獨立收斂才是信號。加上各自獨有的發現,共七條。
+
+### 最重的一條不是缺陷,是**護欄本身是假的**
+
+v0.9.7 的主角是「配額冷卻」,而它的核心修正(冷卻**真正被拒**的那個槽位)**沒有任何測試**:
+把 `refused` 反查整段刪掉,全套 **2588 全綠**。上一版的 red proof 只是
+`TypeError: rotate_client() got an unexpected keyword argument 'refused'` —— 那只證明
+「參數以前不存在」,不證明「冷卻目標對了」。
+
+原因很細:缺陷版燒掉 a1 之後,搜尋起點也跟著推到 slot1,**下一格照樣是 a2** ——
+唯一的斷言 `second == "a2@x"` 對缺陷版與修復版同時成立。這與 v0.9.7 自己修掉的
+「名字寫 concurrent、內容全同步」是**同一個病灶換皮**:斷言看的是回傳值,而缺陷只
+表現在 `_COOLING` 的內容上。現在兩條斷言一條查狀態(`1 not in _COOLING`)、一條查行為
+(再轉一次,a1 仍該是候選;缺陷版此時三格全冷卻會回 `None`)。
+
+**這一輪三個「修正沒有測試」都是突變驗證抓到的,審查者讀 code 讀不出來**(讀起來都對)。
+另外兩個:tried guard 的第二條 dispatch 路徑(只改第二處回舊形狀,全套照樣綠)、
+零候選的 `retract_instruction` 分支(兩支都含 `abandon_in_flight` 字串,而斷言是子字串比對,
+硬寫成錯的那一支全套照樣綠)。**紀律:守門測試寫完要突變一次再收,不然它只是註解。**
+
+### cooldown 冷卻的是游標,不是真正被拒的帳號
+
+`rotate_client()` 無條件 `_COOLING[_ACTIVE] = now`,但呼叫端是拿早先 `snapshot()` 取到的
+`(label, client)` 去送出的,中間隔著至少一次 await。並行下 pool `[a0,a1,a2]` 兩個呼叫都
+snapshot 到 a0、都被拒:A 先 rotate(冷卻 slot0、游標推到 1);B 接著 rotate 時
+**把正在替 A 服務、從沒拒絕過任何人的 a1 打進 600 秒冷卻**。v0.9.7 的 docstring 逐字宣稱
+「現在只有真的被拒的槽位進冷卻,跳過去的那個下次照樣是候選」—— 那句在並行下是假的。
+
+`_rotate_for_quota` 手上一直有 `from_account`(它自己的 docstring 還寫著「必須是這次
+dispatch 實際用過的那一個」),只是沒往下傳。改成 `rotate_client(refused=label)` 用 label
+反查槽位;反查不到(pool 重裝過)才保守退回舊行為。**參數是 label 不是 index**:呼叫端
+手上只有 `snapshot()` 給的 label,index 是 runtime 的內部表示。
+
+### cooldown 順手把「繞完一圈就停」從無條件降級成依賴時鐘
+
+舊版終止性是結構性的(`_ACTIVE` 只增不減,一輪必然用完)。加了時間過期之後,**若繞一圈
+的耗時超過冷卻期,第一格已經解凍、`rotate_client()` 永遠回得出帳號** —— 而
+`_dispatch_audio_with_failover` 是 `while True`,那就是無限重送、無限燒配額,CI 全綠。
+SDK backoff + 429 慢回之下 600 秒不是不可達。
+
+修法不動 cooldown 語意:failover 迴圈自己記 `tried` set,終止性回到**無條件**。
+`rotate_client` 的 docstring 也照實改口 —— 它自己不再保證這件事,由呼叫端保證。
+
+### 而那道 tried guard 第一版**擋在副作用之後**(三個審查視角獨立抓到同一條)
+
+`_rotate_for_quota` 不是純查詢:它在回傳前已經 ①動了全域游標與冷卻 ②`_record_dispatch_failover`
+把 `dispatch.account` 改寫成 to_account、往 **append-only 的 `errors[]`** 寫一筆。
+guard 放在回傳之後,命中時只丟掉回傳值,**兩個副作用一個都沒撤** —— manifest 留下一次
+從未發生的換帳號,而且 `dispatch.account` 指向一個這次根本沒送過東西的帳號。實跑復現:
+實際送出 `[a@x, b@x]`,落盤 `dispatch.account: a@x`、failover 紀錄兩筆而第二筆沒發生過。
+
+這正面違反 **ADR-0010 紀律③「記帳與送出必須同源」—— 而那條紀律正是這一輪 P1 存在的理由**。
+`errors[]` 是 repo 自己宣告永不清除的稽核正本,假紀錄會活到永遠。guard 移進
+`_rotate_for_quota`、擋在 `_record_dispatch_failover` **之前**;冷卻副作用保留(帳號真的被拒過)。
+兩處呼叫端因此變回同形的 `if rotated is not None:`,不會再有「只補一處」的機會。
+
+### 零候選的出路:把時間性判斷寫進條件,不是寫進散文
+
+v0.9.7 為 FINDING-1 加的 `next_step` 前半說「重呼本工具會得到一模一樣的回傳」、後半接
+`_attempt_next_step(caps)` 而它在這一格恆定吐出「先 `podcast_episode_reconcile` 對帳」——
+**照做又回到同一支工具**;`safe_next_action` 更是一個字沒改,仍指回自己。
+
+但把它一路改成 `ACTION_RETRACT` 也錯,而且錯得更貴:零候選有兩種成因(同一句話裡自己就
+寫了),候選窗還沒關的時候晚幾分鐘再對帳**是會撈到的**。更關鍵的是,新指引要求的「外部
+知識」是 `artifact_list(kind="audio")` —— 那正是 reconcile 自己上一秒剛打過的同一支 RPC,
+回傳必然同樣是空,`abandon_in_flight` 那道「我知道 manifest 推導不出來的事」的門就被降級成
+**同義反覆**。照著做的下場:伺服器其實受理了、artifact 還在生成 → retract + 重生 →
+幾分鐘後第一顆出現變成雲端孤兒 → 下次 reconcile 撞 `reconciliation_ambiguous`、配額白燒,
+**正是 ADR-0009 要擋的「把還在飛的因果紀錄提前寫成墓碑」**。
+
+改成用已經算好的 `window_end`:窗關了才給 `ACTION_RETRACT`,窗還開著維持 `ACTION_RECONCILE`
+並明說要等 —— 回到 v0.9.6 驗收 FINDING-1 的原始建議(「值域不必改」)。
+
+### `podcast_series` 重包 reconcile 停點時把 `next_step` 丟掉(外部 Codex 抓到)
+
+零候選的出路只存在於 `next_step` 那一欄,而 series 內部拿到 reconcile 的回傳後重包 `partial()`
+時**只轉傳 `candidate_artifact_ids`**。於是走 series 這條路的呼叫端拿到的仍是一個沒有出路的
+停點。`partial(**extra)` 本來就吃額外欄位,純漏傳 —— 又一次 AGENTS.md 逐字點名的
+「`podcast_series` 有兩條路徑」。
+
+### `_reuse_frozen_input_attempt` 是單一事實來源唯一漏收的出口(第七次現形)
+
+v0.9.6 宣稱把「這顆 attempt 能做什麼」收斂成 `_attempt_capabilities`,但這支仍自己讀
+`dispatch.status`、手寫 `frozen attempt is {status!r}; reconcile or resume it instead`,
+只放行 `prepared`/`not_accepted`。可達狀態:frozen bundle 送出成功(`accepted`)、遠端回
+終態失敗、attempt 仍 active → 呼叫端照冪等契約原樣重呼就撞那句 → 照它說的做,reconcile 被
+`ValueError` 擋、resume 拋 `TerminalGenerationError`,**兩條建議都走不通**。而同一顆 attempt
+餵進 `_attempt_capabilities` 得到的是正確答案(免旗標 retract → 重生)。
+
+**而換過去之後才看見更深的一層**:`_attempt_next_step` 的 settled 分支結尾寫死「整季流程也
+可以直接重呼 `podcast_series` 讓它自動 supersede」,**沒有跟著同一顆 caps 的
+`regeneration_entry` 走**。frozen bundle 這條路上 `regeneration_entry` 必定是 `podcast_episode`,
+於是同一句話前半教 episode、後半教 series —— 而後者正是 `_regeneration_entry_point()` 整顆
+docstring 存在的理由(series 生不出帶 `source_ids`／bundle 的 settings)。照後半句做,
+這一集會改讀整本筆記本(含後面各集的回錄),**正是 v0.9.5 花整輪在防的那個內容錯置形狀**。
+那句改成條件式之後,笛卡爾積測試新加的不變式一次紅了 **32 個組合**。
+
+### 紀律終於寫進常駐文件
+
+這個根因已經現形**七次**,而每次的修法都是「補那一格」。`docs/gotchas-attempt.md` 補上紅線:
+**任何 `safe_next_action` 與狀態相關的指引訊息一律由 `_attempt_capabilities()` /
+`_attempt_next_step()` 產生,不准手寫 if/else**,並列出七次的形狀。AGENTS.md 的
+`tools_podcast.py` 那一列指過去。**這條沒寫進常駐文件正是第七次現形的直接原因**;
+零候選那段手寫的 `retract_instruction` 抽成共用的 `_retract_hint(caps)`,不再平行維護第二份。
+
+### 其餘
+
+- **`authorization_basis` / `remote_status_at_retraction` 補上落盤斷言測試**:v0.9.6 加這兩欄
+  是為了取代「只記呼叫端傳了什麼」,但把它們改回 v0.9.5 語義**測試全綠** —— 唯一守著它的
+  檢查在驗收工作區的 `local-checks.sh`,跟工作區一起丟了。
+- **ADR-0010 補 v0.9.7 amendment**::15「never walks back into a spent account」與
+  :27「rotation walks front to back」兩句與 code 相反,而 AGENTS.md 規定動 dispatch 前必讀它。
+- **`generate_audio` docstring 補「這支沒有配額 failover」**(v0.9.3 FINDING-4 只修了 skill 那半)。
+- **README 的 HTTP 範例從 `0.0.0.0` 改回 `127.0.0.1`** —— 該 transport 無認證,與 AGENTS.md
+  的 loopback-only 紅線牴觸。`docs/mcp-setup.md` 的 tag precheck 還停在 `v0.4.2`(下一行卻裝
+  `v0.9.7`);`docs/release-checklist.md` 的六處 pin 指向一個不存在的「本檔 §Commands」。
+- v0.9.7 CHANGELOG 寫的「6 settings 形狀」實際是 5(450 格,不是 540)。
+
+3041 passed + 12 skipped(連跑三次無間歇紅)。七條修正各自做過突變驗證。
+
 ---
 
 ## v0.9.7

@@ -3,7 +3,7 @@
 Install the tagged MCP package on each machine first:
 
 ```bash
-git ls-remote https://github.com/audichuang/notebooklm-mcp.git refs/tags/v0.4.2
+git ls-remote https://github.com/audichuang/notebooklm-mcp.git refs/tags/v0.9.7
 uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.7"
 ```
 

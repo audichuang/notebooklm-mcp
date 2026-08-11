@@ -2,7 +2,7 @@
 
 自建薄 MCP server(建在 `notebooklm-py` 之上)+ 確定性續集 podcast 工具。**本 repo 只含 MCP 程式碼**,
 發布成 private repo `github.com/audichuang/notebooklm-mcp`,靠 `uv tool install` 裝成 console 命令
-`notebooklm-mcp`(server)/ `notebooklm-cover`(封面 CLI)。薄 `SKILL.md` 路由層 + `references/`
+`nblm-mcp`(server,見 §Gotchas 撞名說明)/ `notebooklm-cover`(封面 CLI)。薄 `SKILL.md` 路由層 + `references/`
 **已拆到 skill repo `audi-skill/notebooklm`(docs-only)**;兩者是一組配置(見底部 Cross-Repo Sync Checklist)。
 完整設計理由與 live 驗證踩坑見 `docs/superpowers/notebooklm-mcp-findings.md`(經驗庫,值得先讀)。
 
@@ -56,7 +56,7 @@ claude mcp add-json notebooklm -s local \
 | `app.py` | FastMCP app + 工具註冊 + lifespan(多帳號 client pool)+ 多 transport main | 憑證落檔與重鑄護欄,見 §Gotchas |
 | `server.py` | thin launcher(可當 `__main__` 跑) | — |
 | `tools_basic.py` | notebook / source / artifact / `chat_ask` 的薄包 + 讀取觀測面 | — |
-| `tools_podcast.py` | manifest-backed audio attempt:durable generate / reconcile / adopt / finalize / retract | **先讀 [ADR-0009](docs/adr/0009-retracted-attempts-are-tombstones.md)** —— 四個不變式各自被真實事故驗證過,而踩過的坑是**只補一條路徑**(attempt 建立有兩個分支、清理義務有三個入口) |
+| `tools_podcast.py` | manifest-backed audio attempt:durable generate / reconcile / adopt / finalize / retract | **先讀 [ADR-0009](docs/adr/0009-retracted-attempts-are-tombstones.md)** —— 四個不變式各自被真實事故驗證過,而踩過的坑是**只補一條路徑**(attempt 建立有兩個分支、清理義務有三個入口)。**寫任何狀態相關的指引訊息前先讀 [gotchas-attempt.md](docs/gotchas-attempt.md) 的紅線**——一律由 `_attempt_capabilities()` / `_attempt_next_step()` 產生,不准手寫 if/else,這個根因已現形七次 |
 | `tools_artifacts.py` | 簡報 PDF / 研讀 Markdown 按需生,路徑回寫 manifest | [gotchas-publish](docs/gotchas-publish.md) |
 | `tools_research.py` | Web / Deep Research 的薄包,**三支分開**(start / wait / import) | [gotchas-research](docs/gotchas-research.md);分開是為了對齊 ADR-0001 的 attempt/resume 紀律,不是為了彈性 |
 | `tools_publish.py` + `publish/` | 整季發布成 Apple 合規 RSS;`publish/` 是純邏輯(離線可測) | [gotchas-publish](docs/gotchas-publish.md) |
@@ -123,7 +123,10 @@ claude mcp add-json notebooklm -s local \
   `tests/test_contracts.py::test_generation_takes_its_source_list_from_the_notebook_not_the_server`
   釘住(**它紅就代表推導失效、清理義務要重新論證**),完整論證在該測試的 docstring。
 - **多帳號 pool 動 dispatch/認證前必讀 [ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**
-  (含 v0.9.0 amendment)。四條實作紀律,每條都被真實事故驗證過、都有測試鎖:
+  (含 v0.9.0 / v0.9.7 amendment)。**v0.9.7 起冷卻不是永久除名**:被拒的帳號 600 秒後會
+  重新變成候選(真實驗收量到同帳號被拒 26 分鐘後又被受理),`rotate_client()` 的游標會
+  環狀 wrap 回去,別再假設「一輪之內同一個帳號只會被拒一次」。四條實作紀律,每條都被
+  真實事故驗證過、都有測試鎖:
   ①**`podcast_series` 有兩條 dispatch 路徑**(全新一集走 `_run_episode`、重送/supersede 是
   series 自己 inline),**兩條共用 `_dispatch_audio_with_failover`** —— v0.8.0 只補了一條,
   於是 pool 對「重試」這條最需要它的路完全無效。

@@ -36,11 +36,14 @@ The install exposes `nblm-mcp` and `notebooklm-cover` on PATH.
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 ```
 
-HTTP mode for trusted private networks:
+HTTP mode, loopback only:
 
 ```bash
-doppler run -p notebooklm -c prd -- nblm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
+doppler run -p notebooklm -c prd -- nblm-mcp --transport streamable-http --host 127.0.0.1 --port 8484
 ```
+
+⚠️ `streamable-http` / `sse` carry **no authentication** — never bind a non-loopback host
+(`0.0.0.0` or a LAN IP); anything on the same network segment could then drive the account.
 
 ## Auth refresh
 
