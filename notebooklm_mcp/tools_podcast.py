@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -45,14 +46,41 @@ from .manifest_store import ManifestStore
 
 _TZ = timezone(timedelta(hours=8))
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
-# ponytail: 保守下限取代持久化窗，若之後要精確就在 dispatch 前存
-# reconciliation_window_end。
-# `podcast_episode_reconcile` 的候選窗**關閉判斷**不能只信這次呼叫的 `wait_timeout`
-# ——原生成可能承諾等 3600 秒，重呼 reconcile 時傳更小的值就能把「窗還沒關」的
-# attempt 誤判成「窗已關」而建議 retract（P1，真實復現：`wait_timeout=1` 約 61 秒後
-# 就會給 retract 指引）。呼叫端只能**放大**這個窗、不能縮小；丟錯成本（tombstone
-# 一顆還在飛的 attempt，ADR-0009 禁止的因果改寫）遠高於試錯成本（多等一輪再對帳）。
+# `podcast_episode_reconcile` 有兩個窗，保守的方向剛好相反，**不能共用同一個判準**
+# (第四輪主迴圈裁決)：
+#   - 關閉判斷：窗「大」才保守——窗小＝提前宣告「繼續等沒有用」＝教人 tombstone
+#     一顆可能還在飛的 attempt（ADR-0009 禁止的因果改寫）。
+#   - 候選篩選：窗「小」才保守——窗大＝把不屬於這次 dispatch 的 artifact 也算成
+#     候選，`_bind_reconciled_artifact` 會把別人的音檔綁進這一集。
+# 上一輪把兩者合併成 `_effective_reconciliation_window_seconds` 一顆值、兩邊都套
+# 同一個保守下限，於是「legacy attempt 的候選窗被下限撐大而誤綁別人的 artifact」與
+# 「持久化承諾比下限小時，關閉判斷不套下限而提前判關」兩個方向各壞一半。
+# `_RECONCILIATION_MIN_WINDOW` 因此只在**關閉判斷**的呼叫點套用（見
+# `_promised_reconciliation_window_seconds` 與下面兩個呼叫點的分工），候選篩選窗
+# 一律用 promised 原始值、不套下限。
 _RECONCILIATION_MIN_WINDOW = timedelta(seconds=3600)
+
+
+def _promised_reconciliation_window_seconds(dispatch: dict, wait_timeout: float) -> float:
+    """算出**那次 dispatch 原始承諾要等多久**（`promised`），不套任何保守下限。
+
+    `promised = max(持久化值 if 有, 這次呼叫的 wait_timeout)`——只取大不取小：
+    持久化值（`_claim_prepared_dispatch` 存的原始秒數，見該函式 docstring）是真的
+    承諾，呼叫端不能用一次較小的 `wait_timeout` 把它讀小；但呼叫端也可以**顯式放大**
+    `wait_timeout` 去撈遲到的 artifact（救援路徑的逃生口），這裡要讓那個放大生效，
+    不能被持久化值蓋掉。讀不到持久化值（v0.9.9 以前建立的 legacy attempt）時就只剩
+    這次呼叫的值。
+
+    **回傳值直接拿去當候選篩選窗**（`candidate_window_end`）——候選篩選窗小才保守，
+    這裡故意不套 `_RECONCILIATION_MIN_WINDOW`。要算關閉判斷窗的呼叫點，自己在外面
+    套 `max(這個回傳值, _RECONCILIATION_MIN_WINDOW)`，別把下限塞進這支共用函式。
+    """
+    persisted = dispatch.get("wait_timeout")
+    promised = float(wait_timeout)
+    if isinstance(persisted, (int, float)) and not isinstance(persisted, bool):
+        promised = max(promised, float(persisted))
+    return promised
+
 
 # 生成 kickoff 的例外裡,**契約上保證「伺服器沒有建出任何 task」**的那幾種。
 # notebooklm-py 0.8.0(ADR-0019 / #1342)把同步拒絕從「回傳 status='failed'」改成
@@ -142,7 +170,7 @@ def _regeneration_entry_point(attempt: dict) -> str:
     return ACTION_EPISODE
 
 
-def _regeneration_hint(attempt: dict) -> str:
+def _regeneration_hint(attempt: dict, *, resend_possible: bool) -> str:
     """重生**這一顆**時要注意什麼 —— 與 `_regeneration_entry_point()` 同源判斷。
 
     v0.9.6 把入口收斂了,卻讓這句話在 retract 的回傳裡另外用 if/else 猜:「有 bundle」
@@ -151,6 +179,13 @@ def _regeneration_hint(attempt: dict) -> str:
     `settings={"origin": "explicit_resume"}` 的 attempt 是**假的** —— manifest 裡根本
     沒有那組 source_ids(v0.9.6 真實驗收 FINDING-4)。收斂做了一半就是這個下場:
     action 對了,附帶的話還是錯的。
+
+    `resend_possible`(v0.9.10 修復):是不是也能**原樣重呼**這顆(`caps["can_resend"]`)。
+    只有 `source_ids` 那句在兩種情境下的正確措辭不同 —— can_resend 為真時,呼叫端除了
+    原樣重送,還有「retract 之後刻意換來源重生」這個選項,這時無條件講「必須帶回原本」
+    會跟 `_attempt_next_step` 的 can_resend 分支(「要換來源就先 retract」)互相矛盾:
+    一句話同時說「可以換」又說「不准換」(v0.9.9 引入的回歸)。can_resend 為假(is_output
+    /settled)時只有 retract 重生一條路,維持「必須帶回原本」不做選擇。
     """
     if attempt.get("input_bundle") is not None:
         # binding 只能建立一次,而它還綁著這顆即將成為 tombstone 的 attempt。
@@ -162,6 +197,12 @@ def _regeneration_hint(attempt: dict) -> str:
     if set(settings) == _SERIES_SETTINGS_KEYS:
         return ""
     if settings.get("source_ids"):
+        if resend_possible:
+            return (
+                "**若只更換 brief,必須保留原 `source_ids`**;若刻意更換來源,"
+                "podcast_attempt_retract(**不需要** abandon_in_flight)後帶新的 "
+                "`source_ids` 明確重生 —— 兩種情況都不會靜默改成讀整本筆記本。"
+            )
         return (
             "**重生時必須帶回原本那組 `source_ids`** —— 這一集的生成輸入指名了來源,"
             "改用 podcast_series 會靜默改成讀整本筆記本。"
@@ -180,7 +221,7 @@ def _attempt_capabilities(
     attempt: dict,
     attempt_id: str,
     *,
-    reconciliation_window_closed: bool = False,
+    reconciliation_window_closed: bool | None = None,
 ) -> dict:
     """**「這顆 attempt 現在能做什麼」的單一事實來源。**
 
@@ -189,6 +230,19 @@ def _attempt_capabilities(
     自己算好「現在幾點」與候選窗有沒有關再傳進來,這裡不讀時鐘(P2 修復)——否則
     `podcast_episode_reconcile` 的零候選分支會繼續自己手寫 if/else 決定
     `safe_next_action`,正是 docs/gotchas-attempt.md 那條紅線要擋的第二個決策來源。
+
+    **這是三態,不是布林**(第四輪修復):`None` = 呼叫端沒算過,`True`/`False` =
+    明確算過的結果。`_attempt_capabilities()` 有五個呼叫點,只有
+    `podcast_episode_reconcile` 真的讀時鐘算過窗;另外四個(attempt 建立衝突、resume
+    的兩個停點、`_reuse_frozen_input_attempt`)手上根本沒有 `dispatched_at`
+    可以算,只是要餵一顆 attempt 進來問「現在能做什麼」。**這四個永遠吃預設值,而
+    預設值的語意不能是「窗還沒關」這個具體宣稱**——上一輪用 `False` 當預設,結果
+    `_attempt_next_step()` 講出「候選窗還沒關,過幾分鐘後重呼有機會撈到」這種話,
+    而真的算過窗的 `podcast_episode_reconcile` 對同一顆 attempt(dispatched_at 是
+    3 天前)說「候選窗已經關了」——兩支工具對同一個狀態給互相矛盾的事實。`None`
+    才是誠實的預設:「不知道,沒資訊可講」,`_attempt_next_step()` 對 `None` 一律
+    回到不含窗宣稱的措辭。`can_reconcile` 的計算不受影響——`not None` 與
+    `not False` 都是 `True`,跟 v0.9.9 的行為一致(視為未關閉)。
 
     **為什麼收斂成一顆:同一個根因現形過五次。** 每次的形狀都是「指引在它自己產生的
     狀態下不可執行」——v0.9.1 FAIL-1(叫人跑一支在該狀態下自己也 permission denied 的
@@ -211,6 +265,10 @@ def _attempt_capabilities(
     - `can_resume` / `can_reconcile`:有沒有 artifact 可續、要不要先對帳(候選窗關了
       就不算「可以對帳」——窗關代表未來任何 artifact 都會落在窗外,繼續對帳沒有用)。
     - `regeneration_entry`:作廢之後重生該用哪支工具。
+    - `safe_next_action`(P2 修復):這個狀態下**單一一支**最該做的工具
+      (`SAFE_NEXT_ACTIONS` 之一,或 `None` 代表歷史紀錄沒有可執行的下一步)。跟
+      `_attempt_next_step()` 的文字分支順序逐字對齊、由同一組笛卡爾積測試互相對照
+      鎖住——那裡是「怎麼講」,這裡是「哪支工具」,兩者故意分開算但答案不准分岔。
     """
     dispatch_status = (attempt.get("dispatch") or {}).get("status")
     remote = attempt.get("remote") or {}
@@ -236,6 +294,35 @@ def _attempt_capabilities(
     else:
         basis = None                    # 真的不知道有沒有東西在跑 —— 要外部知識
 
+    # **只有從沒送出去的才重送得了。** 遠端已終態(`failed`/`removed`)雖然同樣
+    # 「結果已定」,重送卻是走 supersede 建新 attempt,不是沿用這顆 ——
+    # `_is_resendable_same_request` 也只收 `_NEVER_DISPATCHED`。
+    can_resend = never_dispatched and not is_output
+    can_resume = bool(remote.get("artifact_id")) and not is_output
+    can_reconcile = (
+        dispatch_status in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous")
+        and not reconciliation_window_closed
+    )
+    regeneration_entry = _regeneration_entry_point(attempt)
+
+    # **`safe_next_action` 的優先序必須跟 `_attempt_next_step()` 的分支順序逐字
+    # 對齊**(見上方 docstring)。
+    if not is_active and not is_output:
+        safe_next_action = None  # 歷史紀錄,沒有可執行的下一步——要動的是 active/output
+    elif is_output:
+        safe_next_action = ACTION_RETRACT
+    elif can_resend:
+        # 原樣重呼＝再叫一次建立它的那支工具，跟「重生要用哪支工具」同一個判準。
+        safe_next_action = regeneration_entry
+    elif basis == "settled":
+        safe_next_action = ACTION_RETRACT
+    elif can_resume:
+        safe_next_action = ACTION_RESUME
+    elif can_reconcile:
+        safe_next_action = ACTION_RECONCILE
+    else:
+        safe_next_action = ACTION_RETRACT
+
     return {
         "dispatch_status": dispatch_status,
         "remote_status": remote_status,
@@ -243,18 +330,15 @@ def _attempt_capabilities(
         "is_output": is_output,
         "authorization_basis": basis,
         "needs_abandon_flag": basis is None and is_active,
-        # **只有從沒送出去的才重送得了。** 遠端已終態(`failed`/`removed`)雖然同樣
-        # 「結果已定」,重送卻是走 supersede 建新 attempt,不是沿用這顆 ——
-        # `_is_resendable_same_request` 也只收 `_NEVER_DISPATCHED`。
-        "can_resend": never_dispatched and not is_output,
-        "can_resume": bool(remote.get("artifact_id")) and not is_output,
-        "can_reconcile": (
-            dispatch_status
-            in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous")
-            and not reconciliation_window_closed
-        ),
-        "regeneration_entry": _regeneration_entry_point(attempt),
-        "regeneration_hint": _regeneration_hint(attempt),
+        "can_resend": can_resend,
+        "can_resume": can_resume,
+        "can_reconcile": can_reconcile,
+        # 三態原始值(不是 can_reconcile 那個已經跟 dispatch_status 混在一起的布林)
+        # 留給 `_attempt_next_step()` 判斷要不要講窗宣稱——`None` 時不准講。
+        "reconciliation_window_closed": reconciliation_window_closed,
+        "regeneration_entry": regeneration_entry,
+        "regeneration_hint": _regeneration_hint(attempt, resend_possible=can_resend),
+        "safe_next_action": safe_next_action,
     }
 
 
@@ -285,6 +369,17 @@ def _attempt_next_step(caps: dict) -> str:
     沿用舊 bundle 會被 tombstone 擋下來,retract 教的路等於死路。`_regeneration_hint()`
     對不需要提醒的形狀本來就回空字串,所以在每個分支**無條件**附加是安全的——
     `tests/test_attempt_capabilities.py` 的窮舉序列測試驗證這一點。
+
+    **候選窗狀態說明也在這裡產生**(P2 修復):`podcast_episode_reconcile` 零候選
+    出口原本自己手寫 if/else 講「窗開了/關了」,現在從 `caps["dispatch_status"]`
+    (可對帳的狀態集合)與 `caps["can_reconcile"]`(已經算進 window_closed)推出來
+    ——呼叫點只組裝回傳欄位,不再做任何判斷。
+
+    **窗宣稱只能在明確算過時講**(第四輪修復):`caps["reconciliation_window_closed"]`
+    是三態(`None`/`True`/`False`)。`can_reconcile` 分支只有在它是 `False`(明確
+    算過、窗還沒關)時才附加「候選窗還沒關,過幾分鐘後重呼有機會撈到」;`None`(五個
+    呼叫點裡有四個從沒算過時間)時回到 v0.9.9 原文,不提窗的任何字——否則會跟真的
+    算過窗、判定「已經關了」的 `podcast_episode_reconcile` 對同一顆 attempt 打對台。
     """
     if not caps["is_active"] and not caps["is_output"]:
         return "它已經被取代,是歷史紀錄 —— 要動的是現在的 active／output attempt。"
@@ -325,8 +420,31 @@ def _attempt_next_step(caps: dict) -> str:
     if caps["can_resume"]:
         return "遠端有 artifact:先 podcast_episode_resume 續完 finalize。" + retract_hint
     if caps["can_reconcile"]:
+        if caps["reconciliation_window_closed"] is False:
+            # 明確算過、窗還沒關——才有資格講「還有機會撈到」這句時間性宣稱。
+            return (
+                "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完;"
+                "候選窗還沒關,過幾分鐘後重呼有機會撈到,現在重呼未必是一模一樣的空結果)。"
+                + retract_hint
+            )
+        # `None`:呼叫端沒算過窗(建立衝突／resume 停點／frozen 重呼卡住這四個
+        # 呼叫點都是),不能宣稱「還沒關」——回到 v0.9.9 原文,一個字都不提窗。
         return (
             "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完)。"
+            + retract_hint
+        )
+    if caps["dispatch_status"] in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous"):
+        # can_reconcile 在這裡已經是 False,而 dispatch_status 仍落在可對帳的集合裡,
+        # 只可能是呼叫端傳了 `reconciliation_window_closed=True`(明確算過、窗真的
+        # 關了——`None`/`False` 都會讓 can_reconcile 維持 True,走不到這裡)。把
+        # `podcast_episode_reconcile` 零候選出口原本手寫的窗狀態說明收進來,呼叫點
+        # 就不用再自己組。**故意不提 `podcast_episode_reconcile` 這個字面值**:窗
+        # 關了之後這個工具名不准再出現在指引裡(見
+        # test_every_state_combination_yields_executable_guidance 的 window_closed 斷言)。
+        return (
+            "候選窗(dispatch 到 wait_timeout 那段時間,含時鐘容錯)已經關了——"
+            "未來任何 artifact 都會落在窗外,再對帳一次也只會拿到一模一樣的回傳,"
+            "繼續等沒有用。"
             + retract_hint
         )
     return retract_hint
@@ -802,12 +920,22 @@ def _claim_prepared_dispatch(
     attempt_id: str,
     artifact_ids: list[str],
     account: str | None = None,
+    *,
+    wait_timeout: float,
 ) -> bool:
     """原子保存 baseline 並取得 prepared attempt 的 dispatch ownership。
 
     `account` 是「這次由哪個帳號送出」(ADR-0010 的 pool)。單帳號時它只是一條事實,
     多帳號 failover 時它會被 `_record_dispatch_failover` 更新成實際成功的那個 ——
     沒有它,「EP35 是誰生的」事後答不出來。
+
+    `wait_timeout` 是**這次 dispatch 原始承諾要等多久**(呼叫端傳給
+    `podcast_episode`/`podcast_series` 的那個秒數,不是之後 reconcile 時想等多久)。
+    存原始秒數而不是算好的 window_end——window_end 還混進了時鐘容錯常數
+    (`_RECONCILIATION_CLOCK_SKEW`),那個常數以後可能改,秒數不會變(P1 修復,見
+    `_RECONCILIATION_MIN_WINDOW` 的常數註解)。**兩個呼叫端都要傳**
+    (`_run_episode` 與 `podcast_series` 的 inline 重送分支)——只補一條正是
+    docs/gotchas-attempt.md 紅線①點名的病灶。
     """
 
     def mutate(manifest: dict) -> bool:
@@ -820,6 +948,7 @@ def _claim_prepared_dispatch(
                 "status": "dispatching",
                 "artifact_ids_before": artifact_ids,
                 "dispatched_at": datetime.now(timezone.utc).isoformat(),
+                "wait_timeout": float(wait_timeout),
             }
         )
         if account is not None:
@@ -1439,6 +1568,28 @@ def _validate_episode_args(episode_n: int, title: str, prior_mp3_path: str | Non
         raise ValueError("prior_mp3_path requires episode_n >= 2 (there is no prior to episode 1)")
 
 
+def _validate_wait_timeout(wait_timeout: float) -> None:
+    """`wait_timeout` 從「這次呼叫想等多久」升級成**持久化的安全參數**
+    (`_claim_prepared_dispatch` 把它存進 `dispatch["wait_timeout"]`)之後,它就是
+    之後**每一次** reconcile 的候選篩選窗與關閉判斷窗判準——一個沒有信任邊界檢查的
+    呼叫端輸入,不該直接變成長期有效的安全設定。三個入口(`podcast_episode`／
+    `podcast_series`／`podcast_episode_reconcile`)都要同一句驗證,別各寫一份等著
+    漏一個(第四輪修復;只補一個正是 AGENTS.md 紀律①點名的病灶)。
+
+    `math.isfinite` 擋 `nan`/`inf`:光靠 `<= 0` 擋不住 `nan`(`nan <= 0` 恆為
+    `False`,NaN 比較永遠不成立)。`nan` 存進 `dispatch["wait_timeout"]` 後,
+    `timedelta(seconds=nan)` 會在往後**每一次**對帳時炸掉——那顆 attempt 永久對帳
+    不了,只剩 retract 一條路。
+    """
+    if (
+        not isinstance(wait_timeout, (int, float))
+        or isinstance(wait_timeout, bool)
+        or not math.isfinite(wait_timeout)
+        or wait_timeout <= 0
+    ):
+        raise ValueError("wait_timeout must be a finite number greater than zero")
+
+
 def _require_existing_manifest(
     manifest_path: str, *, missing_hint: str | None = None
 ) -> None:
@@ -1817,6 +1968,7 @@ async def _run_episode(
             attempt_id,
             [artifact.id for artifact in baseline],
             account=dispatch_account,
+            wait_timeout=wait_timeout,
         )
         if not claimed:
             raise RuntimeError(
@@ -1976,6 +2128,10 @@ async def podcast_episode(
     # 本地驗證先行(壞參數 ValueError 秒退,不浪費 RPC),再做認證預檢:
     # 單集也要等最多 20 分鐘,cookie 死了先秒退(見 auth_probe docstring)。
     _validate_episode_args(episode_n, title, prior_mp3_path)
+    # wait_timeout 會被 `_claim_prepared_dispatch` 持久化,升級成之後每一次對帳的
+    # 窗判準(第四輪修復,見 `_validate_wait_timeout` docstring)——沒有信任邊界
+    # 檢查的呼叫端輸入不能直接變成安全參數。
+    _validate_wait_timeout(wait_timeout)
     source_ids = to_source_ids(source_ids)
     if manifest_path and prior_mp3_path:
         raise ValueError(
@@ -2039,12 +2195,7 @@ async def podcast_episode_reconcile(
         raise ValueError("episode_n must be an int >= 1")
     if not isinstance(attempt_id, str) or not attempt_id:
         raise ValueError("attempt_id must be a non-empty string")
-    if (
-        not isinstance(wait_timeout, (int, float))
-        or isinstance(wait_timeout, bool)
-        or wait_timeout <= 0
-    ):
-        raise ValueError("wait_timeout must be greater than zero")
+    _validate_wait_timeout(wait_timeout)
     _require_existing_manifest(manifest_path)
 
     store = ManifestStore(manifest_path)
@@ -2088,12 +2239,20 @@ async def podcast_episode_reconcile(
     )
     claimed = _claimed_artifact_ids(snapshot, attempt_id)
     window_start = dispatched_at - _RECONCILIATION_CLOCK_SKEW
-    # **候選 artifact 的篩選窗**——用這次呼叫的 `wait_timeout`,既有行為,不在 P1
-    # 修復範圍內。它與下面零候選分支的「候選窗有沒有關」是兩個不同判準(下面那個要
-    # 加保守下限,這個不用),故意拆成兩個各自有名字的值,不要合併回同一個 `window_end`。
+    # **候選 artifact 的篩選窗**:用 promised(原始承諾與這次呼叫取大),**不套
+    # `_RECONCILIATION_MIN_WINDOW` 保守下限**——這裡曾經跟下面的關閉判斷共用同一個
+    # 套了下限的值,窗大了反而不保守:legacy attempt(沒有持久化承諾)會被下限撐大到
+    # 1 小時,把不屬於這次 dispatch 的 artifact 也算成候選,`_bind_reconciled_artifact`
+    # 綁進別人的音檔(第四輪核心裁決)。這裡若只信這次呼叫的 `wait_timeout`(不合併
+    # 持久化值)也有問題:傳 1 秒會先把稍晚才出現的真 artifact 排除在候選窗外,零候選
+    # 出口再誤判窗已關建議 retract。
     candidate_window_end = (
         dispatched_at
-        + timedelta(seconds=float(wait_timeout))
+        + timedelta(
+            seconds=_promised_reconciliation_window_seconds(
+                attempt["dispatch"], wait_timeout
+            )
+        )
         + _RECONCILIATION_CLOCK_SKEW
     )
     candidates: set[str] = set()
@@ -2179,39 +2338,36 @@ async def podcast_episode_reconcile(
     # 配額——正是 ADR-0009 要擋的「把還在飛的因果紀錄提前寫成墓碑」。
     #
     # **這個窗(關閉判斷)跟上面的 `candidate_window_end`(篩選候選)故意不是同一個
-    # 值**(P1 修復):後者用這次呼叫的 `wait_timeout` 沒問題,但拿它判斷「窗有沒有
-    # 關」會被重試呼叫端的參數改寫——原生成可能承諾等 3600 秒,重呼時傳
-    # `wait_timeout=1` 就能讓這裡誤判成「窗早就關了」,建議 retract 一顆其實還在飛的
-    # attempt(ADR-0009 禁止的因果改寫)。用 `_RECONCILIATION_MIN_WINDOW` 當保守下限,
-    # 見該常數的 ponytail 註解。
+    # 值**(第四輪核心裁決,兩個窗的保守方向相反,見上面 `_RECONCILIATION_MIN_WINDOW`
+    # 的常數註解):這裡才套 `_RECONCILIATION_MIN_WINDOW` 保守下限——窗大才保守,
+    # 窗小 = 提前宣告「繼續等沒有用」= tombstone 一顆可能還在飛的 attempt。
+    # **呼叫端顯式放大 `wait_timeout` 可以放大這個窗(那是救援路徑的逃生口,見
+    # `_promised_reconciliation_window_seconds`),但 floor 不會自動撐大候選窗**
+    # ——這行只影響關閉判斷,不影響上面的 `candidate_window_end`。
     reconciliation_window_end = (
         dispatched_at
-        + max(timedelta(seconds=float(wait_timeout)), _RECONCILIATION_MIN_WINDOW)
+        + timedelta(
+            seconds=max(
+                _promised_reconciliation_window_seconds(
+                    latest_attempt["dispatch"], wait_timeout
+                ),
+                _RECONCILIATION_MIN_WINDOW.total_seconds(),
+            )
+        )
         + _RECONCILIATION_CLOCK_SKEW
     )
     reconciliation_window_closed = (
         datetime.now(timezone.utc) > reconciliation_window_end
     )
-    # **action 的決策不再在這裡手寫 if/else**(P2 修復,docs/gotchas-attempt.md 的
-    # 紅線):窗關了就餵進 `_attempt_capabilities`,讓 `can_reconcile` 自己反映
-    # 「不能再對帳」,`_attempt_next_step` 既有的分支順序會自動落在 retract 那一支。
+    # **action 與窗狀態說明都不在這裡手寫**(P2 修復,docs/gotchas-attempt.md 的
+    # 紅線):`_attempt_capabilities()` 直接產生 `safe_next_action`,
+    # `_attempt_next_step()` 從 `dispatch_status`/`can_reconcile` 推出窗狀態說明。
+    # 呼叫點只組裝回傳欄位,不再做任何判斷。
     caps = _attempt_capabilities(
         episode_row,
         latest_attempt,
         attempt_id,
         reconciliation_window_closed=reconciliation_window_closed,
-    )
-    window_note = (
-        "而且候選窗(dispatch 到 wait_timeout 那段時間,含時鐘容錯)已經關了——"
-        "未來任何 artifact 都會落在窗外。**重呼本工具會得到一模一樣的回傳**"
-        "(不建 attempt,所以 `attempt_count` 不會動,原地打轉偵測看不出來),"
-        "繼續對帳沒有用。"
-        if reconciliation_window_closed
-        else (
-            "但候選窗還沒關(dispatch 到 wait_timeout 那段時間,含時鐘容錯)——"
-            "可能是那次生成還沒出現,過幾分鐘後重呼本工具有機會撈到,**現在重呼"
-            "未必是一模一樣的空結果**。"
-        )
     )
     return {
         "complete": False,
@@ -2219,8 +2375,8 @@ async def podcast_episode_reconcile(
         "attempt_id": attempt_id,
         "observed_state": latest_attempt["dispatch"]["status"],
         "candidate_artifact_ids": [],
-        "safe_next_action": ACTION_RECONCILE if caps["can_reconcile"] else ACTION_RETRACT,
-        "next_step": f"這次對帳在遠端找到 **0 個候選**,{window_note}" + _attempt_next_step(caps),
+        "safe_next_action": caps["safe_next_action"],
+        "next_step": "這次對帳在遠端找到 **0 個候選**。" + _attempt_next_step(caps),
     }
 
 
@@ -2858,7 +3014,8 @@ async def podcast_attempt_retract(
             return (
                 dict(existing),
                 _regeneration_entry_point(attempt),
-                _regeneration_hint(attempt),
+                # 已經是 tombstone,沒有「原樣重送」這個選項可言——一律走 regeneration_entry。
+                _regeneration_hint(attempt, resend_possible=False),
             )
 
         output_attempt_id = episode.get("output_attempt_id")
@@ -3030,7 +3187,8 @@ async def podcast_attempt_retract(
         return (
             dict(retraction),
             _regeneration_entry_point(attempt),
-            _regeneration_hint(attempt),
+            # 這顆剛被作廢,沒有「原樣重送」這個選項可言——一律走 regeneration_entry。
+            _regeneration_hint(attempt, resend_possible=False),
         )
 
     _, (retraction, entry_point, regeneration_hint) = ManifestStore(
@@ -3140,6 +3298,11 @@ async def podcast_series(
         raise ValueError("start must be >= 1")
     if start > len(episodes):
         raise ValueError(f"start must be <= len(episodes) ({len(episodes)})")
+    # wait_timeout 會被 `_claim_prepared_dispatch` 持久化,升級成之後每一次對帳的
+    # 窗判準(第四輪修復,見 `_validate_wait_timeout` docstring)——這支工具是兩個
+    # dispatch 入口之一(另一個是 `podcast_episode`),兩邊都要驗,漏一個正是
+    # AGENTS.md 紀律①點名的病灶。
+    _validate_wait_timeout(wait_timeout)
 
     # 只驗證 candidate range，避免執行中途才因壞 plan 消耗 generation 額度。
     for i, ep in enumerate(episodes[start - 1 :], start=start):
@@ -3540,6 +3703,7 @@ async def podcast_series(
                         active_attempt_id,
                         [row.id for row in baseline],
                         account=dispatch_account,
+                        wait_timeout=wait_timeout,
                     )
                     if not claimed:
                         latest = store.read()

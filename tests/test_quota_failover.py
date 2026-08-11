@@ -483,7 +483,7 @@ async def test_rotate_for_quota_tells_runtime_which_account_was_actually_refused
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
 
     captured: dict = {}
 
@@ -530,7 +530,7 @@ async def test_rotate_for_quota_does_not_give_up_when_the_first_scanned_slot_was
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="b@x")
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="b@x", wait_timeout=1200.0)
 
     import time as time_mod
 
@@ -602,7 +602,7 @@ async def test_dispatch_failover_terminates_even_if_rotate_never_reports_exhaust
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
 
     calls: list = []
 
@@ -650,7 +650,7 @@ async def test_dispatch_failover_terminates_via_the_ensure_started_path_too(
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
 
     calls: list = []
 
@@ -713,7 +713,7 @@ async def test_tried_guard_does_not_leave_a_phantom_failover_record(
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
 
     calls: list = []
 

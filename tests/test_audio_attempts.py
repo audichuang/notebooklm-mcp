@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -107,7 +107,9 @@ def _remote_audio(artifact_id: str):
     )
 
 
-async def _leave_acceptance_unknown(fake_client, tmp_path, candidates):
+async def _leave_acceptance_unknown(
+    fake_client, tmp_path, candidates, wait_timeout: float = 1200.0
+):
     manifest_path = tmp_path / "series_manifest.json"
     fake_client.artifacts.generate_remote_artifacts_before_raise = list(candidates)
     fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
@@ -119,6 +121,7 @@ async def _leave_acceptance_unknown(fake_client, tmp_path, candidates):
             brief="第一集",
             output_dir=str(tmp_path),
             manifest_path=str(manifest_path),
+            wait_timeout=wait_timeout,
         )
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     return manifest_path, stored["episodes"][0]["active_attempt_id"]
@@ -269,6 +272,254 @@ async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller
         str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
     )
     assert out["safe_next_action"] == p.ACTION_RETRACT, out
+
+
+async def test_dispatch_persists_the_original_wait_timeout_promise(
+    fake_client, tmp_path
+):
+    """**P1 前置**:兩個 `_claim_prepared_dispatch` 呼叫端(`_run_episode` 與
+    `podcast_series` 的 inline 重送分支)都要把**原始承諾**的秒數存進
+    `dispatch["wait_timeout"]`——只補一條正是 AGENTS.md 點名的病灶(v0.8.0 的
+    failover 就是這樣只補一條)。這裡先鎖 `_run_episode` 那條(`podcast_episode`
+    是它唯一的公開入口)。
+    """
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, [], wait_timeout=7200
+    )
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert attempt["attempt_id"] == attempt_id
+    assert attempt["dispatch"]["wait_timeout"] == 7200.0, attempt["dispatch"]
+
+
+async def test_series_resend_dispatch_also_persists_the_wait_timeout_promise(
+    fake_client, tmp_path
+):
+    """同一條紀律的第二個呼叫端:`podcast_series` re-arm 一顆 `not_accepted` attempt
+    後、真正 dispatch 前也要走 `_claim_prepared_dispatch`(:3549 附近的 inline 分支)
+    ——這條路徑跟 `_run_episode` 是**分開**補的,漏一條全季重送都測不出來(第一次
+    dispatch 就失敗才會走到這裡)。
+    """
+    episodes = [{"title": "心法篇", "brief": "1"}]
+
+    fake_client.artifacts.fail_generate = True
+    await p.podcast_series(
+        "nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321
+    )
+    fake_client.artifacts.fail_generate = False
+
+    # 第二次呼叫走 re-arm → prepared → `_claim_prepared_dispatch` 那條 inline 分支。
+    await p.podcast_series(
+        "nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321
+    )
+
+    stored = json.loads(
+        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
+    )
+    attempt = stored["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["wait_timeout"] == 4321.0, attempt["dispatch"]
+
+
+@pytest.mark.parametrize("bad_wait_timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+async def test_podcast_episode_rejects_a_bad_wait_timeout_before_any_dispatch(
+    fake_client, tmp_path, bad_wait_timeout
+):
+    """**item 3(第四輪修復)**:`wait_timeout` 被 `_claim_prepared_dispatch` 持久化
+    之後,升級成之後每一次對帳的安全窗判準——一個沒有信任邊界檢查的呼叫端輸入,不該
+    直接變成長期有效的安全參數。`podcast_episode` 之前完全不驗證這個參數,`nan` 存進
+    `dispatch["wait_timeout"]` 後,`timedelta(seconds=nan)` 會在往後每一次 reconcile
+    都炸掉——那顆 attempt 永久對帳不了。`<= 0` 也擋不住 `nan`(`nan <= 0` 恆假),
+    所以要單獨測 `math.isfinite`。驗證必須在任何 dispatch 之前(`fake_client.artifacts.calls`
+    保持空)。
+    """
+    with pytest.raises(ValueError, match="wait_timeout must be a finite number greater than zero"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            wait_timeout=bad_wait_timeout,
+        )
+    assert fake_client.artifacts.calls == []
+
+
+@pytest.mark.parametrize("bad_wait_timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+async def test_podcast_series_rejects_a_bad_wait_timeout_before_any_dispatch(
+    fake_client, tmp_path, bad_wait_timeout
+):
+    """同一條紀律的第二個入口(AGENTS.md 紀律①:兩個 dispatch 入口都要補,只補一個
+    正是反覆出現的病灶)。`podcast_series` 是全季的另一條路,不驗證的話同樣的 `nan`
+    會透過它的 `_claim_prepared_dispatch` 呼叫點(re-arm inline 分支)存進 manifest。
+    """
+    episodes = [{"title": "心法篇", "brief": "1"}]
+    with pytest.raises(ValueError, match="wait_timeout must be a finite number greater than zero"):
+        await p.podcast_series(
+            "nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=bad_wait_timeout,
+        )
+    assert fake_client.artifacts.calls == []
+
+
+async def test_reconcile_honors_the_original_promise_over_a_smaller_retry_timeout(
+    fake_client, tmp_path
+):
+    """**P1 真實復現(整合 repro,三個 agent 獨立收斂)**:原始
+    `podcast_episode(wait_timeout=7200)` 因 response lost 留在 acceptance_unknown,
+    4000 秒後才用 `wait_timeout=1`(或忘記傳、落回預設 1200)對帳。原始承諾的 7200 秒
+    根本還沒到,`max(這次呼叫的 wait_timeout, _RECONCILIATION_MIN_WINDOW=3600)` 那種
+    floor 猜法會把它判成「窗已關」——這裡鎖住:有持久化的原始承諾就必須贏過 floor。
+
+    突變驗證:把 `_promised_reconciliation_window_seconds` 改回只看這次呼叫的
+    `wait_timeout`(忽略 `dispatch.get("wait_timeout")`),這條會從 `ACTION_RECONCILE`
+    變成 `ACTION_RETRACT` 而紅——因為 floor 只有 3600 秒,4000 秒早就超過,但真正
+    承諾的 7200 秒還沒到。
+    """
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, [], wait_timeout=7200
+    )
+    store = p.ManifestStore(str(manifest_path))
+
+    def backdate(manifest: dict) -> None:
+        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        attempt["dispatch"]["dispatched_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=4000)
+        ).isoformat()
+
+    store.update(backdate)
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+    )
+    assert out["safe_next_action"] == p.ACTION_RECONCILE, (
+        f"原始承諾 7200 秒還沒到(只過了 4000 秒),不該被 wait_timeout=1 誤判成窗已關:{out}"
+    )
+    assert "已經關了" not in out["next_step"], out["next_step"]
+
+
+async def test_legacy_attempt_without_a_persisted_promise_still_uses_the_floor(
+    fake_client, tmp_path
+):
+    """**legacy fallback**:v0.9.9 以前建立的 attempt,dispatch 裡沒有 `wait_timeout`
+    欄位(那時還沒有這個修復)。讀不到持久化值時必須退回 v0.9.9 的保守下限
+    (`max(這次呼叫的 wait_timeout, _RECONCILIATION_MIN_WINDOW)`),不能因為讀不到
+    就當作 0 秒或直接爆炸。用 `del` 移掉欄位模擬「這顆是 fix 之前建立的」。
+
+    跟上一條(`test_reconcile_honors_the_original_promise_over_a_smaller_retry_timeout`)
+    互補:同樣 backdate 4000 秒,那條有持久化的 7200 秒承諾 → 窗還沒關;這條沒有
+    持久化值 → 退回 floor(3600 秒)→ 4000 秒已經超過 → 窗真的關了。兩者的反差正是
+    這條 fallback 存在的理由。
+    """
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, [], wait_timeout=7200
+    )
+    store = p.ManifestStore(str(manifest_path))
+
+    def strip_and_backdate(manifest: dict) -> None:
+        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        del attempt["dispatch"]["wait_timeout"]  # 模擬 legacy manifest 沒有這個欄位
+        attempt["dispatch"]["dispatched_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=4000)
+        ).isoformat()
+
+    store.update(strip_and_backdate)
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+    )
+    assert out["safe_next_action"] == p.ACTION_RETRACT, out
+
+
+async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(
+    fake_client, tmp_path
+):
+    """**item 4(第四輪修復,補一條真的走 floor 的測試)**:上一輪的
+    `test_reconciliation_window_closure_has_a_conservative_floor_the_caller_cannot_shrink`
+    兩個 backdate 值不管有沒有套 floor 都會得到同一個答案(1200 秒的承諾／3600 秒的
+    floor 對那兩個 backdate 值來說誰贏都無所謂)——那條測試從沒有真的證明 floor 生效。
+
+    這裡用一個**很小**的持久化承諾(60 秒)同時證兩件事(核心裁決:兩個窗的保守
+    方向相反,不能共用同一個判準):
+    - **關閉判斷窗**必須靠 `_RECONCILIATION_MIN_WINDOW`(1 小時)撐開,不能只信
+      60 秒的承諾——backdate 1500 秒還沒超過 floor,窗不該被判成已關。
+    - **候選篩選窗**不能被同一個 floor 撐大——backdate 1500 秒後才冒出的 artifact
+      早就落在 60 秒承諾之外,不該被誤判成這次 dispatch 的候選。
+
+    突變驗證:
+    ①拿掉關閉判斷的 floor(`max(promised, _RECONCILIATION_MIN_WINDOW...)` 改回只用
+    `promised`),這條會從 `ACTION_RECONCILE` 變成 `ACTION_RETRACT` 而紅
+    (60+60 秒的窗遠遠撐不到 1500 秒)。
+    ②讓候選篩選窗也套 floor(跟關閉判斷共用同一個值),這條會從「0 候選」變成
+    「1 候選、resume」而紅(floor=3600 秒遠大於 1500 秒,遲來的 artifact 會被誤判
+    成這次 dispatch 的候選,綁進錯的 attempt)。
+    """
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, [], wait_timeout=60,
+    )
+    store = p.ManifestStore(str(manifest_path))
+
+    def backdate(manifest: dict) -> None:
+        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        attempt["dispatch"]["dispatched_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1500)
+        ).isoformat()
+
+    store.update(backdate)
+    # 建立時間是「現在」,相對於 1500 秒前的 dispatched_at、60 秒的承諾窗,這是一顆
+    # 跟這次 dispatch 無關的遲到 artifact——候選窗不該收它。
+    fake_client.artifacts.artifacts = [_remote_audio("unrelated-late-artifact")]
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+    )
+    assert out.get("artifact_id") is None, (
+        f"候選窗(60 秒承諾,不套 floor)早就關了,這顆遲來的 artifact 不該被當成候選:{out}"
+    )
+    assert out["safe_next_action"] == p.ACTION_RECONCILE, (
+        f"關閉判斷窗有 floor(1 小時)撐著,持久化承諾只有 60 秒不該讓它被判成已關:{out}"
+    )
+    assert "已經關了" not in out["next_step"], out["next_step"]
+
+
+async def test_candidate_window_also_honors_the_original_promise(
+    fake_client, tmp_path
+):
+    """**P1 的第二個窗**:候選 artifact 篩選窗(`candidate_window_end`)也要讀
+    `_promised_reconciliation_window_seconds`(原始承諾與這次呼叫取大),不能只信
+    這次呼叫的 `wait_timeout=1`——那會先把「4000 秒後才建立」的真 artifact 排除在
+    候選窗外,零候選出口再誤判窗已關建議 retract——兩個 bug 疊在一起,實際後果是
+    明明有 artifact 卻教人 retract。
+
+    ⚠️ **第四輪修復後,候選窗不再套 `_RECONCILIATION_MIN_WINDOW` 保守下限**(核心
+    裁決:兩個窗的保守方向相反,候選窗大才危險)。這個測試的 persisted 承諾是 7200
+    秒、比下限(3600)大,所以候選窗恰好等於關閉判斷窗的有效秒數——這是**這個案例
+    的巧合**,不是兩者共用同一個值的結構性保證;見
+    `test_reconciliation_closure_floor_can_exceed_the_candidate_window` 那條才是
+    兩者真正分岔的案例。
+
+    突變驗證:把 `candidate_window_end` 改回直接吃 `wait_timeout`(不經
+    `_promised_reconciliation_window_seconds`),這條會從「單一候選、resume」變成
+    「零候選、retract」而紅。
+    """
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, [], wait_timeout=7200
+    )
+    store = p.ManifestStore(str(manifest_path))
+
+    def backdate(manifest: dict) -> None:
+        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        attempt["dispatch"]["dispatched_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=4000)
+        ).isoformat()
+
+    store.update(backdate)
+    # 建立時間是「現在」,相對於 4000 秒前的 dispatched_at 就是遲來的真 artifact。
+    fake_client.artifacts.artifacts = [_remote_audio("late-real-artifact")]
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+    )
+    assert out.get("artifact_id") == "late-real-artifact", out
+    assert out["safe_next_action"] == p.ACTION_RESUME, out
 
 
 async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(

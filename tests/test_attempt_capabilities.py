@@ -92,9 +92,13 @@ ALL_CASES = list(
 # P2 修復加的時間性維度:候選窗有沒有關。跟其餘測試無關的地方(series 白名單、
 # resend/flag 語意……)不必跟著翻倍,只有這條核心不變式真的會讀 `can_reconcile`,
 # 所以只在這裡加(笛卡爾積照 AGENTS.md 要求翻倍,不是每個測試都要背這個維度)。
+# **三態,不是布林**(第四輪修復):`None` = 呼叫端沒算過(五個呼叫點裡有四個是這樣),
+# `False`/`True` = 明確算過。三者的 `can_reconcile` 值相同(`None`/`False` 都不擋
+# reconcile),但 `_attempt_next_step()` 對 `None` 不准講任何窗宣稱——那正是這一輪
+# 修的回歸(見 test_unevaluated_window_never_makes_a_window_claim)。
 ALL_CASES_WITH_WINDOW = list(
     itertools.product(
-        DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES, (False, True)
+        DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES, (False, True, None)
     )
 )
 
@@ -113,6 +117,10 @@ def test_every_state_combination_yields_executable_guidance(
     can_reconcile`)——把 `can_reconcile` 算式裡 `and not reconciliation_window_closed`
     拿掉的突變,`caps["can_reconcile"]` 會跟著訊息一起變成 True,自證測不出來;
     下面直接拿 `window_closed` 這個輸入去斷言才抓得到。
+
+    **`None`(第四輪修復加的第三態)額外斷言「不講窗」**:沒算過窗的呼叫端,訊息裡
+    不准出現「候選窗」三個字——這是不變式抓不到的那種 bug(訊息本身自洽、可執行,
+    但對「現在幾點」做了一個沒有計算過的宣稱,會跟真的算過窗的另一支工具打對台)。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
     caps = p._attempt_capabilities(
@@ -129,6 +137,10 @@ def test_every_state_combination_yields_executable_guidance(
     if "podcast_episode_reconcile" in step:
         assert caps["can_reconcile"], f"教了 reconcile 但這個狀態對不了帳:{step}"
         assert not window_closed, f"候選窗已經關了,卻還教 reconcile:{step}"
+        if window_closed is None:
+            assert "候選窗" not in step, (
+                f"沒算過窗(None),卻在訊息裡宣稱窗狀態:{step}"
+            )
     if "不需要** abandon_in_flight" in step or "不需要 abandon_in_flight" in step:
         assert caps["authorization_basis"] is not None, (
             f"說不需要旗標,但這個狀態的 retract 沒有免旗標理由:{step}"
@@ -291,3 +303,144 @@ def test_the_regeneration_hint_never_claims_sources_that_are_not_there(
     # 認不出來的形狀必須**明說認不出來**,不可以靜默當成 series 或假裝知道來源。
     if shape in ("resume",):
         assert "認不出" in hint, f"{shape!r} 應該明說 manifest 裡沒有來源紀錄:{hint}"
+
+
+@pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
+def test_can_resend_hint_never_forbids_the_source_change_it_just_offered(
+    dispatch, remote, role, shape
+):
+    """**P2 修復:can_resend 分支的自相矛盾回歸。**
+
+    v0.9.9 讓 `_attempt_next_step` 的 can_resend 分支同時說「要換來源就先 retract
+    重生」+「重生時**必須帶回原本那組** `source_ids`」——前半刻意允許換來源,後半又
+    要求來源不能換,是同一句話裡的矛盾指引。can_resend 為真時,`source_ids` 那句的
+    正確措辭是區分兩種意圖(只換 brief 保留原樣;刻意換來源就走 retract+新
+    source_ids),不能無條件講死「必須帶回原本」。
+    """
+    episode, attempt = _case(dispatch, remote, role, shape)
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    step = p._attempt_next_step(caps)
+
+    if caps["can_resend"] and "要換 brief 或來源就先" in step:
+        assert "必須帶回原本那組" not in step, (
+            f"can_resend 分支已經提供「換來源」的選項,不該同時講死"
+            f"「必須帶回原本」自相矛盾:{step}"
+        )
+
+
+@pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
+def test_settled_and_output_still_require_the_original_sources_back(
+    dispatch, remote, role, shape
+):
+    """**can_resend 為假時,`source_ids` 的警告不能被 P2 修復連帶弱化。**
+
+    只有 can_resend 分支的措辭要改;is_output／settled 分支只有 retract 重生一條路,
+    「必須帶回原本那組 source_ids」仍然是唯一正確的話,不能被一起改成「兩種情境都可
+    以」的模糊講法(那對這兩個分支是假的——它們根本沒有「原樣重送」這個選項)。
+    """
+    episode, attempt = _case(dispatch, remote, role, shape)
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    hint = caps["regeneration_hint"]
+    settings = attempt.get("settings") or {}
+
+    if not caps["can_resend"] and settings.get("source_ids"):
+        assert "必須帶回原本那組" in hint, (
+            f"can_resend 為假、attempt 指名了來源,理應維持「必須帶回原本」的措辭:{hint}"
+        )
+
+
+@pytest.mark.parametrize("dispatch,remote,role,shape,window_closed", ALL_CASES_WITH_WINDOW)
+def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
+    dispatch, remote, role, shape, window_closed
+):
+    """**P2 修復:`_attempt_capabilities()` 直接產生 `safe_next_action`。**
+
+    這條把它跟 `_attempt_next_step()` 挑的分支對照鎖住——兩個函式各自算「哪支工具」
+    跟「怎麼講」,答案不准分岔(那正是 `podcast_episode_reconcile` 零候選出口原本要
+    自己手寫 if/else 的原因:沒有單一事實來源可用)。
+    """
+    episode, attempt = _case(dispatch, remote, role, shape)
+    caps = p._attempt_capabilities(
+        episode, attempt, "att-me", reconciliation_window_closed=window_closed
+    )
+    action = caps["safe_next_action"]
+
+    if not caps["is_active"] and not caps["is_output"]:
+        assert action is None, "歷史紀錄沒有可執行的下一步"
+        return
+    assert action is None or action in p.SAFE_NEXT_ACTIONS or action == p.ACTION_EPISODE
+    if caps["is_output"]:
+        assert action == p.ACTION_RETRACT
+    elif caps["can_resend"]:
+        assert action == caps["regeneration_entry"], (
+            "can_resend 為真時,safe_next_action 該是原樣重呼的那支工具"
+        )
+    elif caps["authorization_basis"] == "settled":
+        assert action == p.ACTION_RETRACT
+    elif caps["can_resume"]:
+        assert action == p.ACTION_RESUME
+    elif caps["can_reconcile"]:
+        assert action == p.ACTION_RECONCILE
+    else:
+        assert action == p.ACTION_RETRACT
+
+
+@pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
+def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
+    dispatch, remote, role, shape
+):
+    """**P2 修復:候選窗關閉的說明文字由 `_attempt_next_step()` 產生,不是呼叫點手寫。**
+
+    只在 dispatch 落在可對帳的狀態集合、但呼叫端已經算出候選窗關了時才會走到這句;
+    這句話**不准提到 `podcast_episode_reconcile`**(那個工具名不准在窗關了之後
+    出現在指引裡,跟核心不變式測試的 window_closed 斷言同一條紅線)。
+    """
+    dispatch_states_that_can_reconcile = (
+        "dispatching", "acceptance_unknown", "reconciliation_ambiguous",
+    )
+    if dispatch not in dispatch_states_that_can_reconcile:
+        pytest.skip("這個 dispatch 狀態走不到窗關閉分支")
+    episode, attempt = _case(dispatch, remote, role, shape)
+    caps = p._attempt_capabilities(
+        episode, attempt, "att-me", reconciliation_window_closed=True
+    )
+    if (
+        caps["can_resend"]
+        or caps["is_output"]
+        or caps["authorization_basis"] == "settled"
+        or caps["can_resume"]
+    ):
+        pytest.skip("更高優先序的分支先接手,不會走到窗狀態說明")
+    if not caps["is_active"] and not caps["is_output"]:
+        pytest.skip("歷史紀錄分支不會走到窗狀態說明")
+    step = p._attempt_next_step(caps)
+
+    assert "已經關了" in step, step
+    assert "podcast_episode_reconcile" not in step, step
+
+
+@pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
+def test_the_default_reconciliation_window_state_is_unevaluated_not_open(
+    dispatch, remote, role, shape
+):
+    """**第四輪修復的鑑別測試:預設值必須是 `None`(沒算過),不是 `False`(已確認未關)。**
+
+    `_attempt_capabilities()` 有五個呼叫點,只有 `podcast_episode_reconcile` 真的
+    讀時鐘算過候選窗;另外四個(attempt 建立衝突、resume 的兩個停點、
+    `_reuse_frozen_input_attempt` 卡在 frozen 重呼)手上根本沒有 `dispatched_at`,
+    全部吃預設值。實跑復現的矛盾:attempt 停在 acceptance_unknown、`dispatched_at`
+    是 3 天前 —— 用預設值的四個呼叫點若把「沒算過」講成「候選窗還沒關」,會跟真的
+    算過窗、判定「已經關了」的 `podcast_episode_reconcile` 對同一顆 attempt 打對台。
+
+    這裡只鎖預設值本身;「沒算過窗的訊息不准講窗宣稱」這條不變式已經在
+    `test_every_state_combination_yields_executable_guidance` 的 `window_closed=None`
+    分支測過(逐格覆蓋,含優先序更高的分支會先接手的狀態),不在這裡重複斷言逐字文案。
+
+    突變驗證:把 `_attempt_capabilities` 的 `reconciliation_window_closed` 參數預設值
+    改回 `False`,這條就會紅。
+    """
+    episode, attempt = _case(dispatch, remote, role, shape)
+    caps = p._attempt_capabilities(episode, attempt, "att-me")  # 不傳 → 預設值
+    assert caps["reconciliation_window_closed"] is None, (
+        "預設值必須是 None(沒算過),不是 False(已確認未關)"
+    )
