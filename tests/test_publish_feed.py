@@ -179,3 +179,14 @@ def test_unknown_itunes_type_is_refused_before_it_reaches_the_feed():
     """打錯的值進了 feed 只有 Apple 端看得到,所以在渲染邊界就擋。"""
     with pytest.raises(ValueError, match="itunes_type"):
         feed.build_feed_xml({**SHOW, "itunes_type": "series"}, BASE)
+
+
+def test_itunes_type_allowlist_is_exactly_two_values():
+    """精確鎖死值域:放寬成「非空字串就收」的話,單獨拒絕 "series" 那條測試仍會綠。"""
+    assert feed.ITUNES_TYPES == ("episodic", "serial")
+    for accepted in feed.ITUNES_TYPES:
+        assert feed.normalize_itunes_type(accepted) == accepted
+    assert feed.normalize_itunes_type(None) == "episodic"
+    for rejected in ("", "Serial", "SERIAL", "trailer", "bonus", 1, True, ["serial"]):
+        with pytest.raises(ValueError, match="itunes_type"):
+            feed.normalize_itunes_type(rejected)

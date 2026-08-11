@@ -1309,3 +1309,42 @@ async def test_bad_itunes_type_is_refused_before_any_put(
     with pytest.raises(ValueError, match="itunes_type"):
         await _publish(_two_episode_manifest(tmp_path), artwork_png, itunes_type="series")
     assert captured == []
+
+
+async def test_explicit_itunes_type_overrides_the_persisted_one(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """**反向 precedence 也要鎖。** 只驗「顯式 → 之後沿用」的話,把解析改壞成 saved 永遠
+    優先(改回連載節目就再也切不回 episodic)照樣全綠。顯式參數永遠優先並回寫。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png, itunes_type="serial")
+    assert json.loads(open(manifest, encoding="utf-8").read())["show"]["itunes_type"] == "serial"
+
+    captured.clear()
+    await _publish(manifest, artwork_png, itunes_type="episodic")
+
+    assert "<itunes:type>episodic</itunes:type>" in _feed_of(captured)
+    assert json.loads(open(manifest, encoding="utf-8").read())["show"]["itunes_type"] == "episodic"
+
+
+async def test_bad_itunes_type_persisted_in_the_manifest_still_blocks_every_put(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """壞值**來自 manifest** 時也要在任何 PUT 之前擋掉。
+
+    只驗顯式參數的話,「只驗參數、漏驗 saved_show」這個改壞法會讓壞 manifest 一路拖到
+    渲染邊界才擋 —— 那時候 artwork/media 已經上傳出去了。
+    """
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png)
+
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored["show"]["itunes_type"] = "series"          # 手改/跨版本留下的壞值
+    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+
+    captured.clear()
+    with pytest.raises(ValueError, match="itunes_type"):
+        await tools_publish.publish_series(manifest_path=manifest)
+    assert captured == []
