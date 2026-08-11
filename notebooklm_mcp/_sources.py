@@ -66,7 +66,7 @@ class TooManySourcesError(ValueError):
 
     **專屬型別是為了讓 `podcast_series` 認得出它**:series 對呼叫端的契約是「預期內
     的停止用回傳值表達」,而它的 except 分支收的是 `RuntimeError` /
-    `_REFUSED_WITHOUT_DISPATCH` / `(TimeoutError, ConnectionError)` —— 一個裸的
+    `_REFUSED_WITHOUT_DISPATCH` / `_TRANSIENT_TRANSPORT_ERRORS` —— 一個裸的
     `ValueError` 會直接冒泡出去,把**前面幾集已經跑完的 `run_results` 整份丟掉**。
     F-4 修過同一個形狀(見 `tools_podcast` inline dispatch 分支的註解),這裡用型別
     把它擋在再犯之前。`podcast_episode` 沒有那個契約,照樣外拋。

@@ -197,10 +197,18 @@ def main() -> None:
             n = int(ep["episode"])                      # 已過 preflight,保證 int
             cover_path = os.path.abspath(os.path.join(out_dir, f"EP{n:02d}.jpg"))
             if args.skip_existing and os.path.exists(cover_path):
-                validate_artwork(cover_path)
-                cover_updates[n] = (ep["title"], cover_path)
-                print(f"SKIP {cover_path} (exists)")
-                continue
+                # `--skip-existing` 的語意是「已經做完的跳過」,而**壞檔就是沒做完**
+                # ——截斷的 JPEG 會一路帶到 publish 才爆(Apple 端拒收)。所以只把
+                # 「驗得過」當成做完;壞檔 fall through 重畫,不預先刪它:_render 是
+                # 驗證後才 atomic replace,render 失敗時舊檔仍在(手上至少還有東西)。
+                try:
+                    validate_artwork(cover_path)
+                except ValueError as invalid:
+                    print(f"REBUILD {cover_path}({invalid})")
+                else:
+                    cover_updates[n] = (ep["title"], cover_path)
+                    print(f"SKIP {cover_path} (exists)")
+                    continue
             hue = args.hue if args.hue is not None else _episode_hue(n)
             info = _render(tpl, {
                 "__SHOW__": show_name,

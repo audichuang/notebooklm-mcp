@@ -3896,7 +3896,7 @@ def _active_attempt_or_reraise(current: dict, episode_n: int) -> str:
     """`podcast_series` 在候選集區間內、`_run_episode` 建立 attempt 之前就撞到的例外,
     要原樣浮上去給呼叫端看——沒有 default 的 `next()`／dict 下標會把 StopIteration／
     KeyError 蓋掉真正該讓人看到的原始例外。三個 except handler(TerminalGenerationError／
-    RuntimeError／(TimeoutError, ConnectionError))結構完全相同,抽成這裡共用,「補一半」
+    RuntimeError／`_TRANSIENT_TRANSPORT_ERRORS`)結構完全相同,抽成這裡共用,「補一半」
     就不可能發生。裸 `raise` 合法:沿用的是呼叫端當下正在處理的例外(bare raise 讀
     thread-local 的「目前處理中例外」,不是詞法綁定),只要這裡是同步呼叫、沒有中間再
     冒出別的例外就成立。

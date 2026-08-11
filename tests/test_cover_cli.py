@@ -137,21 +137,70 @@ def test_render_failure_preserves_existing_output(tmp_path, monkeypatch):
     assert output.read_bytes() == b"previous-cover"
 
 
-def test_skip_existing_validates_artwork_before_manifest_update(tmp_path, monkeypatch):
+def test_skip_existing_rebuilds_a_corrupt_cover_instead_of_trusting_it(
+    tmp_path, monkeypatch, capsys
+):
+    """`--skip-existing` 的語意是「已經做完的跳過」,而壞檔就是沒做完。
+
+    只看 `os.path.exists` 會把截斷的 JPEG 當成產出,一路帶到 publish 才被 Apple 端擋
+    ——但也不該因為一個壞檔就讓整批 abort:那要人先手動刪檔才跑得動。驗不過就重畫。
+    """
+    from PIL import Image
+
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps({"episodes": [{"episode": 1, "title": "甲集"}]}),
         encoding="utf-8",
     )
-    before = manifest.read_bytes()
-    (tmp_path / "EP01.jpg").write_bytes(b"not-an-image")
+    corrupt = tmp_path / "EP01.jpg"
+    corrupt.write_bytes(b"not-an-image")
+
+    def fake_chrome(command, **_kwargs):
+        screenshot = next(
+            value.split("=", 1)[1] for value in command if value.startswith("--screenshot=")
+        )
+        Image.new("RGB", (3000, 3000)).save(screenshot, "PNG")
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
     monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
+    monkeypatch.setattr(cover_cli.subprocess, "run", fake_chrome)
     monkeypatch.setattr(sys, "argv", [
         "notebooklm-cover", "--manifest", str(manifest),
         "--output-dir", str(tmp_path), "--skip-existing",
     ])
 
-    with pytest.raises(ValueError, match="readable image"):
-        cover_cli.main()
+    cover_cli.main()
 
-    assert manifest.read_bytes() == before
+    assert "REBUILD" in capsys.readouterr().out
+    assert cover_cli.validate_artwork(str(corrupt))["format"] == "JPEG"
+    stored = json.loads(manifest.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["cover_path"] == str(corrupt)
+
+
+def test_skip_existing_keeps_a_valid_cover_untouched(tmp_path, monkeypatch, capsys):
+    """驗得過就真的跳過 —— 不重畫、不改檔案內容(這才是 `--skip-existing` 的本業)。"""
+    from PIL import Image
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"episodes": [{"episode": 1, "title": "甲集"}]}),
+        encoding="utf-8",
+    )
+    good = tmp_path / "EP01.jpg"
+    Image.new("RGB", (1400, 1400)).save(good, "JPEG", quality=92)
+    before = good.read_bytes()
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("驗得過的封面不該重畫")
+
+    monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
+    monkeypatch.setattr(cover_cli.subprocess, "run", explode)
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--manifest", str(manifest),
+        "--output-dir", str(tmp_path), "--skip-existing",
+    ])
+
+    cover_cli.main()
+
+    assert "SKIP" in capsys.readouterr().out
+    assert good.read_bytes() == before

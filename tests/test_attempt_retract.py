@@ -1106,6 +1106,59 @@ async def test_cancellation_before_the_remote_create_settles_once_the_window_clo
     assert "source_cleanup_unresolved" not in retraction
 
 
+async def test_gate_queues_every_candidate_it_finds_not_just_the_first(
+    fake_client, tmp_path, monkeypatch
+):
+    """遠端有兩筆同名 media 都落在候選窗內:身分對不出來,但範圍確定 —— 全部排進義務。
+
+    只排第一筆等於把另一筆放生,而它會被之後每一集的生成讀進 context(finalize 是按
+    source_id 驗的,同名重複沒人擋)。
+    """
+    manifest_path = str(tmp_path / "series_manifest.json")
+    remote_created = asyncio.Event()
+    release_response = asyncio.Event()
+    real_add_file = fake_client.sources.add_file
+
+    async def pause_after_remote_create(*args, **kwargs):
+        source = await real_add_file(*args, **kwargs)
+        remote_created.set()
+        await release_response.wait()
+        return source
+
+    monkeypatch.setattr(fake_client.sources, "add_file", pause_after_remote_create)
+    running = asyncio.create_task(
+        p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    )
+    await remote_created.wait()
+    attempt_id = _episode(manifest_path)["active_attempt_id"]
+    first_orphan = fake_client.sources.sources[-1]["id"]
+    # 重試造成的第二筆:同名、同 kind、同樣落在候選窗內。
+    expected_title = _upload(manifest_path, attempt_id)["expected_title"]
+    second_orphan = fake_client.sources._add(expected_title, kind="media")
+
+    await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="放棄", abandon_in_flight=True
+    )
+    release_response.set()
+    with pytest.raises(ValueError, match="was retracted"):
+        await running
+
+    with pytest.raises(ValueError, match="retracted feedback sources still in") as blocked:
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    assert first_orphan in str(blocked.value)
+    assert second_orphan in str(blocked.value)
+    assert set(_episode(manifest_path)["pending_source_cleanup"]) == {
+        first_orphan,
+        second_orphan,
+    }
+
+
 async def test_gate_keeps_the_obligation_when_the_notebook_cannot_be_listed(
     fake_client, tmp_path, monkeypatch
 ):

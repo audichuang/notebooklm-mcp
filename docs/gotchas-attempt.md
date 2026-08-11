@@ -108,6 +108,20 @@
   連 `podcast_attempt_retract`(修復正門)與回填腳本都打不開,唯一出路變成 ADR-0009 禁止的
   手改 JSON。**壞資料要讀得進來,才修得掉**;retracted tombstone 一律豁免(否則 retract 後
   換 notebook 重生就寫不進去)。
+- **作廢一顆「回錄 upload 還沒落盤」的 attempt 之後,最多 12 分鐘不能重生。** upload 停在
+  `dispatching`/`acceptance_unknown`/`reconciliation_ambiguous` 且 `source_id` 還沒落盤時,
+  retract(要帶 `abandon_in_flight`)會在 tombstone 記一筆 `source_cleanup_unresolved`,
+  而 `_assert_source_cleanup_done` 在候選窗(`UPLOAD_DISPATCH_WINDOW`,dispatch 起算
+  11+1 分鐘)關上之前一律 fail-closed —— **即使已經把撈到的孤兒刪掉也一樣**,因為窗還開著
+  時晚到的 upload 仍可能再冒一筆出來。`safe_next_action` 在這個狀態是 `None`,不是重生入口。
+  **想避開這個等待就別急著 retract**:照 capabilities 指的 `podcast_episode_resume` 續完,
+  它會把那筆 source 的身分認回來,義務當場消失。
+  這個代價是刻意換來的:**舊版對這個狀態硬擋 retract(連旗標都擋)**,而它靠一次 client
+  cancellation 就能永久存在(`except Exception` 收不到 `CancelledError`),唯一出口
+  `_reconcile_source_upload` 只從 `finalize_attempt` 進得去 —— 等於「要作廢一顆輸入本來就
+  錯的 attempt,得先把它完整 finalize、上傳、promote」,比旗標本來要避免的後果還多一輪
+  遠端副作用。候選判準只有一份(`unresolved_upload_candidates`),finalize 對帳與清理義務
+  共用;**再長出第二份就等於保證有一天只有一邊被修到**。
 - **（F7,v0.9.10 盲審,只記不改)算 caps 的位置,adopt/retract 跟 reconcile 不一致**:
   `podcast_attempt_adopt`(`_attempt_capabilities` 在 `store.update` 的 mutate closure
   **裡面**算,拿 `store.update` 已經回傳的一致 manifest)與 `podcast_attempt_retract`
