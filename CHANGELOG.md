@@ -6,6 +6,75 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.11
+
+**「回傳要自足」的三層,一版收完。** v0.9.10 立的紅線是「指引一律由
+`_attempt_capabilities()` 產生」——那條後來被徹底遵守了,而同一根因還是連續現形三次,
+因為它管的只是**訊息從哪裡來**,不管**回傳裡有沒有照做需要的東西**。三次的形狀一路變窄:
+
+| # | 症狀 | 缺什麼 |
+|---|---|---|
+| 第十 | retract 後的指引在它自己產生的狀態下 raise | 分支沒看同一集還在飛的 sibling attempt |
+| 第十一 | 動作交棒給 sibling,身分沒交棒 | 回傳沒有那顆 attempt 的 id |
+| 第十二 | 動作是 `podcast_attempt_adopt`,但它必填候選身分 | 回傳沒有候選的 source id |
+
+### 第十次:post_retract 分支看不到已經在飛的替代 attempt
+
+`_attempt_capabilities` 的 post_retract 分支是無條件 early return,只有三種答案,
+**從不看 `episode["active_attempt_id"]`**。純工具呼叫就能走到:retract(A) → source_delete
+→ 重生但 response lost(B 成為 active + `acceptance_unknown`)→ **再次 retract(A)**
+(MCP request 被取消後的正常重試,而 retract 明文冪等)。v0.9.10 回 `podcast_series`,
+照做撞 `already has durable active attempt`;**v0.9.9 回的 `source_delete` 反而可執行**
+—— 是 v0.9.10 自己造成的 regression,而且長在為了防止這件事而加的分支上。
+修法:發現 `active_attempt_id` 指向另一顆還在飛的 attempt 時,遞迴算**那顆自己的**
+capabilities 並交棒。遞迴有界(遞迴呼叫必然 `post_retract=False`)。
+⚠️ 副作用要記:`_attempt_capabilities` 從此**不再是「一次呼叫一顆 attempt」**,它會側看
+同一集的兄弟;若再出現第三種跨 attempt 查詢,那是該重新設計而不是再加一支。
+
+同一份**不給任何 findings、只看 diff** 的獨立盲審(AGENTS.md 紀律④)另外五條:
+`candidate_selection_required` 在 caps 與 next_step 的優先序相反(同一份回傳兩個欄位教
+不同工具)、`resend_possible` 的 guard 突變掉全套全綠(零覆蓋)、建構上不可達的 dead
+guard、`safe_next_action: null` 與 `blocking_attempt_ids` 沒文件、`blocking_attempt_ids`
+只在單候選那條路回傳(多候選那條會讓 host KeyError)。兩條只記不修(F7 單 process 不可達、
+F8 `abandon_in_flight` 的永久代價)寫進 `docs/gotchas-attempt.md`。
+
+### 第十一次:動作交棒了,身分沒有
+
+上一輪的交棒只換動作名,回傳的 `attempt_id` 仍是被 retract 的 A(tombstone),
+B 的 id 根本沒出現在回傳裡。照做 → `podcast_episode_reconcile(A)` 撞 tombstone;
+B 是 `failed` 時更硬 —— 回 `podcast_attempt_retract` + `attempt_id=A`,照做冪等 retract A
+**得到一模一樣的回傳 → 無限迴圈**。修法是 `_safe_next_target()` 把已算好的 action 字面值
+翻成 `safe_next_attempt_id` / `safe_next_artifact_id`,**刻意不重覆優先序 if/else**。
+
+**根因比它重要**:上一輪為此加的 E2E 註解寫著「照著回傳的下一步做真的走得通」,
+實際卻從 manifest 私下讀 `active_attempt_id` 來驅動下一步 —— 外部審查把公開回傳的 target
+突變成不存在的字串,**全套 12389 仍全綠**。掃全部 tests、4 支 identity-driven 工具的
+131 個呼叫點,找到 4 條同型全部改成只用公開回傳驅動(改完仍綠 —— 值本來是對的,
+錯的是驗證方式沒驗到自足性)。紅線立進 gotchas:**凡是宣稱「照著回傳做走得通」的 E2E,
+執行下一步時只准用公開回傳裡的值**;raise 型停點沒有結構化 dict,是明文例外。
+
+### 第十二次:`podcast_attempt_adopt` 必填候選,回傳沒有候選
+
+`podcast_series` 在回錄 source 上傳撞歧義時停在 `reconciliation_ambiguous` +
+`safe_next_action="podcast_attempt_adopt"`,而那支工具必填 `feedback_source_id` 或
+`artifact_id` **之一** —— 只讀公開回傳執行不了(外部獨立審查實跑驗證)。候選本來就在
+manifest 的 `finalize.feedback_source_upload.candidate_source_ids`,跟 artifact 對帳歧義的
+`candidate_artifact_ids` 是同一個家族,只是沒被帶出來。修法:停點一併回
+`candidate_source_ids`,兩個測試改成只從公開回傳取候選。
+同輪修掉 `podcast_attempt_retract` docstring 把「沒有委派時 `safe_next_attempt_id` 就等於
+`attempt_id`」**寫反**的那句(`safe_next_action` 是全新呼叫入口或認別種身分時它是 `null`),
+並把另一處私讀值換成公開回傳(那個值恰好相同,曾讓該回傳點被突變成假字串時測試完全看不見)。
+
+**這一版新增的判斷準則**(寫進 gotchas,避免下一輪反向補過頭):另外兩個 `ACTION_ADOPT`
+停點 `continuity_unverified` / `legacy_output_unverified` **刻意不帶候選,不是漏補** ——
+它們的出路是呼叫端自己 `source_list` 找出正確 id,**不得以唯一同名來源推定 identity**,
+server 塞候選就是在幫它推定。分界:候選是 server 自己對帳算出、呼叫端無法重建的(時間窗)
+→ 必須帶出;身分本來就要人為指名的 → 不准帶。
+
+`REQUIRED_CONTRACT_TERMS` 從 13 → 16(`blocking_attempt_ids`、`safe_next_attempt_id`、
+`safe_next_artifact_id`、`candidate_source_ids`),skill repo 的 `tool-reference.md` /
+`troubleshooting.md` 同步。離線全套 12391 passed / 597 skipped。
+
 ## v0.9.10
 
 **五輪連續「修好原問題、同時引入新問題」的收束。** 每一輪都是離線測試全綠、突變驗證做過、
