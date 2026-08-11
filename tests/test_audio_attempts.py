@@ -178,7 +178,49 @@ async def test_reconcile_with_no_candidate_stays_unknown(fake_client, tmp_path):
     assert attempt["remote"]["artifact_id"] is None
     assert out["complete"] is False
     assert out["observed_state"] == "acceptance_unknown"
+    # F3(主迴圈裁決,採納審查者的反駁):dispatch 剛發生、候選窗還沒關
+    # (見 test_source_selection.py 的詳細論證),晚幾分鐘再對帳可能就撈得到——
+    # 這時 retract 會把還在飛的因果紀錄提前寫成墓碑(ADR-0009 禁止),所以停在
+    # `podcast_episode_reconcile`;只有候選窗真的關了才給 `podcast_attempt_retract`
+    # (見 test_reconcile_with_no_candidate_past_the_window_offers_retract)。
     assert out["safe_next_action"] == "podcast_episode_reconcile"
+
+
+async def test_reconcile_with_no_candidate_past_the_window_offers_retract(
+    fake_client, tmp_path
+):
+    """**F3 窗外分支(item 4)的鑑別測試。**
+
+    候選窗(`dispatched_at` 到 `wait_timeout` 那段時間,含 1 分鐘時鐘容錯)已經關了
+    ——未來任何 artifact 都會落在窗外,繼續對帳真的沒有用,這時才給
+    `podcast_attempt_retract`。用 `_attempt_record` 直接把 `dispatched_at` 往回撥
+    2 小時,模擬「窗早就關了」而不必真的等 `wait_timeout` 秒。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, []
+    )
+    store = p.ManifestStore(str(manifest_path))
+    stale_dispatched_at = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat()
+
+    def backdate(manifest: dict) -> None:
+        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        attempt["dispatch"]["dispatched_at"] = stale_dispatched_at
+
+    store.update(backdate)
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id
+    )
+
+    assert out["safe_next_action"] == "podcast_attempt_retract"
+    step = out["next_step"]
+    assert "abandon_in_flight=true" in step, step
+    assert "不需要" not in step, step
+    assert "窗" in step and ("關" in step), step
 
 
 async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(

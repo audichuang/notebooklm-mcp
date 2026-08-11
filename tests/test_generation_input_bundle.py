@@ -472,6 +472,55 @@ async def test_same_frozen_bundle_reuses_not_accepted_attempt(fake_client, tmp_p
     ] == [brief, brief]
 
 
+async def test_reuse_frozen_input_attempt_points_at_a_way_out_that_actually_works(
+    fake_client, tmp_path
+):
+    """**F2:`_reuse_frozen_input_attempt` 是單一事實來源唯一漏收的出口。**
+
+    可達狀態之一:frozen bundle 送出成功、遠端回終態失敗(`remote.status` in
+    failed/removed),而 `dispatch.status` 停在 `accepted`(從未回到 `not_accepted`/
+    `prepared`)。呼叫端照冪等契約原樣重呼同一個 frozen bundle 撞進這條路——舊訊息
+    手寫死「reconcile or resume it」,但兩條建議都走不通:reconcile 被
+    `dispatch_status not in (...)` 的狀態檢查擋(它只收 acceptance_unknown /
+    reconciliation_ambiguous),resume 因為終態已定直接拋 `TerminalGenerationError`。
+    而同一顆 attempt 餵進 `_attempt_capabilities` 的答案是 `authorization_basis=
+    "settled"`——免旗標 retract 才是唯一走得通的出口。
+    """
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "manifest/series_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    output_dir = workspace / "output"
+    bundle, _ = _write_bundle(workspace)
+
+    args = dict(
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(output_dir),
+        manifest_path=str(manifest_path),
+        input_bundle_path=str(bundle.relative_to(workspace)),
+    )
+    fake_client.artifacts.fail_complete = True  # wait 回終態失敗 → TerminalGenerationError
+    with pytest.raises(RuntimeError):
+        await p.podcast_episode("nb-1", **args)
+    fake_client.artifacts.fail_complete = False
+
+    first = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt = first["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "accepted", attempt["dispatch"]
+    assert attempt["remote"]["status"] in ("failed", "removed"), attempt["remote"]
+
+    # 冪等契約:呼叫端原樣重呼同一個 frozen bundle,撞進 `_reuse_frozen_input_attempt`
+    # 的 fallback 分支。
+    with pytest.raises(ValueError) as excinfo:
+        await p.podcast_episode("nb-1", **args)
+    message = str(excinfo.value)
+    assert "podcast_attempt_retract" in message, message
+    assert "不需要" in message and "abandon_in_flight" in message, message
+    # 舊訊息的死路建議不該再出現。
+    assert "reconcile or resume it instead" not in message, message
+
+
 def test_frozen_input_rejects_absolute_bundle_path(tmp_path):
     workspace = tmp_path / "workspace"
     manifest_path = workspace / "manifest/series_manifest.json"

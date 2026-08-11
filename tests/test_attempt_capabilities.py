@@ -143,6 +143,33 @@ def test_series_is_only_ever_offered_for_settings_series_can_reproduce(
 
 
 @pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
+def test_settled_hint_never_mentions_series_when_the_entry_is_episode(
+    dispatch, remote, role, shape
+):
+    """**F2 修正暴露出的既有缺陷(主迴圈裁決,item 6)的回歸鎖。**
+
+    settled 分支的收尾曾經寫死「整季流程也可以直接重呼 podcast_series 讓它自動
+    supersede」,沒有跟著同一顆 caps 的 `regeneration_entry` 走 —— 而
+    `_reuse_frozen_input_attempt` 這條路上 `input_bundle is not None` 恆真、
+    `regeneration_entry` 必定是 `podcast_episode`,於是同一句話前半教
+    `podcast_episode`、後半卻教 `podcast_series`。照後半句做的後果是 series 走
+    supersede 分支,用不指名來源的 `_audio_settings()` 建新 attempt,讀整本筆記本
+    (含後面各集的回錄)進這一集——正是 v0.9.5 花整輪在防的內容錯置形狀。
+
+    這條不變式蓋掉整個笛卡爾積:任何組合只要 `regeneration_entry` 落在
+    `podcast_episode`,產生的句子就不准出現 `podcast_series`。
+    """
+    episode, attempt = _case(dispatch, remote, role, shape)
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    step = p._attempt_next_step(caps)
+
+    if caps["regeneration_entry"] == p.ACTION_EPISODE:
+        assert p.ACTION_SERIES not in step, (
+            f"regeneration_entry 是 podcast_episode,句子卻提到 podcast_series:{step}"
+        )
+
+
+@pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
 def test_resend_and_flag_free_retract_are_different_questions(
     dispatch, remote, role, shape
 ):

@@ -237,6 +237,22 @@ def _attempt_capabilities(episode: dict, attempt: dict, attempt_id: str) -> dict
     }
 
 
+def _retract_hint(caps: dict) -> str:
+    """要不要在 `podcast_attempt_retract` 前先查雲端,單一事實來源。
+
+    `_attempt_next_step` 的「遠端可能還有東西」分支與 `podcast_episode_reconcile`
+    的零候選分支都要教「作廢建議」,而且答案必須跟著同一顆 caps 的
+    `needs_abandon_flag` 走——各自手寫一份 if/else 正是這一輪 F3 修正自己種下的雷
+    (兩份判準其中一份漏寫「不需要」三個字,而唯一的測試斷言對兩支都成立,照樣全綠)。
+    """
+    if caps["needs_abandon_flag"]:
+        return (
+            "確定那次生成要作廢的話,artifact_list 查過雲端之後帶 abandon_in_flight=true "
+            f"呼叫 {ACTION_RETRACT}。"
+        )
+    return f"要作廢就直接 {ACTION_RETRACT}(**不需要** abandon_in_flight)。"
+
+
 def _attempt_next_step(caps: dict) -> str:
     """把 `_attempt_capabilities` 的結論翻成一句**可執行**的話。
 
@@ -258,20 +274,25 @@ def _attempt_next_step(caps: dict) -> str:
         )
     if caps["authorization_basis"] == "settled":
         # 遠端已終態:重送不是沿用這顆,而是作廢後重生(或讓 series 自動 supersede)。
+        # **「也可以重呼 podcast_series」這句只在 regeneration_entry 真的是 series 時
+        # 才加**——`_reuse_frozen_input_attempt` 這條路上 `input_bundle is not None`
+        # 恆真,`regeneration_entry` 必定是 `podcast_episode`;若無條件教這句,series
+        # 會走 supersede 分支、用 `_audio_settings()` 建一顆不指名來源的新 attempt,
+        # 讀整本筆記本(含後面各集回錄)——v0.9.5 花整輪在防的內容錯置形狀。
+        also_series = (
+            f" 整季流程也可以直接重呼 {ACTION_SERIES} 讓它自動 supersede。"
+            if caps["regeneration_entry"] == ACTION_SERIES
+            else ""
+        )
         return (
             "遠端已回報終態,這顆沒有東西可續也不能原樣重送:先 podcast_attempt_retract "
-            f"(**不需要** abandon_in_flight),再用 {caps['regeneration_entry']} 重生;"
-            "整季流程也可以直接重呼 podcast_series 讓它自動 supersede。"
+            f"(**不需要** abandon_in_flight),再用 {caps['regeneration_entry']} 重生。"
+            + also_series
         )
     # 以下都是「遠端可能還有東西」的狀態。**作廢建議一律跟著 `needs_abandon_flag`**,
     # 不能寫死 —— 有別的 output 接手、或 legacy 硬證據在場時,這顆的准入早就成立了,
     # 教人傳旗標等於教一個沒有作用的參數(窮舉測試一次抓出 75 個這種組合)。
-    retract_hint = (
-        "確定那次生成要作廢的話,artifact_list 查過雲端之後帶 abandon_in_flight=true "
-        "呼叫 podcast_attempt_retract。"
-        if caps["needs_abandon_flag"]
-        else "要作廢就直接 podcast_attempt_retract(**不需要** abandon_in_flight)。"
-    )
+    retract_hint = _retract_hint(caps)
     if caps["can_resume"]:
         return "遠端有 artifact:先 podcast_episode_resume 續完 finalize。" + retract_hint
     if caps["can_reconcile"]:
@@ -1611,8 +1632,16 @@ def _reuse_frozen_input_attempt(
         if not _rearm_not_accepted_attempt(store, episode_n, attempt_id):
             raise RuntimeError("frozen attempt changed while being rearmed")
         return True
+    # **同一顆 attempt 餵進 `_attempt_capabilities` 就有正確答案,不要自己手寫指引。**
+    # 舊訊息無條件教「reconcile or resume」,但可達狀態裡至少兩種兩條建議都走不通:
+    # `accepted` + 遠端終態失敗(`remote.status` in failed/removed)時,reconcile 會被
+    # :1987 的狀態檢查擋(它只收 acceptance_unknown/reconciliation_ambiguous),resume
+    # 則因為終態已定而直接拋 `TerminalGenerationError`——呼叫端照著冪等契約原樣重呼,
+    # 撞到這句話,再照做又是兩條死路。這是同一根因(指引在它自己產生的狀態下不可
+    # 執行)的第七次現形,單一事實來源不容許再手寫一條 if/else。
     raise ValueError(
-        f"frozen attempt is {status!r}; reconcile or resume it instead of redispatching"
+        f"frozen attempt is {status!r}; "
+        + _attempt_next_step(_attempt_capabilities(episode, attempt, attempt_id))
     )
 
 
@@ -2099,6 +2128,36 @@ async def podcast_episode_reconcile(
         {},
     )
     caps = _attempt_capabilities(episode_row, latest_attempt, attempt_id)
+    # F3(主迴圈裁決,採納審查者的反駁):零候選有兩種成因——那次生成還沒出現
+    # (候選窗還開著,晚幾分鐘再對帳就撈得到),或它根本沒被受理(候選窗已經關,
+    # 未來任何 artifact 都會落在窗外)。**只有後者「繼續對帳沒有用」才成立**;
+    # 窗還開著時「重呼會得到一模一樣的回傳」是假的,而 `ACTION_RETRACT` 要求的
+    # 「外部知識」是 `artifact_list`——那正是這支工具自己剛打過的同一支 RPC,
+    # 回傳必然同樣是空,`abandon_in_flight` 那道「呼叫端知道 manifest 推導不出來
+    # 的事」的門就被降級成同義反覆。窗還沒關就 retract 的後果:acceptance_unknown
+    # 但伺服器其實受理了、artifact 還在生成 → retract + 重生 → 幾分鐘後第一顆
+    # artifact 出現變成雲端孤兒 → 下次對帳撞 reconciliation_ambiguous、還白燒一次
+    # 配額——正是 ADR-0009 要擋的「把還在飛的因果紀錄提前寫成墓碑」。
+    # `window_end` 前面已經算過(候選窗右界 = dispatched_at + wait_timeout + 時鐘
+    # 容錯),兩個分支都借 `_retract_hint` 產生作廢建議,不手寫第二份判準。
+    if datetime.now(timezone.utc) > window_end:
+        return {
+            "complete": False,
+            "episode_n": episode_n,
+            "attempt_id": attempt_id,
+            "observed_state": latest_attempt["dispatch"]["status"],
+            "candidate_artifact_ids": [],
+            "safe_next_action": ACTION_RETRACT,
+            "next_step": (
+                "這次對帳在遠端找到 **0 個候選**,而且候選窗(dispatch 到 "
+                "wait_timeout 那段時間,含時鐘容錯)已經關了——未來任何 artifact "
+                "都會落在窗外。**重呼本工具會得到一模一樣的回傳**(不建 attempt,"
+                "所以 `attempt_count` 不會動,原地打轉偵測看不出來),繼續對帳"
+                "沒有用。先用 artifact_list(notebook_id, kind=\"audio\") 直接看"
+                f"雲端有沒有這一集,{_retract_hint(caps)}"
+                f"再用 {caps['regeneration_entry']} 重生。"
+            ),
+        }
     return {
         "complete": False,
         "episode_n": episode_n,
@@ -2107,11 +2166,13 @@ async def podcast_episode_reconcile(
         "candidate_artifact_ids": [],
         "safe_next_action": ACTION_RECONCILE,
         "next_step": (
-            "這次對帳在遠端找到 **0 個候選** —— 可能是那次生成還沒出現,也可能是它"
-            "根本沒被受理。**重呼本工具會得到一模一樣的回傳**(不建 attempt,所以"
-            "`attempt_count` 不會動,原地打轉偵測看不出來)。先用 "
-            'artifact_list(notebook_id, kind="audio") 直接看雲端有沒有這一集,再照這個做:'
-            + _attempt_next_step(caps)
+            "這次對帳在遠端找到 **0 個候選**,但候選窗還沒關(dispatch 到 "
+            "wait_timeout 那段時間,含時鐘容錯)——可能是那次生成還沒出現,"
+            "過幾分鐘後重呼本工具有機會撈到,**現在重呼未必是一模一樣的空結果**。"
+            "確定那次生成不會再出現的話,先用 "
+            "artifact_list(notebook_id, kind=\"audio\") 直接看雲端有沒有這一集,"
+            f"{_retract_hint(caps)}"
+            f"再用 {caps['regeneration_entry']} 重生。"
         ),
     }
 
@@ -3551,14 +3612,26 @@ async def podcast_series(
                         wait_timeout=wait_timeout,
                     )
                     if reconciled["observed_state"] != "accepted":
+                        # P2:零候選那格的出路寫在 `next_step`(見
+                        # `podcast_episode_reconcile` 的 F3 修法),那是逃離 self-loop
+                        # 的唯一結構化指引——但 `partial(**extra)` 本來就吃額外欄位,
+                        # 這裡只轉傳了 candidate_artifact_ids,漏轉 next_step 純粹是
+                        # 沒接上(AGENTS.md 點名的「series 有兩條路徑」老病的又一次
+                        # 現形:直接呼叫 reconcile 的呼叫端看得到 next_step,經由
+                        # series 重包的這條路卻看不到)。
+                        extra = {
+                            "candidate_artifact_ids": reconciled.get(
+                                "candidate_artifact_ids", []
+                            )
+                        }
+                        if "next_step" in reconciled:
+                            extra["next_step"] = reconciled["next_step"]
                         return partial(
                             episode_n,
                             active_attempt_id,
                             reconciled["observed_state"],
                             reconciled["safe_next_action"],
-                            candidate_artifact_ids=reconciled.get(
-                                "candidate_artifact_ids", []
-                            ),
+                            **extra,
                         )
 
                 try:

@@ -279,7 +279,12 @@ async def test_acceptance_unknown_stops_series_without_generating_ep2_or_ep3(
     assert out["stopped_at_episode"] == 2
     assert out["attempt_id"] == attempt_id
     assert out["observed_state"] == "acceptance_unknown"
+    # F3(主迴圈裁決,採納審查者的反駁):dispatch 剛發生、候選窗還沒關,重呼
+    # reconcile 未必是死結——晚幾分鐘可能撈得到,retract 反而會把還在飛的因果
+    # 紀錄提前寫成墓碑(ADR-0009)。series 重包這個停點時(P2 修法)也要原樣帶出
+    # 這個 safe_next_action,不能停在舊值或漏轉。
     assert out["safe_next_action"] == "podcast_episode_reconcile"
+    assert "next_step" in out, "series 重包時不能把 next_step 漏傳"
 
 
 async def test_first_call_not_accepted_returns_structured_safe_stop(

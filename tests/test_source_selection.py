@@ -746,12 +746,20 @@ async def test_the_permission_stop_points_at_the_tool_that_fixes_it(
 async def test_the_zero_candidate_reconcile_stop_carries_a_way_out(
     fake_client, tmp_path
 ):
-    """**`acceptance_unknown` 零候選:出路要寫在回傳裡,不能只寫在 skill 散文。**
+    """**`acceptance_unknown` 零候選、候選窗還開著:出路要寫在回傳裡。**
 
-    v0.9.6 驗收 FINDING-1:這條路的 `safe_next_action` 指回本工具自己,連呼兩次的回傳
-    **逐欄位相同** —— 照著做就是無限迴圈。而「原地打轉」偵測依據的 `attempt_count` /
-    `superseded_attempt_count` 在這裡恆為 1 / 0(reconcile 不建 attempt),**偵測條件
-    從不成立**。ground truth 是 `artifact_list` 證實遠端零 artifact,迴圈永遠不會自己結束。
+    v0.9.6 驗收 FINDING-1:這條路的 `safe_next_action` 曾經指回本工具自己,連呼兩次的
+    回傳**逐欄位相同** —— 照著做就是無限迴圈。而「原地打轉」偵測依據的
+    `attempt_count` / `superseded_attempt_count` 在這裡恆為 1 / 0(reconcile 不建
+    attempt),**偵測條件從不成立**。
+
+    F3(主迴圈裁決,採納審查者的反駁):零候選有兩種成因,這裡測的是「候選窗還沒
+    關」那一種(dispatch 剛發生,離 `wait_timeout` 還很遠)——那次生成可能還沒出現,
+    晚幾分鐘再對帳就撈得到,`safe_next_action` 因此停在 `podcast_episode_reconcile`
+    而不是 `podcast_attempt_retract`(那會把還在飛的因果紀錄提前寫成墓碑,ADR-0009
+    禁止)。「候選窗已經關」那一種見
+    `test_reconcile_with_no_candidate_past_the_window_offers_retract`
+    (tests/test_audio_attempts.py)。
     """
     manifest_path = tmp_path / "series_manifest.json"
     _seed_sources(fake_client, 3)
@@ -775,6 +783,52 @@ async def test_the_zero_candidate_reconcile_stop_carries_a_way_out(
     assert "next_step" in out, "零候選停點沒有出路欄位 —— 呼叫端只能無限重呼"
     step = out["next_step"]
     assert "artifact_list" in step, step
-    assert "abandon_in_flight" in step, step
-    # 也要說清楚「重呼本工具沒有用」,否則照 safe_next_action 做就是迴圈。
-    assert "一模一樣" in step or "不會動" in step, step
+    # 這顆 attempt 是全新單集、沒有 output 接手,`needs_abandon_flag` 必為 True——
+    # 訊息要跟著同一顆 caps 走(`_retract_hint`),不能寫死另一個分支的措辭。
+    assert "abandon_in_flight=true" in step, step
+    assert "不需要" not in step, step
+    # 候選窗還沒關:不准說「繼續對帳沒有用」,那句只在窗關了之後才是真的
+    # (見窗外分支的鑑別測試)。
+    assert "沒有用" not in step, step
+    assert "窗" in step and "還沒關" in step, step
+    assert out["safe_next_action"] == p.ACTION_RECONCILE, out
+
+
+async def test_series_does_not_drop_the_reconcile_way_out_when_repacking_the_stop(
+    fake_client, tmp_path
+):
+    """**P2(Codex 獨立審查抓到的):`podcast_series` 重包 partial 時漏轉 `next_step`。**
+
+    `podcast_episode_reconcile` 零候選時回傳帶 `next_step`——那是逃離 self-loop 的
+    唯一結構化指引(見上一條測試)。但 `podcast_series` 內部在它自己重呼
+    `podcast_episode_reconcile` 之後重包成結構化停點時,只轉傳了
+    `candidate_artifact_ids`,把 `next_step` 丟掉——`partial(**extra)` 本來就吃
+    額外欄位,純漏傳。這是 AGENTS.md 點名的「series 有兩條路徑」老病的又一次現形:
+    直接呼叫 reconcile 的呼叫端看得到 next_step,經由 series 重包的這條路卻看不到。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    _seed_sources(fake_client, 3)
+    fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+    with pytest.raises(TimeoutError, match="response lost"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="心法篇", brief="第一集",
+            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        )
+    fake_client.artifacts.generate_audio_exc = None
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["attempts"][0]["dispatch"]["status"] == "acceptance_unknown"
+
+    # 原樣重呼整季(series 的續跑動作),接手同一顆 acceptance_unknown 的 attempt。
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+        start=1,
+    )
+
+    # 候選窗還沒關(dispatch 剛發生),`podcast_episode_reconcile` 自己回的是
+    # `ACTION_RECONCILE`(見上一條測試);這裡驗的是 series 重包時**原樣帶出**
+    # 那個值,不是漏傳或改寫成別的。
+    assert out["safe_next_action"] == p.ACTION_RECONCILE
+    assert "next_step" in out, "series 重包 partial 時把 next_step 漏傳了 —— 出路蒸發"
+    assert "artifact_list" in out["next_step"], out
