@@ -1071,6 +1071,9 @@ async def test_cancellation_before_the_remote_create_settles_once_the_window_clo
     with pytest.raises(asyncio.CancelledError):
         await running
     assert _upload(manifest_path, attempt_id)["status"] == "acceptance_unknown"
+    # **上傳 stub 要在這裡就還原。** 留著會讓「窗未關必須 fail-closed」那個 guard 的
+    # 突變表現成永久 hang 而不是紅燈 —— 一條測不出東西的測試。
+    monkeypatch.undo()
 
     retracted = await p.podcast_attempt_retract(
         manifest_path, 1, attempt_id, reason="放棄", abandon_in_flight=True
@@ -1090,7 +1093,6 @@ async def test_cancellation_before_the_remote_create_settles_once_the_window_clo
     ) == dispatches_before
 
     _age_the_dispatch_window(manifest_path, attempt_id)
-    monkeypatch.setattr(fake_client.sources, "add_file", type(fake_client.sources).add_file.__get__(fake_client.sources))
     out = await p.podcast_episode(
         "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
         output_dir=str(tmp_path), manifest_path=manifest_path,
