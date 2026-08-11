@@ -172,6 +172,13 @@ claude mcp add-json notebooklm -s local \
 ## Conventions
 
 - 全程繁體中文註解/文件。TDD:測試先紅再綠,每任務一 commit。
+  **「每任務一 commit」要在實作階段達成,不要事後切 patch。** 派 agent 做多條修正時,
+  要求它逐條做完逐條回報、主迴圈逐條 commit;**一旦全部混在一起,寧可一個 commit,
+  也不要用 `git apply --cached --unidiff-zero` 事後切** —— `-U0` 的 patch 沒有 context 行,
+  連續套用時前一份造成的行號偏移不會被吸收,實測把一整個 helper 函式插進了另一個函式的
+  註解中間,三個 commit 的內容全錯。**而 `uv run pytest` 跑的是 working tree、不是 commit
+  的內容,所以照樣全綠** —— 這種錯只有 `git status` 不乾淨或事後 checkout 才看得出來。
+  **commit 的內容 = 驗證過的內容,這件事比 commit 粒度重要。**
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
 - **要不要真實驗收,看改動有沒有碰到遠端副作用路徑**(`generate` / `add_user` / `delete`
   這類會在雲端留下東西的呼叫)。沒碰 → 離線測試 + 用既有實測前提推導結案(`source_delete`
