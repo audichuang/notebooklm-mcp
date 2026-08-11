@@ -228,10 +228,12 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
     step = p._attempt_next_step(caps)
     assert "沒人記得" in step and "候選窗" in step
 
-    # 身分已確定的義務(gate 撈到候選並排進 pending)優先序更高:有具體 id 可刪,
-    # `cleanup_state` 換成 `pending_delete`,而 `safe_next_action` 是那個動作。
-    attempt["retraction"]["stale_source_ids"] = ["src-orphan"]
+    # **gate 撈到候選之後,retract 的冪等回傳要跟著改口。** 那些 id 只會進 episode 的
+    # `pending_source_cleanup`(tombstone 不回寫,見 ADR-0009),所以只看
+    # `stale_source_ids ∩ pending` 會永遠算不出 `pending_delete` —— retract 說「等窗關」、
+    # 生成 gate 同時拿著具體 id 要人刪,兩個欄位對同一狀態指向不同動作。
     episode["pending_source_cleanup"] = ["src-orphan"]
+    assert attempt["retraction"]["stale_source_ids"] == []  # tombstone 沒有被改寫
     caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
     assert caps["cleanup_state"] == "pending_delete"
     assert caps["source_cleanup_unresolved"] is True   # 窗還沒關,義務仍未全部結案
@@ -240,7 +242,6 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
 
     # 義務結案(gate 對帳過)之後,重生才回到指引裡。
     attempt["retraction"].pop("source_cleanup_unresolved")
-    attempt["retraction"]["stale_source_ids"] = []
     episode.pop("pending_source_cleanup")
     caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
     assert caps["cleanup_state"] is None

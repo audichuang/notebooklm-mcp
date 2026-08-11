@@ -913,6 +913,15 @@ def _upload(manifest_path, attempt_id):
     return attempt["finalize"]["feedback_source_upload"]
 
 
+def _attempt_next_step_for(manifest_path, attempt_id):
+    snapshot = ManifestStore(manifest_path).read()
+    episode, attempt = p._attempt_record(
+        snapshot, 1, attempt_id, allow_retracted=True
+    )
+    caps = p._attempt_capabilities(episode, attempt, attempt_id, post_retract=True)
+    return p._attempt_next_step(caps)
+
+
 def _age_the_dispatch_window(manifest_path, attempt_id):
     """把 dispatched_at 推到候選窗之外(等真實時間過去是不可行的測法)。"""
     old = datetime.now(timezone.utc) - (
@@ -1005,6 +1014,22 @@ async def test_retract_abandons_an_in_flight_upload_and_the_gate_finds_the_orpha
     ) == dispatches_before
     # 撈到的候選要變成耐久義務,不能只活在那句錯誤訊息裡。
     assert _episode(manifest_path)["pending_source_cleanup"] == [orphan_id]
+
+    # **gate 撈到之後,retract 的冪等回傳要跟著改口。** 這一刻已經有具體 id 可刪,
+    # 若還回 `reconcile_after`／`safe_next_action=None`,呼叫端會以為只能乾等,而生成
+    # gate 同時正拿著這個 id 擋著 —— 兩個入口對同一狀態指向不同動作。
+    replayed = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="輸入錯誤,放棄仍在 finalize 的 attempt"
+    )
+    assert replayed["safe_next_action"] == p.ACTION_SOURCE_DELETE
+    assert orphan_id in _attempt_next_step_for(manifest_path, attempt_id)
+    # tombstone 本身沒有被改寫(ADR-0009):候選只進 episode 級的 pending。
+    retraction = next(
+        row["retraction"]
+        for row in _episode(manifest_path)["attempts"]
+        if row["attempt_id"] == attempt_id
+    )
+    assert retraction["stale_source_ids"] == []
 
     # 刪掉孤兒還不夠:候選窗還開著,晚到的 upload 仍可能再冒一筆出來,所以
     # replacement 繼續 fail-closed(這一條就是「window 前 replacement 被擋」)。

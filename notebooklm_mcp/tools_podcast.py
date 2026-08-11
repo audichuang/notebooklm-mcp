@@ -392,13 +392,11 @@ def _attempt_capabilities(
     )
     pending_source_cleanup = False
     source_cleanup_unresolved = False
+    cleanup_source_ids: list[str] = []
     if post_retract:
         pending_source_ids = set(episode.get("pending_source_cleanup") or [])
         retracted_source_ids = (
             (attempt.get("retraction") or {}).get("stale_source_ids") or []
-        )
-        pending_source_cleanup = any(
-            source_id in pending_source_ids for source_id in retracted_source_ids
         )
         # **retract 可以作廢一顆 upload 還沒落盤的 attempt(abandon_in_flight),但不能
         # 忘掉它可能留下的孤兒。** 身分不確定的清理義務記在 tombstone 上,由生成前的
@@ -408,6 +406,23 @@ def _attempt_capabilities(
             (attempt.get("retraction") or {}).get("source_cleanup_unresolved")
             and feedback_upload_unresolved
         )
+        # **這一刻真正要刪的是哪幾筆。** 兩個來源:①retract 當下就知道身分的
+        # (`stale_source_ids`,仍在 episode 的 pending 裡);②gate 對帳之後才撈到的候選
+        # —— 那些**只會進 episode 的 `pending_source_cleanup`,不回寫 tombstone**
+        # (ADR-0009:tombstone 是稽核紀錄,不改寫;而「這一集有具體 id 要刪」本來就是
+        # episode 級事實,複製進 retraction 只是多一個會漂移的副本,與 F2 已確立的
+        # 「只記狀態、不複製 checkpoint」同一條)。
+        # 少了②,retract 的冪等回傳會說 `reconcile_after`／`safe_next_action=None`,而同一
+        # 時刻生成 gate 正拿著具體 id 擋著要人刪 —— 兩個入口對同一狀態指向不同動作。
+        covered = {
+            source_id
+            for source_id in retracted_source_ids
+            if source_id in pending_source_ids
+        }
+        if source_cleanup_unresolved:
+            covered |= pending_source_ids
+        cleanup_source_ids = sorted(covered)
+        pending_source_cleanup = bool(cleanup_source_ids)
     cleanup_state = None
     if pending_source_cleanup:
         cleanup_state = "pending_delete"
@@ -522,6 +537,9 @@ def _attempt_capabilities(
         "candidate_selection_required": candidate_selection_required,
         "post_retract": post_retract,
         "pending_source_cleanup": pending_source_cleanup,
+        # 具體要刪的 id。**指引必須列得出它們**——「把 stale_source_ids 全部 source_delete」
+        # 在 gate 撈到候選的情形下是假的(那個欄位是空的,id 只在 episode 的 pending 裡)。
+        "cleanup_source_ids": cleanup_source_ids,
         "source_cleanup_unresolved": source_cleanup_unresolved,
         "cleanup_state": cleanup_state,
         "preserves_existing_output": preserves_existing_output,
@@ -598,8 +616,14 @@ def _attempt_next_step(caps: dict) -> str:
     影響,見 `_promised_reconciliation_window_seconds` docstring)。
     """
     if caps["post_retract"]:
+        # **要列得出 id,不能只報欄位名。** 「把 `stale_source_ids` 全部 source_delete」
+        # 在 gate 對帳撈到候選之後是**假的**:那個欄位是空的(tombstone 不回寫),id 只在
+        # episode 的 `pending_source_cleanup` 裡 —— 照字面做的呼叫端會拿到空清單而以為
+        # 沒事要做,但生成 gate 正拿著同一批 id 擋著。
         cleanup = (
-            "先把 stale_source_ids 全部 source_delete。"
+            "先把這幾筆 source_delete 掉:"
+            + "、".join(caps["cleanup_source_ids"])
+            + "。"
             if caps["pending_source_cleanup"]
             else ""
         )
@@ -613,8 +637,9 @@ def _attempt_next_step(caps: dict) -> str:
                 f"{caps['feedback_upload_status']!r}),notebook 裡可能多了一筆沒人記得的 "
                 "media。清理義務已經記進 tombstone,不會消失:等候選窗關上後直接重呼 "
                 f"{caps['regeneration_entry']},生成前的 gate 會自己去 notebook 對帳"
-                "——撈到候選就把 id 列進 stale ids 擋下來要你 source_delete,確認零候選"
-                "才放行。對帳失敗(認證/notebook 讀不到)時義務不會被清掉。"
+                "——撈到候選就把 id 排進這一集的 pending_source_cleanup 擋下來要你 "
+                "source_delete(那時候重呼 podcast_attempt_retract 就會列出它們),"
+                "確認零候選才放行。對帳失敗(認證/notebook 讀不到)時義務不會被清掉。"
                 + caps["regeneration_hint"]
             )
         if caps["preserves_existing_output"]:
