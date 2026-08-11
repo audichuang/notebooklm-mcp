@@ -501,7 +501,13 @@ async def generate_audio(
     ⚠️ **帶進生成的來源 >= 10 筆會在打 RPC 之前 raise**,與 ``podcast_episode`` 同一道
     守門(實測 11–15 筆會讓模型拿別的來源內容填空,而 task_id／時長全部正常)。
     這支是低階救援入口,但**失效模式跟高階完全一樣**——守門只掛在 podcast 家族的話,
-    這裡就是繞過它的公開後門。"""
+    這裡就是繞過它的公開後門。
+
+    ⚠️ **這支沒有配額 failover**:它用 ``runtime.get_client()``(此刻作用中的那一個),
+    撞到配額就直接 raise,不會像 podcast 家族那樣換帳號重送——failover 掛在
+    ``_dispatch_audio_with_failover`` 上,而那條路要有 manifest 才寫得了稽核紀錄
+    (ADR-0010:沒地方記錄就不准靜默換帳號)。多帳號 pool 裝了幾個帳號都一樣。
+    所以拿這支當 ``acceptance_unknown`` 的備援出路時,配額拒絕要由呼叫端自己處理。"""
     selected = to_source_ids(source_ids)
     client = runtime.get_client()
     await assert_source_count_is_safe(client, notebook_id, selected)

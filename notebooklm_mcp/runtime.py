@@ -104,37 +104,57 @@ def all_clients() -> list[tuple[str, Any]]:
     return list(_POOL)
 
 
-def rotate_client() -> str | None:
-    """把當前槽位標成冷卻中,切到下一個**不在冷卻中**的帳號;全部都在冷卻就回 None。
+def rotate_client(refused: str | None = None) -> str | None:
+    """把**真正被拒**的那個槽位標成冷卻中,切到下一個**不在冷卻中**的帳號;
+    全部都在冷卻就回 None。
 
-    **繞完一圈就停**:呼叫端(配額 failover)必須能分辨「還有沒試過的帳號」與「全部
-    都拒絕了」,無限輪替會把一次配額耗盡變成永遠重試。被拒的槽位一定會進冷卻,所以
-    一輪之內繞完自然回 None —— 終止性與舊版相同。
+    Args:
+        refused: 這次真正被拒的帳號 label —— 呼叫端從自己的 `snapshot()` 拿到的那個,
+            不是「現在的 `_ACTIVE`」。**參數是 label 不是 index**:呼叫端手上只有
+            `snapshot()` 給的 label(它是拿去送出 RPC 的那個身分的唯一線索),
+            index 是這個模組的內部表示,呼叫端從來沒有、也不該持有它。
+            `None`(或反查不到,例如 pool 已重裝)= 保守退回冷卻當前 `_ACTIVE`
+            (舊行為,相容沒有 snapshot 可用的呼叫端)。
 
-    **游標按「帳號狀態」走,不再按「被拒次數」走**(v0.9.7)。舊版只有 `_ACTIVE += 1`、
-    只增不減,於是:
+    **為什麼不能無條件冷卻 `_ACTIVE`(v0.9.7 修復的並行缺陷)**:呼叫端是拿早先
+    `snapshot()` 取到的 `(label, client)` 去送出的,中間隔著至少一次 await。並行下
+    pool [a0,a1,a2] 兩個呼叫都 snapshot 到 a0、都被拒:A 先 rotate(冷卻 slot0、
+    `_ACTIVE` 變 1);B 接著 rotate 時如果照舊冷卻「現在的 `_ACTIVE`」,冷的會是
+    **從沒被試過的 a1**,而真正被拒的 a0 這次反而沒被記上(它已經在 slot0 冷卻過一次,
+    但下一輪 A 若也還沒認識 a1,a1 就這樣平白少了一次候選機會)。改成「用 `refused`
+    的 label 反查槽位去冷卻」之後,兩次呼叫冷卻的都是 slot0(同一顆),`_ACTIVE`
+    的搜尋起點仍然用「當下的游標」——這樣才會撿到 A 已經推進過的位置,兩個呼叫最終
+    會分別落在 a1、a2 上,沒有槽位被錯殺。**現在只有真的被拒的槽位會進冷卻,跳過去的
+    那個下次照樣是候選**——這句話在並行下才終於成立。
 
-    - **一次瞬時限流 = 那個帳號在這個 process 餘生退場。** v0.9.6 真實驗收量到同一個
-      帳號被拒後 **26 分鐘**在另一個 process 又被受理 —— `RateLimitError` **不等於**
-      「今天已耗盡」,而舊版把兩者當同一件事。那一輪實測三個帳號因此提早出局,pool 的
-      有效容量被白白吃掉,**而 manifest 看起來一切正常**(每次都成功 failover 了)。
-      舊 docstring 把它留成已知取捨,理由是「代價只是那一輪少試一個帳號」——26 分鐘
-      那個觀測推翻了前提:代價是整個 process 的餘生。
-    - **並行推兩格會燒掉中間那個從沒被試過的帳號。** 現在只有**真的被拒**的槽位進冷卻,
-      跳過去的那個下次照樣是候選。
+    **終止性只在單次呼叫內有保證**:迴圈最多繞 `len(_POOL)` 步,全部冷卻中就回 None,
+    不會無限迴圈。但**跨呼叫的收斂靠牆上時鐘**,不是這個函式能保證的:如果繞完一圈的
+    耗時超過 `_COOLDOWN_SECONDS`,第一格的冷卻已經過期,下一輪又會被選中重試——這在
+    正常配額 failover 的時間尺度下不是問題,但誠實地說,**這個函式本身不保證「同一批
+    failover 不會重複試同一個已知失敗的帳號」**;真正防止在同一批 failover 內原地打轉
+    的,是呼叫端(`tools_podcast._dispatch_audio_with_failover`)自己記的 tried set,
+    不是這裡的冷卻表。
 
-    冷卻用 `time.monotonic()`(不受系統時鐘調整影響)。`_COOLDOWN_SECONDS` 取得比實測的
-    26 分鐘**保守**:寧可多花一次 RPC 去試、也不要白白丟掉一個還有額度的帳號 ——
-    試錯成本是一次 RPC,丟錯成本是整個 process 少一個帳號。
+    冷卻用 `time.monotonic()`(不受系統時鐘調整影響)。`_COOLDOWN_SECONDS` 取得比
+    v0.9.6 實測的 26 分鐘**保守**:寧可多花一次 RPC 去試、也不要白白丟掉一個還有額度
+    的帳號 —— 試錯成本是一次 RPC,丟錯成本是整個 process 少一個帳號。
 
     仍然**沒有鎖**,理由見模組 docstring:真正會出事的是呼叫端把 label 與 client 分兩次
-    讀,那個縫由 `snapshot()` 關掉。
+    讀,那個縫由 `snapshot()` 關掉,不是這裡。
     """
     global _ACTIVE
     if not _POOL:
         return None
     now = time.monotonic()
-    _COOLING[_ACTIVE] = now
+    # 反查 refused 對應的槽位;找不到(None、或 label 不在目前的 pool 裡,例如
+    # pool 重裝過)就保守退回冷卻現在的 _ACTIVE —— 舊呼叫端相容。
+    refused_index = _ACTIVE
+    if refused is not None:
+        for i, (label, _client) in enumerate(_POOL):
+            if label == refused:
+                refused_index = i
+                break
+    _COOLING[refused_index] = now
     for step in range(1, len(_POOL) + 1):
         candidate = (_ACTIVE + step) % len(_POOL)
         cooled_at = _COOLING.get(candidate)

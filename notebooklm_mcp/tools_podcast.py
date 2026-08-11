@@ -824,6 +824,7 @@ def _rotate_for_quota(
     attempt_id: str,
     reason: object,
     from_account: str | None,
+    tried: set[str],
 ) -> tuple[str | None, object] | None:
     """還有沒試過的帳號就換過去,回**換過去那一個**的 `(label, client)`;沒有就回 None。
 
@@ -834,12 +835,26 @@ def _rotate_for_quota(
     全域(`rotate_client()` 與下一次 `get_client()` 之間有 await,並行的另一次
     rotate 會落在那個縫裡)。`from_account` 也由呼叫端傳進來、不在這裡重讀,理由同上
     ——`_record_dispatch_failover` 記的「從哪個帳號換到哪個」必須是**這次 dispatch
-    實際用過的**那一個,不是「此刻剛好輪到誰」。
+    實際用過的**那一個,不是「此刻剛好輪到誰」。**現在也把它原樣轉給
+    `runtime.rotate_client(refused=...)`**:冷卻要進的是真正被拒的那個槽位,不是
+    游標此刻剛好指到的那個——兩者在並行 dispatch 下可能不是同一個(P1)。
+
+    **`tried` 這道門必須擋在 `_record_dispatch_failover` 之前,不能留給呼叫端事後丟棄
+    回傳值。** `runtime.rotate_client(refused=...)` 與 `_record_dispatch_failover` 都是
+    副作用(前者推進冷卻/全域游標,後者把 `dispatch.account` 改寫成 to_account、
+    往 append-only 的 `errors[]` 多寫一筆)——只在呼叫端判斷「這個 to_account 已經
+    tried 過,不繼續送」時才丟棄回傳值,冷卻確實該進(帳號真的被拒過),但
+    manifest 那筆「換成 to_account」的紀錄從未真正生效(呼叫端沒有真的拿它去送),
+    留著就是一筆假的稽核紀錄,而且會覆寫掉上一輪才寫下的、真正生效的 `dispatch.account`。
     """
     if store is None:
         return None
-    to_account = runtime.rotate_client()
-    if to_account is None:
+    # `refused` 必須是**這次 dispatch 實際用過的**帳號,不是「此刻游標指到誰」——
+    # rotate 只該把真正被拒的那個槽位送進冷卻,反查不到時 `runtime.rotate_client`
+    # 自己會保守退回冷卻當前 `_ACTIVE`(舊行為)。冷卻副作用永遠要做,所以這一步
+    # 不能被 `tried` 擋掉。
+    to_account = runtime.rotate_client(refused=from_account)
+    if to_account is None or to_account in tried:
         return None
     _record_dispatch_failover(
         store, episode_n, attempt_id, reason, from_account, to_account
@@ -888,7 +903,16 @@ async def _dispatch_audio_with_failover(
     在 finalize 爆 401、根因在遠處(正是 ADR-0010 以為已經退休掉的那個);分享完整時退化成
     稽核失真:manifest 記 A 生成、實際下載與回錄上傳的是 B,而 finalize 身分不寫進任何欄位,
     事後查不出來。
+
+    **F7:終止性不能依賴時鐘。** v0.9.7 之前 `_ACTIVE` 只增不減,繞一圈必定回到起點,
+    終止性無條件成立;加了冷卻後 `rotate_client()` 改成「冷卻過期就重新可用」——若每一腿
+    被拒都耗時夠久(SDK backoff、伺服器慢回 429),繞回來時第一格冷卻可能已經過期,
+    `rotate_client()` 就會**永遠**回得出帳號,這個 `while True` 便失去終止性。用
+    `tried` 自己記這次 dispatch 已經試過誰:rotate 回來的 label 若已在 `tried` 裡,
+    當作沒有帳號可換,走原本 `None` 的那條路——終止性回到「一輪之內最多試 len(pool)
+    次」,不再靠冷卻是否過期。
     """
+    tried: set[str] = {account} if account else set()
     while True:
         try:
             status = await generate(client)
@@ -896,9 +920,10 @@ async def _dispatch_audio_with_failover(
             # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
             # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」——標成
             # not_accepted 讓呼叫端可以直接重試,不必先跑一次註定撈不到東西的對帳。
-            rotated = _rotate_for_quota(store, episode_n, attempt_id, exc, account)
+            rotated = _rotate_for_quota(store, episode_n, attempt_id, exc, account, tried)
             if rotated is not None:
                 account, client = rotated
+                tried.add(account)
                 continue
             if store is not None:
                 _mark_not_accepted(store, episode_n, attempt_id, exc)
@@ -953,9 +978,10 @@ async def _dispatch_audio_with_failover(
                 if store is not None:
                     _mark_acceptance_unknown(store, episode_n, attempt_id, status)
                 raise
-            rotated = _rotate_for_quota(store, episode_n, attempt_id, status, account)
+            rotated = _rotate_for_quota(store, episode_n, attempt_id, status, account, tried)
             if rotated is not None:
                 account, client = rotated
+                tried.add(account)
                 continue
             if store is not None:
                 _mark_not_accepted(store, episode_n, attempt_id, status)

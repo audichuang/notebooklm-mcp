@@ -458,3 +458,236 @@ async def test_single_account_records_the_account_without_any_failover(
     attempt = _attempts(manifest_path)[0]
     assert attempt["dispatch"]["account"] == "solo@x"
     assert not [e for e in attempt["errors"] if e["phase"] == "dispatch_failover"]
+
+
+async def test_rotate_for_quota_tells_runtime_which_account_was_actually_refused(
+    tmp_path, monkeypatch
+):
+    """**P1**:`_rotate_for_quota` 手上的 `from_account` 是這次 dispatch 實際用過的
+    那一個——它自己的 docstring 逐字這樣寫,卻只拿去記帳(`_record_dispatch_failover`),
+    沒轉給 `runtime.rotate_client`。冷卻要進的是**真正被拒**的那個槽位,不是「此刻游標
+    指到誰」——兩者在並行 dispatch 下可能不是同一個。
+
+    這裡直接單測 `_rotate_for_quota`,不依賴 `runtime.rotate_client` 的實際冷卻邏輯
+    (那由另一個修正同步改動 —— 見跨檔案契約),用 monkeypatch 斷言呼叫端**傳了什麼**。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        language="en",
+        audio_format=None,
+        audio_length=None,
+    )
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+
+    captured: dict = {}
+
+    def fake_rotate_client(*, refused=None):
+        captured["refused"] = refused
+        return "b@x"
+
+    monkeypatch.setattr(runtime, "rotate_client", fake_rotate_client)
+    monkeypatch.setattr(runtime, "snapshot", lambda: ("b@x", object()))
+
+    p._rotate_for_quota(store, 1, attempt_id, RuntimeError("quota"), "a@x", {"a@x"})
+
+    assert captured.get("refused") == "a@x", (
+        "必須是這次 dispatch 實際用過的帳號(呼叫端傳進來的 from_account),"
+        "不是保守預設值 None——那等於退回『冷卻此刻游標指到誰』的舊行為"
+    )
+
+
+def _bouncing_rotate_client(pool, state):
+    """冷卻永遠已過期的假 `runtime.rotate_client`:在 `pool` 裡的帳號間無限乒乓,
+    從不回 None。用呼叫次數當保險絲(**不是牆上時鐘**)——`tried` guard 一旦失效,
+    `_dispatch_audio_with_failover` 的 `while True` 會不斷跟這支要下一個帳號,
+    次數一過 `len(pool) + 1` 就直接指名根因,而不是讓測試在真實秒數上偶發逾時
+    (F7:單跑 0.3~0.4 秒的原子寫入撞上 2 秒的 `asyncio.wait_for` 只有 ~5 倍餘裕,
+    機器一忙就穿;而且『tried 失效』與『機器慢』紅的都是同一種 TimeoutError,
+    看紅字分不出是 regression 還是雜訊)。
+    """
+    calls = {"n": 0}
+
+    def fake_rotate_client(*, refused=None):
+        calls["n"] += 1
+        if calls["n"] > len(pool) + 1:
+            raise AssertionError("rotate 被無限呼叫 —— tried guard 失效")
+        idx = pool.index(state["active"])
+        state["active"] = pool[(idx + 1) % len(pool)]
+        return state["active"]
+
+    return fake_rotate_client
+
+
+async def test_dispatch_failover_terminates_even_if_rotate_never_reports_exhaustion(
+    fake_client, tmp_path, monkeypatch
+):
+    """**F7**:終止性不能依賴時鐘。
+
+    v0.9.7 之前 `_ACTIVE` 只增不減,繞一圈必定回到起點,終止性無條件成立;加了冷卻後
+    `rotate_client()` 改成「冷卻過期就重新可用」——若每一腿被拒都耗時夠久(SDK
+    backoff、伺服器慢回 429),繞回來時第一格冷卻可能已經過期,`rotate_client()`
+    就會**永遠**回得出帳號。這裡直接模擬那個最壞情況(monkeypatch 讓它在兩個帳號間
+    無限乒乓、從不回 None),證明 `_dispatch_audio_with_failover` 自己用 `tried`
+    擋住,而不是靠 `rotate_client` 繞完一圈就停。走的是 `_REFUSED_WITHOUT_DISPATCH`
+    這條 raise 路徑(0.8.0 起的同步拒絕)。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        language="en",
+        audio_format=None,
+        audio_length=None,
+    )
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+
+    calls: list = []
+
+    async def always_refuse(client):
+        calls.append(client)
+        raise RateLimitError("每日配額已用盡")
+
+    pool = ["a@x", "b@x"]
+    state = {"active": "a@x"}
+    monkeypatch.setattr(runtime, "rotate_client", _bouncing_rotate_client(pool, state))
+    monkeypatch.setattr(runtime, "snapshot", lambda: (state["active"], fake_client))
+
+    with pytest.raises(RateLimitError):
+        await p._dispatch_audio_with_failover(
+            store, 1, attempt_id, always_refuse,
+            account="a@x", client=fake_client,
+        )
+
+    assert len(calls) == 2, (
+        "終止性:一輪之內最多試『沒被 tried 過』的帳號數,不能靠 rotate_client "
+        "自己回 None 才停"
+    )
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["attempts"][0]["dispatch"]["status"] == "not_accepted"
+
+
+async def test_dispatch_failover_terminates_via_the_ensure_started_path_too(
+    fake_client, tmp_path, monkeypatch
+):
+    """**F7 的孿生測試**:上面那條只走得到 `_REFUSED_WITHOUT_DISPATCH`(raise)分支,
+    `_dispatch_audio_with_failover` 還有第二條路——0.7.x 風格的『不 raise,回
+    `task_id="", is_failed=True` 由 `ensure_started` 判定』——兩條各自呼叫一次
+    `_rotate_for_quota`,是分開補的兩處(AGENTS.md 點名的『補一半』形狀,這次
+    輪到測試層:曾經只把其中一處的 tried guard 修好,全套照樣全綠)。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        language="en",
+        audio_format=None,
+        audio_length=None,
+    )
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+
+    calls: list = []
+
+    class _RefusedStatus:
+        task_id = ""
+        is_failed = True
+        status = "failed"
+        error = "每日配額已用盡"
+        error_code = "RateLimitError"
+
+    async def always_refuse(client):
+        calls.append(client)
+        return _RefusedStatus()
+
+    pool = ["a@x", "b@x"]
+    state = {"active": "a@x"}
+    monkeypatch.setattr(runtime, "rotate_client", _bouncing_rotate_client(pool, state))
+    monkeypatch.setattr(runtime, "snapshot", lambda: (state["active"], fake_client))
+
+    with pytest.raises(RuntimeError, match="每日配額已用盡"):
+        await p._dispatch_audio_with_failover(
+            store, 1, attempt_id, always_refuse,
+            account="a@x", client=fake_client,
+        )
+
+    assert len(calls) == 2, (
+        "終止性:一輪之內最多試『沒被 tried 過』的帳號數,ensure_started 這條路徑"
+        "也要靠 tried 擋住,不能靠 rotate_client 自己回 None 才停"
+    )
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["attempts"][0]["dispatch"]["status"] == "not_accepted"
+
+
+async def test_tried_guard_does_not_leave_a_phantom_failover_record(
+    fake_client, tmp_path, monkeypatch
+):
+    """**P1**:`tried` 命中前,`_rotate_for_quota` 已經做完兩個副作用——
+    `runtime.rotate_client(refused=...)`(冷卻)與 `_record_dispatch_failover`
+    (把 `dispatch.account` 改寫成 to_account、往 append-only 的 `errors[]` 多寫
+    一筆)。若 `tried` 這道門放在呼叫端、事後才丟棄回傳值,冷卻確實該進沒錯,但
+    `_record_dispatch_failover` 那筆『換成 to_account』的紀錄從未真正生效
+    (呼叫端沒有真的拿它去送),manifest 就會留下一次從未發生的換帳號,還覆寫掉
+    上一輪才寫下的、真正生效的 `dispatch.account`。
+
+    劇本:兩帳號 a/b 乒乓、冷卻永遠已過期、generate 永遠配額拒絕。
+    第一次 rotate(a→b)真正生效,第二次 rotate 打回已經 tried 過的 a——這一次
+    不該被送出去,也不該留下稽核紀錄。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        language="en",
+        audio_format=None,
+        audio_length=None,
+    )
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x")
+
+    calls: list = []
+
+    async def always_refuse(client):
+        calls.append(client)
+        raise RateLimitError("每日配額已用盡")
+
+    pool = ["a@x", "b@x"]
+    state = {"active": "a@x"}
+    monkeypatch.setattr(runtime, "rotate_client", _bouncing_rotate_client(pool, state))
+    monkeypatch.setattr(runtime, "snapshot", lambda: (state["active"], fake_client))
+
+    with pytest.raises(RateLimitError):
+        await p._dispatch_audio_with_failover(
+            store, 1, attempt_id, always_refuse,
+            account="a@x", client=fake_client,
+        )
+
+    assert len(calls) == 2, "真正送出兩次——第二次 rotate 打回已試過的帳號,不該再送第三次"
+
+    attempt = _attempts(manifest_path)[0]
+    assert attempt["dispatch"]["account"] == "b@x", (
+        "manifest 要記『最後真正送出的那個帳號』,不是一次被丟棄、從未真正送出的換帳號"
+    )
+    failovers = [e for e in attempt["errors"] if e["phase"] == "dispatch_failover"]
+    assert [(f["from_account"], f["to_account"]) for f in failovers] == [("a@x", "b@x")], (
+        "只有一次換帳號真的發生過;b@x -> a@x 那次從未生效,不該留下稽核紀錄"
+    )
