@@ -109,16 +109,27 @@ ALL_CASES = list(
 # `False`/`True` = 明確算過。三者的 `can_reconcile` 值相同(`None`/`False` 都不擋
 # reconcile),但 `_attempt_next_step()` 對 `None` 不准講任何窗宣稱——那正是這一輪
 # 修的回歸(見 test_unevaluated_window_never_makes_a_window_claim)。
+# F2 修復加的第二個維度:`candidate_selection_required`。它跟 window_closed 一樣只在
+# 這兩條核心不變式測試裡加——`_attempt_capabilities()` 的五個呼叫點裡只有兩個
+# (`podcast_episode_reconcile` 的候選分岔)會傳 `True`,但在這輪盲審之前，整個
+# `test_attempt_capabilities.py` 沒有任何一格餵過它(永遠吃預設值 `False`),於是
+# `candidate_selection_required=True` 這個新維度整個在笛卡爾網之外——`_attempt_
+# capabilities()` 與 `_attempt_next_step()` 對它的分支順序不一致（F2 regression：
+# 前者排在 `can_resume` 之前，後者原本排在之後）完全沒有測試碰過。
 ALL_CASES_WITH_WINDOW = list(
     itertools.product(
-        DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES, (False, True, None)
+        DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES, (False, True, None),
+        (False, True),
     )
 )
 
 
-@pytest.mark.parametrize("dispatch,remote,role,shape,window_closed", ALL_CASES_WITH_WINDOW)
+@pytest.mark.parametrize(
+    "dispatch,remote,role,shape,window_closed,candidate_selection_required",
+    ALL_CASES_WITH_WINDOW,
+)
 def test_every_state_combination_yields_executable_guidance(
-    dispatch, remote, role, shape, window_closed
+    dispatch, remote, role, shape, window_closed, candidate_selection_required
 ):
     """**核心不變式:訊息教的每一個動作,在那個狀態下都必須真的做得到。**
 
@@ -134,16 +145,27 @@ def test_every_state_combination_yields_executable_guidance(
     **`None`(第四輪修復加的第三態)額外斷言「不講窗」**:沒算過窗的呼叫端,訊息裡
     不准出現「候選窗」三個字——這是不變式抓不到的那種 bug(訊息本身自洽、可執行,
     但對「現在幾點」做了一個沒有計算過的宣稱,會跟真的算過窗的另一支工具打對台)。
+
+    `candidate_selection_required` 是 F2 修復加的維度:在這輪盲審之前，整個檔案
+    從沒餵過 `True`，`podcast_attempt_adopt` 這個字面值完全沒有不變式守著。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
     caps = p._attempt_capabilities(
-        episode, attempt, "att-me", reconciliation_window_closed=window_closed
+        episode,
+        attempt,
+        "att-me",
+        reconciliation_window_closed=window_closed,
+        candidate_selection_required=candidate_selection_required,
     )
     step = p._attempt_next_step(caps)
 
     if "原樣重呼" in step:
         assert caps["can_resend"], (
             f"教了原樣重送,但這個狀態送不了({dispatch}/{remote}/{role}):{step}"
+        )
+    if "podcast_attempt_adopt" in step and "候選 artifact 的歸屬" in step:
+        assert caps["candidate_selection_required"] and caps["can_reconcile"], (
+            f"教了 adopt,但候選歸屬不需要外部知識或這個狀態對不了帳:{step}"
         )
     if "podcast_episode_resume" in step:
         assert caps["can_resume"], f"教了 resume 但沒有 artifact 可續:{step}"
@@ -362,19 +384,31 @@ def test_settled_and_output_still_require_the_original_sources_back(
         )
 
 
-@pytest.mark.parametrize("dispatch,remote,role,shape,window_closed", ALL_CASES_WITH_WINDOW)
+@pytest.mark.parametrize(
+    "dispatch,remote,role,shape,window_closed,candidate_selection_required",
+    ALL_CASES_WITH_WINDOW,
+)
 def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
-    dispatch, remote, role, shape, window_closed
+    dispatch, remote, role, shape, window_closed, candidate_selection_required
 ):
     """**P2 修復:`_attempt_capabilities()` 直接產生 `safe_next_action`。**
 
     這條把它跟 `_attempt_next_step()` 挑的分支對照鎖住——兩個函式各自算「哪支工具」
     跟「怎麼講」,答案不准分岔(那正是 `podcast_episode_reconcile` 零候選出口原本要
     自己手寫 if/else 的原因:沒有單一事實來源可用)。
+
+    **F2 修復**:`candidate_selection_required` 這個維度加進來之前,這條測試從沒
+    驗過 `caps["safe_next_action"] == p.ACTION_ADOPT` 那一格——`_attempt_next_step()`
+    原本把這個分支排在 `can_resume` 之後,跟這裡（=`_attempt_capabilities()`）的
+    優先序相反,兩個函式對同一顆 caps 指向不同工具卻沒有任何測試看得到。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
     caps = p._attempt_capabilities(
-        episode, attempt, "att-me", reconciliation_window_closed=window_closed
+        episode,
+        attempt,
+        "att-me",
+        reconciliation_window_closed=window_closed,
+        candidate_selection_required=candidate_selection_required,
     )
     action = caps["safe_next_action"]
 
@@ -396,12 +430,31 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
         )
     elif caps["authorization_basis"] == "settled":
         assert action == p.ACTION_RETRACT
+    elif caps["candidate_selection_required"] and caps["can_reconcile"]:
+        # F2:必須排在 `can_resume` 之前,跟 `_attempt_capabilities()` 的優先序對齊
+        # ——這個 elif 的順序本身就是斷言的一部分（`_attempt_next_step()` 若排錯，
+        # 下面 `_attempt_next_step` 對照測試會抓到，這裡先鎖住 `safe_next_action` 值）。
+        assert action == p.ACTION_ADOPT
     elif caps["can_resume"]:
         assert action == p.ACTION_RESUME
     elif caps["can_reconcile"]:
         assert action == p.ACTION_RECONCILE
     else:
         assert action == p.ACTION_RETRACT
+
+    # **這條測試的名字要求驗證「文字教的工具」,不是只驗 `safe_next_action` 這個值。**
+    # F2 的實際 regression 在 `_attempt_next_step()` 那邊——兩個函式各自算，這裡直接
+    # 對照文字裡點名的工具跟 `action` 一致，才是名字承諾的那件事。
+    step = p._attempt_next_step(caps)
+    if action == p.ACTION_ADOPT:
+        assert "podcast_attempt_adopt" in step, (
+            f"safe_next_action 是 adopt,文字卻沒教這支工具:{step}"
+        )
+        assert "podcast_episode_resume" not in step, (
+            f"adopt 優先序更高，文字不該再教 resume:{step}"
+        )
+    elif action == p.ACTION_RESUME:
+        assert "podcast_episode_resume" in step, step
 
 
 @pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
@@ -555,3 +608,103 @@ def test_window_closed_narrative_offers_the_widen_wait_timeout_rescue_not_an_abs
     assert "放大" in step and "wait_timeout" in step, (
         f"沒有揭露放大 wait_timeout 的救援路徑:{step}"
     )
+
+
+def test_reconciliation_ambiguous_with_a_stray_remote_artifact_still_teaches_adopt():
+    """**F2(獨立盲審實跑探針):`safe_next_action` 與 `_attempt_next_step()` 對同一顆
+    caps 指向不同工具。**
+
+    探針:`dispatch=reconciliation_ambiguous`、`remote.artifact_id="art-1"`、
+    `candidate_selection_required=True`。修復前:`safe_next_action` 是
+    `podcast_attempt_adopt`,但 `next_step` 教「先 podcast_episode_resume 續完
+    finalize」——同一份回傳的兩個欄位教不同的工具,只讀其中一個欄位的 host 會被
+    另一個欄位誤導。
+
+    `_mark_reconciliation_ambiguous`(候選分岔唯一產生點)禁止 `remote.artifact_id`
+    已存在時再標記 ambiguous,所以這個精確組合單 process 不可達——但順序不一致
+    本身是明確的契約違反,這裡直接餵這個組合驗證兩個函式的優先序一致。
+
+    突變驗證:把 F2 修復(`_attempt_next_step()` 裡 `candidate_selection_required`
+    分支挪回 `can_resume` 之後)還原,這條就會紅。
+    """
+    episode, attempt = _case("reconciliation_ambiguous", "pending", "active", "series")
+    caps = p._attempt_capabilities(
+        episode, attempt, "att-me", candidate_selection_required=True
+    )
+    step = p._attempt_next_step(caps)
+
+    assert caps["safe_next_action"] == p.ACTION_ADOPT, caps
+    assert "podcast_attempt_adopt" in step, step
+    assert "podcast_episode_resume" not in step, (
+        f"safe_next_action 教 adopt,next_step 卻教 resume,兩個欄位互相矛盾:{step}"
+    )
+
+
+def test_a_retracted_prepared_attempt_with_pinned_sources_is_not_taught_to_retract_itself_again():
+    """**F3(獨立盲審):`resend_possible=can_resend and not post_retract` 這個 guard
+    零覆蓋——盲審實測拿掉 `and not post_retract` 之後全套 8785 仍然全綠。**
+
+    `can_resend` 不看 retraction 狀態,只看 `never_dispatched and not is_output`——
+    一顆已經 retract 的 `prepared`/`not_accepted`、帶 `source_ids` 的 attempt,
+    `can_resend` 照樣算出 `True`。若把 `post_retract` 這半個條件拿掉,
+    `_regeneration_hint()` 會教它「若刻意更換來源,先 podcast_attempt_retract
+    (不需要 abandon_in_flight)後帶新的 source_ids」——教一顆已經是 tombstone 的
+    attempt 去 retract 自己,正是 v0.9.6 FINDING-4 的形狀。
+
+    突變驗證:把 `_attempt_capabilities()` 裡
+    `resend_possible=can_resend and not post_retract` 改成
+    `resend_possible=can_resend`,這條就會紅。
+    """
+    episode, attempt = _case("prepared", None, "active", "pinned")
+    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+
+    assert caps["can_resend"] is True, "前提:can_resend 真的不看 retraction 狀態"
+    hint = caps["regeneration_hint"]
+    assert "必須帶回原本那組" in hint, hint
+    assert "podcast_attempt_retract" not in hint, (
+        f"教一顆已經是 tombstone 的 attempt 去 retract 自己:{hint}"
+    )
+
+
+def test_post_retract_defers_to_the_replacement_attempt_already_in_flight():
+    """**F1(獨立盲審 P1 regression,發版後現形):post_retract 分支從不看
+    `episode["active_attempt_id"]`,永遠回 `regeneration_entry`。**
+
+    端到端重現見 ``tests/test_attempt_retract.py`` 的對應測試;這裡直接構造同一個
+    episode 形狀做鑑別測試:A 已 retract、B 是 `active_attempt_id` 指向的替代版
+    (重生成功但 response lost,停在 `acceptance_unknown`,還沒 promote 成
+    output)。修復前這裡永遠回 `regeneration_entry`(這個 settings 形狀下是
+    `podcast_series`),照做會撞 `already has durable active attempt`——
+    `_create_audio_attempt`／series 一看到 `active_attempt_id` 已經指向別顆就直接
+    拒收。`source_delete` 是冪等的,所以舊版教的「先清 stale source 再重呼」在這裡
+    走不通不是因為清理沒做,是 regeneration_entry 本身在這個狀態下就是死路。
+
+    突變驗證:把 `_attempt_capabilities()` 裡 `elif replacement_caps is not None:`
+    這個分支拿掉,這條就會紅。
+    """
+    attempt_a = {
+        "attempt_id": "att-a",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "completed", "artifact_id": "art-a"},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+        "retraction": {"stale_source_ids": []},
+    }
+    attempt_b = {
+        "attempt_id": "att-b",
+        "dispatch": {"status": "acceptance_unknown"},
+        "remote": {},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+    }
+    episode = {
+        "episode": 1,
+        "active_attempt_id": "att-b",
+        "attempts": [attempt_a, attempt_b],
+    }
+
+    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+
+    assert caps["safe_next_action"] != p.ACTION_SERIES, caps
+    assert caps["safe_next_action"] == p.ACTION_RECONCILE, caps
+    step = p._attempt_next_step(caps)
+    assert "用 podcast_series 重生" not in step, step
+    assert "podcast_episode_reconcile" in step, step

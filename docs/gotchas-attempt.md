@@ -64,3 +64,24 @@
   連 `podcast_attempt_retract`(修復正門)與回填腳本都打不開,唯一出路變成 ADR-0009 禁止的
   手改 JSON。**壞資料要讀得進來,才修得掉**;retracted tombstone 一律豁免(否則 retract 後
   換 notebook 重生就寫不進去)。
+- **（F7,v0.9.10 盲審,只記不改)算 caps 的位置,adopt/retract 跟 reconcile 不一致**:
+  `podcast_attempt_adopt`(`_attempt_capabilities` 在 `store.update` 的 mutate closure
+  **裡面**算,拿 `store.update` 已經回傳的一致 manifest)與 `podcast_attempt_retract`
+  同樣如此;但 `podcast_episode_reconcile` 的四個回傳點丟掉 `store.update` 回傳的一致
+  manifest,改在鎖**外面**重新 `store.read()` + `_attempt_record()`。單 process 不可達
+  (`store.update`/`store.read()`之間沒有東西會改這顆 attempt,需要第二個 writer
+  process 才會讓兩次讀出現落差),所以這一輪沒有改 code——改了也證不了,需要兩
+  process 的整合測試才驗得出來。之後要動 reconcile 的回傳點時,順手改成跟
+  adopt/retract 一樣在鎖裡面算,別再長出第三種寫法。
+- **(F8,v0.9.10 盲審,只記不改)`abandon_in_flight` retract 會永久停用該 notebook
+  的候選自動綁定**:`_unresolved_attempt_ids()` 掃同一本 notebook 底下所有
+  `dispatch.status` 落在 `dispatching`/`acceptance_unknown`/`reconciliation_ambiguous`
+  且還沒 claim 到 artifact 的 attempt,**不排除已經 retract 的**——`podcast_attempt_retract`
+  不會改動 `dispatch.status`,只加 `retraction` 欄位,所以一顆用
+  `abandon_in_flight=True` 作廢的 attempt(它的 dispatch 永遠停在作廢當下那個「還在飛」
+  的狀態)會被 `_unresolved_attempt_ids()` 永久算成「未解決」,擋住這本 notebook 之後
+  **每一集**的唯一候選自動綁定(改停在 `reconciliation_ambiguous` 要求手動
+  `podcast_attempt_adopt`)。這是刻意的設計取捨——否則遲到的 orphan artifact 可能被
+  誤綁給不相干的新 attempt——不是 bug,但代價要記下來。否定答案(「確認這顆候選不屬於
+  這次 dispatch」)的出路有端到端測試鎖著:
+  `tests/test_audio_attempts.py::test_tombstone_blocker_offers_and_executes_the_negative_candidate_path`。

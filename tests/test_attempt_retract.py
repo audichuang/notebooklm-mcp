@@ -484,6 +484,58 @@ async def test_delayed_retract_retry_does_not_destroy_the_replacement(
     assert after["published_at"] == replacement["published_at"]
 
 
+async def test_idempotent_retract_after_a_stuck_replacement_does_not_point_at_a_dead_end(
+    fake_client, tmp_path
+):
+    """**F1(獨立盲審 P1 regression,v0.9.10 發版後現形):post_retract 分支從不看
+    `episode["active_attempt_id"]`,永遠回 `regeneration_entry`。**
+
+    盲審實跑重現的可達序列(全是純工具呼叫,沒有手改 manifest):
+    1. `podcast_episode` EP1 → A 成為 output。
+    2. `podcast_attempt_retract(A)` → 教「先把 stale_source_ids 全部
+       source_delete,再用 regeneration_entry 重生」。
+    3. `source_delete(stale)`。
+    4. 重生 → response lost → B 成為 `active` + `acceptance_unknown`
+       (`_assert_source_cleanup_done` 這一步已經清掉
+       `episode["pending_source_cleanup"]`)。
+    5. **再次 `podcast_attempt_retract(A)`**——MCP request 被取消後的正常重試,
+       retract 明文冪等。
+
+    修復前這裡教「用 podcast_series 重生」,照做會撞
+    `ValueError: episode 1 already has durable active attempt`——`source_delete`
+    冪等,所以舊版給的機器可讀 action 是可執行的,新版不是。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    attempt_a = before["output_attempt_id"]
+
+    first = await p.podcast_attempt_retract(manifest_path, 1, attempt_a, reason="QA")
+    assert first["safe_next_action"] == "source_delete"
+    await b.source_delete("nb-1", before["feedback_source_id"])
+
+    fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+    with pytest.raises(TimeoutError, match="response lost"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    stuck = _episode(manifest_path)
+    attempt_b = stuck["active_attempt_id"]
+    assert attempt_b != attempt_a
+    assert stuck.get("output_attempt_id") is None      # B 還沒 promote
+
+    again = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_a, reason="重試(request 被取消後冪等重呼)"
+    )
+
+    # **鑑別點**:不准再教會撞牆的 podcast_series/podcast_episode。
+    assert again["safe_next_action"] not in (p.ACTION_SERIES, p.ACTION_EPISODE), again
+    assert "用 podcast_series 重生" not in again["next_step"], again
+    # 照著回傳的下一步做,真的走得通——不是隨便換一個不撞牆的字面值交差。
+    assert again["safe_next_action"] == p.ACTION_RECONCILE, again
+    out = await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
+    assert out["episode_n"] == 1     # 沒有 raise 就是走得通
+
+
 async def test_claimed_artifact_resume_cannot_steal_active_from_the_output(
     fake_client, tmp_path
 ):

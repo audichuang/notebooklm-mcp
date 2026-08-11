@@ -37,6 +37,8 @@ REQUIRED_CONTRACT_TERMS = (
     "abandon_in_flight", # podcast_attempt_retract:呼叫端宣告的外部知識,狀態推導不出來
     "notebook_access_denied",  # series 安全停點裡「要人工補分享」的那一種,不可原樣重呼
     "too_many_sources",  # v0.9.3 的來源筆數守門停點;safe_next_action 分兩種,照做才走得出去
+    "blocking_attempt_ids",  # v0.9.10 加的 reconcile 回傳欄位(F5/F6 盲審):
+                              # 工具名沒變,checker 原本看不到——加進來讓它從此看得到
 )
 
 

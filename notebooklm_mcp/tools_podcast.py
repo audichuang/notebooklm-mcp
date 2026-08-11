@@ -325,6 +325,31 @@ def _attempt_capabilities(
             source_id in pending_source_ids for source_id in retracted_source_ids
         )
 
+    # F1(盲審 P1 regression,v0.9.10 之後現形):post_retract 分支原本無條件回
+    # `regeneration_entry`，從不看 `episode["active_attempt_id"]`——如果 retract 之後
+    # 重生已經成功建出替代 attempt(active，但還沒 promote 成 output），教它「用
+    # regeneration_entry 重生」在這裡是死路：`_create_audio_attempt`／series 一看到
+    # `active_attempt_id` 已經指向別顆就直接 raise「already has durable active
+    # attempt」。改成看那顆替代 attempt**自己**的 capabilities，教它現在真正能做
+    # 的事（resume／reconcile／retract 它自己……）。`preserves_existing_output` 只
+    # 覆蓋替代版已經 promote 成 output 的情形，這裡補的是它還在飛、尚未 promote 的
+    # 中間態。
+    replacement_attempt_id = episode.get("active_attempt_id")
+    replacement_caps: dict | None = None
+    if post_retract and replacement_attempt_id not in (None, attempt_id):
+        replacement_attempt = next(
+            (
+                row
+                for row in episode.get("attempts", [])
+                if row.get("attempt_id") == replacement_attempt_id
+            ),
+            None,
+        )
+        if replacement_attempt is not None:
+            replacement_caps = _attempt_capabilities(
+                episode, replacement_attempt, replacement_attempt_id
+            )
+
     # **`safe_next_action` 的優先序必須跟 `_attempt_next_step()` 的分支順序逐字
     # 對齊**(見上方 docstring)。
     if post_retract:
@@ -332,6 +357,8 @@ def _attempt_capabilities(
             safe_next_action = ACTION_SOURCE_DELETE
         elif preserves_existing_output:
             safe_next_action = None
+        elif replacement_caps is not None:
+            safe_next_action = replacement_caps["safe_next_action"]
         else:
             safe_next_action = regeneration_entry
     elif not is_active and not is_output:
@@ -384,6 +411,10 @@ def _attempt_capabilities(
         "post_retract": post_retract,
         "pending_source_cleanup": pending_source_cleanup,
         "preserves_existing_output": preserves_existing_output,
+        # F1 修復:非 None 代表 retract 之後已經有替代 attempt 在飛（尚未 promote 成
+        # output）。內部欄位，只給 `_attempt_next_step()` 遞迴用，不對外洩漏——外層
+        # 呼叫端只讀 `safe_next_action` 與 `_attempt_next_step()` 的文字。
+        "post_retract_replacement_caps": replacement_caps,
         "regeneration_entry": regeneration_entry,
         "regeneration_hint": _regeneration_hint(
             attempt, resend_possible=can_resend and not post_retract
@@ -456,6 +487,17 @@ def _attempt_next_step(caps: dict) -> str:
         )
         if caps["preserves_existing_output"]:
             return cleanup + "這一集的既有正式輸出不受影響，不必重生。"
+        replacement_caps = caps["post_retract_replacement_caps"]
+        if replacement_caps is not None:
+            # F1 修復:retract 之後已經有替代 attempt 在飛（尚未 promote 成
+            # output）——`regeneration_entry` 教的「重生」在這裡是死路
+            # （`already has durable active attempt`）。改講那顆替代 attempt
+            # 現在真正能做的事，遞迴复用同一顆事實來源，不重新發明一份判斷。
+            return (
+                cleanup
+                + "替代 attempt 已經在飛（尚未成為正式輸出），不能再走「重生」："
+                + _attempt_next_step(replacement_caps)
+            )
         return (
             cleanup
             + f"用 {caps['regeneration_entry']} 重生。"
@@ -509,8 +551,11 @@ def _attempt_next_step(caps: dict) -> str:
     # 不能寫死 —— 有別的 output 接手、或 legacy 硬證據在場時,這顆的准入早就成立了,
     # 教人傳旗標等於教一個沒有作用的參數(窮舉測試一次抓出 75 個這種組合)。
     retract_hint = _retract_hint(caps)
-    if caps["can_resume"]:
-        return "遠端有 artifact:先 podcast_episode_resume 續完 finalize。" + retract_hint
+    # F2 修復:這裡的分支順序必須跟 `_attempt_capabilities()` 的 `safe_next_action`
+    # 優先序逐字對齊(見上方 docstring 的紅線)——`candidate_selection_required and
+    # can_reconcile` 在那邊排在 `can_resume` 之前，這裡曾經反過來，於是同一顆 caps
+    # 的 `safe_next_action` 教 adopt、`next_step` 的散文卻教 resume，兩個欄位對同一個
+    # 狀態指向不同工具。
     if caps["candidate_selection_required"] and caps["can_reconcile"]:
         return (
             "manifest 無法判定候選 artifact 的歸屬:確認屬於這次 dispatch 就用 "
@@ -518,6 +563,8 @@ def _attempt_next_step(caps: dict) -> str:
             + retract_hint
             + "作廢後再照 retract 回傳的入口重生。"
         )
+    if caps["can_resume"]:
+        return "遠端有 artifact:先 podcast_episode_resume 續完 finalize。" + retract_hint
     if caps["can_reconcile"]:
         if caps["reconciliation_window_closed"] is False:
             # 明確算過、窗還沒關——才有資格講「還有機會撈到」這句時間性宣稱。
@@ -1514,9 +1561,12 @@ def _bind_reconciled_artifact(
             raise ValueError("attempt already has a remote artifact mapping")
         if artifact_id in _claimed_artifact_ids(manifest, attempt_id):
             raise ValueError(f"artifact {artifact_id!r} was claimed during reconciliation")
+        # F4(盲審 P3):`notebook_id` 的非空字串驗證已經在唯一呼叫端
+        # `podcast_episode_reconcile` 進來前由 `_reconciliation_subject` 做過一次
+        # ——逐位元組相同的 guard，而 `notebook_id` 是建立 attempt 時寫死、之後不會
+        # 被任何 writer 改動的欄位（唯一寫入點在 `_create_audio_attempt` 一類的建立
+        # 分支），這裡重驗建構上不可達。不重複驗證，直接沿用。
         notebook_id = attempt.get("notebook_id")
-        if not isinstance(notebook_id, str) or not notebook_id:
-            raise ValueError("attempt notebook_id must be a non-empty string")
         blocking_attempt_ids = _unresolved_attempt_ids(
             manifest, notebook_id, excluding_attempt_id=attempt_id
         )
@@ -2367,6 +2417,16 @@ async def podcast_episode_reconcile(
 
     只收養一筆建立時間符合持久化 dispatch window、且尚未被認領的 audio artifact；
     零筆或多筆候選都安全停止，不做猜測。
+
+    ``observed_state="reconciliation_ambiguous"`` 時回傳含 ``blocking_attempt_ids``
+    （F5 補記）：唯一候選存在，但同一本 notebook 底下還有**別的** attempt 也還沒被
+    認領（dispatching／acceptance_unknown／reconciliation_ambiguous 且尚未 claim 到
+    artifact）——那顆唯一候選有可能其實是它的產物，manifest 分不出歸屬，所以不自動
+    綁定，改停在 ``reconciliation_ambiguous`` 讓呼叫端用 ``podcast_attempt_adopt``
+    明確指名。真的有 2 筆以上候選時這個欄位固定是空陣列（那條路本來就不是被別的
+    attempt 卡住,單純候選本身不只一個）。⚠️ 這個欄位一旦不是空陣列，代表其中某顆
+    attempt 若是 ``abandon_in_flight`` 作廢的產物，會**永久**卡住這本 notebook 之後
+    每一次的候選自動綁定（見 ``docs/gotchas-attempt.md`` 的相關記錄）。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
         raise ValueError("manifest_path must be a non-empty string")
@@ -2532,6 +2592,11 @@ async def podcast_episode_reconcile(
             "attempt_id": attempt_id,
             "observed_state": "reconciliation_ambiguous",
             "candidate_artifact_ids": candidate_ids,
+            # F6 修復:真的有 2 筆以上候選時直接判定 ambiguous，不會先跑
+            # `_unresolved_attempt_ids` 那條早退路徑，所以這裡本來就沒有「被別的
+            # attempt 卡住」這件事——固定回空陣列，讓兩個 `reconciliation_ambiguous`
+            # 出口的 return shape 對稱，keying 在這個欄位上的 host 不會 KeyError。
+            "blocking_attempt_ids": [],
             "safe_next_action": caps["safe_next_action"],
             "next_step": _attempt_next_step(caps),
         }
@@ -3209,6 +3274,19 @@ async def podcast_attempt_retract(
     retract 後必須把回傳的 ``stale_source_ids`` 逐一 ``source_delete``：下一次生成或
     resume 前會實際查 notebook 驗證，還在就 fail-closed。標題不可在取代時改。同一
     attempt 重呼冪等。
+
+    回傳的 ``safe_next_action`` 不是每次都要求重生（F5 補記，避免呼叫端誤以為 retract
+    永遠要接一次重生）：
+
+    - 這一集已經有**另一顆** attempt 接手成為正式輸出（active≠output 分岔，或替代版
+      已完成 finalize）——``safe_next_action`` 是 ``null``，``next_step`` 會說「既有正式
+      輸出不受影響，不必重生」。
+    - 這一集已經有替代 attempt 在飛（重生成功但還沒 promote 成 output，例如上一次
+      response 遺失）——``safe_next_action`` 會改指向那顆替代 attempt 現在真正能做的
+      事（例如 ``podcast_episode_reconcile``），**不會**再指回原本建立這顆 attempt 的
+      入口，因為那條路此時會被「episode 已有 durable active attempt」擋下來。
+    - 其餘情況才是「重生」：``safe_next_action`` 指回原本建立這顆 attempt 的入口
+      （``podcast_series`` 或 ``podcast_episode``）。
 
     詳見 skill ``references/tool-reference.md`` 與 ADR-0009。
     """

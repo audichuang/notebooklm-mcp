@@ -960,6 +960,11 @@ async def test_reconcile_with_multiple_candidates_is_ambiguous(
         "remote-audio-1",
         "remote-audio-2",
     ]
+    # F6(獨立盲審):單候選+blocking 的 `reconciliation_ambiguous` 出口有
+    # `blocking_attempt_ids`,這條多候選的出口原本沒有——同一個 `observed_state`
+    # 的兩個出口 return shape 不對稱,keying 在這個欄位上的 host 在這條路會
+    # KeyError。這裡真的有 2 筆以上候選,不是被別的 attempt 卡住,固定是空陣列。
+    assert out["blocking_attempt_ids"] == []
 
 
 async def test_adopt_selects_one_ambiguous_artifact_without_remote_side_effects(
