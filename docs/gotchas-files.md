@@ -20,7 +20,12 @@
   注意 `source_add_file` 只是 caller-facing 通用入口;podcast 流程的已知 mp3 是**直接打
   SDK 的 `sources.add_file`**、不經過它(三個呼叫點:`grep -n 'sources.add_file'
   notebooklm_mcp/`)。
-- **任何新的原子寫入一律重用 `_atomic`,別自己再寫一份**。`generation_input` 的 sidecar
+- **任何新的原子寫入一律重用 `_atomic.prepared_replacement`,別自己再寫一份**
+  (v0.9.12 起是一個 context manager:`with prepared_replacement(path) as tmp:` 把內容寫進
+  `tmp`,離開區塊時原子換上去;`mode=` 顯式指定用於憑證那種不能繼承既有 mode 的檔)。
+  這條紅線寫下之後**又被違反兩次** —— `auth_cli`(憑證)與 `cover_cli`(封面)各自手寫
+  temp/fsync/replace,兩處都漏了 `os.replace` 之後的 parent-directory fsync、又各自重寫
+  了一份 0644 常數。已改成共用,`tests/test_atomic.py` 逐條釘住那幾件事。`generation_input` 的 sidecar
   曾經自帶一個 `_fsync_directory`,結果把 v0.3.3 學過的三件事全漏了:mkstemp 的 0600 被帶到
   最終檔、commit point 之後的 fsync 放在 try 裡(一拋就把剛建立的綁定刪掉)、沒容忍
   `_DIR_FSYNC_UNSUPPORTED`。三件事都有測試鎖著——但鎖在簡報/講義那條路上,新路徑照樣漏。

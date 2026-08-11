@@ -5,8 +5,8 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 
+from ._atomic import prepared_replacement
 from ._cookies import assert_usable_storage_state
 
 
@@ -31,26 +31,12 @@ def main() -> None:
         raise SystemExit(f"Invalid storage_state: {exc}") from None
 
     out = os.path.expanduser(args.out)
-    parent = os.path.dirname(out) or "."
-    os.makedirs(parent, exist_ok=True)
-    encoded = json.dumps(data).encode("utf-8")
-    fd, temporary_path = tempfile.mkstemp(dir=parent, prefix=f".{os.path.basename(out)}.")
-    replaced = False
-    try:
-        with os.fdopen(fd, "wb") as temporary_file:
-            temporary_file.write(encoded)
-            temporary_file.flush()
-            if os.name != "nt":
-                os.fchmod(temporary_file.fileno(), 0o600)
-            os.fsync(temporary_file.fileno())
-        os.replace(temporary_path, out)
-        replaced = True
-    finally:
-        if not replaced:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    # 原子換檔走 `_atomic` 那一份(gotchas-files 的紅線:不准再自己寫一份)。
+    # `mode=0o600` 是顯式的:憑證不繼承既有檔案的 mode,也不吃 `_NEW_FILE_MODE` 的 0644。
+    with prepared_replacement(out, mode=0o600) as temporary_path:
+        with open(temporary_path, "wb") as handle:
+            handle.write(json.dumps(data).encode("utf-8"))
     print(f"Wrote {out} ({len(data['cookies'])} cookies)", file=sys.stderr)
 
 

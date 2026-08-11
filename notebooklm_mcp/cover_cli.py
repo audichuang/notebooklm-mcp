@@ -33,13 +33,13 @@ import argparse
 import html
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 
 from PIL import Image
 
+from notebooklm_mcp._atomic import prepared_replacement
 from notebooklm_mcp.publish.artwork import validate_artwork
 from notebooklm_mcp.manifest_store import ManifestStore
 
@@ -56,6 +56,9 @@ def _episode_hue(n: int) -> int:
 
 
 def _find_chrome(explicit: str | None = None) -> str:
+    """找 headless Chrome。**呼叫點刻意在每個 render 之前,不在 main 開頭**——
+    `--skip-existing` 而且每張封面都驗得過時,這一輪根本不需要 Chrome,不該因為那台機器
+    沒裝而失敗。`shutil.which` 很便宜,不值得為它做 memo。"""
     cand = explicit or os.environ.get("NOTEBOOKLM_COVER_CHROME")
     if cand:
         if os.path.exists(cand) or shutil.which(cand):
@@ -85,13 +88,10 @@ def _render(template: str, subs: dict, output: str, chrome: str) -> dict:
     doc = template
     for key, val in subs.items():
         doc = doc.replace(key, str(val) if key == "__HUE__" else html.escape(str(val)))
-    directory = os.path.dirname(os.path.abspath(output))
-    os.makedirs(directory, exist_ok=True)
-    fd, temporary_output = tempfile.mkstemp(
-        dir=directory, prefix=f".{os.path.basename(output)}.", suffix=".part"
-    )
-    os.close(fd)
-    try:
+    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+    # 原子換檔走 `_atomic` 那一份(gotchas-files 的紅線:不准再自己寫一份)。mode 不指定
+    # → 沿用既有封面的 mode,首次生成用 `_NEW_FILE_MODE`(0644;封面要讓發布端讀得到)。
+    with prepared_replacement(output) as temporary_output:
         with tempfile.TemporaryDirectory() as td:
             hpath = os.path.join(td, "cover.html")
             png = os.path.join(td, "cover.png")
@@ -107,21 +107,8 @@ def _render(template: str, subs: dict, output: str, chrome: str) -> dict:
                 raise SystemExit(f"Chrome 光柵化失敗 (exit={r.returncode}):{r.stderr[-400:]}")
             with Image.open(png) as image:
                 image.convert("RGB").save(temporary_output, "JPEG", quality=92)
-        info = validate_artwork(temporary_output)
-        try:
-            mode = stat.S_IMODE(os.stat(output).st_mode)
-        except FileNotFoundError:
-            mode = 0o644
-        os.chmod(temporary_output, mode)
-        with open(temporary_output, "rb") as image_file:
-            os.fsync(image_file.fileno())
-        os.replace(temporary_output, output)
-        return info
-    finally:
-        try:
-            os.unlink(temporary_output)
-        except FileNotFoundError:
-            pass
+        info = validate_artwork(temporary_output)   # 驗過才 commit(replace 在離開時)
+    return info
 
 
 def _preflight_episodes(episodes: list) -> None:
@@ -165,8 +152,6 @@ def main() -> None:
     ap.add_argument("--chrome", default=None,
                     help="Chrome binary(否則自動找 / 用 NOTEBOOKLM_COVER_CHROME)")
     args = ap.parse_args()
-
-    chrome = _find_chrome(args.chrome)
 
     # 1) 批次:整季單集封面
     if args.manifest:
@@ -216,7 +201,7 @@ def main() -> None:
                 "__TITLE__": ep["title"],
                 "__BYLINE__": args.byline,
                 "__HUE__": hue,
-            }, cover_path, chrome)
+            }, cover_path, _find_chrome(args.chrome))
             print(f"OK {cover_path} -> {info}")
             cover_updates[n] = (ep["title"], cover_path)
 
@@ -249,7 +234,7 @@ def main() -> None:
             "__TAGLINE__": args.tagline,
             "__BYLINE__": args.byline,
             "__HUE__": hue,
-        }, args.output, chrome)
+        }, args.output, _find_chrome(args.chrome))
         print(f"OK {args.output} -> {info}")
         return
 
@@ -267,7 +252,7 @@ def main() -> None:
         "__TITLE__": args.title,
         "__BYLINE__": args.byline,
         "__HUE__": hue,
-    }, args.output, chrome)
+    }, args.output, _find_chrome(args.chrome))
     print(f"OK {args.output} -> {info}")
 
 

@@ -7,11 +7,12 @@ temp → 驗 → fsync → os.replace:並發讀者只會看到「舊的完整版
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import stat
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 
 #: directory fsync 在某些 filesystem(部分 network/overlay mount)本來就不支援。那不是
 #: 失敗,只是拿不到額外的持久性保證 —— 不該讓它把一次成功的換檔回報成錯誤。
@@ -33,36 +34,45 @@ def fsync_parent(path: str) -> None:
         os.close(directory_fd)
 
 
-async def download_atomically(
-    final_path: str,
-    download: Callable[[str], Awaitable[object]],
-    validate: Callable[[str], None],
-) -> None:
-    """把 ``download`` 的產物原子換上 ``final_path``。
+@contextlib.contextmanager
+def prepared_replacement(
+    final_path: str, *, suffix: str = ".part", mode: int | None = None
+) -> Iterator[str]:
+    """在 ``final_path`` 同目錄開一個 temp 檔,離開 with 區塊時**原子換上去**。
 
-    ``download`` 收到 temp 路徑,``validate`` 在 replace 之前對 temp 檔跑格式檢查
-    (空檔已先擋)。temp 刻意建在 ``final_path`` 同目錄——``os.replace`` 只在同一
-    filesystem 上才是原子操作。
+    這是本 package 唯一一份「原子換檔」實作(見 `docs/gotchas-files.md` 的紅線:任何新的
+    原子寫入一律重用這裡)。自己再寫一份的下場已經記過三次,每次漏的都是同樣那幾件:
+
+    - **mkstemp 的 0600 被帶到最終檔**:``os.replace`` 會把 temp 的 mode 一起換過去,
+      於是重生一次就把 0644 的產物變成 0600,之後 publish 讀不到。這裡沿用既有檔案的
+      mode(首次建立用 `_NEW_FILE_MODE`),或由 ``mode`` 顯式指定(憑證用 0600)。
+    - **commit point 之後的 fsync 被放進 try 裡**:一拋就把剛換上去的東西刪掉。所以
+      directory fsync 刻意留在 try 之外。
+    - **沒容忍 `_DIR_FSYNC_UNSUPPORTED`**:部分 network/overlay mount 本來就不支援
+      directory fsync,那不是失敗,只是拿不到額外的持久性保證。
 
     契約:**``os.replace`` 是 commit point。** 它之前的任何失敗都不動既有檔案(temp 會被
     清掉);它之後舊內容即不可回復,所以之後唯一可能的失敗(directory fsync)會回報成
-    明講「檔案已經換掉了」的錯誤,呼叫端才不會照著「舊檔還在」做復原決定。"""
+    明講「檔案已經換掉了」的錯誤,呼叫端才不會照著「舊檔還在」做復原決定。
+
+    temp 刻意建在同目錄:``os.replace`` 只在同一 filesystem 上才是原子操作。
+    """
     directory = os.path.dirname(os.path.abspath(final_path)) or "."
     fd, temp_path = tempfile.mkstemp(
-        dir=directory, prefix=f".{os.path.basename(final_path)}.", suffix=".part"
+        dir=directory, prefix=f".{os.path.basename(final_path)}.", suffix=suffix
     )
     os.close(fd)
     try:
-        await download(temp_path)
+        yield temp_path
         if os.path.getsize(temp_path) <= 0:
-            raise ValueError(f"downloaded file is empty: {final_path}")
-        validate(temp_path)
-        # mkstemp 給 0600,而 os.replace 會把 temp 的 mode 一起帶到最終檔 → 重生一次就
-        # 把 0644 的產物變成 0600。沿用既有檔案的 mode,首次生成用 _NEW_FILE_MODE。
-        try:
-            os.chmod(temp_path, stat.S_IMODE(os.stat(final_path).st_mode))
-        except FileNotFoundError:
-            os.chmod(temp_path, _NEW_FILE_MODE)
+            raise ValueError(f"refusing to install an empty file: {final_path}")
+        resolved_mode = mode
+        if resolved_mode is None:
+            try:
+                resolved_mode = stat.S_IMODE(os.stat(final_path).st_mode)
+            except FileNotFoundError:
+                resolved_mode = _NEW_FILE_MODE
+        os.chmod(temp_path, resolved_mode)
         with open(temp_path, "rb") as handle:
             os.fsync(handle.fileno())
         os.replace(temp_path, final_path)          # ← commit point
@@ -86,3 +96,19 @@ async def download_atomically(
             f"directory fsync failed ({exc.strerror}) — the previous version is gone, "
             f"do not treat this as 'download did not happen'",
         ) from exc
+
+
+async def download_atomically(
+    final_path: str,
+    download: Callable[[str], Awaitable[object]],
+    validate: Callable[[str], None],
+) -> None:
+    """把 ``download`` 的產物原子換上 ``final_path``。
+
+    ``download`` 收到 temp 路徑,``validate`` 在 replace 之前對 temp 檔跑格式檢查
+    (空檔已先擋)。換檔契約見 `prepared_replacement`。"""
+    with prepared_replacement(final_path) as temp_path:
+        await download(temp_path)
+        if os.path.getsize(temp_path) <= 0:
+            raise ValueError(f"downloaded file is empty: {final_path}")
+        validate(temp_path)
