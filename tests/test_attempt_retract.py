@@ -1084,6 +1084,46 @@ async def test_the_audit_record_says_whether_the_flag_was_used(fake_client, tmp_
     assert retraction["dispatch_status_at_retraction"] == "accepted"
 
 
+async def test_the_audit_record_names_the_authorization_basis(fake_client, tmp_path):
+    """**F4:v0.9.6 補的 `authorization_basis` / `remote_status_at_retraction` 零測試。**
+
+    `grep -rn authorization_basis tests/` 舊只命中 `_attempt_capabilities` 的**回傳值**
+    斷言(`test_attempt_capabilities.py`),沒有一處讀 retraction **落盤紀錄**;
+    `remote_status_at_retraction` 在 tests/ 舊全零命中。這兩個欄位是 v0.9.6 用來取代
+    「只記呼叫端傳了什麼」(`abandon_in_flight`)的**實際生效授權依據**——欄位名稱、
+    值域拼錯或漏寫都不會被任何既有測試抓到,補上落盤斷言,至少蓋 `settled` 與
+    `output_owner` 兩種 basis。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    # settled:從沒送出去,manifest 自己就知道結果,不需要旗標。
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    plain_path = str(plain_dir / "series_manifest.json")
+    fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
+    refused = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(plain_dir))
+    fake_client.artifacts.generate_audio_exc = None
+    await p.podcast_attempt_retract(
+        plain_path, 1, refused["attempt_id"], reason="brief 寫錯"
+    )
+    stored = json.loads(open(plain_path, encoding="utf-8").read())
+    retraction = stored["episodes"][0]["attempts"][0]["retraction"]
+    assert retraction["authorization_basis"] == "settled"
+    assert retraction["remote_status_at_retraction"] == "failed"
+
+    # output_owner:正常 QA 拒收一顆已完成的正式輸出,同樣不需要旗標。
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output_path, episode = await _complete_ep1(fake_client, output_dir)
+    await p.podcast_attempt_retract(
+        output_path, 1, episode["output_attempt_id"], reason="QA 拒收"
+    )
+    stored2 = json.loads(open(output_path, encoding="utf-8").read())
+    retraction2 = stored2["episodes"][0]["attempts"][0]["retraction"]
+    assert retraction2["authorization_basis"] == "output_owner"
+    assert retraction2["remote_status_at_retraction"] == "completed"
+
+
 async def test_retract_sends_a_pinned_episode_back_to_the_single_entry_point(
     fake_client, tmp_path
 ):
