@@ -62,3 +62,38 @@ def test_existing_secret_is_atomically_replaced_with_mode_0600(tmp_path, monkeyp
 
     assert json.loads(target.read_text(encoding="utf-8")) == state
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_auth_cli_and_pool_precheck_share_one_cookie_policy(tmp_path, monkeypatch):
+    """**兩個入口的接受條件只能有一份。**
+
+    `app._write_credential_file` 那份由
+    `test_client_pool.py::test_precheck_agrees_with_the_sdk_strict_loader` 守著「與 SDK
+    strict loader 等價」;auth CLI 之前是自己抄一份,那條 tripwire 照不到它 —— 上游改
+    `MINIMUM_REQUIRED_COOKIES` 或 `extract_cookies_from_storage` 的語義時,只有 pool
+    那邊會被改到。共用 `_cookies` 之後,同一個 tripwire 自然涵蓋兩處,而這條測試鎖住
+    「真的共用」這件事本身(有人把判準抄回 CLI 裡就紅)。
+    """
+    from notebooklm_mcp import app
+    from notebooklm_mcp import _cookies
+
+    assert auth_cli.assert_usable_storage_state is _cookies.assert_usable_storage_state
+    assert app.assert_usable_storage_state is _cookies.assert_usable_storage_state
+
+    # 空值 PSIDTS(實跑重現過的那個形狀)在兩個入口都必須被拒。
+    blank_psidts = {
+        "cookies": [
+            {"name": "SID", "value": "x", "domain": ".google.com", "path": "/"},
+            {"name": "__Secure-1PSIDTS", "value": "", "domain": ".google.com", "path": "/"},
+        ]
+    }
+    with pytest.raises(ValueError, match="必要 cookie"):
+        _cookies.assert_usable_storage_state(blank_psidts)
+
+    target = tmp_path / "storage_state.json"
+    target.write_text("old-secret", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["notebooklm-auth", "--out", str(target)])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(blank_psidts)))
+    with pytest.raises(SystemExit, match="Invalid storage_state"):
+        auth_cli.main()
+    assert target.read_text(encoding="utf-8") == "old-secret"

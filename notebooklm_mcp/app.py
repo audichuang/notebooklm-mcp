@@ -25,9 +25,9 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from notebooklm import NotebookLMClient
-from notebooklm.auth import MINIMUM_REQUIRED_COOKIES, extract_cookies_from_storage
 
 from . import runtime
+from ._cookies import assert_usable_storage_state
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +150,16 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
     非空的,所以「高優先網域空值 + 低優先網域有值」我們會拒、SDK 會收。方向是
     fail-closed(啟動時大聲失敗),可接受;真正的等價前提由
     `tests/test_client_pool.py::test_precheck_agrees_with_the_sdk_strict_loader` 守著。
+
+    **判準本身住在 `_cookies.assert_usable_storage_state`,`auth_cli` 走同一支。**
+    那條 tripwire 只認得這裡的呼叫路徑,所以 CLI 自己抄一份的話它照不到 —— 上游改語義
+    時只有 pool 這邊會被改到,而 CLI 正是「認證已經壞掉」時才會用到的救援工具。
     """
     name = _slot_env_name(slot)
     try:
-        cookies = extract_cookies_from_storage(json.loads(cred))
-        if blank := sorted(n for n in MINIMUM_REQUIRED_COOKIES if not cookies.get(n)):
-            raise ValueError(f"必要 cookie 的值是空的:{blank}")
+        # 判準本身在 `_cookies.assert_usable_storage_state` —— `auth_cli` 走同一支,
+        # 上面那段等價論證才不會只在其中一邊被維護(見該 module 的 docstring)。
+        assert_usable_storage_state(json.loads(cred))
     except Exception as exc:  # ValueError(JSON / 缺 cookie / 空值)、型別不對…一律具名重拋
         raise RuntimeError(
             f"{name} 不是可用的 storage_state:{type(exc).__name__}: {exc}"

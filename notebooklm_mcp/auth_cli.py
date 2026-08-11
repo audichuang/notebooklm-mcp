@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 
-from notebooklm.auth import MINIMUM_REQUIRED_COOKIES, extract_cookies_from_storage
+from ._cookies import assert_usable_storage_state
 
 
 def main() -> None:
@@ -23,10 +23,10 @@ def main() -> None:
         raise SystemExit(f"Invalid storage_state JSON: {exc}") from None
     if not isinstance(data, dict) or not isinstance(data.get("cookies"), list):
         raise SystemExit("Invalid storage_state: must be an object with a 'cookies' list")
+    # 必要-cookie 判準與 pool 落檔前的預驗證**共用同一支**(`_cookies`):各寫一份的話,
+    # 上游改語義時只有其中一邊會被改到,而 tripwire 只守著 app 那一邊。
     try:
-        cookies = extract_cookies_from_storage(data)
-        if missing := sorted(name for name in MINIMUM_REQUIRED_COOKIES if not cookies.get(name)):
-            raise ValueError(f"missing or empty required cookies: {missing}")
+        assert_usable_storage_state(data)
     except Exception as exc:
         raise SystemExit(f"Invalid storage_state: {exc}") from None
 
