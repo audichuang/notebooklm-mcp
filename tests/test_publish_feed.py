@@ -146,3 +146,36 @@ def test_content_encoded_escapes_cdata_end_marker():
     assert "]]]]><![CDATA[>" in raw
     ce = ET.fromstring(raw).findtext("channel/item/content:encoded", namespaces=NS)
     assert ce == html          # round-trip 還原
+
+
+# ---- itunes:type(連載 vs 時事):channel 層一律輸出 --------------------------------
+
+
+def test_channel_declares_itunes_type_explicitly():
+    """**不能靠 Apple 的隱含預設。** 沒有 `<itunes:type>` 時 Apple 當 episodic,於是
+    照 pubDate 由新到舊排,`itunes:episode` 基本被忽略 —— 連載節目打開看到的第一集是
+    最後一集。跟 `<itunes:explicit>` 同一條紀律:即使是預設值也明講。"""
+    ch = _feed().find("channel")
+    assert ch.find("itunes:type", NS).text == "episodic"
+
+    serial = {**SHOW, "itunes_type": "serial"}
+    ch = ET.fromstring(feed.build_feed_xml(serial, BASE)).find("channel")
+    assert ch.find("itunes:type", NS).text == "serial"
+
+
+def test_itunes_type_does_not_reorder_items():
+    """**item 順序不跟著 type 動。**
+
+    Apple 對 serial 是用 `itunes:episode` 排,不看 item 的文件順序;而真的照文件順序
+    顯示的播放器,遞增正好是連載要的順序 —— 反轉會把問題從 Apple 搬到它們身上。
+    """
+    for itunes_type in ("episodic", "serial"):
+        show = {**SHOW, "itunes_type": itunes_type}
+        items = ET.fromstring(feed.build_feed_xml(show, BASE)).find("channel").findall("item")
+        assert [i.find("itunes:episode", NS).text for i in items] == ["1", "2"]
+
+
+def test_unknown_itunes_type_is_refused_before_it_reaches_the_feed():
+    """打錯的值進了 feed 只有 Apple 端看得到,所以在渲染邊界就擋。"""
+    with pytest.raises(ValueError, match="itunes_type"):
+        feed.build_feed_xml({**SHOW, "itunes_type": "series"}, BASE)

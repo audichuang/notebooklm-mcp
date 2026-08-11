@@ -48,6 +48,8 @@ REQUIRED_CONTRACT_TERMS = (
                               # feedback_source_id/artifact_id 之一,單教動作名執行不了
     "was_present",           # source_delete:查無此 id 時不發破壞性 RPC 也不 raise,
                               # 清理迴圈可以重放。`deleted` 單獨看分不出這兩種情形
+    "itunes_type",           # publish_series 的季級設定:缺這個宣告時 Apple 當 episodic,
+                              # 連載節目的集序會整個顛倒(實測 SAA/SAP 兩個 feed 都中)
     "source_cleanup_unresolved",  # podcast_attempt_retract:upload 還沒落盤時作廢會留下
                               # 身分未定的清理義務,safe_next_action 是 null 而重生會被
                               # 生成前的 gate 擋住 —— 不寫進文件,呼叫端會誤判成死路

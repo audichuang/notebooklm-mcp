@@ -1238,3 +1238,74 @@ async def test_defaults_are_fail_closed(env, tmp_path, artwork_png, monkeypatch)
         await _publish_with_defaults(only_slides, artwork_png)
 
     assert captured == []
+
+
+# ---- itunes:type 是季級設定(連載節目的排序根因) -----------------------------------
+
+
+def _feed_of(captured):
+    return next(c["content"].decode("utf-8") for c in captured if c["name"] == "feed.xml")
+
+
+async def test_itunes_type_defaults_to_apple_implicit_episodic(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """沒傳就是 `episodic` —— **不替呼叫端改節目語意**(那是 Apple 缺這個標籤時的預設)。
+
+    但仍然**顯式輸出**:靠隱含預設等於把語意交給播放器猜,而這正是兩個連載 feed 排序
+    錯亂的根因。
+    """
+    captured = _install_mock(monkeypatch)
+    await _publish(_two_episode_manifest(tmp_path), artwork_png)
+    assert "<itunes:type>episodic</itunes:type>" in _feed_of(captured)
+
+
+async def test_serial_is_declared_and_persisted_as_a_season_setting(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """傳一次就存進 manifest['show'],之後只傳 manifest_path 也沿用(同 show 七欄)。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png, itunes_type="serial")
+    assert "<itunes:type>serial</itunes:type>" in _feed_of(captured)
+
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    assert stored["show"]["itunes_type"] == "serial"
+
+    # 滾動加集只傳 manifest_path:不能悄悄退回 episodic。
+    captured.clear()
+    await tools_publish.publish_series(manifest_path=manifest)
+    assert "<itunes:type>serial</itunes:type>" in _feed_of(captured)
+
+
+async def test_serial_does_not_change_episode_order_or_guids(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """**只補宣告,不動排序與身分。** 重跑不需要重生音檔,Apple 視為同一節目更新。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    before = await _publish(manifest, artwork_png)
+    episodic_feed = _feed_of(captured)
+
+    captured.clear()
+    after = await _publish(manifest, artwork_png, itunes_type="serial")
+    serial_feed = _feed_of(captured)
+
+    assert before["token"] == after["token"]
+    assert [e["guid"] for e in before["episodes"]] == [e["guid"] for e in after["episodes"]]
+    assert [e["url"] for e in before["episodes"]] == [e["url"] for e in after["episodes"]]
+    # 兩份 feed 的差異只有那一行宣告
+    assert episodic_feed.replace(
+        "<itunes:type>episodic</itunes:type>", "<itunes:type>serial</itunes:type>"
+    ) == serial_feed
+
+
+async def test_bad_itunes_type_is_refused_before_any_put(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """值域驗證要在**任何遠端副作用之前**:feed.xml 是最後一個 PUT,拖到渲染才擋的話
+    artwork/media 已經上傳了,呼叫端拿到「發布失敗」但遠端留下一半的檔案。"""
+    captured = _install_mock(monkeypatch)
+    with pytest.raises(ValueError, match="itunes_type"):
+        await _publish(_two_episode_manifest(tmp_path), artwork_png, itunes_type="series")
+    assert captured == []

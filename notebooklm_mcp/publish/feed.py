@@ -41,12 +41,34 @@ def validate_xml_text(value: object) -> None:
             validate_xml_text(item)
 
 
+#: Apple 的 `<itunes:type>` 值域。`episodic` 是 Apple 在缺這個標籤時的隱含預設,所以
+#: 也是我們的預設 —— 不能靠一個布林旗標把別人的節目語意改掉。
+ITUNES_TYPES = ("episodic", "serial")
+
+
+def normalize_itunes_type(value: object) -> str:
+    """驗 `itunes_type` 並補上預設。
+
+    **打錯的值只有 Apple 端看得到**(feed 是渲染後直接 PUT 的,本機沒有檔案可對),所以
+    在渲染邊界就擋掉,而不是讓 `<itunes:type>series</itunes:type>` 靜默發出去。
+    """
+    if value is None:
+        return "episodic"
+    if value not in ITUNES_TYPES:
+        raise ValueError(
+            f"itunes_type must be one of {ITUNES_TYPES} (got: {value!r}) —— "
+            "serial=連載(播放器照 itunes:episode 由第一集排)、episodic=時事(由新到舊)"
+        )
+    return value
+
+
 def build_feed_xml(show: dict, base_url: str) -> str:
     validate_xml_text((show, base_url))
     token = show["token"]
     base = _feed_dir_url(base_url, token)
     feed_url = f"{base}/feed.xml"
     explicit = "true" if show.get("explicit") else "false"
+    itunes_type = normalize_itunes_type(show.get("itunes_type"))
     eps = live_episodes(show)
 
     lines = [
@@ -61,6 +83,13 @@ def build_feed_xml(show: dict, base_url: str) -> str:
         f"    <itunes:author>{escape(show['author'])}</itunes:author>",
         f"    <itunes:summary>{escape(show['description'])}</itunes:summary>",
         f"    <itunes:explicit>{explicit}</itunes:explicit>",
+        # **一律輸出,即使是預設值** —— 跟 `<itunes:explicit>` 同一條紀律。缺這一行時
+        # Apple 當 episodic:照 pubDate 由新到舊排,`itunes:episode` 基本被忽略,連載
+        # 節目打開看到的第一集是最後一集(實測 SAA/SAP 兩個 feed 都撞到)。
+        # **item 的文件順序刻意不跟著這個值變**:Apple 對 serial 是用 `itunes:episode`
+        # 排、不看文件順序;而真的照文件順序顯示的播放器,現行的遞增正好是連載要的順序
+        # —— 反轉只會把問題從 Apple 搬到它們身上,還讓每一個既有 feed 的 bytes 全變。
+        f"    <itunes:type>{itunes_type}</itunes:type>",
         f'    <itunes:category text={quoteattr(show.get("category", "Technology"))}/>',
         f'    <itunes:image href={quoteattr(base + "/" + show["artwork_file"])}/>',
         "    <itunes:owner>",

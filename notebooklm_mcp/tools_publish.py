@@ -278,6 +278,7 @@ async def publish_series(
     artwork_path: str | None = None,
     category: str | None = None,
     explicit: bool | None = None,
+    itunes_type: str | None = None,
     notebook_id: str | None = None,
     return_episodes: list[int] | None = None,
     require_slides: bool | None = None,
@@ -295,6 +296,13 @@ async def publish_series(
     (+ ``return_episodes=[N]``,讓回傳不隨集數膨脹)。顯式參數永遠優先並回寫。
     ``notebook_id`` 只是某集 mp3 不在本機時的重抓 fallback,且**每集 manifest 自己的
     ``notebook_id`` 優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
+
+    ``itunes_type`` 是**季級**設定(沿用規則同 show 七欄):``serial`` = 連載,播放器改用
+    ``itunes:episode`` 由第一集排;``episodic``(預設)= 時事,照 ``pubDate`` 由新到舊排。
+    **缺這個宣告時 Apple 當 episodic**,於是有嚴格集序的節目打開會看到最後一集在最前面
+    (`itunes:episode` 基本被忽略)——連載節目請顯式傳 ``serial``。只補宣告、不動 item
+    排序與 ``guid``/``enclosure`` URL,所以改完重跑不需要重生任何音檔,Apple 視為同一
+    節目的更新。
 
     ``require_slides`` / ``require_report`` 是**季級政策**(沿用規則同 show 七欄):為
     True 時 manifest 未回寫該附件路徑就拒絕發布 —— fail-closed required-deliverable
@@ -331,6 +339,13 @@ async def publish_series(
         # 布林/有預設的兩欄:None 才 fallback,避免 explicit=False 被誤判成「沒傳」。
         "category": category if category is not None else saved_show.get("category", "Technology"),
         "explicit": explicit if explicit is not None else bool(saved_show.get("explicit", False)),
+        # 連載 vs 時事,**季級**設定(沿用規則同 show 七欄)。缺這個標籤時 Apple 當
+        # episodic:照 pubDate 由新到舊排、`itunes:episode` 基本被忽略,於是連載節目
+        # 打開看到的第一集是最後一集。預設沿用 Apple 的隱含值,不替呼叫端改語意。
+        "itunes_type": (
+            itunes_type if itunes_type is not None
+            else saved_show.get("itunes_type", "episodic")
+        ),
         # notebook_id(重抓 fallback,選填)也要一起解析:它會進上傳的 show.json,
         # 不解析的話「首發有傳、之後沒傳」會讓 show.json bytes 不穩(null vs 值)。
         "notebook_id": notebook_id or saved_show.get("notebook_id"),
@@ -365,6 +380,11 @@ async def publish_series(
     notebook_id = show_cfg["notebook_id"]
 
     identity.validate_show_id(show_id)
+    # **值域驗證要在任何遠端副作用之前。** 打錯的 itunes_type 若拖到渲染才擋,前面的
+    # artwork/media PUT 已經送出去了(而 feed.xml 是最後一個 PUT),呼叫端會拿到「發布
+    # 失敗」但遠端其實留下了一半的檔案。渲染邊界那份是把關,這裡是 fail-fast。
+    itunes_type = feed_mod.normalize_itunes_type(show_cfg["itunes_type"])
+    show_cfg["itunes_type"] = itunes_type
     # Validate artwork up front (fail-fast before any upload). Extension follows
     # the real format so a JPEG is never served as .png. Content-address the filename
     # (artwork-<hash>.jpg) so a CHANGED show cover gets a NEW URL → bypasses the CDN
@@ -595,6 +615,7 @@ async def publish_series(
                 "language": "zh-Hant", "author": author,
                 "owner_name": owner_name, "owner_email": owner_email,
                 "category": category, "explicit": bool(explicit),
+                "itunes_type": itunes_type,
                 "artwork_file": artwork_file, "episodes": new_eps,
             }
             show_json = json.dumps(show, ensure_ascii=False, indent=2).encode("utf-8")
