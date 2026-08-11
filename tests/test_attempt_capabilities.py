@@ -228,8 +228,20 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
     step = p._attempt_next_step(caps)
     assert "沒人記得" in step and "候選窗" in step
 
+    # 身分已確定的義務(gate 撈到候選並排進 pending)優先序更高:有具體 id 可刪,
+    # `cleanup_state` 換成 `pending_delete`,而 `safe_next_action` 是那個動作。
+    attempt["retraction"]["stale_source_ids"] = ["src-orphan"]
+    episode["pending_source_cleanup"] = ["src-orphan"]
+    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+    assert caps["cleanup_state"] == "pending_delete"
+    assert caps["source_cleanup_unresolved"] is True   # 窗還沒關,義務仍未全部結案
+    assert caps["safe_next_action"] == p.ACTION_SOURCE_DELETE
+    assert "source_delete" in p._attempt_next_step(caps)
+
     # 義務結案(gate 對帳過)之後,重生才回到指引裡。
     attempt["retraction"].pop("source_cleanup_unresolved")
+    attempt["retraction"]["stale_source_ids"] = []
+    episode.pop("pending_source_cleanup")
     caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
     assert caps["cleanup_state"] is None
     assert caps["safe_next_action"] == caps["regeneration_entry"]

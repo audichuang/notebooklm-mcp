@@ -1204,6 +1204,93 @@ async def test_gate_keeps_the_obligation_when_the_notebook_cannot_be_listed(
     assert retraction["source_cleanup_unresolved"] is True
 
 
+async def _abandon_an_unresolved_upload(fake_client, tmp_path, monkeypatch):
+    """把一集帶到「retract 過、清理義務未結案、遠端零候選」的狀態。"""
+    manifest_path = str(tmp_path / "series_manifest.json")
+    entered = asyncio.Event()
+
+    async def hang_before_remote_create(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fake_client.sources, "add_file", hang_before_remote_create)
+    running = asyncio.create_task(
+        p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    )
+    await entered.wait()
+    attempt_id = _episode(manifest_path)["active_attempt_id"]
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    monkeypatch.undo()
+    await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="放棄", abandon_in_flight=True
+    )
+    return manifest_path, attempt_id
+
+
+async def test_gate_refuses_to_discharge_an_obligation_it_cannot_identify(
+    fake_client, tmp_path, monkeypatch
+):
+    """零候選 + 窗已關,但這一集沒有 canonical notebook_id → 仍然不准結案。
+
+    與 `clearable` 同一條紀律:拿呼叫端隨手傳的 notebook 查到「沒有」,不代表當初上傳的
+    那本筆記本也沒有。少了這道判斷,legacy 列的義務會被誤清,而誤清之後再也沒有東西擋
+    那筆舊來源污染後續生成。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    _age_the_dispatch_window(manifest_path, attempt_id)
+
+    def strip_notebook_identity(manifest):
+        manifest.pop("notebook_id", None)
+        manifest["episodes"][0].pop("notebook_id", None)
+
+    ManifestStore(manifest_path).update(strip_notebook_identity)
+
+    with pytest.raises(ValueError, match="canonical notebook_id"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    retraction = next(
+        row["retraction"]
+        for row in _episode(manifest_path)["attempts"]
+        if row["attempt_id"] == attempt_id
+    )
+    assert retraction["source_cleanup_unresolved"] is True
+
+
+async def test_gate_names_the_attempt_when_its_checkpoint_cannot_be_reconciled(
+    fake_client, tmp_path, monkeypatch
+):
+    """checkpoint 缺欄位(手改過/跨版本)時 fail-closed,但訊息要說得出是哪一顆。
+
+    生成前突然冒出一句「feedback source dispatch time is missing」沒人查得動。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+
+    def corrupt_checkpoint(manifest):
+        _, attempt = p._attempt_record(manifest, 1, attempt_id, allow_retracted=True)
+        attempt["finalize"]["feedback_source_upload"]["dispatched_at"] = None
+
+    ManifestStore(manifest_path).update(corrupt_checkpoint)
+
+    with pytest.raises(ValueError, match="對不出候選") as failure:
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    assert attempt_id in str(failure.value)
+    assert "episode 1" in str(failure.value)
+
+
 @pytest.mark.parametrize(
     "status", ("dispatching", "acceptance_unknown", "reconciliation_ambiguous")
 )
