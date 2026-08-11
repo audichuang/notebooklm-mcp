@@ -6,6 +6,86 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.9
+
+外部 Codex 對 v0.9.8 做獨立 review,抓到四條 —— **其中兩條是 v0.9.8 自己引入的,
+而且都長在「修正動作」上**:v0.9.8 為了修 A 而加的東西,自己變成了 B 的攻擊面。
+離線測試全綠、三個 opus 視角都審過,仍然沒抓到。這是這一版最該記住的事。
+
+### 修「不要 tombstone 還在飛的 attempt」的那道窗,自己可以被呼叫端縮小
+
+v0.9.8 把零候選的 `safe_next_action` 從「指回自己」改成「窗關了才給 retract」,
+理由是候選窗還開著時 retract 會 tombstone 一顆其實還在生成的 attempt(ADR-0009)。
+但窗是這樣算的:
+
+```python
+window_end = dispatched_at + wait_timeout + skew   # wait_timeout 是**本次呼叫**傳進來的
+```
+
+原始 dispatch 當時承諾等多久**沒有被持久化**。於是原生成允許 3600 秒、30 分鐘後
+reconcile 用預設 1200 秒,就會誤判「窗已關」而建議 retract;傳 `wait_timeout=1` 的話
+**約 61 秒後就給 retract 指引**。host 照做就 tombstone 一顆還在生成的 attempt,
+再生成會出現第二個 artifact —— **正好是那道窗被加進來要防的那件事**。
+
+修法把一個 `window_end` 拆成兩個各有名字的值:`candidate_window_end`(篩選候選
+artifact,仍用本次 `wait_timeout`,既有行為不動)與 `reconciliation_window_end`
+(關閉判斷,用 `max(wait_timeout, _RECONCILIATION_MIN_WINDOW)`)。呼叫端只能**放大**
+這個窗、不能縮小,因為丟錯成本(tombstone 一顆還在飛的 attempt)遠高於試錯成本
+(多等一輪再對帳一次)。
+
+Codex 建議的是在 dispatch 前持久化不可變的 `reconciliation_window_end`,那更正確 ——
+但要改 manifest schema、處理既有 attempt 沒有該欄位的向後相容,而且動到 dispatch
+寫 manifest 的路徑。這一輪選零 schema 改動的版本,取捨標成 `ponytail:` 註解留在
+常數旁邊。
+
+### 修「無限重送」的那道 tried guard,自己會漏試可用帳號
+
+v0.9.8 為了讓終止性不依賴時鐘,在 failover 迴圈加了 `tried` set:`rotate_client()`
+回來的帳號已經試過就停。但 `rotate_client()` **不知道 `tried` 是誰** —— 它只回
+「游標後方第一個不在冷卻中的槽位」,而那個槽位剛好試過的話,呼叫端就整批放棄了,
+**游標後面可能還有完全沒試過、也沒在冷卻中的帳號**。
+
+實跑復現(pool A/B/C/D,本次已試 A、B,並行 request 把全域游標推到 D,A 的冷卻剛好
+到期):rotate 回 A → 在 tried 裡 → 放棄,而 **C 既沒試過也沒冷卻**。結果錯誤標成
+`not_accepted`,違反「每個已知帳號最多、也應該試一次」的承諾。v0.9.8 新增的雙帳號
+bouncing 測試涵蓋不到 —— 兩個帳號時「第一個候選在 tried」等價於「全試過了」。
+
+修法把排除搬進掃描本身:`rotate_client(refused=…, skip=frozenset(tried))`,迴圈裡
+`skip` 與冷卻是兩個獨立條件、都要滿足才是候選。冷卻副作用不受 `skip` 影響,永遠做。
+
+### 零候選分支繞過了這一版自己剛立的紅線
+
+v0.9.8 在 `docs/gotchas-attempt.md` 寫下「狀態能力與指引一律由 `_attempt_capabilities()`
+/ `_attempt_next_step()` 產生,不准手寫 if/else」,而它自己的零候選分支就是用時間
+if/else 手寫 `ACTION_RETRACT` / `ACTION_RECONCILE` 加兩段 `next_step` —— 兩個 return
+還重複了大半結構。上一輪只把 hint 抽成 `_retract_hint`,**action 的決策仍留在呼叫點**。
+
+修法採納 Codex 的方向,把時間性狀態納入能力:`_attempt_capabilities(...,
+reconciliation_window_closed: bool = False)`,語意很直接 —— **窗關了就是「不能再對帳」**
+→ `can_reconcile` 為 False。`_attempt_next_step()` 既有的分支順序就會自動走到 retract
+那一支,`safe_next_action` 也從 caps 推導,呼叫點的第二個決策來源消失、兩個 return
+收成一個。函式仍是純的(窗關了沒由呼叫端算好傳進來)。笛卡爾積測試加這個 bool 維度。
+
+### frozen bundle 的重生指引,少了唯一那句讓它可執行的話
+
+`_attempt_next_step()` 的 settled 分支叫人 retract 後呼叫 `podcast_episode`,但沒帶
+`caps["regeneration_hint"]` —— 而 `_regeneration_hint()` 對 `input_bundle` 的 attempt
+明明算好了正確那句:「重生要用一份**新的、尚未綁定的** frozen bundle,舊 bundle 的
+`attempt-binding.json` 還綁著這顆已作廢的 attempt,沿用它會被 tombstone 擋下來」。
+
+照現況做:沿用原 bundle → dispatch 前被 tombstone binding 拒絕;完全不傳 bundle →
+失去 frozen-input 的確定性承諾。**兩條路都不通**,又一次「指引在它自己產生的狀態下
+做不到」(第八次)。三個提到 `regeneration_entry` 的分支現在一律附上這句提示
+(它對不需要提醒的形狀回空字串)。
+
+### 駁回一條
+
+Codex 另指 ADR-0010 新增的 v0.9.7 amendment 是英文、違反「全程繁體中文」。**不採納**:
+整份 ADR-0010 從標題到 v0.9.0 amendment 都是英文,在一份英文 ADR 裡插一段中文才是破壞
+體例。那條規範約束的是新寫的註解與中文文件。
+
+3494 passed + 12 skipped(笛卡爾積多一個維度,比 v0.9.8 的 3041 多)。四條各自突變驗證過。
+
 ## v0.9.8
 
 兩份**互相獨立**的 v0.9.7 事後審查(本迴圈的三視角 opus 複審、外部 Codex 複審)各自跑完,

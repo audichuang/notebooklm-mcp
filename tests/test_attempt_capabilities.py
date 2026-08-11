@@ -89,18 +89,35 @@ ALL_CASES = list(
     itertools.product(DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES)
 )
 
+# P2 修復加的時間性維度:候選窗有沒有關。跟其餘測試無關的地方(series 白名單、
+# resend/flag 語意……)不必跟著翻倍,只有這條核心不變式真的會讀 `can_reconcile`,
+# 所以只在這裡加(笛卡爾積照 AGENTS.md 要求翻倍,不是每個測試都要背這個維度)。
+ALL_CASES_WITH_WINDOW = list(
+    itertools.product(
+        DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES, (False, True)
+    )
+)
 
-@pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
+
+@pytest.mark.parametrize("dispatch,remote,role,shape,window_closed", ALL_CASES_WITH_WINDOW)
 def test_every_state_combination_yields_executable_guidance(
-    dispatch, remote, role, shape
+    dispatch, remote, role, shape, window_closed
 ):
     """**核心不變式:訊息教的每一個動作,在那個狀態下都必須真的做得到。**
 
     這一條直接對應五次現形的共同形狀。它不預設哪一格會錯 —— 把 next_step 的文字與
     capabilities 對照,教了做不到的事就紅。
+
+    `window_closed` 是 P2 修復加的維度:候選窗關了之後,`podcast_episode_reconcile`
+    這個字不准再出現在指引裡。**這裡故意不只做自證**(`if 提到 reconcile: assert
+    can_reconcile`)——把 `can_reconcile` 算式裡 `and not reconciliation_window_closed`
+    拿掉的突變,`caps["can_reconcile"]` 會跟著訊息一起變成 True,自證測不出來;
+    下面直接拿 `window_closed` 這個輸入去斷言才抓得到。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = p._attempt_capabilities(
+        episode, attempt, "att-me", reconciliation_window_closed=window_closed
+    )
     step = p._attempt_next_step(caps)
 
     if "原樣重呼" in step:
@@ -111,6 +128,7 @@ def test_every_state_combination_yields_executable_guidance(
         assert caps["can_resume"], f"教了 resume 但沒有 artifact 可續:{step}"
     if "podcast_episode_reconcile" in step:
         assert caps["can_reconcile"], f"教了 reconcile 但這個狀態對不了帳:{step}"
+        assert not window_closed, f"候選窗已經關了,卻還教 reconcile:{step}"
     if "不需要** abandon_in_flight" in step or "不需要 abandon_in_flight" in step:
         assert caps["authorization_basis"] is not None, (
             f"說不需要旗標,但這個狀態的 retract 沒有免旗標理由:{step}"
@@ -157,15 +175,21 @@ def test_settled_hint_never_mentions_series_when_the_entry_is_episode(
     (含後面各集的回錄)進這一集——正是 v0.9.5 花整輪在防的內容錯置形狀。
 
     這條不變式蓋掉整個笛卡爾積:任何組合只要 `regeneration_entry` 落在
-    `podcast_episode`,產生的句子就不准出現 `podcast_series`。
+    `podcast_episode`,產生的句子就不准**推薦** `podcast_series`。
+
+    ⚠️ **P2 修復後(caps["regeneration_hint"] 一律附加)**:「pinned」形狀的 hint
+    會說「改用 podcast_series 會靜默改成讀整本筆記本」——這是**警告不要用**,不是
+    「也可以用」,兩者語意相反但都含 `ACTION_SERIES` 這個字面值。所以判準改成比對
+    v0.9.5 那句具體的推薦措辭(`also_series` 變數的逐字內容),不能再用「有沒有出現
+    這個字」當代理判準——那個代理現在會把合法的警告句也一起打成違規。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
     caps = p._attempt_capabilities(episode, attempt, "att-me")
     step = p._attempt_next_step(caps)
 
     if caps["regeneration_entry"] == p.ACTION_EPISODE:
-        assert p.ACTION_SERIES not in step, (
-            f"regeneration_entry 是 podcast_episode,句子卻提到 podcast_series:{step}"
+        assert "也可以直接重呼 podcast_series" not in step, (
+            f"regeneration_entry 是 podcast_episode,句子卻推薦重呼 podcast_series:{step}"
         )
 
 

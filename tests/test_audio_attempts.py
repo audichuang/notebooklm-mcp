@@ -223,6 +223,54 @@ async def test_reconcile_with_no_candidate_past_the_window_offers_retract(
     assert "窗" in step and ("關" in step), step
 
 
+async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller_cannot_shrink(
+    fake_client, tmp_path
+):
+    """**P1**:候選窗的**關閉判斷**曾經直接用這次呼叫的 `wait_timeout`,呼叫端傳小一點
+    (甚至 1 秒)就能把窗縮小到早就「過期」——原生成可能承諾等 3600 秒,30 分鐘後拿
+    `wait_timeout=1` 重呼 reconcile,約 61 秒(1 秒 + 1 分鐘時鐘容錯)後就會誤判成
+    「窗已關」,建議 retract 一顆其實還在飛的 attempt(照做就是 ADR-0009 禁止的
+    因果改寫)。修法是關閉判斷改用 `max(wait_timeout, _RECONCILIATION_MIN_WINDOW)`
+    ——呼叫端只能放大這個窗,不能縮小。
+
+    用 backdate `dispatched_at` 模擬「已經過了多久」,不用 `sleep` 真的等。
+    """
+    from datetime import timedelta
+
+    manifest_path, attempt_id = await _leave_acceptance_unknown(
+        fake_client, tmp_path, []
+    )
+    store = p.ManifestStore(str(manifest_path))
+
+    def backdate(seconds: float):
+        def _mutate(manifest: dict) -> None:
+            _, attempt = p._attempt_record(manifest, 1, attempt_id)
+            attempt["dispatch"]["dispatched_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=seconds)
+            ).isoformat()
+
+        store.update(_mutate)
+
+    # dispatch 是 2 分鐘前的事,這次呼叫傳 wait_timeout=1:舊窗(1 秒 + 1 分鐘時鐘
+    # 容錯 = 61 秒)早就「關了」,但保守下限(_RECONCILIATION_MIN_WINDOW,1 小時)
+    # 還沒到——不該被縮小到給 retract。
+    backdate(120)
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+    )
+    assert out["safe_next_action"] == p.ACTION_RECONCILE, (
+        f"wait_timeout=1 不該把候選窗縮小到 61 秒就關掉:{out}"
+    )
+
+    # dispatch 是保守下限 + 時鐘容錯之後的事:這次窗真的關了,即使呼叫端仍然只傳
+    # wait_timeout=1(下限保證窗不會比它更小,不代表窗永遠不關)。
+    backdate(p._RECONCILIATION_MIN_WINDOW.total_seconds() + 120)
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+    )
+    assert out["safe_next_action"] == p.ACTION_RETRACT, out
+
+
 async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(
     fake_client, tmp_path
 ):

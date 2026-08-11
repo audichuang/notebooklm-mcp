@@ -45,6 +45,14 @@ from .manifest_store import ManifestStore
 
 _TZ = timezone(timedelta(hours=8))
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
+# ponytail: 保守下限取代持久化窗，若之後要精確就在 dispatch 前存
+# reconciliation_window_end。
+# `podcast_episode_reconcile` 的候選窗**關閉判斷**不能只信這次呼叫的 `wait_timeout`
+# ——原生成可能承諾等 3600 秒，重呼 reconcile 時傳更小的值就能把「窗還沒關」的
+# attempt 誤判成「窗已關」而建議 retract（P1，真實復現：`wait_timeout=1` 約 61 秒後
+# 就會給 retract 指引）。呼叫端只能**放大**這個窗、不能縮小；丟錯成本（tombstone
+# 一顆還在飛的 attempt，ADR-0009 禁止的因果改寫）遠高於試錯成本（多等一輪再對帳）。
+_RECONCILIATION_MIN_WINDOW = timedelta(seconds=3600)
 
 # 生成 kickoff 的例外裡,**契約上保證「伺服器沒有建出任何 task」**的那幾種。
 # notebooklm-py 0.8.0(ADR-0019 / #1342)把同步拒絕從「回傳 status='failed'」改成
@@ -167,11 +175,20 @@ def _regeneration_hint(attempt: dict) -> str:
     )
 
 
-def _attempt_capabilities(episode: dict, attempt: dict, attempt_id: str) -> dict:
+def _attempt_capabilities(
+    episode: dict,
+    attempt: dict,
+    attempt_id: str,
+    *,
+    reconciliation_window_closed: bool = False,
+) -> dict:
     """**「這顆 attempt 現在能做什麼」的單一事實來源。**
 
     純函式,不打 RPC、不改狀態。所有給呼叫端的 `safe_next_action` 與「下一步」訊息都要
-    從這裡產生,不要各自手寫。
+    從這裡產生,不要各自手寫。**`reconciliation_window_closed` 也遵守這條**:呼叫端
+    自己算好「現在幾點」與候選窗有沒有關再傳進來,這裡不讀時鐘(P2 修復)——否則
+    `podcast_episode_reconcile` 的零候選分支會繼續自己手寫 if/else 決定
+    `safe_next_action`,正是 docs/gotchas-attempt.md 那條紅線要擋的第二個決策來源。
 
     **為什麼收斂成一顆:同一個根因現形過五次。** 每次的形狀都是「指引在它自己產生的
     狀態下不可執行」——v0.9.1 FAIL-1(叫人跑一支在該狀態下自己也 permission denied 的
@@ -191,7 +208,8 @@ def _attempt_capabilities(episode: dict, attempt: dict, attempt_id: str) -> dict
     - `authorization_basis`:免旗標 retract 的理由;`None` 代表需要 `abandon_in_flight`。
     - `can_resend`:原樣重呼建立它的那支工具能不能沿用同一顆重送(**不等於**
       `authorization_basis` 非 None —— 那正是第五次現形的成因)。
-    - `can_resume` / `can_reconcile`:有沒有 artifact 可續、要不要先對帳。
+    - `can_resume` / `can_reconcile`:有沒有 artifact 可續、要不要先對帳(候選窗關了
+      就不算「可以對帳」——窗關代表未來任何 artifact 都會落在窗外,繼續對帳沒有用)。
     - `regeneration_entry`:作廢之後重生該用哪支工具。
     """
     dispatch_status = (attempt.get("dispatch") or {}).get("status")
@@ -230,8 +248,11 @@ def _attempt_capabilities(episode: dict, attempt: dict, attempt_id: str) -> dict
         # `_is_resendable_same_request` 也只收 `_NEVER_DISPATCHED`。
         "can_resend": never_dispatched and not is_output,
         "can_resume": bool(remote.get("artifact_id")) and not is_output,
-        "can_reconcile": dispatch_status
-        in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous"),
+        "can_reconcile": (
+            dispatch_status
+            in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous")
+            and not reconciliation_window_closed
+        ),
         "regeneration_entry": _regeneration_entry_point(attempt),
         "regeneration_hint": _regeneration_hint(attempt),
     }
@@ -257,6 +278,13 @@ def _attempt_next_step(caps: dict) -> str:
     """把 `_attempt_capabilities` 的結論翻成一句**可執行**的話。
 
     每個分支教的動作都必須在該狀態下真的做得到 —— 這是整顆 helper 存在的理由。
+
+    **每個教人「retract 之後重生」的分支都要附上 `caps["regeneration_hint"]`**
+    (P2 修復)—— 少附的下場是 `_regeneration_hint()` 早算好的關鍵提醒(尤其是
+    frozen bundle 那句「要用一份新的、尚未綁定的 bundle」)不會出現在指引裡,照做的人
+    沿用舊 bundle 會被 tombstone 擋下來,retract 教的路等於死路。`_regeneration_hint()`
+    對不需要提醒的形狀本來就回空字串,所以在每個分支**無條件**附加是安全的——
+    `tests/test_attempt_capabilities.py` 的窮舉序列測試驗證這一點。
     """
     if not caps["is_active"] and not caps["is_output"]:
         return "它已經被取代,是歷史紀錄 —— 要動的是現在的 active／output attempt。"
@@ -264,13 +292,13 @@ def _attempt_next_step(caps: dict) -> str:
         return (
             "它是這一集的正式輸出:要作廢就直接 podcast_attempt_retract"
             "(**不需要** abandon_in_flight),照回傳的 stale_source_ids 逐一 source_delete,"
-            f"再用 {caps['regeneration_entry']} 重生。"
+            f"再用 {caps['regeneration_entry']} 重生。" + caps["regeneration_hint"]
         )
     if caps["can_resend"]:
         return (
             "參數完全相同就原樣重呼建立它的那支工具,沿用同一顆重送(不多燒配額);"
             f"要換 brief 或來源就先 podcast_attempt_retract(**不需要** abandon_in_flight),"
-            f"再用 {caps['regeneration_entry']} 重生。"
+            f"再用 {caps['regeneration_entry']} 重生。" + caps["regeneration_hint"]
         )
     if caps["authorization_basis"] == "settled":
         # 遠端已終態:重送不是沿用這顆,而是作廢後重生(或讓 series 自動 supersede)。
@@ -288,6 +316,7 @@ def _attempt_next_step(caps: dict) -> str:
             "遠端已回報終態,這顆沒有東西可續也不能原樣重送:先 podcast_attempt_retract "
             f"(**不需要** abandon_in_flight),再用 {caps['regeneration_entry']} 重生。"
             + also_series
+            + caps["regeneration_hint"]
         )
     # 以下都是「遠端可能還有東西」的狀態。**作廢建議一律跟著 `needs_abandon_flag`**,
     # 不能寫死 —— 有別的 output 接手、或 legacy 硬證據在場時,這顆的准入早就成立了,
@@ -2059,7 +2088,10 @@ async def podcast_episode_reconcile(
     )
     claimed = _claimed_artifact_ids(snapshot, attempt_id)
     window_start = dispatched_at - _RECONCILIATION_CLOCK_SKEW
-    window_end = (
+    # **候選 artifact 的篩選窗**——用這次呼叫的 `wait_timeout`,既有行為,不在 P1
+    # 修復範圍內。它與下面零候選分支的「候選窗有沒有關」是兩個不同判準(下面那個要
+    # 加保守下限,這個不用),故意拆成兩個各自有名字的值,不要合併回同一個 `window_end`。
+    candidate_window_end = (
         dispatched_at
         + timedelta(seconds=float(wait_timeout))
         + _RECONCILIATION_CLOCK_SKEW
@@ -2080,7 +2112,7 @@ async def podcast_episode_reconcile(
             or created_at is None
         ):
             continue
-        if window_start <= created_at <= window_end:
+        if window_start <= created_at <= candidate_window_end:
             candidates.add(artifact_id)
 
     candidate_ids = sorted(candidates)
@@ -2135,7 +2167,6 @@ async def podcast_episode_reconcile(
         (row for row in latest.get("episodes", []) if row.get("episode") == episode_n),
         {},
     )
-    caps = _attempt_capabilities(episode_row, latest_attempt, attempt_id)
     # F3(主迴圈裁決,採納審查者的反駁):零候選有兩種成因——那次生成還沒出現
     # (候選窗還開著,晚幾分鐘再對帳就撈得到),或它根本沒被受理(候選窗已經關,
     # 未來任何 artifact 都會落在窗外)。**只有後者「繼續對帳沒有用」才成立**;
@@ -2146,42 +2177,50 @@ async def podcast_episode_reconcile(
     # 但伺服器其實受理了、artifact 還在生成 → retract + 重生 → 幾分鐘後第一顆
     # artifact 出現變成雲端孤兒 → 下次對帳撞 reconciliation_ambiguous、還白燒一次
     # 配額——正是 ADR-0009 要擋的「把還在飛的因果紀錄提前寫成墓碑」。
-    # `window_end` 前面已經算過(候選窗右界 = dispatched_at + wait_timeout + 時鐘
-    # 容錯),兩個分支都借 `_retract_hint` 產生作廢建議,不手寫第二份判準。
-    if datetime.now(timezone.utc) > window_end:
-        return {
-            "complete": False,
-            "episode_n": episode_n,
-            "attempt_id": attempt_id,
-            "observed_state": latest_attempt["dispatch"]["status"],
-            "candidate_artifact_ids": [],
-            "safe_next_action": ACTION_RETRACT,
-            "next_step": (
-                "這次對帳在遠端找到 **0 個候選**,而且候選窗(dispatch 到 "
-                "wait_timeout 那段時間,含時鐘容錯)已經關了——未來任何 artifact "
-                "都會落在窗外。**重呼本工具會得到一模一樣的回傳**(不建 attempt,"
-                "所以 `attempt_count` 不會動,原地打轉偵測看不出來),繼續對帳"
-                "沒有用。先用 artifact_list(notebook_id, kind=\"audio\") 直接看"
-                f"雲端有沒有這一集,{_retract_hint(caps)}"
-                f"再用 {caps['regeneration_entry']} 重生。"
-            ),
-        }
+    #
+    # **這個窗(關閉判斷)跟上面的 `candidate_window_end`(篩選候選)故意不是同一個
+    # 值**(P1 修復):後者用這次呼叫的 `wait_timeout` 沒問題,但拿它判斷「窗有沒有
+    # 關」會被重試呼叫端的參數改寫——原生成可能承諾等 3600 秒,重呼時傳
+    # `wait_timeout=1` 就能讓這裡誤判成「窗早就關了」,建議 retract 一顆其實還在飛的
+    # attempt(ADR-0009 禁止的因果改寫)。用 `_RECONCILIATION_MIN_WINDOW` 當保守下限,
+    # 見該常數的 ponytail 註解。
+    reconciliation_window_end = (
+        dispatched_at
+        + max(timedelta(seconds=float(wait_timeout)), _RECONCILIATION_MIN_WINDOW)
+        + _RECONCILIATION_CLOCK_SKEW
+    )
+    reconciliation_window_closed = (
+        datetime.now(timezone.utc) > reconciliation_window_end
+    )
+    # **action 的決策不再在這裡手寫 if/else**(P2 修復,docs/gotchas-attempt.md 的
+    # 紅線):窗關了就餵進 `_attempt_capabilities`,讓 `can_reconcile` 自己反映
+    # 「不能再對帳」,`_attempt_next_step` 既有的分支順序會自動落在 retract 那一支。
+    caps = _attempt_capabilities(
+        episode_row,
+        latest_attempt,
+        attempt_id,
+        reconciliation_window_closed=reconciliation_window_closed,
+    )
+    window_note = (
+        "而且候選窗(dispatch 到 wait_timeout 那段時間,含時鐘容錯)已經關了——"
+        "未來任何 artifact 都會落在窗外。**重呼本工具會得到一模一樣的回傳**"
+        "(不建 attempt,所以 `attempt_count` 不會動,原地打轉偵測看不出來),"
+        "繼續對帳沒有用。"
+        if reconciliation_window_closed
+        else (
+            "但候選窗還沒關(dispatch 到 wait_timeout 那段時間,含時鐘容錯)——"
+            "可能是那次生成還沒出現,過幾分鐘後重呼本工具有機會撈到,**現在重呼"
+            "未必是一模一樣的空結果**。"
+        )
+    )
     return {
         "complete": False,
         "episode_n": episode_n,
         "attempt_id": attempt_id,
         "observed_state": latest_attempt["dispatch"]["status"],
         "candidate_artifact_ids": [],
-        "safe_next_action": ACTION_RECONCILE,
-        "next_step": (
-            "這次對帳在遠端找到 **0 個候選**,但候選窗還沒關(dispatch 到 "
-            "wait_timeout 那段時間,含時鐘容錯)——可能是那次生成還沒出現,"
-            "過幾分鐘後重呼本工具有機會撈到,**現在重呼未必是一模一樣的空結果**。"
-            "確定那次生成不會再出現的話,先用 "
-            "artifact_list(notebook_id, kind=\"audio\") 直接看雲端有沒有這一集,"
-            f"{_retract_hint(caps)}"
-            f"再用 {caps['regeneration_entry']} 重生。"
-        ),
+        "safe_next_action": ACTION_RECONCILE if caps["can_reconcile"] else ACTION_RETRACT,
+        "next_step": f"這次對帳在遠端找到 **0 個候選**,{window_note}" + _attempt_next_step(caps),
     }
 
 

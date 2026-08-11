@@ -11,8 +11,8 @@ from notebooklm_mcp import tools_podcast as p
 from notebooklm_mcp.generation_input import load_frozen_generation_input
 
 
-def _write_bundle(workspace, *, brief="exact frozen brief\n"):
-    bundle = workspace / "seasons/s01/qa/attempt-inputs/request-1"
+def _write_bundle(workspace, *, brief="exact frozen brief\n", request_id="request-1"):
+    bundle = workspace / f"seasons/s01/qa/attempt-inputs/{request_id}"
     bundle.mkdir(parents=True)
     files = {
         "runtime_brief": ("runtime-brief.md", brief.encode()),
@@ -38,7 +38,7 @@ def _write_bundle(workspace, *, brief="exact frozen brief\n"):
         "qa_kind": "generation_attempt_input",
         "status": "frozen",
         "episode_id": "ep01",
-        "generation_request_id": "request-1",
+        "generation_request_id": request_id,
         "frozen_at": "2026-07-28T00:00:00+00:00",
         "files": records,
         "dispatch_contract": "provider_must_load_runtime_brief_from_this_bundle",
@@ -519,6 +519,71 @@ async def test_reuse_frozen_input_attempt_points_at_a_way_out_that_actually_work
     assert "不需要" in message and "abandon_in_flight" in message, message
     # 舊訊息的死路建議不該再出現。
     assert "reconcile or resume it instead" not in message, message
+
+
+async def test_settled_frozen_attempt_retract_and_regenerate_with_a_new_bundle_actually_works(
+    fake_client, tmp_path
+):
+    """**P2(item 4)完整序列**:settled 分支附上 `regeneration_hint` 之後,照著做真的
+    走得通,不是只有字面上出現而已。
+
+    只斷言訊息包含「retract」字樣測不出「retract 之後呢?」——`_reuse_frozen_input_
+    attempt` 這條路上 `regeneration_entry` 恆為 `podcast_episode`,而沿用同一個
+    frozen bundle 目錄重生會被 tombstone 擋下來(bundle 裡的 attempt-binding.json
+    還綁著剛作廢的那顆)。這裡把整條路走一次:settled attempt → 免旗標 retract →
+    用**新的、尚未綁定**的 frozen bundle 重生成功。
+    """
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "manifest/series_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    output_dir = workspace / "output"
+    bundle_1, _ = _write_bundle(workspace, request_id="request-1")
+
+    args = dict(
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(output_dir),
+        manifest_path=str(manifest_path),
+        input_bundle_path=str(bundle_1.relative_to(workspace)),
+    )
+    fake_client.artifacts.fail_complete = True  # wait 回終態失敗 → TerminalGenerationError
+    with pytest.raises(RuntimeError):
+        await p.podcast_episode("nb-1", **args)
+    fake_client.artifacts.fail_complete = False
+
+    first = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt_id = first["episodes"][0]["active_attempt_id"]
+    attempt = first["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "accepted", attempt["dispatch"]
+    assert attempt["remote"]["status"] in ("failed", "removed"), attempt["remote"]
+
+    # 撞進 settled 分支,確認 `regeneration_hint` 真的附上了(P2 修復點)。
+    with pytest.raises(ValueError) as excinfo:
+        await p.podcast_episode("nb-1", **args)
+    message = str(excinfo.value)
+    assert "尚未綁定的 frozen bundle" in message, message
+
+    # 照 hint 做:免旗標(authorization_basis="settled")retract。
+    retraction = await p.podcast_attempt_retract(
+        str(manifest_path), 1, attempt_id, reason="settled,換新 bundle 重生"
+    )
+    assert retraction["authorization_basis"] == "settled"
+    assert retraction["stale_source_ids"] == []  # 從沒 finalize 過,沒有回錄 source 要清
+
+    # 用新的、尚未綁定的 frozen bundle 重生——這才是 hint 真正要驗的事:沿用
+    # bundle_1 會被它自己的 attempt-binding.json 擋下來,必須是全新的 bundle。
+    bundle_2, _ = _write_bundle(workspace, request_id="request-2")
+    result = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(output_dir),
+        manifest_path=str(manifest_path),
+        input_bundle_path=str(bundle_2.relative_to(workspace)),
+    )
+    assert result["artifact_id"]
 
 
 def test_frozen_input_rejects_absolute_bundle_path(tmp_path):
