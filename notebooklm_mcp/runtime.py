@@ -104,9 +104,11 @@ def all_clients() -> list[tuple[str, Any]]:
     return list(_POOL)
 
 
-def rotate_client(refused: str | None = None) -> str | None:
-    """把**真正被拒**的那個槽位標成冷卻中,切到下一個**不在冷卻中**的帳號;
-    全部都在冷卻就回 None。
+def rotate_client(
+    refused: str | None = None, skip: frozenset[str] = frozenset()
+) -> str | None:
+    """把**真正被拒**的那個槽位標成冷卻中,切到下一個**不在冷卻中且不在 `skip` 裡**
+    的帳號;繞完一圈都沒有就回 None。
 
     Args:
         refused: 這次真正被拒的帳號 label —— 呼叫端從自己的 `snapshot()` 拿到的那個,
@@ -115,6 +117,15 @@ def rotate_client(refused: str | None = None) -> str | None:
             index 是這個模組的內部表示,呼叫端從來沒有、也不該持有它。
             `None`(或反查不到,例如 pool 已重裝)= 保守退回冷卻當前 `_ACTIVE`
             (舊行為,相容沒有 snapshot 可用的呼叫端)。
+        skip: 呼叫端這一批 failover 已經試過的 label(`tools_podcast._dispatch_
+            audio_with_failover` 的 `tried` 集合)。**排除要發生在這裡的掃描裡,
+            不能只擋回傳值**(這一輪 P1 修復):舊版本這個函式不知道 `skip` 是誰,
+            只回「游標後方第一個不在冷卻中的槽位」——呼叫端事後發現那個槽位剛好
+            試過,只能整批放棄,但游標後面可能還有完全沒試過、也沒在冷卻中的帳號
+            (真實復現:pool A/B/C/D,tried={A,B},並行 request 把游標推到 D、A 的
+            冷卻剛好到期——不掃描時直接跳過 tried 的話,回的是已經試過的 A,C 就這樣
+            白白被漏試)。掃描時 `skip` 與冷卻是**兩個獨立條件**,都要滿足才是候選;
+            冷卻副作用(標記 `refused` 的槽位)不受 `skip` 影響,永遠做。
 
     **為什麼不能無條件冷卻 `_ACTIVE`(v0.9.7 修復的並行缺陷)**:呼叫端是拿早先
     `snapshot()` 取到的 `(label, client)` 去送出的,中間隔著至少一次 await。並行下
@@ -157,8 +168,11 @@ def rotate_client(refused: str | None = None) -> str | None:
     _COOLING[refused_index] = now
     for step in range(1, len(_POOL) + 1):
         candidate = (_ACTIVE + step) % len(_POOL)
+        label = _POOL[candidate][0]
+        if label in skip:
+            continue
         cooled_at = _COOLING.get(candidate)
         if cooled_at is None or now - cooled_at >= _COOLDOWN_SECONDS:
             _ACTIVE = candidate
-            return _POOL[candidate][0]
+            return label
     return None

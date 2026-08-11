@@ -867,6 +867,14 @@ def _rotate_for_quota(
     tried 過,不繼續送」時才丟棄回傳值,冷卻確實該進(帳號真的被拒過),但
     manifest 那筆「換成 to_account」的紀錄從未真正生效(呼叫端沒有真的拿它去送),
     留著就是一筆假的稽核紀錄,而且會覆寫掉上一輪才寫下的、真正生效的 `dispatch.account`。
+
+    **`tried` 現在同時是「排除清單」也是「事後防線」(P1 修復)。** 排除主動傳給
+    `runtime.rotate_client(skip=...)`,讓掃描本身跳過已試過的槽位、繼續往後找 ——
+    而不是像 v0.9.8 之前那樣只回「游標後方第一個不在冷卻中的槽位」,回傳之後才發現
+    它已經 tried 過就整批放棄(游標後面可能還有完全沒試過、也沒在冷卻中的帳號)。
+    下面的 `to_account in tried` 判斷保留成第二道防線 —— `runtime.rotate_client`
+    不保證每個呼叫端(含測試用的 monkeypatch 假件)都真的遵守 `skip`,這裡仍是
+    `_record_dispatch_failover` 前唯一擋得住假稽核紀錄的地方。
     """
     if store is None:
         return None
@@ -874,7 +882,7 @@ def _rotate_for_quota(
     # rotate 只該把真正被拒的那個槽位送進冷卻,反查不到時 `runtime.rotate_client`
     # 自己會保守退回冷卻當前 `_ACTIVE`(舊行為)。冷卻副作用永遠要做,所以這一步
     # 不能被 `tried` 擋掉。
-    to_account = runtime.rotate_client(refused=from_account)
+    to_account = runtime.rotate_client(refused=from_account, skip=frozenset(tried))
     if to_account is None or to_account in tried:
         return None
     _record_dispatch_failover(

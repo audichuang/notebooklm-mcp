@@ -487,7 +487,7 @@ async def test_rotate_for_quota_tells_runtime_which_account_was_actually_refused
 
     captured: dict = {}
 
-    def fake_rotate_client(*, refused=None):
+    def fake_rotate_client(*, refused=None, skip=frozenset()):
         captured["refused"] = refused
         return "b@x"
 
@@ -502,6 +502,57 @@ async def test_rotate_for_quota_tells_runtime_which_account_was_actually_refused
     )
 
 
+async def test_rotate_for_quota_does_not_give_up_when_the_first_scanned_slot_was_tried(
+    fake_client, tmp_path, monkeypatch
+):
+    """**P1**:`runtime.rotate_client` 只回「游標後方第一個不在冷卻中的槽位」,
+    它不知道呼叫端的 `tried` 集合——如果那個槽位剛好試過,`_rotate_for_quota`
+    舊版就直接放棄,但游標後面可能還有完全沒試過、也沒在冷卻中的帳號。
+
+    劇本(主迴圈實跑復現的形狀):pool a/b/c/d,這批 failover 已經試過 a、b
+    (tried={a,b}),游標因為另一個並行 request 已經被推到 d,而 a 的冷卻剛好過期。
+    不傳 `skip` 的話,`runtime.rotate_client` 從 d 往後掃到的第一個「不在冷卻中」
+    候選就是 a——已經試過的那個;c 從沒被拒絕過也沒進冷卻表,卻因為排除只擋在
+    回傳值上(而不是掃描裡)被漏試,`_rotate_for_quota` 因此白白回 None。
+
+    ``fake_client`` 只為了借它的 fixture 收尾(`runtime.set_client(None)`)——這裡
+    直接改寫 pool/`_ACTIVE`/`_COOLING`,沒有這個收尾會漏到同一個 session 後面的測試。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        language="en",
+        audio_format=None,
+        audio_length=None,
+    )
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="b@x")
+
+    import time as time_mod
+
+    runtime.set_clients([(label, fake_client) for label in ("a@x", "b@x", "c@x", "d@x")])
+    now = {"t": 1000.0}
+    monkeypatch.setattr(time_mod, "monotonic", lambda: now["t"])
+    runtime._COOLING[0] = now["t"]  # a 先前被拒,先進冷卻
+    runtime._ACTIVE = 3  # 模擬「並行 request 已經把游標推到 d」
+    now["t"] += runtime._COOLDOWN_SECONDS + 1  # a 的冷卻剛好到期
+
+    result = p._rotate_for_quota(
+        store, 1, attempt_id, RuntimeError("quota"), "b@x", {"a@x", "b@x"}
+    )
+
+    assert result is not None, (
+        "c@x 從沒試過也沒冷卻——不該因為 rotate 掃到的第一個候選剛好是已試過的 "
+        "a@x 就整批放棄"
+    )
+    account, _client = result
+    assert account == "c@x"
+
+
 def _bouncing_rotate_client(pool, state):
     """冷卻永遠已過期的假 `runtime.rotate_client`:在 `pool` 裡的帳號間無限乒乓,
     從不回 None。用呼叫次數當保險絲(**不是牆上時鐘**)——`tried` guard 一旦失效,
@@ -513,7 +564,7 @@ def _bouncing_rotate_client(pool, state):
     """
     calls = {"n": 0}
 
-    def fake_rotate_client(*, refused=None):
+    def fake_rotate_client(*, refused=None, skip=frozenset()):
         calls["n"] += 1
         if calls["n"] > len(pool) + 1:
             raise AssertionError("rotate 被無限呼叫 —— tried guard 失效")
