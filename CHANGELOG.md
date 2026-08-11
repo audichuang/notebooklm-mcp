@@ -6,6 +6,110 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.10
+
+**五輪連續「修好原問題、同時引入新問題」的收束。** 每一輪都是離線測試全綠、突變驗證做過、
+多個獨立視角審過才發版,而下一輪的外部 review 每次都抓到東西 —— 其中多數長在**上一輪新加的
+防護**上。這一版把那個循環的根因處理掉了,而它不在任何一條個別缺陷裡。
+
+### 循環長什麼樣(照時間順序)
+
+| 為了修什麼 | 那個修正自己造成什麼 |
+|---|---|
+| 不要 tombstone 還在飛的 attempt(v0.9.8) | 加的安全窗可被呼叫端縮小到同樣後果 |
+| 終止性不依賴時鐘(v0.9.9) | 加的 tried guard 會漏試仍可用的帳號 |
+| 窗不能被 retry 參數縮小 | 合併兩個窗 → 關閉窗丟 floor、候選窗誤綁外來 artifact |
+| 兩個窗拆回來、方向相反 | 窗變大 → 跨 attempt 誤綁更容易觸發 |
+| 加 guard 擋跨 attempt 誤綁 | guard 有 TOCTOU;停點手寫 action 繞過紅線;tombstone 停點永遠不解除 |
+
+### 根因一:測試全打在 helper 上,看不見公開回傳
+
+`tests/test_attempt_capabilities.py` 的笛卡爾積很漂亮 —— 8000 多個案例、每一格驗不變式。
+但它斷言的是 `_attempt_capabilities()` 的**回傳值**,而工具的公開回傳裡手寫
+`safe_next_action` 時,那套測試**完全看不見**。所以「指引一律由 capabilities 產生」這條紅線
+才寫進 `docs/gotchas-attempt.md`,下一個 commit 新加的 guard 停點就手寫了 `ACTION_ADOPT`,
+而全套照樣綠 —— 紅線有了、文件有了、笛卡爾積有了,就是沒有任何東西在檢查工具真正回什麼。
+
+新增一層**針對公開回傳的契約測試**:實際呼叫 `podcast_episode_reconcile` /
+`podcast_attempt_adopt` / `podcast_attempt_retract`,拿它們真正回傳的 `safe_next_action`
+與 `next_step`,斷言與該狀態下的 capabilities 相容。它上線後**立刻抓到三個既有的手寫偏離**。
+真正需要偏離的出口列進帶理由的例外清單(目前只有一項:`podcast_attempt_adopt` 的
+feedback-source 模式,它問的不是 audio attempt 的下一步,legacy 甚至沒有 `attempt_id`)。
+**偏離從此是刻意且看得見的,不是靜默的手寫值。** 八個公開出口現在全部讀
+`caps["safe_next_action"]`。
+
+### 根因二:時間窗本質上判定不了 artifact 歸屬
+
+前四輪都在調同一個旋鈕的大小 —— 而**窗大 → 誤綁別的 attempt 的產物,窗小 → 撈不到真的**,
+兩邊都是輸。真正的判準是所有權(誰 claim 了它),不是時間。
+
+`_claimed_artifact_ids` 只排除 `remote.artifact_id` 非 None 的 attempt,而一顆 response lost
+的 attempt 它的 artifact_id 就是 None —— 於是它的產物對別人來說是「無主的窗內候選」。
+實跑:EP1 承諾 7200 秒後 response lost,EP2 在 T0+4000 建出 artifact 也 response lost,
+T0+4100 對帳 EP1 就把 EP2 的音檔綁走、改名、下載、回錄、發布成 EP1。
+**這個缺陷 v0.9.8 / v0.9.9 也有**,只是那兩版候選窗較小(用本次 `wait_timeout`,預設 1200 秒),
+觸發條件較窄。
+
+完整的所有權導向重設計**刻意留給獨立一輪**(會碰遠端行為、需要真實驗收)。這一版先把失敗
+模式從「靜默綁錯並發布」收斂成「停下來問人,而且問完有路可走」:同一本 notebook 底下還有
+其他未解決的 attempt 時不自動綁定唯一候選,改走 ambiguous 停點要求明確指名。
+
+而那個 guard 自己又踩了兩個坑,都已修:①**TOCTOU** —— 它原本掃 `artifacts.list` await
+之前的舊 snapshot,並行 session 在那個縫裡 dispatch 就看不到;現在 unresolved 重驗移進
+`_bind_reconciled_artifact` 的同一個原子 update,與 claimed 重驗共用那次區段,RPC 前那次
+降級成便宜的早退。②**tombstone 永久停點** —— 以 `abandon_in_flight` retract 的 attempt
+永久保留 `acceptance_unknown` + `artifact_id=None`,所以永遠算 unresolved;它的遲到 orphan
+落進新 attempt 的候選窗時,每次對帳都回同一個 adopt 停點,而確認「這顆屬於 tombstone」之後
+adopt tombstone 被 default-deny、adopt 自己會錯綁、重跑回到原點 —— **無事可做**。
+(直接排除 retracted 不可採用:那會讓 orphan 自動綁給新 attempt。)現在停點的指引涵蓋
+否定答案,端到端測試實際走完「adopt tombstone 被拒 → retract 自己 → 重生完成」。
+
+### 其餘修正
+
+- **安全窗被 retry 參數改寫**:`window_end` 吃的是**本次** reconcile 呼叫的 `wait_timeout`,
+  而原始 dispatch 承諾等多久沒有被持久化。傳 `wait_timeout=1` 約 61 秒後就給 retract 指引。
+  改成 dispatch 時把承諾存進 `dispatch.wait_timeout`,對帳時
+  `promised = max(這次呼叫, 持久化值)` —— 取 max 而不是「持久化值贏」,因為呼叫端顯式傳大值
+  是撈遲到 artifact 的救援路徑。
+- **兩個窗的保守方向相反,不能共用判準**:關閉判斷窗大才保守(不提前 tombstone),候選篩選窗
+  小才保守(不誤綁)。曾經合併成一顆值,兩邊各壞一半。現在候選窗用 `promised` 裸值、關閉窗
+  在呼叫點套 `max(promised, _RECONCILIATION_MIN_WINDOW)`,推導寫進常數註解 ——
+  下一個人想合併它們的動機會再出現。
+- **failover 漏試可用帳號**:`tried` 的排除發生在 `rotate_client()` **掃描之後**,碰到第一個
+  已試過的候選就整批放棄,而游標後面可能還有沒試過也沒冷卻的帳號(實跑:pool A/B/C/D、
+  已試 A/B、並行把游標推到 D、A 冷卻剛好到期 → 放棄時 C 既沒試過也沒冷卻)。改成把 `skip`
+  傳進掃描裡。
+- **關窗指引講錯窗、還否定自己提供的救援路徑**:文案說「候選窗還沒關」而依據是關閉窗;
+  窗關分支寫死「重呼必然一模一樣」,而放大 `wait_timeout` 重呼就會不一樣 —— 照它做會作廢
+  一顆救得回來的 attempt。
+- **`safe_next_action` 漏掉 `active≠output`**:查 output 回 retract 但實際會被拒(要先處理
+  active)、查 active 回 resume 但實際會因既有 output 被拒 —— 正確出口是先 retract active,
+  兩個建議都走不通。笛卡爾積的 `ROLES` 從三格擴成四格。**這一格內部複審報過、被判成 low
+  沒修**,理由是「行為面已被端到端測試覆蓋」——覆蓋的是 retract 的行為,不是指引。
+- **`wait_timeout` 從「本次等待」升級成持久化安全參數,入口卻沒驗證**:`float('nan')` 存進
+  manifest 之後每次對帳都在 `timedelta(seconds=nan)` 爆掉,那顆 attempt 永久對帳不了。
+  抽成 `_validate_wait_timeout` 接上三個信任邊界(順帶補掉 reconcile 自己的漏洞:
+  `nan <= 0` 是 `False`,舊的 inline 檢查擋不住 nan)。
+- **re-arm 沒清掉新增的持久化欄位**:`_reset_attempt_for_resend` 清了 `account` 卻漏
+  `wait_timeout`,留下「沒有當前 dispatch 卻帶著上一輪承諾」的形狀。同函式清 `account` 的
+  註解理由逐字適用:「缺漏至少看得出來,錯的值看不出來」。
+
+### 方法論(這幾輪最該留下來的東西)
+
+- **AGENTS.md 紀律④**:「修正有沒有修好原問題」與「修正自己有沒有引入新問題」是兩個不同的
+  審查,要分開問。v0.9.8 派了三個 opus 視角、每條突變驗證、全套綠、tag 也發了,外部 review
+  仍抓到四條 —— 根因不在審查者,在 prompt:他們拿到的是「這幾條修正對不對」,於是逐條對照
+  原缺陷驗證,沒有人對成品重新問「這裡面有什麼是新的、而且沒被任何測試守住的」。
+- **不變式測試有盲區**:拿掉 `_attempt_next_step` 的 `output_owner` 分支時,純不變式測試
+  **0 failed**,只有顯式測試抓到(135 failed)。不變式抓自相矛盾,抓不到語意選錯。
+- **事後切 patch 做不到「commit 內容 = 驗證過的內容」**:用
+  `git apply --cached --unidiff-zero` 分批提交時,`-U0` 沒有 context 行,連續套用的行號偏移
+  把一整個 helper 插進了另一個函式的註解中間,三個 commit 全錯 —— **而 pytest 跑的是
+  working tree,所以照樣 8779 綠**。要一修復一 commit,得在實作階段逐條做完逐條提交。
+
+8785 passed + 597 skipped。每條修正各自突變驗證過;主迴圈另外獨立驗過三個最關鍵的突變
+(atomic 重驗、公開契約測試、guard 本體),不是只讀 agent 的回報。
+
 ## v0.9.9
 
 外部 Codex 對 v0.9.8 做獨立 review,抓到四條 —— **其中兩條是 v0.9.8 自己引入的,
