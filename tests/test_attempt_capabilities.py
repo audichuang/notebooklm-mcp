@@ -29,7 +29,15 @@ DISPATCH_STATES = (
     "reconciliation_ambiguous",
 )
 REMOTE_STATES = (None, "pending", "completed", "failed", "removed")
-ROLES = ("active", "output", "historical")
+# P1(Codex adversarial review 實跑驗證):`active_not_output` 是 ADR-0009 amendment
+# 明列、但這三格笛卡爾積生不出來的第四格——active=自己、output=另一顆不同的
+# attempt。實跑用 helper 查這格的答案:查 A(output)→ podcast_attempt_retract,
+# 但實際 retract A 會被 active guard 拒(要求先處理 active B);查 B(active)→
+# can_resume/can_reconcile 可能算出 True 而指向 resume/reconcile,但實際會被
+# `_ensure_resume_attempt` 的既有 output guard 拒收。正確且唯一的出口是先 retract
+# B 自己——這一格補進來之前,`_attempt_capabilities`/`_attempt_next_step` 對 B 完全
+# 沒有測試守著。
+ROLES = ("active", "output", "historical", "active_not_output")
 SETTINGS_SHAPES = {
     # `podcast_series` 不指名來源時的形狀(逐字,由 test_source_selection 鎖著)
     "series": ({"language": "zh", "audio_format": None, "audio_length": None}, None),
@@ -79,6 +87,11 @@ def _case(dispatch, remote, role, shape):
     elif role == "output":
         episode["active_attempt_id"] = "att-me"
         episode["output_attempt_id"] = "att-me"
+    elif role == "active_not_output":
+        # active≠output 分岔(P1 補的第四格):自己是 active,但另一顆(att-other)
+        # 才是這一集的正式輸出。
+        episode["active_attempt_id"] = "att-me"
+        episode["output_attempt_id"] = "att-other"
     else:  # historical:已被別顆取代
         episode["active_attempt_id"] = "att-other"
         episode["output_attempt_id"] = "att-other"
@@ -371,6 +384,12 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
     assert action is None or action in p.SAFE_NEXT_ACTIONS or action == p.ACTION_EPISODE
     if caps["is_output"]:
         assert action == p.ACTION_RETRACT
+    elif caps["authorization_basis"] == "output_owner":
+        # P1:active≠output 分岔(自己是 active,但另有一顆不同的 output)——can_resend
+        # /can_resume/can_reconcile 對這格可能仍算出 True,但那三條路都會被既有 output
+        # guard 擋下來,safe_next_action 必須無條件指向先 retract 自己,優先序排在
+        # 它們前面(見 `_attempt_capabilities` 裡 `elif basis == "output_owner":` 那格)。
+        assert action == p.ACTION_RETRACT
     elif caps["can_resend"]:
         assert action == caps["regeneration_entry"], (
             "can_resend 為真時,safe_next_action 該是原樣重呼的那支工具"
@@ -409,6 +428,11 @@ def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
         or caps["is_output"]
         or caps["authorization_basis"] == "settled"
         or caps["can_resume"]
+        # P1:active≠output 分岔(`authorization_basis == "output_owner"` 但
+        # `is_output` 為 False)也是更高優先序的分支——見
+        # `test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches`
+        # 同一顆 caps 的對應斷言。
+        or caps["authorization_basis"] == "output_owner"
     ):
         pytest.skip("更高優先序的分支先接手,不會走到窗狀態說明")
     if not caps["is_active"] and not caps["is_output"]:
@@ -443,4 +467,91 @@ def test_the_default_reconciliation_window_state_is_unevaluated_not_open(
     caps = p._attempt_capabilities(episode, attempt, "att-me")  # 不傳 → 預設值
     assert caps["reconciliation_window_closed"] is None, (
         "預設值必須是 None(沒算過),不是 False(已確認未關)"
+    )
+
+
+@pytest.mark.parametrize("dispatch,remote,shape", [
+    (d, r, s) for d in DISPATCH_STATES for r in REMOTE_STATES for s in SETTINGS_SHAPES
+])
+def test_active_not_output_narrative_teaches_retracting_itself_not_resume_or_resend(
+    dispatch, remote, shape
+):
+    """**P1(Codex adversarial review 實跑驗證):`_attempt_next_step` 的文字要跟著
+    `safe_next_action` 的新分支走,不能只改一邊。**
+
+    Codex 實跑用 helper 查這格(active=B、output=A)的答案:查 A(output)→
+    `podcast_attempt_retract`,但實際 retract A 會被 active guard 拒(要求先處理
+    active B);查 B(active)→ can_resume/can_reconcile 可能算出 True 而指向
+    resume/reconcile,但實際會被 `_ensure_resume_attempt` 的既有 output guard 拒收。
+    正確且唯一的出口是先 retract B 自己。
+
+    這條直接鎖 `_attempt_next_step` 產生的文字(不只是 `safe_next_action` 那個
+    工具名欄位)——把這裡的分支拿掉,文字會落回 can_resend/can_resume/can_reconcile
+    分支,教出 resume/reconcile/原樣重呼這些會被既有 output 擋下來的死路,而純不變式
+    測試(`test_every_state_combination_yields_executable_guidance`)照不到這個盲區
+    (can_resume/can_resend 這些 caps 本身在這格可能就是 True,自洽,但系統性是錯的
+    ——跟 AGENTS.md 記錄的「獨立複審用兩個突變證明的盲區」同一個形狀)。
+
+    突變驗證:把 `_attempt_next_step` 裡 `caps["authorization_basis"] ==
+    "output_owner"` 那個分支拿掉,這條就會紅(而純不變式測試全綠,抓不到)。
+    """
+    episode, attempt = _case(dispatch, remote, "active_not_output", shape)
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    step = p._attempt_next_step(caps)
+
+    assert "podcast_attempt_retract" in step, step
+    assert "podcast_episode_resume" not in step, step
+    assert "podcast_episode_reconcile" not in step, step
+    assert "原樣重呼" not in step, step
+
+
+def test_window_open_narrative_names_the_closure_window_not_the_candidate_window():
+    """**P1(Codex adversarial review 實跑驗證):兩個窗上一輪才刻意拆開,文案不准
+    再把它們合併。**
+
+    `can_reconcile` 依據的是「關閉判斷窗」(`reconciliation_window_closed`,含
+    `_RECONCILIATION_MIN_WINDOW` 1 小時保守下限),`podcast_episode_reconcile` 篩選
+    候選用的是另一個「候選窗」(`promised` 原始值,不套下限)。Codex 實跑抓到的反例:
+    `promised=60`、dispatch 在 1500 秒前、`wait_timeout=1` 重呼——候選窗早在 120 秒
+    就關了,但 1 小時的關閉判斷窗還沒關,舊文案卻回「候選窗還沒關」,把兩個窗混成
+    一個講。這裡直接餵「明確算過、窗還沒關」的三態值(`False`),鎖住訊息不准再講
+    「候選窗」,必須改講它實際依據的關閉判斷窗。
+
+    突變驗證:把 `_attempt_next_step` 這句話的措辭改回「候選窗還沒關」就會紅。
+    """
+    episode, attempt = _case("dispatching", None, "active", "series")
+    caps = p._attempt_capabilities(
+        episode, attempt, "att-me", reconciliation_window_closed=False
+    )
+    step = p._attempt_next_step(caps)
+
+    assert "候選窗" not in step, step
+    assert "關閉判斷窗" in step, step
+
+
+def test_window_closed_narrative_offers_the_widen_wait_timeout_rescue_not_an_absolute_claim():
+    """**P1(Codex adversarial review 實跑驗證):窗關了之後不准再宣稱「重呼必然
+    相同」——那句話否定了指引自己提供的救援路徑。**
+
+    Codex 實跑對比:`promised=60`、dispatch 在 7200 秒前、artifact 建於
+    dispatch+5000 秒——第一次用 `wait_timeout=1` 得到這句話並宣稱「重呼會得到一模
+    一樣的回傳」,第二次用本 commit 自己定義的救援值 `wait_timeout=10000` 重呼,
+    同一顆 artifact 立刻被綁定並回 `podcast_episode_resume`。舊文案的「未來任何
+    artifact 都會落在窗外」只在**沿用同一個 wait_timeout** 時成立,寫成無條件宣稱
+    就是自我矛盾。
+
+    突變驗證:把「未來任何 artifact 都會落在窗外」這句絕對宣稱放回去,或拿掉
+    「放大 wait_timeout」的揭露,這條就會紅。
+    """
+    episode, attempt = _case("dispatching", None, "active", "series")
+    caps = p._attempt_capabilities(
+        episode, attempt, "att-me", reconciliation_window_closed=True
+    )
+    step = p._attempt_next_step(caps)
+
+    assert "候選窗" not in step, step
+    assert "已經關了" in step, step
+    assert "未來任何 artifact 都會落在窗外" not in step, step
+    assert "放大" in step and "wait_timeout" in step, (
+        f"沒有揭露放大 wait_timeout 的救援路徑:{step}"
     )

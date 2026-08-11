@@ -269,6 +269,11 @@ def _attempt_capabilities(
       (`SAFE_NEXT_ACTIONS` 之一,或 `None` 代表歷史紀錄沒有可執行的下一步)。跟
       `_attempt_next_step()` 的文字分支順序逐字對齊、由同一組笛卡爾積測試互相對照
       鎖住——那裡是「怎麼講」,這裡是「哪支工具」,兩者故意分開算但答案不准分岔。
+      **P1 修復**:ADR-0009 amendment 明列的 active≠output 分岔(自己是 active,
+      但另有一顆不同的 attempt 是 output)這一格,`ROLES` 笛卡爾積(`active`/
+      `output`/`historical`)原本生不出來——can_resend/can_resume/can_reconcile
+      對它可能仍算出 True,但 resume 與原樣重呼都會被既有 output 擋下來,唯一出口
+      是先 retract 自己,見下面 `elif basis == "output_owner":` 那個分支。
     """
     dispatch_status = (attempt.get("dispatch") or {}).get("status")
     remote = attempt.get("remote") or {}
@@ -310,6 +315,19 @@ def _attempt_capabilities(
     if not is_active and not is_output:
         safe_next_action = None  # 歷史紀錄,沒有可執行的下一步——要動的是 active/output
     elif is_output:
+        safe_next_action = ACTION_RETRACT
+    elif basis == "output_owner":
+        # P1(Codex adversarial review 實跑驗證,ADR-0009 amendment 明列的
+        # active≠output 分岔):`is_output` 已經在上面擋掉「自己就是 output」那格,
+        # 走到這裡代表 `basis == "output_owner"` 只可能來自另一個分支——active=自己、
+        # output=別顆(見上面 `elif output_attempt_id is not None:` 那行)。這顆是
+        # 未經授權的 candidate,can_resend/can_resume/can_reconcile 對它可能仍算出
+        # True(dispatch/remote 欄位形狀跟正常在飛的第一顆 attempt 分不出來),但
+        # 實測兩條路都是死路:`_create_audio_attempt` 一看到 episode 已有
+        # `output_attempt_id` 就在最前面整段拒收(連「原樣重呼」都進不去),
+        # `_ensure_resume_attempt` 的兩條分支也都有同一道 output guard 拒收 resume。
+        # 唯一走得通的出口是先 retract 自己——這裡優先序必須排在
+        # can_resend/can_resume/can_reconcile 之前,否則會被那三個誤判的 True 蓋過去。
         safe_next_action = ACTION_RETRACT
     elif can_resend:
         # 原樣重呼＝再叫一次建立它的那支工具，跟「重生要用哪支工具」同一個判準。
@@ -377,9 +395,26 @@ def _attempt_next_step(caps: dict) -> str:
 
     **窗宣稱只能在明確算過時講**(第四輪修復):`caps["reconciliation_window_closed"]`
     是三態(`None`/`True`/`False`)。`can_reconcile` 分支只有在它是 `False`(明確
-    算過、窗還沒關)時才附加「候選窗還沒關,過幾分鐘後重呼有機會撈到」;`None`(五個
-    呼叫點裡有四個從沒算過時間)時回到 v0.9.9 原文,不提窗的任何字——否則會跟真的
-    算過窗、判定「已經關了」的 `podcast_episode_reconcile` 對同一顆 attempt 打對台。
+    算過、窗還沒關)時才附加窗狀態說明;`None`(五個呼叫點裡有四個從沒算過時間)時
+    回到 v0.9.9 原文,不提窗的任何字——否則會跟真的算過窗、判定「已經關了」的
+    `podcast_episode_reconcile` 對同一顆 attempt 打對台。
+
+    **P1 修復:兩處窗宣稱都不准再講「候選窗」。**`can_reconcile` 依據的是
+    `reconciliation_window_closed`(**關閉判斷窗**,含 `_RECONCILIATION_MIN_WINDOW`
+    1 小時保守下限),跟 `podcast_episode_reconcile` 篩選候選用的候選窗(`promised`
+    原始值,不套下限)是刻意拆開的兩個不同的窗(見檔案開頭 `_RECONCILIATION_MIN_WINDOW`
+    的常數註解)。Codex 實跑抓到:`promised=60`、dispatch 在 1500 秒前、
+    `wait_timeout=1` 重呼——候選窗早在 120 秒就關了,但 1 小時的關閉判斷窗還沒關,
+    這裡卻回「候選窗還沒關」,把兩個窗混成一個。措辭改成講**這句話實際依據的那個
+    窗**(關閉判斷窗),不再用「候選窗」這個已經另有所指的字面值。
+
+    **窗已關的分支也拿掉了「重呼必然相同」的絕對宣稱**:原文說「再對帳一次也只會
+    拿到一模一樣的回傳,繼續等沒有用」,但那只在呼叫端**沿用同一個 `wait_timeout`**
+    時才成立——Codex 實跑對比:`wait_timeout=1` 得到這句話並宣稱死路,換成本 commit
+    自己定義的救援值 `wait_timeout=10000` 重呼,同一顆 artifact 立刻被綁定。指引
+    自己否定了自己提供的救援路徑。現在改成揭露這條路:**放大 `wait_timeout` 重呼
+    有機會撈到更晚建立的 artifact**(候選篩選窗會跟著放大,關閉判斷窗的保守下限不受
+    影響,見 `_promised_reconciliation_window_seconds` docstring)。
     """
     if not caps["is_active"] and not caps["is_output"]:
         return "它已經被取代,是歷史紀錄 —— 要動的是現在的 active／output attempt。"
@@ -388,6 +423,18 @@ def _attempt_next_step(caps: dict) -> str:
             "它是這一集的正式輸出:要作廢就直接 podcast_attempt_retract"
             "(**不需要** abandon_in_flight),照回傳的 stale_source_ids 逐一 source_delete,"
             f"再用 {caps['regeneration_entry']} 重生。" + caps["regeneration_hint"]
+        )
+    if caps["authorization_basis"] == "output_owner":
+        # P1(見上面 `_attempt_capabilities` 的 safe_next_action 分支,同一組笛卡爾
+        # 積測試互相對照鎖住):走到這裡代表 active≠output 分岔——`is_output` 已在
+        # 上面擋掉「自己就是 output」那格,這裡只可能是「自己是 active,但另有一顆
+        # 不同的 attempt 是 output」。**不附 regeneration_hint**:retract 自己之後
+        # episode 仍以既有 output 為準,不需要重生,附上「怎麼重生」的提醒反而是誤導。
+        return (
+            "這一集已經有另一顆 attempt 是正式輸出,這顆(active 但非 output)是未經"
+            "授權的 candidate——resume 與對帳都會被既有輸出擋下來(ADR-0009 amendment):"
+            "先 podcast_attempt_retract(**不需要** abandon_in_flight)作廢它就好,"
+            "不必重生,既有輸出不受影響。"
         )
     if caps["can_resend"]:
         return (
@@ -422,9 +469,12 @@ def _attempt_next_step(caps: dict) -> str:
     if caps["can_reconcile"]:
         if caps["reconciliation_window_closed"] is False:
             # 明確算過、窗還沒關——才有資格講「還有機會撈到」這句時間性宣稱。
+            # **講的是關閉判斷窗,不是候選窗**(P1 修復,見上面 docstring):兩者是
+            # 刻意拆開的不同窗,這句話依據的是前者。
             return (
                 "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完;"
-                "候選窗還沒關,過幾分鐘後重呼有機會撈到,現在重呼未必是一模一樣的空結果)。"
+                "這次對帳依據的關閉判斷窗還沒關,過幾分鐘後重呼有機會撈到,現在重呼"
+                "未必是一模一樣的空結果)。"
                 + retract_hint
             )
         # `None`:呼叫端沒算過窗(建立衝突／resume 停點／frozen 重呼卡住這四個
@@ -441,10 +491,15 @@ def _attempt_next_step(caps: dict) -> str:
         # 就不用再自己組。**故意不提 `podcast_episode_reconcile` 這個字面值**:窗
         # 關了之後這個工具名不准再出現在指引裡(見
         # test_every_state_combination_yields_executable_guidance 的 window_closed 斷言)。
+        # **P1 修復(見上面 docstring)兩處**:①講的是關閉判斷窗,不是候選窗——這裡
+        # 才套 `_RECONCILIATION_MIN_WINDOW` 保守下限,跟候選篩選窗是刻意拆開的兩個
+        # 窗。②拿掉「重呼必然相同」的絕對宣稱:那只在沿用同一個 `wait_timeout` 時
+        # 才成立,放大它是救援路徑的逃生口,不能被這句話堵死。
         return (
-            "候選窗(dispatch 到 wait_timeout 那段時間,含時鐘容錯)已經關了——"
-            "未來任何 artifact 都會落在窗外,再對帳一次也只會拿到一模一樣的回傳,"
-            "繼續等沒有用。"
+            "關閉判斷窗(dispatch 到 wait_timeout 與 1 小時保守下限取大者,含時鐘容錯)"
+            "已經關了——沿用原本的 wait_timeout 重呼只會拿到一模一樣的空結果;但"
+            "**放大 wait_timeout 重呼有機會撈到更晚建立的 artifact**,不是「繼續等"
+            "就沒有用」。"
             + retract_hint
         )
     return retract_hint
@@ -1304,6 +1359,15 @@ def _reset_attempt_for_resend(attempt: dict) -> None:
     # 帳號也要 pop:留著會變成**過期值**——manifest 說 A 生的,實際是重送時的 B 送出的。
     # 缺漏至少看得出來,錯的值看不出來(v0.8.0 驗收 F-4)。
     dispatch.pop("account", None)
+    # P2(Codex 實跑驗證):`wait_timeout` 是**這次 dispatch** 的持久化承諾(見
+    # `_validate_wait_timeout` docstring),reset 回 `prepared` 就代表這次 dispatch
+    # 已經不存在了——留著上一輪的值會被下一次對帳誤當成「這次」的窗判準。實跑重現:
+    # `wait_timeout=7200` 被拒 → reset 成 prepared → 用 `wait_timeout=60` 重試 →
+    # manifest 卻是 `status=prepared`／`dispatched_at=None`／`wait_timeout=7200.0`
+    # ——沒有當前 dispatch,卻留著上一輪的窗。**這裡是所有 dispatch-specific 欄位
+    # 該清的地方,新增持久化欄位時記得跟上**——這正是「新增欄位卻沒跟著清理義務走」
+    # 的典型補一半。
+    dispatch.pop("wait_timeout", None)
     attempt["remote"].update(
         {
             "status": "unknown",
@@ -2177,6 +2241,57 @@ async def podcast_episode(
     )
 
 
+# P1(Codex adversarial review 實跑驗證,主迴圈裁決採納):**時間窗本身判定不了
+# artifact 歸屬。** 兩顆並行、各自 response lost 的 unresolved attempt,候選窗會
+# 重疊——窗內出現的一顆 artifact 可能是「另一顆」的產物,不是「正在對帳的這一顆」的。
+# 實跑重現:EP1 用 wait_timeout=7200 dispatch 後 response lost;EP2 在窗內另外
+# dispatch,也 response lost、建出 artifact-B(同樣還沒 claim);對 EP1 reconcile 時,
+# artifact-B 落在 EP1 的候選窗內、不在 EP1 的 baseline、也沒被 EP2 claim,於是被判成
+# EP1 的「唯一候選」而誤綁——manifest 的稽核紀錄從此失真(這顆其實是 EP2 的)。
+#
+# 完整重新設計歸屬判定不在這輪範圍,這裡先加 Codex 驗過的保守 guard:唯一候選出現
+# 時,若同一本 notebook 底下還有其他「未解決」的 attempt,代表這顆 artifact 有可能
+# 是它的產物,不能自動綁定——停下來把候選交給呼叫端,要求明確指名
+# (`podcast_attempt_adopt`)。**只有一顆 attempt 在飛的正常情境不受影響**:那時
+# `_unresolved_attempt_ids` 排除自己之後找不到任何人,guard 不會觸發,自動綁定照舊。
+#
+# 「未解決」的判準:dispatch_status 落在對帳中的三個狀態(與 `can_reconcile` 判準
+# 一致——`_NEVER_DISPATCHED` 從沒離開本機、`_TERMINAL_REMOTE` 已終態,兩者往後都不會
+# 再冒出新 artifact,不算「未解決」)、且尚未 claim 到 artifact。這三個狀態下
+# `remote.artifact_id` 理論上恆為 None(見下面 `podcast_episode_reconcile` 開頭的
+# 一致性檢查:`remote_artifact_id is not None` 時 `dispatch_status` 必須是
+# `"accepted"`),這裡仍顯式檢查而不是只憑 dispatch_status 假設,防呆成本很低。
+_UNRESOLVED_DISPATCH_STATUSES = frozenset(
+    {"dispatching", "acceptance_unknown", "reconciliation_ambiguous"}
+)
+
+
+def _unresolved_attempt_ids(
+    manifest: dict, notebook_id: str, excluding_attempt_id: str
+) -> list[str]:
+    """同一本 notebook 底下，還有哪些「已送出但還沒被認領」的 attempt(排除自己)。
+
+    回傳值只用來回答「能不能自動綁定」,不是稽核紀錄,所以不需要跨 notebook —— 別本
+    notebook 的 attempt 不可能在這本 notebook 的 `artifacts.list` 裡冒出候選。
+    """
+    unresolved: list[str] = []
+    for episode in manifest.get("episodes", []):
+        for attempt in episode.get("attempts", []):
+            attempt_id = attempt.get("attempt_id")
+            if (
+                attempt_id == excluding_attempt_id
+                or attempt.get("notebook_id") != notebook_id
+            ):
+                continue
+            remote = attempt.get("remote") or {}
+            if remote.get("artifact_id") is not None:
+                continue
+            dispatch = attempt.get("dispatch") or {}
+            if dispatch.get("status") in _UNRESOLVED_DISPATCH_STATUSES:
+                unresolved.append(attempt_id)
+    return sorted(unresolved)
+
+
 @mcp.tool()
 async def podcast_episode_reconcile(
     manifest_path: str,
@@ -2276,17 +2391,45 @@ async def podcast_episode_reconcile(
 
     candidate_ids = sorted(candidates)
     if len(candidate_ids) == 1:
-        artifact_id = candidate_ids[0]
-        _bind_reconciled_artifact(
-            store, episode_n, attempt_id, artifact_id
+        # **時間窗判定不了歸屬,所有權才是**(P1,見上面 `_unresolved_attempt_ids`
+        # 的推導)。同一本 notebook 底下還有別的 attempt 也還沒 claim 到 artifact 時,
+        # 窗內這顆唯一候選有可能其實是它的產物——不自動綁定,停下來讓呼叫端指名。
+        blocking_attempt_ids = _unresolved_attempt_ids(
+            snapshot, notebook_id, excluding_attempt_id=attempt_id
+        )
+        if not blocking_attempt_ids:
+            artifact_id = candidate_ids[0]
+            _bind_reconciled_artifact(
+                store, episode_n, attempt_id, artifact_id
+            )
+            return {
+                "complete": False,
+                "episode_n": episode_n,
+                "attempt_id": attempt_id,
+                "observed_state": "accepted",
+                "artifact_id": artifact_id,
+                "safe_next_action": ACTION_RESUME,
+            }
+        # 跟「真的有多筆候選」共用同一個安全停點(`reconciliation_ambiguous` +
+        # `podcast_attempt_adopt`):道理相同,都是「manifest 自己分不出這顆屬於誰,
+        # 需要呼叫端帶外部知識來指名」。
+        _mark_reconciliation_ambiguous(
+            store, episode_n, attempt_id, candidate_ids
         )
         return {
             "complete": False,
             "episode_n": episode_n,
             "attempt_id": attempt_id,
-            "observed_state": "accepted",
-            "artifact_id": artifact_id,
-            "safe_next_action": ACTION_RESUME,
+            "observed_state": "reconciliation_ambiguous",
+            "candidate_artifact_ids": candidate_ids,
+            "safe_next_action": ACTION_ADOPT,
+            "next_step": (
+                "時間窗內只有一個候選 artifact,但同一本 notebook 底下還有其他尚未 "
+                f"claim 到 artifact 的 attempt 也在飛(attempt_id: {blocking_attempt_ids!r})"
+                "——這顆 artifact 有可能是它們的產物,時間窗判定不了真正的歸屬,不自動"
+                f"綁定。用 artifact_list 或其他外部知識確認它確實屬於這次 dispatch 之後,"
+                f"呼叫 {ACTION_ADOPT} 明確指名 artifact_id 綁定。"
+            ),
         }
     if len(candidate_ids) > 1:
         _mark_reconciliation_ambiguous(

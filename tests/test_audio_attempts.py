@@ -274,6 +274,92 @@ async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller
     assert out["safe_next_action"] == p.ACTION_RETRACT, out
 
 
+async def test_reconcile_does_not_auto_bind_when_another_attempt_is_still_unresolved(
+    fake_client, tmp_path
+):
+    """**P1**(Codex adversarial review 實跑驗證,主迴圈裁決採納):時間窗本身判定不了
+    artifact 歸屬。實跑重現:EP1 用 `wait_timeout=7200` dispatch 後 response lost;
+    EP2 在 EP1 的候選窗內另外 dispatch,也 response lost、但遠端真的建出了
+    artifact-created-by-b(同樣還沒 claim)。對 EP1 reconcile 時,這顆 artifact 落在
+    EP1 的候選窗內、不在 EP1 的 baseline、也沒被 EP2 claim,舊行為會判成 EP1 的
+    「唯一候選」而誤綁——Codex 實跑輸出正是 `artifact_id="artifact-created-by-b"`。
+
+    修法:唯一候選出現時,若同一本 notebook 底下還有其他「未解決」的 attempt(這裡
+    是 EP2),代表這顆 artifact 有可能是它的產物——不自動綁定,改成跟「真的有多筆
+    候選」共用的安全停點(`reconciliation_ambiguous` + `podcast_attempt_adopt`)。
+
+    ⚠️ 只有一顆 attempt 在飛的正常情境不該受這條 guard 影響——那條回歸鎖已經是
+    `test_reconcile_adopts_the_only_unclaimed_audio_candidate`(上面第一條 reconcile
+    測試),不重複造一份。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+
+    async def _dispatch_and_lose_response(episode_n: int, title: str, wait_timeout: float):
+        fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+        with pytest.raises(TimeoutError, match="response lost"):
+            await p.podcast_episode(
+                "nb-1",
+                episode_n=episode_n,
+                title=title,
+                brief=f"第{episode_n}集",
+                output_dir=str(tmp_path),
+                manifest_path=str(manifest_path),
+                wait_timeout=wait_timeout,
+            )
+
+    # EP1:T0 dispatch,承諾等 7200 秒,response lost,這次遠端(目前為止)還沒有
+    # 任何 artifact。
+    await _dispatch_and_lose_response(1, "心法篇", 7200)
+    # EP2:在 EP1 的候選窗內另外 dispatch,也 response lost——但這次遠端真的建出了
+    # artifact-created-by-b(模擬「response lost,但伺服器已經受理並開始生成」)。
+    fake_client.artifacts.generate_remote_artifacts_before_raise = [
+        _remote_audio("artifact-created-by-b")
+    ]
+    await _dispatch_and_lose_response(2, "續集", 1200)
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
+    ep2 = next(e for e in stored["episodes"] if e["episode"] == 2)
+    ep1_attempt_id = ep1["active_attempt_id"]
+    ep2_attempt_id = ep2["active_attempt_id"]
+
+    # 模擬「EP1 在 T0 dispatch、EP2 在 T0+4000 dispatch、對帳發生在 T0+4100」——
+    # 用 backdate 控制相對時間,不必真的等。
+    store = p.ManifestStore(str(manifest_path))
+
+    def backdate(episode_n: int, attempt_id: str, seconds_ago: float):
+        def _mutate(manifest: dict) -> None:
+            _, attempt = p._attempt_record(manifest, episode_n, attempt_id)
+            attempt["dispatch"]["dispatched_at"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+            ).isoformat()
+
+        store.update(_mutate)
+
+    backdate(1, ep1_attempt_id, 4100)
+    backdate(2, ep2_attempt_id, 100)
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=ep1_attempt_id, wait_timeout=1200,
+    )
+
+    # **鑑別點**:artifact-created-by-b 停在候選清單裡等呼叫端指名,不是被 EP1
+    # 直接認領走。拿掉這輪的 guard(讓 `blocking_attempt_ids` 恆為 `[]`)會讓下面
+    # 兩條斷言雙雙變回舊行為(`out["artifact_id"] == "artifact-created-by-b"` /
+    # `safe_next_action == podcast_episode_resume`)。
+    assert out["candidate_artifact_ids"] == ["artifact-created-by-b"], out
+    assert out["safe_next_action"] == p.ACTION_ADOPT, out
+    assert out.get("artifact_id") is None, out
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ep1_attempt = next(
+        a for a in stored["episodes"][0]["attempts"] if a["attempt_id"] == ep1_attempt_id
+    )
+    assert ep1_attempt["remote"]["artifact_id"] is None, (
+        "誤綁的話這裡會被寫成 artifact-created-by-b —— EP1 從沒真的建出這顆 artifact"
+    )
+
+
 async def test_dispatch_persists_the_original_wait_timeout_promise(
     fake_client, tmp_path
 ):
@@ -318,6 +404,51 @@ async def test_series_resend_dispatch_also_persists_the_wait_timeout_promise(
     )
     attempt = stored["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["wait_timeout"] == 4321.0, attempt["dispatch"]
+
+
+def test_reset_attempt_for_resend_clears_the_stale_wait_timeout_promise():
+    """**P2(Codex adversarial review 實跑驗證):新增的持久化欄位沒有跟著清理義務
+    走。**
+
+    `wait_timeout` 是**這次 dispatch** 的持久化承諾(見 `_validate_wait_timeout`
+    docstring),`_reset_attempt_for_resend` 把 attempt 就地清回乾淨的 `prepared`
+    時代表這次 dispatch 已經不存在了,留著上一輪的 `wait_timeout` 會被下一次對帳
+    誤當成「這次」的窗判準。Codex 實跑重現:`wait_timeout=7200` 的 dispatch 被拒 →
+    `not_accepted` → 以 `wait_timeout=60` 重試 → reset 成 `prepared` → claim 前的
+    baseline RPC 失敗,留下的 manifest 是 `status=prepared`／`dispatched_at=None`／
+    `wait_timeout=7200.0`——沒有當前 dispatch,卻留著上一輪的 dispatch-specific
+    timeout。同一個函式已經在清 `account`(v0.8.0 驗收 F-4 的教訓),`wait_timeout`
+    要跟著清在旁邊。
+
+    突變驗證:把新加的 `dispatch.pop("wait_timeout", None)` 拿掉就會紅。
+    """
+    attempt = {
+        "dispatch": {
+            "status": "not_accepted",
+            "artifact_ids_before": ["stale-baseline-id"],
+            "dispatched_at": "2026-01-01T00:00:00+00:00",
+            "accepted_at": "2026-01-01T00:00:01+00:00",
+            "account": "stale-account",
+            "wait_timeout": 7200.0,
+        },
+        "remote": {
+            "status": "failed",
+            "status_origin": "remote",
+            "observed_at": "2026-01-01T00:00:02+00:00",
+            "error": "quota exceeded",
+            "error_code": "RESOURCE_EXHAUSTED",
+        },
+    }
+
+    p._reset_attempt_for_resend(attempt)
+
+    dispatch = attempt["dispatch"]
+    assert "wait_timeout" not in dispatch, dispatch
+    assert "account" not in dispatch, dispatch
+    assert dispatch["status"] == "prepared"
+    assert dispatch["artifact_ids_before"] == []
+    assert dispatch["dispatched_at"] is None
+    assert dispatch["accepted_at"] is None
 
 
 @pytest.mark.parametrize("bad_wait_timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
