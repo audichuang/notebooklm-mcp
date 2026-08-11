@@ -3,6 +3,7 @@ import json
 import os
 
 import pytest
+from notebooklm.exceptions import NetworkError
 
 from notebooklm_mcp import tools_basic as t
 from notebooklm_mcp import tools_podcast as p
@@ -46,7 +47,7 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
     assert fake_client.sources.titles() == ["EP01 心法篇"]
 
 
-async def test_series_resume_connection_error_returns_structured_partial(
+async def test_series_resume_network_error_returns_structured_partial(
     fake_client, tmp_path
 ):
     fake_client.artifacts.fail_wait_on = 1
@@ -59,7 +60,7 @@ async def test_series_resume_connection_error_returns_structured_partial(
     assert first["observed_state"] == "pending"
 
     fake_client.artifacts.fail_wait_on = 2
-    fake_client.artifacts.wait_exc = ConnectionError("resume network down")
+    fake_client.artifacts.wait_exc = NetworkError("resume network down")
     resumed = await p.podcast_series(
         "nb-1", episodes=eps, output_dir=str(tmp_path)
     )

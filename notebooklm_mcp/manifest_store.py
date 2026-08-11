@@ -23,6 +23,10 @@ class ManifestConflictError(RuntimeError):
     """caller 讀取預期 revision 後，manifest 已被其他 writer 更新。"""
 
 
+class ManifestPostCommitError(OSError):
+    """manifest 已 replace 成新 revision，但 parent-directory fsync 失敗。"""
+
+
 class ManifestStore:
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
@@ -120,7 +124,11 @@ class ManifestStore:
             _fsync_parent(str(self.path))
         except OSError as exc:
             if exc.errno not in _DIR_FSYNC_UNSUPPORTED:
-                raise
+                raise ManifestPostCommitError(
+                    exc.errno,
+                    f"manifest was committed but directory fsync failed: {exc}",
+                    str(self.path),
+                ) from exc
 
 
 def _revision(manifest: dict[str, Any]) -> int:

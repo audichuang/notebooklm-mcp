@@ -14,6 +14,7 @@ def validate_artwork(path: str) -> dict:
         raise ValueError(f"artwork file not found: {path}")
     try:
         with Image.open(path) as img:
+            img.load()
             fmt = img.format
             width, height = img.size
             bands = img.getbands()

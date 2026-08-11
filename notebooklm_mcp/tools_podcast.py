@@ -14,7 +14,11 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 from mcp.types import ToolAnnotations
-from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
+from notebooklm.exceptions import (
+    ArtifactFeatureUnavailableError,
+    NetworkError,
+    RateLimitError,
+)
 from notebooklm.types import ArtifactType
 
 from . import runtime
@@ -26,10 +30,14 @@ from ._sources import (
 )
 from ._status import TerminalGenerationError, ensure_completed, ensure_started
 from .audio_finalize import (
+    UPLOAD_DISPATCH_WINDOW,
     finalize_attempt,
     has_durable_output_evidence,
     has_hard_output_evidence,
     new_finalize_state,
+    unresolved_upload_candidates,
+    unresolved_upload_descriptor,
+    upload_dispatch_window_closed,
 )
 from ._errors import NotebookAccessDenied, is_permission_denied
 from .app import mcp
@@ -42,7 +50,7 @@ from .generation_input import (
     write_attempt_binding,
 )
 from .languages import resolve_language
-from .manifest_store import ManifestStore
+from .manifest_store import ManifestPostCommitError, ManifestStore
 
 _TZ = timezone(timedelta(hours=8))
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
@@ -93,6 +101,7 @@ def _promised_reconciliation_window_seconds(dispatch: dict, wait_timeout: float)
 # 重燒配額。兩種誤判的代價不對稱——把拒絕誤判成 unknown 只是多跑一次撈不到東西的
 # 對帳(便宜),把已受理誤判成拒絕是真的損失,所以這個集合只放契約講死的那兩種。
 _REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
+_TRANSIENT_TRANSPORT_ERRORS = (TimeoutError, ConnectionError, NetworkError)
 
 # `NotebookAccessDenied` / `_is_permission_denied` 已移到 `_errors.py`:v0.9.0 起
 # `tools_basic.notebook_share_with_pool` 也要判同一件事,各寫一份等於埋一顆「上游改了
@@ -304,6 +313,16 @@ def _attempt_capabilities(
     回傳的每個 key 都回答一個**具體可執行的問題**:
 
     - `authorization_basis`:免旗標 retract 的理由;`None` 代表需要 `abandon_in_flight`。
+    - `feedback_upload_unresolved` / `feedback_upload_status`:回錄 source 已 dispatch
+      但 `source_id` 還沒落盤(三種狀態,見 `unresolved_upload_descriptor`)。**這個維度
+      不擋 retract**——擋住只是把死鎖換個地方(F2:cancellation 讓 checkpoint 永久停在
+      `dispatching`,而唯一出口 `_reconcile_source_upload` 只從 finalize 進得去,等於
+      「要作廢一顆輸入本來就錯的 attempt,得先把它完整 finalize」)。它的作用是讓
+      `safe_next_action` 優先建議 resume;真要作廢就走 `abandon_in_flight`,義務由
+      `cleanup_state` 接手。
+    - `cleanup_state`:retract 之後的清理義務狀態。`pending_delete` = 身分已確定、
+      有 id 要 `source_delete`;`reconcile_after` = 還不知道遠端有沒有孤兒,要等候選窗
+      關上由生成前的 gate 對帳;`None` = 沒有義務。
     - `can_resend`:原樣重呼建立它的那支工具能不能沿用同一顆重送(**不等於**
       `authorization_basis` 非 None —— 那正是第五次現形的成因)。
     - `can_resume` / `can_reconcile`:有沒有 artifact 可續、要不要先對帳(候選窗關了
@@ -332,6 +351,13 @@ def _attempt_capabilities(
     is_active = attempt_id == episode.get("active_attempt_id")
     output_attempt_id = episode.get("output_attempt_id")
     is_output = attempt_id == output_attempt_id
+    # 「已 dispatch、source_id 還沒落盤」——判準與清理義務對帳共用同一支
+    # (`unresolved_upload_descriptor`),不在這裡重讀 checkpoint 發明第二套。
+    unresolved_upload = unresolved_upload_descriptor(attempt)
+    feedback_upload_unresolved = unresolved_upload is not None
+    feedback_upload_status = (
+        attempt.get("finalize", {}).get("feedback_source_upload", {})
+    ).get("status")
 
     never_dispatched = dispatch_status in _NEVER_DISPATCHED
     remote_terminal = remote_status in _TERMINAL_REMOTE
@@ -365,6 +391,7 @@ def _attempt_capabilities(
         and episode.get("output_attempt_id") not in (None, attempt_id)
     )
     pending_source_cleanup = False
+    source_cleanup_unresolved = False
     if post_retract:
         pending_source_ids = set(episode.get("pending_source_cleanup") or [])
         retracted_source_ids = (
@@ -373,6 +400,19 @@ def _attempt_capabilities(
         pending_source_cleanup = any(
             source_id in pending_source_ids for source_id in retracted_source_ids
         )
+        # **retract 可以作廢一顆 upload 還沒落盤的 attempt(abandon_in_flight),但不能
+        # 忘掉它可能留下的孤兒。** 身分不確定的清理義務記在 tombstone 上,由生成前的
+        # `_assert_source_cleanup_done` 用候選窗對帳結案——所以這裡不是「還有東西要刪」
+        # (那是 `pending_source_cleanup`),而是「還不知道有沒有東西要刪」。
+        source_cleanup_unresolved = bool(
+            (attempt.get("retraction") or {}).get("source_cleanup_unresolved")
+            and feedback_upload_unresolved
+        )
+    cleanup_state = None
+    if pending_source_cleanup:
+        cleanup_state = "pending_delete"
+    elif source_cleanup_unresolved:
+        cleanup_state = "reconcile_after"
 
     # F1(盲審 P1 regression,v0.9.10 之後現形):post_retract 分支原本無條件回
     # `regeneration_entry`，從不看 `episode["active_attempt_id"]`——如果 retract 之後
@@ -404,6 +444,11 @@ def _attempt_capabilities(
     if post_retract:
         if pending_source_cleanup:
             safe_next_action = ACTION_SOURCE_DELETE
+        elif source_cleanup_unresolved:
+            # **不准假裝重生現在就做得到**:候選窗還沒對帳完,`regeneration_entry` 會被
+            # `_assert_source_cleanup_done` 擋成 ValueError。沒有可執行的單一工具,
+            # 要等的事情由 `cleanup_state` 與 `_attempt_next_step()` 講清楚。
+            safe_next_action = None
         elif preserves_existing_output:
             safe_next_action = None
         elif replacement_caps is not None:
@@ -412,6 +457,15 @@ def _attempt_capabilities(
             safe_next_action = regeneration_entry
     elif not is_active and not is_output:
         safe_next_action = None  # 歷史紀錄,沒有可執行的下一步——要動的是 active/output
+    elif feedback_upload_unresolved:
+        # 歷史紀錄那格必須先判(上一個分支):一顆已被取代的 attempt 就算 upload 卡在
+        # unresolved,能動的也不是它——教人 resume 一顆歷史 attempt 會被 output guard
+        # 擋掉,又是一句「在它自己產生的狀態下不可執行」的指引。
+        safe_next_action = (
+            ACTION_RESUME
+            if can_resume
+            else ACTION_RECONCILE if can_reconcile else None
+        )
     elif is_output:
         safe_next_action = ACTION_RETRACT
     elif basis == "output_owner":
@@ -457,6 +511,8 @@ def _attempt_capabilities(
         "is_output": is_output,
         "authorization_basis": basis,
         "needs_abandon_flag": basis is None and is_active,
+        "feedback_upload_unresolved": feedback_upload_unresolved,
+        "feedback_upload_status": feedback_upload_status,
         "can_resend": can_resend,
         "can_resume": can_resume,
         "can_reconcile": can_reconcile,
@@ -466,6 +522,8 @@ def _attempt_capabilities(
         "candidate_selection_required": candidate_selection_required,
         "post_retract": post_retract,
         "pending_source_cleanup": pending_source_cleanup,
+        "source_cleanup_unresolved": source_cleanup_unresolved,
+        "cleanup_state": cleanup_state,
         "preserves_existing_output": preserves_existing_output,
         # F1 修復:非 None 代表 retract 之後已經有替代 attempt 在飛（尚未 promote 成
         # output）。內部欄位，只給 `_attempt_next_step()` 遞迴用，不對外洩漏——外層
@@ -545,6 +603,20 @@ def _attempt_next_step(caps: dict) -> str:
             if caps["pending_source_cleanup"]
             else ""
         )
+        if caps["source_cleanup_unresolved"]:
+            # **這個分支要排在重生之前**:義務沒結案時 `regeneration_entry` 會被
+            # `_assert_source_cleanup_done` 擋成 ValueError,教人重生就是教一條當下
+            # 走不通的路。`safe_next_action` 在這一格是 `None`,兩邊一致。
+            return (
+                cleanup
+                + "這顆的回錄 source 已經送出、但 source_id 沒落盤(upload 停在 "
+                f"{caps['feedback_upload_status']!r}),notebook 裡可能多了一筆沒人記得的 "
+                "media。清理義務已經記進 tombstone,不會消失:等候選窗關上後直接重呼 "
+                f"{caps['regeneration_entry']},生成前的 gate 會自己去 notebook 對帳"
+                "——撈到候選就把 id 列進 stale ids 擋下來要你 source_delete,確認零候選"
+                "才放行。對帳失敗(認證/notebook 讀不到)時義務不會被清掉。"
+                + caps["regeneration_hint"]
+            )
         if caps["preserves_existing_output"]:
             return cleanup + "這一集的既有正式輸出不受影響，不必重生。"
         replacement_caps = caps["post_retract_replacement_caps"]
@@ -565,6 +637,20 @@ def _attempt_next_step(caps: dict) -> str:
         )
     if not caps["is_active"] and not caps["is_output"]:
         return "它已經被取代,是歷史紀錄 —— 要動的是現在的 active／output attempt。"
+    if caps["feedback_upload_unresolved"]:
+        # 順序與 `safe_next_action` 逐字對齊(歷史紀錄先判)。這裡**不擋 retract**,
+        # 只是把「先續完」排在前面:遠端可能已經多出一筆 media,續完是唯一能把它的
+        # 身分認回來的路;真要作廢就照 `_retract_hint()` 走旗標,義務會留在 tombstone。
+        action = caps["safe_next_action"]
+        recovery = (
+            f"原呼叫中斷的話用 {action} 接續,它會把那筆 source 的身分對回來。"
+            if action is not None
+            else "先讓目前的 finalize 結案。"
+        )
+        return (
+            f"回錄 source 已經送出但 source_id 還沒落盤(upload 停在 "
+            f"{caps['feedback_upload_status']!r}):" + recovery + _retract_hint(caps)
+        )
     if caps["is_output"]:
         return (
             "它是這一集的正式輸出:要作廢就直接 podcast_attempt_retract"
@@ -1927,7 +2013,16 @@ async def _assert_source_cleanup_done(
     的 EP_b(例如 start 跳過較早集)會直接放行——EP_b 未指名 source_ids 時就把 EP_a
     的拒收逐字稿讀進 context。canonical notebook 取
     ``episode.get("notebook_id") or manifest.get("notebook_id")``;canonical 不同的集
-    互不影響(不同 notebook 的義務不該互相卡住)。"""
+    互不影響(不同 notebook 的義務不該互相卡住)。
+
+    **兩種義務都在這裡結案**(F2):
+      (1) ``pending_source_cleanup``——身分已確定的 id,驗「已經不在 notebook」。
+      (2) tombstone 上的 ``source_cleanup_unresolved``——retract 作廢了一顆 upload 還沒
+          落盤的 attempt,遠端可能多出一筆沒人記得的 media。用
+          ``unresolved_upload_candidates()``(與 finalize 對帳同一份判準)去撈:撈到候選
+          就排進 (1) 並 fail-closed 要求刪掉;零候選**且候選窗已關**才算真的沒有、清掉
+          義務放行;窗還開著就繼續 fail-closed(這時候的零候選只代表「還沒出現」)。
+          ``sources.list`` / 認證失敗一律往上拋 —— 義務不會被誤清。"""
     snapshot = store.read()
     episodes = snapshot.get("episodes", [])
     manifest_notebook_id = snapshot.get("notebook_id")
@@ -1935,10 +2030,42 @@ async def _assert_source_cleanup_done(
     def canonical_notebook(row: dict) -> object:
         return row.get("notebook_id") or manifest_notebook_id
 
+    # (episode_n, attempt_id, attempt, upload)。attempt 整顆帶著走:候選判準要讀它的
+    # finalize checkpoint(baseline／expected_title／dispatched_at),而那份資料刻意
+    # 只有一份、留在 attempt 上,沒有複製進 retraction。
+    unresolved_records: list[tuple[object, str, dict, dict, bool]] = []
+    for row in episodes:
+        if canonical_notebook(row) not in (None, notebook_id):
+            continue
+        for candidate_attempt in row.get("attempts", []):
+            retraction = candidate_attempt.get("retraction") or {}
+            if not retraction.get("source_cleanup_unresolved"):
+                continue
+            upload = unresolved_upload_descriptor(candidate_attempt)
+            if upload is None:
+                # source_id 後來落盤了(adopt/對帳補回身分):義務改由既有的
+                # stale_source_ids／pending 路徑處理,這裡不再管它。
+                continue
+            unresolved_records.append(
+                (
+                    row.get("episode"),
+                    candidate_attempt.get("attempt_id"),
+                    candidate_attempt,
+                    upload,
+                    # 身分確定才可以結案 —— 與下面 `clearable` 同一條紀律:拿呼叫端
+                    # 隨手傳的 notebook 查到零候選,不代表當初上傳的那本也沒有。
+                    canonical_notebook(row) == notebook_id,
+                )
+            )
+
     target_episode = next(
         (row for row in episodes if row.get("episode") == episode_n), None
     )
-    if target_episode is not None and (target_episode.get("pending_source_cleanup") or []):
+    target_has_obligation = target_episode is not None and (
+        bool(target_episode.get("pending_source_cleanup") or [])
+        or any(record[0] == episode_n for record in unresolved_records)
+    )
+    if target_has_obligation:
         # 先驗這一集本身的 notebook 身分,再拿它查。`notebook_id` 是呼叫端給的,而清理
         # 義務是綁在 manifest 那個 notebook 上——拿一個空的別的 notebook 來查,會「查無
         # 此 source」而把義務誤判成已結案(舊來源其實還躺在真正的筆記本裡)。
@@ -1955,18 +2082,72 @@ async def _assert_source_cleanup_done(
         if row.get("pending_source_cleanup")
         and canonical_notebook(row) in (None, notebook_id)
     ]
-    if not pending_by_episode:
+    if not pending_by_episode and not unresolved_records:
         return
 
-    live = {
-        getattr(source, "id", None) for source in await client.sources.list(notebook_id)
-    }
+    sources = await client.sources.list(notebook_id)
+    live = {getattr(source, "id", None) for source in sources}
     violations = [
         (ep_n, source_id)
         for ep_n, pending in pending_by_episode
         for source_id in pending
         if source_id in live
     ]
+
+    # 身分未定的義務:撈候選 → 有就變成確定的義務,零候選且窗已關才結案。
+    now = datetime.now(timezone.utc)
+    discovered: dict[object, list[str]] = {}
+    waiting: list[tuple[object, str]] = []
+    identity_unknown: list[tuple[object, str]] = []
+    settled_attempt_ids: set[str] = set()
+    for (
+        ep_n,
+        unresolved_attempt_id,
+        unresolved_attempt,
+        upload,
+        identity_confirmed,
+    ) in unresolved_records:
+        try:
+            candidates = unresolved_upload_candidates(
+                snapshot, unresolved_attempt, unresolved_attempt_id, sources
+            )
+            window_closed = upload_dispatch_window_closed(upload, now=now)
+        except ValueError as exc:
+            # checkpoint 缺 expected_title／dispatched_at(手改過或跨版本的 manifest):
+            # 對不出來就不能放行,但錯誤訊息要說得出是哪一顆,否則生成前突然冒出一句
+            # 「dispatch time is missing」沒人查得動。
+            raise ValueError(
+                f"episode {ep_n} attempt {unresolved_attempt_id!r} 的 retract 留下"
+                f"未結案的回錄 source 清理義務,但它的 upload checkpoint 對不出候選:{exc}"
+            ) from exc
+        if candidates:
+            discovered.setdefault(ep_n, []).extend(candidates)
+            violations.extend((ep_n, source_id) for source_id in candidates)
+        elif not identity_confirmed:
+            identity_unknown.append((ep_n, unresolved_attempt_id))
+        elif window_closed:
+            settled_attempt_ids.add(unresolved_attempt_id)
+        else:
+            waiting.append((ep_n, unresolved_attempt_id))
+
+    if discovered:
+        # **先把撈到的候選寫成耐久義務,再 fail-closed。** 反過來寫的話這次撈到的結果
+        # 只存在於這一句錯誤訊息裡,呼叫端刪一半就斷線 = 剩下那幾筆從此沒人記得。
+        def queue(manifest: dict) -> None:
+            for row in manifest["episodes"]:
+                found = discovered.get(row.get("episode"))
+                if not found:
+                    continue
+                history = row.setdefault("previous_feedback_source_ids", [])
+                pending = row.setdefault("pending_source_cleanup", [])
+                for source_id in found:
+                    if source_id not in history:
+                        history.append(source_id)
+                    if source_id not in pending:
+                        pending.append(source_id)
+
+        store.update(queue)
+
     if violations:
         details = ", ".join(f"episode {ep_n}: {sid}" for ep_n, sid in violations)
         raise ValueError(
@@ -1974,6 +2155,23 @@ async def _assert_source_cleanup_done(
             f"notebook: {details}. Delete them first — "
             f"source_delete(notebook_id={notebook_id!r}, source_id=...) — then retry; "
             "leaving them creates two identically named sources."
+        )
+    if identity_unknown:
+        details = ", ".join(f"episode {ep_n}: {att!r}" for ep_n, att in identity_unknown)
+        raise ValueError(
+            f"notebook {notebook_id!r} 查到零候選,但這幾顆 retracted attempt 的清理義務"
+            f"沒有 canonical notebook_id 可以核對身分:{details}。補上 episode 或 manifest "
+            "的 notebook_id 再重試 —— 拿別本筆記本查到「沒有」不能當成義務結案。"
+        )
+    if waiting:
+        details = ", ".join(f"episode {ep_n}: {att!r}" for ep_n, att in waiting)
+        window_seconds = int(UPLOAD_DISPATCH_WINDOW.total_seconds())
+        raise ValueError(
+            f"notebook {notebook_id!r} has retracted attempts whose feedback source "
+            f"upload was never resolved: {details}. 現在查到零候選,但候選窗還沒關"
+            f"(dispatch 起算 {window_seconds} 秒),此刻的「沒有」不等於「不會出現」。"
+            "等窗關上後重呼同一支工具,它會自己對帳:撈到就會要求 source_delete,"
+            "確認零候選才放行。"
         )
 
     # 只有「身分確定就是這個 notebook」的列才可以結案。canonical 為 None(episode 與
@@ -1993,6 +2191,11 @@ async def _assert_source_cleanup_done(
 
     def clear(manifest: dict) -> None:
         for row in manifest["episodes"]:
+            for candidate_attempt in row.get("attempts", []):
+                retraction = candidate_attempt.get("retraction") or {}
+                if candidate_attempt.get("attempt_id") in settled_attempt_ids:
+                    # 窗已關 + 零候選 = 遠端真的沒有多出東西。義務結案,重生放行。
+                    retraction.pop("source_cleanup_unresolved", None)
             checked_absent = checked_absent_by_episode.get(row.get("episode"))
             if checked_absent is None:
                 continue
@@ -2167,6 +2370,7 @@ async def _run_episode(
                 binding_created
                 and prepared_generation_input is not None
                 and binding_bytes is not None
+                and not isinstance(error, ManifestPostCommitError)
             ):
                 # 清理失敗只回一則 note、絕不 raise —— 在 except handler 裡再拋會把
                 # 真正該讀的那個錯誤蓋掉。把殘留訊息掛回原例外,兩件事都看得到。
@@ -2312,17 +2516,39 @@ async def _run_episode(
         # 等 constructor 需 notebook_id/task_id/timeout 多個必填參數,type(exc)(str) 會
         # 反而 TypeError 吞掉真錯;改寫 args 對內建與 SDK 例外都能把 hint 帶進 str(exc))。
         # 呼叫端據此續完(不重生、不燒 quota),不必再 artifact_list 撈 id。
-        durable_argument = (
-            f", manifest_path={manifest_path!r}" if manifest_path else ""
-        )
-        exc.args = (
-            f"{exc}\n音檔已在雲端生成(artifact_id={artifact_id!r})但後續步驟失敗。"
-            f"既有 attempt_id={attempt_id!r}；用 podcast_episode_resume "
-            "續完(不會重新生成):"
-            f"podcast_episode_resume(notebook_id={notebook_id!r}, episode_n={episode_n}, "
-            f"title={title.strip()!r}, artifact_id={artifact_id!r}, "
-            f"output_dir={output_dir!r}{durable_argument})",
-        )
+        original_error = str(exc)
+        if store is not None:
+            # 下一步只從 capabilities 產生：同一條 finalize 例外可能仍是 accepted
+            # attempt，也可能已被並行 retract 成 tombstone，不能一律手寫 resume。
+            try:
+                current = store.read()
+                episode, stopped_attempt = _attempt_record(
+                    current, episode_n, attempt_id, allow_retracted=True
+                )
+                caps = _attempt_capabilities(
+                    episode,
+                    stopped_attempt,
+                    attempt_id,
+                    post_retract=bool(stopped_attempt.get("retraction")),
+                )
+                next_step = _attempt_next_step(caps)
+            except Exception:
+                next_step = ""
+            durable_identity = (
+                f", manifest_path={manifest_path!r}" if manifest_path else ""
+            )
+            exc.args = (
+                f"{original_error}\n音檔已在雲端生成(artifact_id={artifact_id!r})但後續步驟失敗。"
+                f"既有 attempt_id={attempt_id!r}{durable_identity}；{next_step}",
+            )
+        else:
+            exc.args = (
+                f"{original_error}\n音檔已在雲端生成(artifact_id={artifact_id!r})但後續步驟失敗。"
+                "用 podcast_episode_resume 續完(不會重新生成):"
+                f"podcast_episode_resume(notebook_id={notebook_id!r}, episode_n={episode_n}, "
+                f"title={title.strip()!r}, artifact_id={artifact_id!r}, "
+                f"output_dir={output_dir!r})",
+            )
         raise
 
 
@@ -3320,6 +3546,15 @@ async def podcast_attempt_retract(
       或明知送進去的 brief 本身就是錯的、等它跑完也沒有意義）。所以必須顯式宣告，預設不開；
       不宣告時那個狀態刻意留給 ``podcast_episode_reconcile`` / ``podcast_episode_resume``。
 
+    **回錄 source 的 upload 已 dispatch、``source_id`` 還沒落盤時（``dispatching`` /
+    ``acceptance_unknown`` / ``reconciliation_ambiguous``），retract 一樣做得到**，但
+    tombstone 會多帶一筆 ``source_cleanup_unresolved``：遠端可能已經多出一筆沒人記得的
+    media，義務由下一次生成前的 gate 用候選窗對帳結案（撈到就要求 ``source_delete``，
+    零候選且窗已關才放行）。**刻意不擋**：那個狀態靠一次 client cancellation 就能永久
+    存在，而擋住的唯一出路是「先把這顆完整 finalize 再作廢」—— 比 ``abandon_in_flight``
+    本來要避免的後果還多一輪遠端副作用。要保住那筆 source 的身分就走 capabilities 指的
+    ``podcast_episode_resume``；要作廢就帶旗標，義務不會消失。
+
     ⚠️ ``acceptance_unknown`` 撞上「原樣重呼」死結時就是走這條：``podcast_episode`` 會擋、
     而它給的出路「用 identical arguments 重送」要求 brief 逐字相同——中途改過產生器就重現
     不了。查過 ``artifact_list`` 確認雲端零 artifact 之後，``abandon_in_flight=True`` 是正門；
@@ -3418,6 +3653,7 @@ async def podcast_attempt_retract(
                 caps,
             )
 
+        caps = _attempt_capabilities(episode, attempt, attempt_id)
         output_attempt_id = episode.get("output_attempt_id")
         active_attempt_id = episode.get("active_attempt_id")
         # 受審計的 abandon 涵蓋兩種無路可走的分岔(ADR-0009 補記:output=None 也可以是
@@ -3460,7 +3696,6 @@ async def podcast_attempt_retract(
         # 呼叫端只能用低階 `generate_audio` + `podcast_attempt_adopt` 繞出去、多燒一次
         # 生成配額。**`acceptance_unknown` 不在這裡面**:那個是真的不知道有沒有受理,
         # 需要外部知識,仍然只能走 `abandon_in_flight`。
-        caps = _attempt_capabilities(episode, attempt, attempt_id)
         # **授權依據 = 免旗標的理由,或呼叫端顯式宣告的旗標。** 這個值就是稽核要記的
         # 那一個(v0.9.5 只記「傳了什麼」,而結果已定的 attempt 就算傳 true 也是白傳,
         # 事後分不出哪一次真的動用了外部知識)。
@@ -3529,10 +3764,33 @@ async def podcast_attempt_retract(
         # 投影是 legacy 相容欄位,可能缺、可能被 adopt 改寫,而真正上傳了哪一筆 source
         # 只有 checkpoint 知道。
         upload = attempt.get("finalize", {}).get("feedback_source_upload", {})
+        # **身分不確定的義務也要記下來,不能因為記不住就擋住 retract。** upload 已經
+        # dispatch 但 `source_id` 沒落盤時,遠端可能多出一筆沒人記得的 media —— 舊版的
+        # 處置是硬擋 retract(連 `abandon_in_flight` 都擋),而那個狀態靠 cancellation
+        # 就能永久存在,唯一出口 `_reconcile_source_upload` 只從 finalize 進得去,等於
+        # 「要作廢一顆輸入本來就錯的 attempt,得先把它完整 finalize、上傳、promote」
+        # ——比 `abandon_in_flight` 本來要避免的後果還多一輪遠端副作用。
+        # 改成:放行 retract,把「還沒對帳完」記成 tombstone 上的義務,由生成前的
+        # `_assert_source_cleanup_done` 用候選窗結案。已經算出來的候選(ambiguous)
+        # 身分雖不確定但範圍確定,直接排進 pending 讓呼叫端全刪掉最保守。
+        unresolved_upload = unresolved_upload_descriptor(attempt)
+        candidate_source_ids = (
+            [
+                source_id
+                for source_id in (unresolved_upload.get("candidate_source_ids") or [])
+                if isinstance(source_id, str) and source_id
+            ]
+            if unresolved_upload is not None
+            else []
+        )
         stale_source_ids = [
             source_id
             for source_id in dict.fromkeys(
-                [retracted_output.get("feedback_source_id"), upload.get("source_id")]
+                [
+                    retracted_output.get("feedback_source_id"),
+                    upload.get("source_id"),
+                    *candidate_source_ids,
+                ]
             )
             if isinstance(source_id, str) and source_id
         ]
@@ -3573,6 +3831,12 @@ async def podcast_attempt_retract(
             # (不必回頭翻 attempt、也不受手改 manifest 影響),不是因為合法操作會改動它
             # —— tombstone 是 default-deny 的,`_attempt_record` 擋掉所有 attempt 級 writer。
             "abandon_in_flight": abandon_in_flight,
+            # 「可能有孤兒回錄 source,但身分還對不出來」。**只記一個狀態旗標,不複製
+            # `source_ids_before` / `expected_title` / `dispatched_at`** —— tombstone
+            # 不刪 attempt,那三個欄位就一直躺在它的 finalize checkpoint 上,複製一份
+            # 只是多一個會漂移的副本。對帳規則同理只有一份
+            # (`unresolved_upload_candidates`)。
+            "source_cleanup_unresolved": unresolved_upload is not None,
             "dispatch_status_at_retraction": attempt.get("dispatch", {}).get("status"),
             # **實際生效的授權依據**,這才是稽核該讀的那一個:`abandon_in_flight` 只是
             # 呼叫端傳了什麼,而結果已定的 attempt 就算傳 true 也是白傳 —— 兩種語意
@@ -3911,7 +4175,7 @@ async def podcast_series(
                                 ACTION_ADOPT,
                             )
                     raise
-                except (TimeoutError, ConnectionError):
+                except _TRANSIENT_TRANSPORT_ERRORS:
                     # 已完成集的 drift 複驗途中傳輸失敗:manifest checkpoint 仍是真相,
                     # 回結構化 partial 讓呼叫端重跑同一組 series,別裸拋掉整季進度回報
                     # (與下方 active attempt 分支同一處置)。
@@ -4264,7 +4528,7 @@ async def podcast_series(
                         failed_attempt["remote"]["status"],
                         ACTION_SERIES,
                     )
-                except (TimeoutError, ConnectionError):
+                except _TRANSIENT_TRANSPORT_ERRORS:
                     current = store.read()
                     _, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
@@ -4408,7 +4672,7 @@ async def podcast_series(
                 action,
                 **extra,
             )
-        except (TimeoutError, ConnectionError):
+        except _TRANSIENT_TRANSPORT_ERRORS:
             current = store.read()
             attempt_id = _active_attempt_or_reraise(current, episode_n)
             _, stopped_attempt = _attempt_record(

@@ -135,9 +135,32 @@ async def test_source_add_file_fails_loud_when_title_does_not_land(fake_client, 
 
 async def test_artifact_rename_is_fire_and_forget(fake_client):
     """artifact_rename 工具同樣必須顯式 return_object=False。"""
+    fake_client.artifacts.seed_artifact("task-123")
     await t.artifact_rename("nb-123", "task-123", "EP01 心法篇")
     call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "rename")
     assert call["return_object"] is False
+
+
+async def test_artifact_rename_rejects_an_id_from_another_notebook_before_mutation(
+    fake_client, monkeypatch
+):
+    """錯配 notebook 時 SDK 的 rename RPC 會先改、後對傳入的 notebook list
+    做 miss-detection。公開工具必須在 mutation 前先驗歸屬。"""
+    elsewhere = fake_client.artifacts.seed_artifact("task-elsewhere", title="原標題")
+
+    async def absent_from_requested_notebook(notebook_id, artifact_id):
+        assert (notebook_id, artifact_id) == ("nb-requested", "task-elsewhere")
+        return None
+
+    monkeypatch.setattr(
+        fake_client.artifacts, "get_or_none", absent_from_requested_notebook
+    )
+
+    with pytest.raises(ValueError, match="not in notebook"):
+        await t.artifact_rename("nb-requested", "task-elsewhere", "不應落地")
+
+    assert elsewhere.title == "原標題"
+    assert not [call for call in fake_client.artifacts.calls if call[0] == "rename"]
 
 
 async def test_artifact_retry_failed_reuses_the_same_artifact_id(fake_client):

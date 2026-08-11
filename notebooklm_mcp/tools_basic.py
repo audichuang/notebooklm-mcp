@@ -471,16 +471,22 @@ async def source_add_file(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True)
+    annotations=ToolAnnotations(destructiveHint=True)
 )
 async def source_delete(notebook_id: str, source_id: str) -> dict:
     """Delete a caller-selected source that is no longer needed.
 
     這是 generic source 管理能力，不代表可覆寫 manifest-backed completed episode。
-    注意:0.7.x 起 SDK 的 delete 是 idempotent —— 刪不存在的 source 也「成功」不 raise。
-    因此 deleted 表示「呼叫後該 id 已不在筆記本」,不保證它先前存在(打錯 id 也回 deleted)。
-    需要確認確實刪掉某個既有來源時,先用 source_list 取得真實 source_id。"""
-    await runtime.get_client().sources.delete(notebook_id, source_id)
+    SDK 的 delete 雖然允許刪不存在的 id，但 RPC 只送 source_id；工具會先以
+    source_list 驗證它屬於指定 notebook，避免打錯 notebook 後刪到別本的來源。"""
+    client = runtime.get_client()
+    sources = await client.sources.list(notebook_id)
+    if not any(getattr(source, "id", None) == source_id for source in sources):
+        raise ValueError(
+            f"source {source_id} not in notebook {notebook_id}; "
+            "(use source_list to select a source from that notebook)"
+        )
+    await client.sources.delete(notebook_id, source_id)
     return {"deleted": source_id}
 
 
@@ -582,7 +588,13 @@ async def artifact_download_audio(
 @mcp.tool()
 async def artifact_rename(notebook_id: str, artifact_id: str, new_title: str) -> dict:
     """Rename an artifact so it stays identifiable in the notebook."""
-    await runtime.get_client().artifacts.rename(
+    client = runtime.get_client()
+    if await client.artifacts.get_or_none(notebook_id, artifact_id) is None:
+        raise ValueError(
+            f"artifact {artifact_id} not in notebook {notebook_id}; "
+            "(use artifact_list to select an artifact from that notebook)"
+        )
+    await client.artifacts.rename(
         notebook_id, artifact_id, new_title, return_object=False
     )
     return {"artifact_id": artifact_id, "title": new_title}

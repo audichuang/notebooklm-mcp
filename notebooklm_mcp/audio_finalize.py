@@ -6,13 +6,14 @@ projection；caller 只在本函式完整成功後才 promotion。
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from notebooklm.types import ArtifactType
 
@@ -23,6 +24,17 @@ from .manifest_store import ManifestStore
 
 _SOURCE_CLOCK_SKEW = timedelta(minutes=1)
 _SOURCE_DISPATCH_WINDOW = timedelta(minutes=11)
+# 「已 dispatch,但 source_id 還沒落盤」的三種狀態。三種的共同後果都是「遠端可能多出
+# 一筆 media、而 manifest 記不住它是誰」,所以清理義務必須一起涵蓋(見
+# `unresolved_upload_descriptor`)。
+_UNRESOLVED_UPLOAD_STATUSES = (
+    "dispatching",
+    "acceptance_unknown",
+    "reconciliation_ambiguous",
+)
+# 候選窗全長(含 clock skew)。清理義務的指引要講「等多久」,而那個數字必須跟
+# `upload_dispatch_window_closed()` 用的是同一個,不能在別的 module 再加一次。
+UPLOAD_DISPATCH_WINDOW = _SOURCE_DISPATCH_WINDOW + _SOURCE_CLOCK_SKEW
 _TZ = timezone(timedelta(hours=8))
 
 
@@ -233,30 +245,68 @@ def _created_at_utc(value: object) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-async def _reconcile_source_upload(
-    client: object,
-    store: ManifestStore,
-    episode_n: int,
-    attempt_id: str,
-    notebook_id: str,
-) -> str:
-    snapshot = store.read()
-    _, attempt = _record(snapshot, episode_n, attempt_id)
-    upload = attempt["finalize"]["feedback_source_upload"]
-    baseline = set(upload.get("source_ids_before") or [])
-    expected_title = upload.get("expected_title")
+def unresolved_upload_descriptor(attempt: dict) -> dict | None:
+    """回傳「已經 dispatch、但回錄 source id 還沒落盤」的那份 upload checkpoint。
+
+    **三種狀態都算 unresolved,不只 `dispatching`**:`acceptance_unknown` 與
+    `reconciliation_ambiguous` 同樣是「遠端可能已經多出一筆 media,而 manifest 記不住
+    它是誰」。只修 `dispatching` 是補一半——漏掉的那兩種留下的孤兒 source 一樣從此
+    沒人記得,而 finalize 是按 source_id 驗的,之後每次生成都把那份逐字稿讀進 context。
+
+    `source_id` 一落盤就不再 unresolved(那時候清理義務走既有的 `stale_source_ids`
+    路徑,身分是確定的,不需要對帳)。
+    """
+    finalize = attempt.get("finalize")
+    upload = (finalize or {}).get("feedback_source_upload")
+    if not isinstance(upload, dict) or upload.get("source_id"):
+        return None
+    if upload.get("status") not in _UNRESOLVED_UPLOAD_STATUSES:
+        return None
+    return upload
+
+
+def _dispatched_at_utc(upload: dict) -> datetime:
     dispatched_raw = upload.get("dispatched_at")
-    if not isinstance(expected_title, str) or not expected_title:
-        raise ValueError("feedback source expected title is missing")
     if not isinstance(dispatched_raw, str):
         raise ValueError("feedback source dispatch time is missing")
     dispatched_at = datetime.fromisoformat(dispatched_raw)
     if dispatched_at.tzinfo is None:
         raise ValueError("feedback source dispatch time must include timezone")
-    dispatched_at = dispatched_at.astimezone(timezone.utc)
-    claimed = _claimed_source_ids(snapshot, attempt_id)
-    sources = await client.sources.list(notebook_id)
-    candidates: list[str] = []
+    return dispatched_at.astimezone(timezone.utc)
+
+
+def upload_dispatch_window_closed(upload: dict, *, now: datetime | None = None) -> bool:
+    """候選窗(含 clock skew)是否已經關上。
+
+    **只有關上之後,「零候選」才等於「遠端真的沒有多出東西」**;窗還開著時零候選
+    可能只是 source 還沒出現在 list 裡,那時候清掉清理義務就是把孤兒放生。
+    """
+    moment = now or datetime.now(timezone.utc)
+    return moment > _dispatched_at_utc(upload) + UPLOAD_DISPATCH_WINDOW
+
+
+def unresolved_upload_candidates(
+    manifest: dict, attempt: dict, attempt_id: str, sources: Iterable[object]
+) -> list[str]:
+    """從 notebook 現況篩出「可能是這次 upload 建出來的」source id。
+
+    **這是唯一一份候選判準**:finalize 對帳(`_reconcile_source_upload`)與 retract
+    之後的清理義務對帳(`tools_podcast._assert_source_cleanup_done`)都走這裡。
+    baseline／title／kind／時間窗／已被別顆認領這五個條件,漏任何一個都會把別集的
+    回錄誤判成這次的孤兒(或反過來漏掉真的孤兒),而兩邊各寫一份就等於保證有一天
+    只有一邊被修到——本 repo 對「各寫一份」記過的帳已經夠多了。
+
+    刻意收 `attempt` 而不是走 `_record()`:tombstone 之後的對帳是這支的主要用途,
+    而 `_record()` 對已 retract 的 attempt 一律 raise(default-deny)。
+    """
+    upload = attempt["finalize"]["feedback_source_upload"]
+    baseline = set(upload.get("source_ids_before") or [])
+    expected_title = upload.get("expected_title")
+    if not isinstance(expected_title, str) or not expected_title:
+        raise ValueError("feedback source expected title is missing")
+    dispatched_at = _dispatched_at_utc(upload)
+    claimed = _claimed_source_ids(manifest, attempt_id)
+    candidates: set[str] = set()
     for source in sources:
         source_id = getattr(source, "id", None)
         created_at = _created_at_utc(getattr(source, "created_at", None))
@@ -275,8 +325,21 @@ async def _reconcile_source_upload(
             <= created_at
             <= dispatched_at + _SOURCE_DISPATCH_WINDOW
         ):
-            candidates.append(source_id)
-    candidates = sorted(set(candidates))
+            candidates.add(source_id)
+    return sorted(candidates)
+
+
+async def _reconcile_source_upload(
+    client: object,
+    store: ManifestStore,
+    episode_n: int,
+    attempt_id: str,
+    notebook_id: str,
+) -> str:
+    snapshot = store.read()
+    _, attempt = _record(snapshot, episode_n, attempt_id)
+    sources = await client.sources.list(notebook_id)
+    candidates = unresolved_upload_candidates(snapshot, attempt, attempt_id, sources)
     if len(candidates) == 1:
         source_id = candidates[0]
 
@@ -673,13 +736,27 @@ async def finalize_attempt(
                     wait=True,
                     wait_timeout=600.0,
                 )
-            except Exception:
+            # **`CancelledError` 要顯式收**:它是 `BaseException`,`except Exception`
+            # 收不到,而 MCP 的長 request 被 client 取消是常態不是意外。漏收的下場是
+            # checkpoint 永久停在 `dispatching`——遠端可能已經建出 source,而狀態機
+            # 卡在「還在飛」,retract 的清理義務也就永遠算不出要對帳什麼(F2 的根因)。
+            # 刻意不寫 `except BaseException`:KeyboardInterrupt／SystemExit 不該在這裡
+            # 被當成「上傳結果不明」處理。
+            except (Exception, asyncio.CancelledError) as exc:
                 def upload_unknown(_episode: dict, current: dict) -> None:
                     current["finalize"]["feedback_source_upload"][
                         "status"
                     ] = "acceptance_unknown"
 
-                _mutate(store, episode_n, attempt_id, upload_unknown)
+                try:
+                    _mutate(store, episode_n, attempt_id, upload_unknown)
+                except Exception as checkpoint_error:
+                    # 並行 retract 已經 tombstone 掉這顆(`_record` default-deny),或
+                    # manifest 根本寫不進去。兩種都不該蓋掉呼叫端真正要讀的那個例外
+                    # ——retract 那條路自己會留下 unresolved 清理義務。
+                    exc.add_note(
+                        f"upload checkpoint 未能改寫成 acceptance_unknown:{checkpoint_error}"
+                    )
                 raise
             source_id = getattr(source, "id", None)
             if not isinstance(source_id, str) or not source_id:

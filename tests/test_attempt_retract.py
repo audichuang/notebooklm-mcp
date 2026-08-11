@@ -9,6 +9,7 @@ guard 沒保護 manifest,只是把寫入趕出工具外。
 紀錄不會消失、以及被作廢的 attempt **不可能再被復活**——不論是 retract 之前就啟動的
 in-flight finalizer、還是任何把指標寫回去的 writer。
 """
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -893,6 +894,304 @@ async def test_retract_rejects_bad_arguments_before_touching_the_manifest(
         await p.podcast_attempt_retract(manifest_path, 1, "", reason="QA")
     with pytest.raises(ValueError, match="attempt .* is missing"):
         await p.podcast_attempt_retract(manifest_path, 1, "att-nope", reason="QA")
+
+
+# ---- F2:upload 還沒落盤時的 retract —— 放行,但義務要留在 tombstone 上 ----------
+#
+# 舊版對這個狀態硬擋 retract(連 `abandon_in_flight` 都擋),而它靠一次 client
+# cancellation 就能永久存在:`except Exception` 收不到 `CancelledError`,checkpoint
+# 停在 `dispatching`,而唯一的出路 `_reconcile_source_upload` 只從 finalize 進得去
+# ——「要作廢一顆輸入本來就錯的 attempt,得先把它完整 finalize、上傳、promote」,
+# 比旗標本來要避免的後果還多一輪遠端副作用。
+
+
+def _upload(manifest_path, attempt_id):
+    snapshot = ManifestStore(manifest_path).read()
+    _, attempt = p._attempt_record(
+        snapshot, 1, attempt_id, allow_retracted=True
+    )
+    return attempt["finalize"]["feedback_source_upload"]
+
+
+def _age_the_dispatch_window(manifest_path, attempt_id):
+    """把 dispatched_at 推到候選窗之外(等真實時間過去是不可行的測法)。"""
+    old = datetime.now(timezone.utc) - (
+        audio_finalize.UPLOAD_DISPATCH_WINDOW + timedelta(minutes=1)
+    )
+
+    def mutate(manifest):
+        _, attempt = p._attempt_record(manifest, 1, attempt_id, allow_retracted=True)
+        attempt["finalize"]["feedback_source_upload"]["dispatched_at"] = old.isoformat()
+
+    ManifestStore(manifest_path).update(mutate)
+
+
+async def test_retract_abandons_an_in_flight_upload_and_the_gate_finds_the_orphan(
+    fake_client, tmp_path, monkeypatch
+):
+    """add_file 已建出遠端 source、response 還沒回 checkpoint 時 retract。
+
+    **旗標必須穿得過去**(F2),但 tombstone 要記下「可能有孤兒」;下一次生成前的 gate
+    用候選窗撈出那筆 source、排進 pending 並 fail-closed,刪掉才放行。
+    """
+    manifest_path = str(tmp_path / "series_manifest.json")
+    remote_created = asyncio.Event()
+    release_response = asyncio.Event()
+    real_add_file = fake_client.sources.add_file
+
+    async def pause_after_remote_create(*args, **kwargs):
+        source = await real_add_file(*args, **kwargs)
+        remote_created.set()
+        await release_response.wait()
+        return source
+
+    monkeypatch.setattr(fake_client.sources, "add_file", pause_after_remote_create)
+    running = asyncio.create_task(
+        p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief=EP["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
+        )
+    )
+    await remote_created.wait()
+    attempt_id = _episode(manifest_path)["active_attempt_id"]
+    orphan_id = fake_client.sources.sources[-1]["id"]
+    assert _upload(manifest_path, attempt_id)["status"] == "dispatching"
+
+    retracted = await p.podcast_attempt_retract(
+        manifest_path,
+        1,
+        attempt_id,
+        reason="輸入錯誤，放棄仍在 finalize 的 attempt",
+        abandon_in_flight=True,
+    )
+    assert retracted["source_cleanup_unresolved"] is True
+    assert retracted["authorization_basis"] == "abandon_in_flight"
+    # 身分還對不出來,所以這一刻沒有具體 id 可刪——義務不是靠回傳值記住的。
+    assert retracted["stale_source_ids"] == []
+    assert retracted["safe_next_action"] is None
+    _assert_public_guidance_matches_capabilities(
+        manifest_path,
+        attempt_id,
+        retracted,
+        tool="podcast_attempt_retract",
+        post_retract=True,
+    )
+
+    # tombstone 之後,還在飛的 finalizer 不得復活它(ADR-0009)。
+    release_response.set()
+    with pytest.raises(ValueError, match="was retracted"):
+        await running
+
+    # 生成前的 gate 自己去 notebook 對帳,撈到那筆孤兒 → fail-closed 且零配額。
+    dispatches_before = sum(
+        call[0] == "generate_audio" for call in fake_client.artifacts.calls
+    )
+    with pytest.raises(ValueError, match="retracted feedback sources still in") as blocked:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
+        )
+    assert orphan_id in str(blocked.value)
+    assert sum(
+        call[0] == "generate_audio" for call in fake_client.artifacts.calls
+    ) == dispatches_before
+    # 撈到的候選要變成耐久義務,不能只活在那句錯誤訊息裡。
+    assert _episode(manifest_path)["pending_source_cleanup"] == [orphan_id]
+
+    # 刪掉孤兒還不夠:候選窗還開著,晚到的 upload 仍可能再冒一筆出來,所以
+    # replacement 繼續 fail-closed(這一條就是「window 前 replacement 被擋」)。
+    await b.source_delete("nb-1", orphan_id)
+    with pytest.raises(ValueError, match="候選窗還沒關"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    assert sum(
+        call[0] == "generate_audio" for call in fake_client.artifacts.calls
+    ) == dispatches_before
+
+    _age_the_dispatch_window(manifest_path, attempt_id)
+    out = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        brief="修正後內容",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
+    )
+    assert out["episode"] == 1
+    episode = _episode(manifest_path)
+    assert "pending_source_cleanup" not in episode
+    retraction = next(
+        row["retraction"]
+        for row in episode["attempts"]
+        if row["attempt_id"] == attempt_id
+    )
+    assert "source_cleanup_unresolved" not in retraction
+
+
+async def test_cancellation_before_the_remote_create_settles_once_the_window_closes(
+    fake_client, tmp_path, monkeypatch
+):
+    """取消發生在 add_file 真的建出 source 之前:遠端零候選。
+
+    **`CancelledError` 要被 checkpoint 收到**(它是 BaseException,`except Exception`
+    收不到)——漏收會讓狀態永久停在 `dispatching`。而零候選在候選窗關上之前不算
+    「真的沒有」,所以重生要先 fail-closed,窗關了才結案放行。
+    """
+    manifest_path = str(tmp_path / "series_manifest.json")
+    entered = asyncio.Event()
+
+    async def hang_before_remote_create(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fake_client.sources, "add_file", hang_before_remote_create)
+    running = asyncio.create_task(
+        p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief=EP["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
+        )
+    )
+    await entered.wait()
+    attempt_id = _episode(manifest_path)["active_attempt_id"]
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert _upload(manifest_path, attempt_id)["status"] == "acceptance_unknown"
+
+    retracted = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="放棄", abandon_in_flight=True
+    )
+    assert retracted["source_cleanup_unresolved"] is True
+
+    dispatches_before = sum(
+        call[0] == "generate_audio" for call in fake_client.artifacts.calls
+    )
+    with pytest.raises(ValueError, match="候選窗還沒關"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    assert sum(
+        call[0] == "generate_audio" for call in fake_client.artifacts.calls
+    ) == dispatches_before
+
+    _age_the_dispatch_window(manifest_path, attempt_id)
+    monkeypatch.setattr(fake_client.sources, "add_file", type(fake_client.sources).add_file.__get__(fake_client.sources))
+    out = await p.podcast_episode(
+        "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+    assert out["episode"] == 1
+    retraction = next(
+        row["retraction"]
+        for row in _episode(manifest_path)["attempts"]
+        if row["attempt_id"] == attempt_id
+    )
+    assert "source_cleanup_unresolved" not in retraction
+
+
+async def test_gate_keeps_the_obligation_when_the_notebook_cannot_be_listed(
+    fake_client, tmp_path, monkeypatch
+):
+    """對帳打不通(認證死了／notebook 讀不到)絕不能把義務誤清成已結案。"""
+    manifest_path = str(tmp_path / "series_manifest.json")
+    entered = asyncio.Event()
+
+    async def hang_before_remote_create(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fake_client.sources, "add_file", hang_before_remote_create)
+    running = asyncio.create_task(
+        p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    )
+    await entered.wait()
+    attempt_id = _episode(manifest_path)["active_attempt_id"]
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="放棄", abandon_in_flight=True
+    )
+    _age_the_dispatch_window(manifest_path, attempt_id)
+
+    async def dead_auth(*args, **kwargs):
+        raise RuntimeError("auth is dead")
+
+    monkeypatch.setattr(fake_client.sources, "list", dead_auth)
+    with pytest.raises(RuntimeError, match="auth is dead"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    retraction = next(
+        row["retraction"]
+        for row in _episode(manifest_path)["attempts"]
+        if row["attempt_id"] == attempt_id
+    )
+    assert retraction["source_cleanup_unresolved"] is True
+
+
+@pytest.mark.parametrize(
+    "status", ("dispatching", "acceptance_unknown", "reconciliation_ambiguous")
+)
+async def test_every_unresolved_upload_status_carries_the_obligation(
+    fake_client, tmp_path, status
+):
+    """**三種 unresolved 狀態都要記義務,不只 `dispatching`。**
+
+    三者的共同後果相同(遠端可能多出一筆 media、manifest 記不住它是誰),只涵蓋一種
+    等於另外兩種的孤兒照樣沒人記得。`reconciliation_ambiguous` 已經算出候選時,那組
+    候選要直接排進 stale ids ——身分不確定但範圍確定,全刪掉最保守。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    attempt_id = before["output_attempt_id"]
+    candidates = ["src-ambiguous-a", "src-ambiguous-b"]
+
+    def unresolve(manifest):
+        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        attempt["finalize"]["feedback_source_upload"].update(
+            {
+                "status": status,
+                "source_id": None,
+                "candidate_source_ids": (
+                    candidates if status == "reconciliation_ambiguous" else []
+                ),
+            }
+        )
+
+    ManifestStore(manifest_path).update(unresolve)
+
+    retracted = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="QA 拒收", abandon_in_flight=True
+    )
+    assert retracted["source_cleanup_unresolved"] is True
+    # `_complete_ep1` 留下的 episode 級 feedback_source_id 投影本來就是確定的義務,
+    # 所以三種狀態都先指向 source_delete;unresolved 的部分由 gate 之後再對帳。
+    assert retracted["safe_next_action"] == p.ACTION_SOURCE_DELETE
+    if status == "reconciliation_ambiguous":
+        # 身分不確定但範圍確定:算出來的候選直接全部排進清理義務,最保守。
+        assert set(candidates) <= set(retracted["stale_source_ids"])
+        assert set(candidates) <= set(_episode(manifest_path)["pending_source_cleanup"])
+    else:
+        assert not set(candidates) & set(retracted["stale_source_ids"])
 
 
 # ---- 清理義務要聚合整個 canonical notebook,不是只看 episode_n 那一列(review #3) ----

@@ -435,6 +435,23 @@ async def publish_series(
             if path and not (os.path.exists(path) and os.path.getsize(path) > 0):
                 raise ValueError(f"episode {n}: {key} missing file: {path}")
 
+    # Validate only values projected into feed.xml before the first PUT; internal
+    # manifest fields (brief, errors, local paths) are deliberately irrelevant.
+    # build_feed_xml repeats this at its own public boundary.
+    feed_mod.validate_xml_text((
+        base_url,
+        show_title,
+        show_description,
+        author,
+        owner_name,
+        owner_email,
+        category,
+        [
+            (ep["title"], ep["description"], ep.get("published_at"))
+            for ep in manifest_eps
+        ],
+    ))
+
     # 用單次 run 專屬的 staging 目錄裝重抓的 mp3(見 _ensure_local_mp3):
     # os.replace 換的是目的路徑本身,symlink 攻擊面在最終路徑,不在暫存目錄的檔案
     # mode——固定檔名不是覆寫面。TemporaryDirectory 預設 0700 解的是另一件事:未發布

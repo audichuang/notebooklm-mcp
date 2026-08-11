@@ -106,3 +106,52 @@ def test_batch_manifest_update_uses_manifest_store(tmp_path, monkeypatch):
     stored = json.loads(man.read_text(encoding="utf-8"))
     assert stored["schema_version"] == 2
     assert stored["revision"] == 1
+
+
+def test_render_failure_preserves_existing_output(tmp_path, monkeypatch):
+    from PIL import Image
+
+    output = tmp_path / "show.jpg"
+    output.write_bytes(b"previous-cover")
+
+    def fake_chrome(command, **_kwargs):
+        screenshot = next(
+            value.split("=", 1)[1] for value in command if value.startswith("--screenshot=")
+        )
+        Image.new("RGB", (3000, 3000)).save(screenshot, "PNG")
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    def reject_artwork(_path):
+        raise ValueError("invalid rendered artwork")
+
+    monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
+    monkeypatch.setattr(cover_cli.subprocess, "run", fake_chrome)
+    monkeypatch.setattr(cover_cli, "validate_artwork", reject_artwork)
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--show", "--output", str(output),
+    ])
+
+    with pytest.raises(ValueError, match="invalid rendered artwork"):
+        cover_cli.main()
+
+    assert output.read_bytes() == b"previous-cover"
+
+
+def test_skip_existing_validates_artwork_before_manifest_update(tmp_path, monkeypatch):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"episodes": [{"episode": 1, "title": "甲集"}]}),
+        encoding="utf-8",
+    )
+    before = manifest.read_bytes()
+    (tmp_path / "EP01.jpg").write_bytes(b"not-an-image")
+    monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--manifest", str(manifest),
+        "--output-dir", str(tmp_path), "--skip-existing",
+    ])
+
+    with pytest.raises(ValueError, match="readable image"):
+        cover_cli.main()
+
+    assert manifest.read_bytes() == before

@@ -424,6 +424,41 @@ async def test_missing_description_fails_fast(env, tmp_path, artwork_png, monkey
     assert captured == []
 
 
+async def test_forbidden_xml_character_fails_before_any_put(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+
+    with pytest.raises(ValueError, match=r"XML 1\.0.*U\+0001"):
+        await _publish(manifest, artwork_png, show_title="AI\x01新聞")
+
+    assert captured == []
+
+
+async def test_forbidden_xml_character_in_non_feed_field_does_not_block_publish(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    with open(manifest, encoding="utf-8") as manifest_file:
+        data = json.load(manifest_file)
+    data["episodes"][0]["brief"] = "internal\x01note"
+    with open(manifest, "w", encoding="utf-8") as manifest_file:
+        json.dump(data, manifest_file, ensure_ascii=False)
+    monkeypatch.setattr(tools_publish, "_audio_duration_hms", lambda _path: None)
+
+    async def run_inline(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(tools_publish.asyncio, "to_thread", run_inline)
+
+    result = await _publish(manifest, artwork_png)
+
+    assert result["episode_count"] == 2
+    assert any(item["name"] == "feed.xml" for item in captured)
+
+
 async def test_feed_info(env):
     info = await tools_publish.feed_info("ai-news")
     token = identity.make_token("ai-news", os.environ["PODCAST_TOKEN_SALT"])

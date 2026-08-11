@@ -16,7 +16,28 @@ def _feed_dir_url(base_url: str, token: str) -> str:
     return f"{base_url.rstrip('/')}/feeds/{token}"
 
 
+def validate_xml_text(value: object) -> None:
+    """Reject characters XML 1.0 cannot represent."""
+    if isinstance(value, str):
+        for char in value:
+            code = ord(char)
+            if not (
+                code in (0x9, 0xA, 0xD)
+                or 0x20 <= code <= 0xD7FF
+                or 0xE000 <= code <= 0xFFFD
+                or 0x10000 <= code <= 0x10FFFF
+            ):
+                raise ValueError(f"XML 1.0 forbids character U+{code:04X}")
+    elif isinstance(value, dict):
+        for item in value.values():
+            validate_xml_text(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            validate_xml_text(item)
+
+
 def build_feed_xml(show: dict, base_url: str) -> str:
+    validate_xml_text((show, base_url))
     token = show["token"]
     base = _feed_dir_url(base_url, token)
     feed_url = f"{base}/feed.xml"

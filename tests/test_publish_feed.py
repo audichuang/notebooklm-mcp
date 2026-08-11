@@ -1,4 +1,5 @@
 import xml.etree.ElementTree as ET
+import pytest
 from notebooklm_mcp.publish import feed
 
 NS = {
@@ -92,6 +93,12 @@ def test_namespaces_declared():
     assert 'xmlns:content="http://purl.org/rss/1.0/modules/content/"' in raw
     assert 'xmlns:atom="http://www.w3.org/2005/Atom"' in raw
     assert raw.startswith("<?xml")
+
+
+def test_feed_rejects_xml_10_forbidden_control_characters():
+    show = {**SHOW, "title": "AI\x01新聞"}
+    with pytest.raises(ValueError, match=r"XML 1\.0.*U\+0001"):
+        feed.build_feed_xml(show, BASE)
 
 
 def test_index_html_lists_live_episodes_only():

@@ -116,20 +116,138 @@ ALL_CASES = list(
 # `candidate_selection_required=True` 這個新維度整個在笛卡爾網之外——`_attempt_
 # capabilities()` 與 `_attempt_next_step()` 對它的分支順序不一致（F2 regression：
 # 前者排在 `can_resume` 之前，後者原本排在之後）完全沒有測試碰過。
-ALL_CASES_WITH_WINDOW = list(
-    itertools.product(
-        DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES, (False, True, None),
-        (False, True),
-    )
+# **三種 unresolved 狀態都要進網,不只 `dispatching`**(F2 盲審):三者的共同後果都是
+# 「遠端可能多出一筆 media,而 manifest 記不住它是誰」,只餵一種等於另外兩種完全沒有
+# 不變式守著。`None` = source_id 已落盤或還沒 dispatch(不 unresolved)。
+UNRESOLVED_UPLOAD_STATES = (
+    None,
+    "dispatching",
+    "acceptance_unknown",
+    "reconciliation_ambiguous",
 )
+
+ALL_CASES_WITH_WINDOW = [
+    case
+    for case in itertools.product(
+        DISPATCH_STATES,
+        REMOTE_STATES,
+        ROLES,
+        SETTINGS_SHAPES,
+        (False, True, None),
+        (False, True),
+        UNRESOLVED_UPLOAD_STATES,
+    )
+    # Feedback upload 只可能在 generation 已 accepted、remote 已 completed 之後 dispatch。
+    # `output` 那格排除掉:promote 的前提是四個 finalize step 都 completed,而那代表
+    # source_id 早就落盤——不拿測試 fixture 製造 production 永遠生不出的矛盾狀態。
+    # **`historical` 要留著**:supersede 一顆 remote 已終態的 attempt 之後,它的 upload
+    # checkpoint 仍可能卡在 unresolved,而那正是「歷史紀錄」與「upload 未結案」兩個
+    # 分支搶同一句話的那一格(分支順序回歸就長在這裡)。
+    if case[-1] is None
+    or (
+        case[0] == "accepted"
+        and case[1] == "completed"
+        and case[2] in ("active", "historical")
+    )
+]
+
+
+@pytest.mark.parametrize("status", UNRESOLVED_UPLOAD_STATES[1:])
+def test_unresolved_feedback_upload_prefers_resume_but_never_blocks_retract(status):
+    """**F2:未結案的 upload 不准取消 retract 能力。**
+
+    舊版對 `dispatching` 硬擋(連 `abandon_in_flight` 都擋),而那個狀態靠一次 client
+    cancellation 就能永久存在——`_reconcile_source_upload` 只從 finalize 進得去,於是
+    唯一出路變成「要作廢一顆輸入本來就錯的 attempt,得先把它完整 finalize、上傳、
+    promote」,比旗標本來要避免的後果還多一輪遠端副作用。
+
+    現在的處置:優先建議 resume(那是唯一能把 source 身分認回來的路),但顯式旗標
+    穿得過去,義務改由 tombstone 上的 `source_cleanup_unresolved` 接手。
+    """
+    episode, attempt = _case("accepted", "completed", "active", "series")
+    attempt["finalize"] = {
+        "feedback_source_upload": {"status": status, "source_id": None}
+    }
+
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+
+    assert caps["feedback_upload_unresolved"] is True
+    assert caps["feedback_upload_status"] == status
+    assert caps["safe_next_action"] == p.ACTION_RESUME
+    # 旗標出口必須還在 —— 這一條就是 F2 的回歸鎖。
+    assert caps["needs_abandon_flag"] is True
+    step = p._attempt_next_step(caps)
+    assert "source_id 還沒落盤" in step
+    assert p.ACTION_RESUME in step
+    assert "abandon_in_flight=true" in step
+
+    # source_id 一落盤就不再 unresolved,回到既有的 stale_source_ids 路徑。
+    attempt["finalize"]["feedback_source_upload"]["source_id"] = "src-1"
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    assert caps["feedback_upload_unresolved"] is False
+    assert caps["needs_abandon_flag"] is True
+
+
+@pytest.mark.parametrize("status", UNRESOLVED_UPLOAD_STATES[1:])
+def test_historical_attempt_wins_over_unresolved_upload(status):
+    """已被取代的 attempt 就算 upload 卡在 unresolved,能動的也不是它。
+
+    分支順序回歸:把 unresolved 判斷排在 historical 之前,這一格會教人去 resume 一顆
+    歷史 attempt——而 output guard 會擋掉,又是一句在它自己產生的狀態下不可執行的指引。
+    """
+    episode, attempt = _case("accepted", "completed", "historical", "series")
+    attempt["finalize"] = {
+        "feedback_source_upload": {"status": status, "source_id": None}
+    }
+
+    caps = p._attempt_capabilities(episode, attempt, "att-me")
+
+    assert caps["feedback_upload_unresolved"] is True
+    assert caps["safe_next_action"] is None
+    assert "歷史紀錄" in p._attempt_next_step(caps)
+
+
+def test_post_retract_unresolved_upload_does_not_promise_regeneration():
+    """retract 之後義務還沒對帳完時,不准把重生講成現在就做得到。
+
+    `_assert_source_cleanup_done` 會把 `regeneration_entry` 擋成 ValueError,所以
+    `safe_next_action` 必須是 `None`、指引必須講「等窗關上、gate 會自己對帳」。
+    """
+    episode, attempt = _case("accepted", "completed", "active", "series")
+    attempt["finalize"] = {
+        "feedback_source_upload": {"status": "dispatching", "source_id": None}
+    }
+    attempt["retraction"] = {"source_cleanup_unresolved": True, "stale_source_ids": []}
+    episode.pop("active_attempt_id", None)
+
+    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+
+    assert caps["source_cleanup_unresolved"] is True
+    assert caps["cleanup_state"] == "reconcile_after"
+    assert caps["safe_next_action"] is None
+    step = p._attempt_next_step(caps)
+    assert "沒人記得" in step and "候選窗" in step
+
+    # 義務結案(gate 對帳過)之後,重生才回到指引裡。
+    attempt["retraction"].pop("source_cleanup_unresolved")
+    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+    assert caps["cleanup_state"] is None
+    assert caps["safe_next_action"] == caps["regeneration_entry"]
 
 
 @pytest.mark.parametrize(
-    "dispatch,remote,role,shape,window_closed,candidate_selection_required",
+    "dispatch,remote,role,shape,window_closed,candidate_selection_required,"
+    "upload_status",
     ALL_CASES_WITH_WINDOW,
 )
 def test_every_state_combination_yields_executable_guidance(
-    dispatch, remote, role, shape, window_closed, candidate_selection_required
+    dispatch,
+    remote,
+    role,
+    shape,
+    window_closed,
+    candidate_selection_required,
+    upload_status,
 ):
     """**核心不變式:訊息教的每一個動作,在那個狀態下都必須真的做得到。**
 
@@ -150,6 +268,10 @@ def test_every_state_combination_yields_executable_guidance(
     從沒餵過 `True`，`podcast_attempt_adopt` 這個字面值完全沒有不變式守著。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
+    if upload_status is not None:
+        attempt["finalize"] = {
+            "feedback_source_upload": {"status": upload_status, "source_id": None}
+        }
     caps = p._attempt_capabilities(
         episode,
         attempt,
@@ -158,6 +280,12 @@ def test_every_state_combination_yields_executable_guidance(
         candidate_selection_required=candidate_selection_required,
     )
     step = p._attempt_next_step(caps)
+    assert caps["feedback_upload_unresolved"] is (upload_status is not None)
+    if upload_status is not None and role == "active":
+        # **F2 回歸鎖:未結案的 upload 不准把 retract 講成做不到。** 舊版在這一格回
+        # 「retract 暫時不可用,abandon_in_flight 也不能越過」——而那條路才是唯一出口。
+        assert caps["needs_abandon_flag"] is (caps["authorization_basis"] is None)
+        assert "不可用" not in step
 
     if "原樣重呼" in step:
         assert caps["can_resend"], (
@@ -385,11 +513,18 @@ def test_settled_and_output_still_require_the_original_sources_back(
 
 
 @pytest.mark.parametrize(
-    "dispatch,remote,role,shape,window_closed,candidate_selection_required",
+    "dispatch,remote,role,shape,window_closed,candidate_selection_required,"
+    "upload_status",
     ALL_CASES_WITH_WINDOW,
 )
 def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
-    dispatch, remote, role, shape, window_closed, candidate_selection_required
+    dispatch,
+    remote,
+    role,
+    shape,
+    window_closed,
+    candidate_selection_required,
+    upload_status,
 ):
     """**P2 修復:`_attempt_capabilities()` 直接產生 `safe_next_action`。**
 
@@ -403,6 +538,10 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
     優先序相反,兩個函式對同一顆 caps 指向不同工具卻沒有任何測試看得到。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
+    if upload_status is not None:
+        attempt["finalize"] = {
+            "feedback_source_upload": {"status": upload_status, "source_id": None}
+        }
     caps = p._attempt_capabilities(
         episode,
         attempt,
@@ -411,11 +550,23 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
         candidate_selection_required=candidate_selection_required,
     )
     action = caps["safe_next_action"]
+    assert caps["feedback_upload_unresolved"] is (upload_status is not None)
 
     if not caps["is_active"] and not caps["is_output"]:
         assert action is None, "歷史紀錄沒有可執行的下一步"
         return
     assert action is None or action in p.SAFE_NEXT_ACTIONS or action == p.ACTION_EPISODE
+    if caps["feedback_upload_unresolved"]:
+        # 優先序:歷史紀錄(上面已 return)→ upload 未結案 → is_output → ……。續完是
+        # 唯一能把那筆 source 的身分認回來的路,所以排在其他建議之前。
+        assert action == (
+            p.ACTION_RESUME
+            if caps["can_resume"]
+            else p.ACTION_RECONCILE if caps["can_reconcile"] else None
+        )
+        if action == p.ACTION_RESUME:
+            assert "podcast_episode_resume" in p._attempt_next_step(caps)
+        return
     if caps["is_output"]:
         assert action == p.ACTION_RETRACT
     elif caps["authorization_basis"] == "output_owner":

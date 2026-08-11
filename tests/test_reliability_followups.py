@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from notebooklm.exceptions import NetworkError
 from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import tools_podcast as p
@@ -505,7 +506,7 @@ async def test_completed_episode_transport_failure_returns_structured_partial(
     )
 
     async def transport_failure(_notebook_id):
-        raise ConnectionError("network blip while verifying completed episode")
+        raise NetworkError("network blip while verifying completed episode")
 
     monkeypatch.setattr(fake_client.sources, "list", transport_failure)
     out = await p.podcast_series(
@@ -521,6 +522,26 @@ async def test_completed_episode_transport_failure_returns_structured_partial(
     assert [
         call for call in fake_client.artifacts.calls if call[0] == "generate_audio"
     ] == [call for call in fake_client.artifacts.calls if call[0] == "generate_audio"][:1]
+
+
+async def test_new_episode_network_error_returns_structured_partial(
+    fake_client, tmp_path
+):
+    """首次 dispatch 的 SDK transport failure 也要保留 series recovery contract。"""
+    fake_client.artifacts.generate_audio_exc = NetworkError(
+        "network blip during first dispatch"
+    )
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "1"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 1
+    assert out["observed_state"] == "acceptance_unknown"
+    assert out["safe_next_action"] == "podcast_episode_reconcile"
 
 
 async def test_repeated_quota_supersede_is_visible_to_the_caller(

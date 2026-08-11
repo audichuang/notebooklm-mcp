@@ -33,6 +33,7 @@ import argparse
 import html
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -84,22 +85,43 @@ def _render(template: str, subs: dict, output: str, chrome: str) -> dict:
     doc = template
     for key, val in subs.items():
         doc = doc.replace(key, str(val) if key == "__HUE__" else html.escape(str(val)))
-    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-    with tempfile.TemporaryDirectory() as td:
-        hpath = os.path.join(td, "cover.html")
-        png = os.path.join(td, "cover.png")
-        with open(hpath, "w", encoding="utf-8") as f:
-            f.write(doc)
-        r = subprocess.run(
-            [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
-             "--hide-scrollbars", "--force-device-scale-factor=1",
-             f"--window-size={S},{S}", f"--screenshot={png}",
-             f"file://{os.path.abspath(hpath)}"],   # 必須絕對路徑,否則 Chrome 當 host → ERR_INVALID_URL
-            capture_output=True, text=True, timeout=180)
-        if not os.path.exists(png):
-            raise SystemExit(f"Chrome 光柵化失敗 (exit={r.returncode}):{r.stderr[-400:]}")
-        Image.open(png).convert("RGB").save(output, "JPEG", quality=92)
-    return validate_artwork(output)
+    directory = os.path.dirname(os.path.abspath(output))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_output = tempfile.mkstemp(
+        dir=directory, prefix=f".{os.path.basename(output)}.", suffix=".part"
+    )
+    os.close(fd)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            hpath = os.path.join(td, "cover.html")
+            png = os.path.join(td, "cover.png")
+            with open(hpath, "w", encoding="utf-8") as f:
+                f.write(doc)
+            r = subprocess.run(
+                [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+                 "--hide-scrollbars", "--force-device-scale-factor=1",
+                 f"--window-size={S},{S}", f"--screenshot={png}",
+                 f"file://{os.path.abspath(hpath)}"],   # 必須絕對路徑,否則 Chrome 當 host → ERR_INVALID_URL
+                capture_output=True, text=True, timeout=180)
+            if not os.path.exists(png):
+                raise SystemExit(f"Chrome 光柵化失敗 (exit={r.returncode}):{r.stderr[-400:]}")
+            with Image.open(png) as image:
+                image.convert("RGB").save(temporary_output, "JPEG", quality=92)
+        info = validate_artwork(temporary_output)
+        try:
+            mode = stat.S_IMODE(os.stat(output).st_mode)
+        except FileNotFoundError:
+            mode = 0o644
+        os.chmod(temporary_output, mode)
+        with open(temporary_output, "rb") as image_file:
+            os.fsync(image_file.fileno())
+        os.replace(temporary_output, output)
+        return info
+    finally:
+        try:
+            os.unlink(temporary_output)
+        except FileNotFoundError:
+            pass
 
 
 def _preflight_episodes(episodes: list) -> None:
@@ -175,6 +197,7 @@ def main() -> None:
             n = int(ep["episode"])                      # 已過 preflight,保證 int
             cover_path = os.path.abspath(os.path.join(out_dir, f"EP{n:02d}.jpg"))
             if args.skip_existing and os.path.exists(cover_path):
+                validate_artwork(cover_path)
                 cover_updates[n] = (ep["title"], cover_path)
                 print(f"SKIP {cover_path} (exists)")
                 continue

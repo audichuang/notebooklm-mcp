@@ -114,9 +114,10 @@ claude mcp add-json notebooklm -s local \
   推導與取捨見 [ADR-0010](docs/adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md) 的 v0.9.0 amendment。
 - 長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**有 `probe_auth` 認證預檢
   (輕量真 RPC;homepage probe 會 false-positive,jacob-bd #250);獨立工具版是 `auth_check`。
-- `sources.delete` 是 **idempotent**(0.7.0 起):刪不存在的 source 也「成功」不 raise。
-  `source_delete` 回的 `deleted` 只代表「呼叫後該 id 已不在筆記本」,**不保證它先前存在**
-  (打錯 id 也回 deleted)。要確認刪掉某既有來源,先用 `source_list` 拿真實 `source_id`。
+- SDK 的 `sources.delete` 雖是 idempotent(0.7.0 起)，但它的 mutation payload 只有
+  `source_id`；公開工具 `source_delete` 會先用 `source_list` 驗證該 id 屬於指定 notebook。
+  打錯 id／notebook 會在 destructive RPC 前 fail-loud，不會回報 `deleted`；因此工具不再標
+  `idempotentHint`。使用前先用 `source_list` 取得該 notebook 的真實 `source_id`。
   ⚠️ **刪除後 `source_fulltext` 用同一個 `source_id` 仍讀得回全文(實測 55 分鐘後仍可)
   —— 那是預期的,不是清理失敗**:它繞過 notebook 直接查 source 物件,而生成用的來源清單
   與 `source_list` 同走 `GET_NOTEBOOK`。所以 ADR-0009 的清理義務有效。推導的三個前提由
@@ -199,4 +200,3 @@ claude mcp add-json notebooklm -s local \
   tried guard,自己會漏試可用帳號)。根因是 prompt:審查者拿到的是「這幾條修正對不對」,
   於是他們對照原缺陷逐條驗證,**沒有人對成品重新問一次「這裡面有什麼是新的、而且沒被
   任何測試守住的」**。修正輪之後要再派一輪只看成品、不看原 findings 的複審。
-

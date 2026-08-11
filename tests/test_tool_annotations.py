@@ -29,11 +29,10 @@ EXPECTED_DESTRUCTIVE = {
     "podcast_attempt_retract",
 }
 
-# SDK 0.7.0 起 delete 是 idempotent(刪不存在的 id 也「成功」不 raise);
-# retract 對同一 attempt 重呼沿用既有 retraction、不重寫時間戳(docstring 自稱冪等,
-# annotations 要跟上,否則兩個自稱冪等的工具標記不一致)。
+# source_delete 現在會先驗證 id 屬於指定 notebook，刪除後重呼會 fail-loud，
+# 不再符合 MCP 的 idempotentHint。retract 對同一 attempt 重呼仍沿用既有
+# retraction，不重寫時間戳。
 EXPECTED_IDEMPOTENT = {
-    "source_delete",
     "podcast_attempt_retract",
 }
 

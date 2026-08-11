@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -396,6 +397,55 @@ async def test_pre_dispatch_baseline_failure_keeps_frozen_attempt_prepared_and_r
     await p.podcast_episode("nb-1", **args)
     final = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert final["episodes"][0]["attempts"][0]["attempt_id"] == attempt["attempt_id"]
+
+
+async def test_manifest_postcommit_fsync_error_keeps_binding_for_public_retry(
+    fake_client, tmp_path, monkeypatch
+):
+    """manifest 的 replace 已提交後即使 directory fsync 回 EIO，呼叫端也不能把
+    frozen binding 當成未提交而刪掉；相同 public request 必須可沿用同一 attempt。"""
+    from notebooklm_mcp import manifest_store
+
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "manifest/series_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    bundle, _ = _write_bundle(workspace)
+    real_fsync_parent = manifest_store._fsync_parent
+    calls = 0
+
+    def fail_first_manifest_fsync(path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(errno.EIO, "simulated post-commit directory fsync failure")
+        return real_fsync_parent(path)
+
+    monkeypatch.setattr(manifest_store, "_fsync_parent", fail_first_manifest_fsync)
+    args = dict(
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(workspace / "output"),
+        manifest_path=str(manifest_path),
+        input_bundle_path=str(bundle.relative_to(workspace)),
+    )
+
+    with pytest.raises(OSError, match="committed"):
+        await p.podcast_episode("nb-1", **args)
+
+    binding_path = bundle / "attempt-binding.json"
+    assert binding_path.exists()
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    committed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first_attempt = committed["episodes"][0]["attempts"][0]
+    assert first_attempt["attempt_id"] == binding["attempt_id"]
+    assert not any(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
+
+    result = await p.podcast_episode("nb-1", **args)
+    final = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result["attempt_id"] == first_attempt["attempt_id"]
+    assert len(final["episodes"][0]["attempts"]) == 1
+    assert sum(call[0] == "generate_audio" for call in fake_client.artifacts.calls) == 1
 
 
 async def test_binding_sidecar_rolls_back_when_manifest_rejects_attempt(fake_client, tmp_path):

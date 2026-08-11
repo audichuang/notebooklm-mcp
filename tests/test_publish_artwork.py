@@ -20,6 +20,15 @@ def test_valid_jpeg_passes(tmp_path):
     assert info["format"] == "JPEG"
 
 
+def test_truncated_image_rejected_even_when_header_is_readable(tmp_path):
+    path = _make(tmp_path, "truncated.jpg", (1400, 1400), fmt="JPEG")
+    with open(path, "rb+") as image_file:
+        image_file.truncate(image_file.seek(0, 2) - 100)
+
+    with pytest.raises(ValueError, match="readable image"):
+        artwork.validate_artwork(path)
+
+
 def test_non_square_rejected(tmp_path):
     with pytest.raises(ValueError, match="square"):
         artwork.validate_artwork(_make(tmp_path, "rect.png", (1500, 1400)))

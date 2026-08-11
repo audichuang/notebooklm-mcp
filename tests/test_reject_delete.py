@@ -3,6 +3,8 @@
 This compatibility case has no prior manifest-backed completed episode and does
 not authorize implicit regeneration or replacement of durable output.
 """
+import pytest
+
 from notebooklm_mcp import tools_basic as t
 from notebooklm_mcp import tools_podcast as p
 
@@ -13,6 +15,26 @@ async def test_source_delete_removes_the_source(fake_client):
     out = await t.source_delete("nb-1", sid)
     assert out["deleted"] == sid
     assert fake_client.sources.titles() == []
+
+
+async def test_source_delete_rejects_an_id_from_another_notebook_before_mutation(
+    fake_client, monkeypatch
+):
+    """DELETE_SOURCE 只送 source_id；公開工具必須在破壞性 RPC 前驗歸屬。"""
+    fake_client.sources.seed("別本筆記的來源")
+    elsewhere_id = fake_client.sources.sources[0]["id"]
+
+    async def requested_notebook_sources(notebook_id):
+        assert notebook_id == "nb-requested"
+        return []
+
+    monkeypatch.setattr(fake_client.sources, "list", requested_notebook_sources)
+
+    with pytest.raises(ValueError, match="not in notebook"):
+        await t.source_delete("nb-requested", elsewhere_id)
+
+    assert fake_client.sources.titles() == ["別本筆記的來源"]
+    assert not [call for call in fake_client.sources.calls if call[0] == "delete"]
 
 
 async def test_delete_source_then_generate_fresh_standalone_episode(fake_client, tmp_path):
