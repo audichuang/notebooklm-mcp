@@ -50,7 +50,11 @@ from .generation_input import (
     write_attempt_binding,
 )
 from .languages import resolve_language
-from .manifest_store import ManifestPostCommitError, ManifestStore
+from .manifest_store import (
+    ManifestConflictError,
+    ManifestPostCommitError,
+    ManifestStore,
+)
 
 _TZ = timezone(timedelta(hours=8))
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
@@ -2036,32 +2040,56 @@ async def _assert_source_cleanup_done(
     聚合範圍是**整個 canonical notebook**,不是只有 `episode_n` 這一列:retract EP_a
     後漏刪其 stale source,若只驗當前這一集,回頭跳過 dirty 的 EP_a、改生成同 notebook
     的 EP_b(例如 start 跳過較早集)會直接放行——EP_b 未指名 source_ids 時就把 EP_a
-    的拒收逐字稿讀進 context。canonical notebook 取
-    ``episode.get("notebook_id") or manifest.get("notebook_id")``;canonical 不同的集
-    互不影響(不同 notebook 的義務不該互相卡住)。
+    的拒收逐字稿讀進 context。canonical 不同的集互不影響(不同 notebook 的義務不該
+    互相卡住)。
 
     **兩種義務都在這裡結案**(F2):
       (1) ``pending_source_cleanup``——身分已確定的 id,驗「已經不在 notebook」。
       (2) tombstone 上的 ``source_cleanup_unresolved``——retract 作廢了一顆 upload 還沒
           落盤的 attempt,遠端可能多出一筆沒人記得的 media。用
-          ``unresolved_upload_candidates()``(與 finalize 對帳同一份判準)去撈:撈到候選
-          就排進 (1) 並 fail-closed 要求刪掉;零候選**且候選窗已關**才算真的沒有、清掉
-          義務放行;窗還開著就繼續 fail-closed(這時候的零候選只代表「還沒出現」)。
-          ``sources.list`` / 認證失敗一律往上拋 —— 義務不會被誤清。"""
+          ``unresolved_upload_candidates()``(與 finalize 對帳同一份判準)去撈。
+
+    **執行順序本身就是安全性質**(盲審 P1×3 + P2×2 之後重寫):
+
+    ① **身分先於一切。** 清理義務綁的是「當初上傳的那本 notebook」,而 (2) 的權威來源是
+       **attempt 自己的 `notebook_id`** —— `manifest_store._validate` 明文允許 tombstone
+       保留建立時綁的舊 notebook(否則 retract 之後想換 notebook 重生就寫不進去),所以
+       episode 當下的 notebook 只是 fallback,不是判準。身分沒對上就**不篩選、不持久化、
+       不回傳任何候選**:拿呼叫端隨手傳的 notebook 去撈,撈到的是**別本筆記本裡碰巧同名
+       同時間窗**的 source,而我們會把它寫進清理義務、再叫呼叫端 `source_delete` —— 那是
+       對無關 notebook 下dest構性指令,比漏掉義務更糟。
+    ② **一次 list,純計算,不中途拋。** 掃描過程只累積結果(candidates / settled /
+       waiting / checkpoint 壞掉的),**不在迴圈裡 raise** —— 前面幾顆已經撈到的候選還沒
+       落盤,一拋就永遠回不來(那些 id 從此沒人記得)。
+    ③ **單次 revision-CAS mutation。** `_claimed_source_ids` 是在 `await` **之前**的
+       snapshot 上算的,而 await 期間另一個 finalizer 可能剛好把某個 source claim 成它那
+       一集的合法 continuity source。拿舊 ownership 寫新 manifest = 把合法 source 排進
+       待刪清單、呼叫端照指引刪掉。所以整批寫入帶 `expected_revision`,manifest 在這段
+       期間動過就衝突、fail-closed,由呼叫端重跑(重跑會拿到新的 ownership)。
+    ④ **寫完才 raise。** 「已確認不在」的清除、撈到的新義務、結案的 unresolved 旗標,
+       全部在同一次 mutation 裡結算 —— 否則已經刪掉的 id 會卡在 `pending_source_cleanup`
+       裡(因為這一輪先在 waiting 那裡拋了),而 `podcast_attempt_retract` 的冪等回傳會
+       繼續說 `source_delete`,指向一個早就不存在的東西。
+
+    `sources.list` / 認證失敗一律往上拋 —— 義務不會被誤清。"""
     snapshot = store.read()
+    snapshot_revision = snapshot.get("revision")
     episodes = snapshot.get("episodes", [])
     manifest_notebook_id = snapshot.get("notebook_id")
 
     def canonical_notebook(row: dict) -> object:
         return row.get("notebook_id") or manifest_notebook_id
 
+    def cleanup_notebook(row: dict, attempt: dict) -> object:
+        """清理義務綁的那本 notebook:**attempt 自己的優先**(見 docstring ①)。"""
+        return attempt.get("notebook_id") or canonical_notebook(row)
+
     # (episode_n, attempt_id, attempt, upload)。attempt 整顆帶著走:候選判準要讀它的
     # finalize checkpoint(baseline／expected_title／dispatched_at),而那份資料刻意
     # 只有一份、留在 attempt 上,沒有複製進 retraction。
-    unresolved_records: list[tuple[object, str, dict, dict, bool]] = []
+    unresolved_here: list[tuple[object, str, dict, dict]] = []
+    unresolved_elsewhere: list[tuple[object, str, object]] = []
     for row in episodes:
-        if canonical_notebook(row) not in (None, notebook_id):
-            continue
         for candidate_attempt in row.get("attempts", []):
             retraction = candidate_attempt.get("retraction") or {}
             if not retraction.get("source_cleanup_unresolved"):
@@ -2071,26 +2099,27 @@ async def _assert_source_cleanup_done(
                 # source_id 後來落盤了(adopt/對帳補回身分):義務改由既有的
                 # stale_source_ids／pending 路徑處理,這裡不再管它。
                 continue
-            unresolved_records.append(
-                (
-                    row.get("episode"),
-                    candidate_attempt.get("attempt_id"),
-                    candidate_attempt,
-                    upload,
-                    # 身分確定才可以結案 —— 與下面 `clearable` 同一條紀律:拿呼叫端
-                    # 隨手傳的 notebook 查到零候選,不代表當初上傳的那本也沒有。
-                    canonical_notebook(row) == notebook_id,
-                )
-            )
+            owner = cleanup_notebook(row, candidate_attempt)
+            record = (row.get("episode"), candidate_attempt.get("attempt_id"))
+            if owner == notebook_id:
+                unresolved_here.append((*record, candidate_attempt, upload))
+            else:
+                # **別本 notebook 的義務不擋這一本的生成**(canonical 不同的集互不影響),
+                # 但身分不明(`None`)的擋 —— 那種列無從證明它不是這一本的。
+                if owner is None:
+                    unresolved_elsewhere.append((*record, owner))
+
+    pending_by_episode = [
+        (row.get("episode"), list(row["pending_source_cleanup"]))
+        for row in episodes
+        if row.get("pending_source_cleanup")
+        and canonical_notebook(row) in (None, notebook_id)
+    ]
 
     target_episode = next(
         (row for row in episodes if row.get("episode") == episode_n), None
     )
-    target_has_obligation = target_episode is not None and (
-        bool(target_episode.get("pending_source_cleanup") or [])
-        or any(record[0] == episode_n for record in unresolved_records)
-    )
-    if target_has_obligation:
+    if target_episode is not None and (target_episode.get("pending_source_cleanup") or []):
         # 先驗這一集本身的 notebook 身分,再拿它查。`notebook_id` 是呼叫端給的,而清理
         # 義務是綁在 manifest 那個 notebook 上——拿一個空的別的 notebook 來查,會「查無
         # 此 source」而把義務誤判成已結案(舊來源其實還躺在真正的筆記本裡)。
@@ -2101,13 +2130,20 @@ async def _assert_source_cleanup_done(
                 f"{notebook_id!r}; cannot discharge its source cleanup from another notebook"
             )
 
-    pending_by_episode = [
-        (row.get("episode"), list(row["pending_source_cleanup"]))
-        for row in episodes
-        if row.get("pending_source_cleanup")
-        and canonical_notebook(row) in (None, notebook_id)
-    ]
-    if not pending_by_episode and not unresolved_records:
+    # **身分不明的 unresolved 義務在打 RPC 之前就擋掉**(docstring ①):不篩選、不持久化、
+    # 不回傳任何候選 —— 這一條必須排在 `sources.list` 之前,否則「撈到的候選」已經被算出來
+    # 並寫進義務了,擋在後面沒有意義。
+    if unresolved_elsewhere:
+        details = ", ".join(
+            f"episode {ep_n}: {att!r}" for ep_n, att, _ in unresolved_elsewhere
+        )
+        raise ValueError(
+            f"這幾顆 retracted attempt 的回錄 source 清理義務沒有可核對的 notebook 身分:"
+            f"{details}。補上 attempt／episode／manifest 任一層的 notebook_id 再重試 —— "
+            "拿別本筆記本查到「沒有」不能當成義務結案,而拿它查到的候選更不能當成要刪的東西。"
+        )
+
+    if not pending_by_episode and not unresolved_here:
         return
 
     sources = await client.sources.list(notebook_id)
@@ -2119,19 +2155,13 @@ async def _assert_source_cleanup_done(
         if source_id in live
     ]
 
-    # 身分未定的義務:撈候選 → 有就變成確定的義務,零候選且窗已關才結案。
+    # 純計算:全部累積,迴圈裡一律不 raise(docstring ②)。
     now = datetime.now(timezone.utc)
     discovered: dict[object, list[str]] = {}
     waiting: list[tuple[object, str]] = []
-    identity_unknown: list[tuple[object, str]] = []
+    unreconcilable: list[str] = []
     settled_attempt_ids: set[str] = set()
-    for (
-        ep_n,
-        unresolved_attempt_id,
-        unresolved_attempt,
-        upload,
-        identity_confirmed,
-    ) in unresolved_records:
+    for ep_n, unresolved_attempt_id, unresolved_attempt, upload in unresolved_here:
         try:
             candidates = unresolved_upload_candidates(
                 snapshot, unresolved_attempt, unresolved_attempt_id, sources
@@ -2140,29 +2170,43 @@ async def _assert_source_cleanup_done(
         except ValueError as exc:
             # checkpoint 缺 expected_title／dispatched_at(手改過或跨版本的 manifest):
             # 對不出來就不能放行,但錯誤訊息要說得出是哪一顆,否則生成前突然冒出一句
-            # 「dispatch time is missing」沒人查得動。
-            raise ValueError(
-                f"episode {ep_n} attempt {unresolved_attempt_id!r} 的 retract 留下"
-                f"未結案的回錄 source 清理義務,但它的 upload checkpoint 對不出候選:{exc}"
-            ) from exc
+            # 「dispatch time is missing」沒人查得動。**先記下來,不在這裡拋** ——
+            # 前面幾顆撈到的候選還沒落盤。
+            unreconcilable.append(
+                f"episode {ep_n} attempt {unresolved_attempt_id!r}({exc})"
+            )
+            continue
         if candidates:
             discovered.setdefault(ep_n, []).extend(candidates)
             violations.extend((ep_n, source_id) for source_id in candidates)
-        elif not identity_confirmed:
-            identity_unknown.append((ep_n, unresolved_attempt_id))
         elif window_closed:
             settled_attempt_ids.add(unresolved_attempt_id)
         else:
             waiting.append((ep_n, unresolved_attempt_id))
 
-    if discovered:
-        # **先把撈到的候選寫成耐久義務,再 fail-closed。** 反過來寫的話這次撈到的結果
-        # 只存在於這一句錯誤訊息裡,呼叫端刪一半就斷線 = 剩下那幾筆從此沒人記得。
-        def queue(manifest: dict) -> None:
-            for row in manifest["episodes"]:
-                found = discovered.get(row.get("episode"))
-                if not found:
-                    continue
+    clearable = {
+        row.get("episode")
+        for row in episodes
+        if row.get("pending_source_cleanup") and canonical_notebook(row) == notebook_id
+    }
+    # 只清「這次真的查過、確認不在」的那幾筆:await 期間可能又有一次 retract 追加新義務,
+    # 無條件 pop 整個欄位會把它一起吞掉。
+    checked_absent_by_episode = {
+        ep_n: {source_id for source_id in pending if source_id not in live}
+        for ep_n, pending in pending_by_episode
+        if ep_n in clearable
+    }
+
+    def settle(manifest: dict) -> None:
+        for row in manifest["episodes"]:
+            for candidate_attempt in row.get("attempts", []):
+                if candidate_attempt.get("attempt_id") in settled_attempt_ids:
+                    # 窗已關 + 零候選 = 遠端真的沒有多出東西。義務結案,重生放行。
+                    (candidate_attempt.get("retraction") or {}).pop(
+                        "source_cleanup_unresolved", None
+                    )
+            found = discovered.get(row.get("episode"))
+            if found:
                 history = row.setdefault("previous_feedback_source_ids", [])
                 pending = row.setdefault("pending_source_cleanup", [])
                 for source_id in found:
@@ -2170,8 +2214,36 @@ async def _assert_source_cleanup_done(
                         history.append(source_id)
                     if source_id not in pending:
                         pending.append(source_id)
+            checked_absent = checked_absent_by_episode.get(row.get("episode"))
+            if not checked_absent:
+                continue
+            left = [
+                source_id
+                for source_id in row.get("pending_source_cleanup", [])
+                if source_id not in checked_absent
+            ]
+            if left:
+                row["pending_source_cleanup"] = left
+            else:
+                row.pop("pending_source_cleanup", None)
 
-        store.update(queue)
+    try:
+        # **CAS 只掛在「有新發現要寫」那條路**(docstring ③)。`discovered` 是拿 await
+        # 之前的 `_claimed_source_ids` 算出來的,manifest 在這段期間動過就可能有別集剛
+        # 認領走某個 source —— 拿舊 ownership 寫新狀態 = 把合法 source 排進待刪清單。
+        # 反過來,沒有新發現時 settle 只做兩件對並行天生安全的事:清掉「這次真的查過、
+        # 確認不在」的那幾筆(逐筆比對,不整欄 pop),與清掉 tombstone 上已結案的旗標
+        # (tombstone 不可變)。那時候硬要 CAS 會把「await 期間又有一次 retract 追加新
+        # 義務」這個**本來就被正確吸收**的情形變成硬失敗,而它有既有測試鎖著。
+        store.update(
+            settle, expected_revision=snapshot_revision if discovered else None
+        )
+    except ManifestConflictError as conflict:
+        raise ValueError(
+            f"notebook {notebook_id!r} 的回錄 source 清理義務對帳期間 manifest 被改動過"
+            f"({conflict});這次算出來的歸屬可能已經過期,不套用。重呼同一支工具即可 —— "
+            "它會用新的 manifest 重新對帳。"
+        ) from conflict
 
     if violations:
         details = ", ".join(f"episode {ep_n}: {sid}" for ep_n, sid in violations)
@@ -2181,12 +2253,10 @@ async def _assert_source_cleanup_done(
             f"source_delete(notebook_id={notebook_id!r}, source_id=...) — then retry; "
             "leaving them creates two identically named sources."
         )
-    if identity_unknown:
-        details = ", ".join(f"episode {ep_n}: {att!r}" for ep_n, att in identity_unknown)
+    if unreconcilable:
         raise ValueError(
-            f"notebook {notebook_id!r} 查到零候選,但這幾顆 retracted attempt 的清理義務"
-            f"沒有 canonical notebook_id 可以核對身分:{details}。補上 episode 或 manifest "
-            "的 notebook_id 再重試 —— 拿別本筆記本查到「沒有」不能當成義務結案。"
+            "這幾顆 retracted attempt 留下未結案的回錄 source 清理義務,但它們的 upload "
+            f"checkpoint 對不出候選:{', '.join(unreconcilable)}。"
         )
     if waiting:
         details = ", ".join(f"episode {ep_n}: {att!r}" for ep_n, att in waiting)
@@ -2198,45 +2268,6 @@ async def _assert_source_cleanup_done(
             "等窗關上後重呼同一支工具,它會自己對帳:撈到就會要求 source_delete,"
             "確認零候選才放行。"
         )
-
-    # 只有「身分確定就是這個 notebook」的列才可以結案。canonical 為 None(episode 與
-    # manifest 都沒有 notebook_id 的 legacy 列)納入上面的違規檢查是保守的正確做法,但
-    # 不能拿呼叫端隨手傳的 notebook 查不到就當它結案——那筆舊來源可能正躺在別的筆記本裡,
-    # 一旦誤清就再也沒有東西擋它污染後續生成。
-    clearable = {
-        row.get("episode")
-        for row in episodes
-        if row.get("pending_source_cleanup") and canonical_notebook(row) == notebook_id
-    }
-    checked_absent_by_episode = {
-        ep_n: set(pending)
-        for ep_n, pending in pending_by_episode
-        if ep_n in clearable
-    }
-
-    def clear(manifest: dict) -> None:
-        for row in manifest["episodes"]:
-            for candidate_attempt in row.get("attempts", []):
-                retraction = candidate_attempt.get("retraction") or {}
-                if candidate_attempt.get("attempt_id") in settled_attempt_ids:
-                    # 窗已關 + 零候選 = 遠端真的沒有多出東西。義務結案,重生放行。
-                    retraction.pop("source_cleanup_unresolved", None)
-            checked_absent = checked_absent_by_episode.get(row.get("episode"))
-            if checked_absent is None:
-                continue
-            # 只清「這次真的查過、確認不在」的那幾筆:await 期間可能又有一次 retract 追加
-            # 新義務,無條件 pop 整個欄位會把它一起吞掉。
-            left = [
-                source_id
-                for source_id in row.get("pending_source_cleanup", [])
-                if source_id not in checked_absent
-            ]
-            if left:
-                row["pending_source_cleanup"] = left
-            else:
-                row.pop("pending_source_cleanup", None)
-
-    store.update(clear)
 
 
 def _reuse_frozen_input_attempt(

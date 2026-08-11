@@ -10,6 +10,7 @@ guard 沒保護 manifest,只是把寫入趕出工具外。
 in-flight finalizer、還是任何把指標寫回去的 writer。
 """
 import asyncio
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -1184,6 +1185,86 @@ async def test_gate_queues_every_candidate_it_finds_not_just_the_first(
     }
 
 
+async def test_gate_settles_verified_deletions_before_it_raises_on_the_window(
+    fake_client, tmp_path
+):
+    """已確認不在的 id 要在同一次 mutation 結算,不能被 waiting 那條 raise 卡住。(盲審 P2)
+
+    舊版把清除放在所有 raise 之後,於是已經刪掉的 id 永遠留在 `pending_source_cleanup`
+    裡,而冪等 `podcast_attempt_retract` 會一直回 `source_delete`——指向一個早就不存在
+    的東西。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    attempt_id = before["output_attempt_id"]
+
+    def unresolve(manifest):
+        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        attempt["finalize"]["feedback_source_upload"].update(
+            {"status": "acceptance_unknown", "source_id": None}
+        )
+
+    ManifestStore(manifest_path).update(unresolve)
+    retracted = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="QA 拒收", abandon_in_flight=True
+    )
+    known_stale = retracted["stale_source_ids"]
+    assert known_stale and _episode(manifest_path)["pending_source_cleanup"] == known_stale
+
+    # 呼叫端照指引刪乾淨了,但 unresolved 的候選窗還開著。
+    for source_id in known_stale:
+        await b.source_delete("nb-1", source_id)
+
+    with pytest.raises(ValueError, match="候選窗還沒關"):
+        await p.podcast_episode(
+            "nb-1", episode_n=2, title="實戰篇", brief="第二集",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+
+    # **raise 了,但已驗證的清除照樣落盤。**
+    assert "pending_source_cleanup" not in _episode(manifest_path)
+    replayed = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_id, reason="QA 拒收"
+    )
+    assert replayed["safe_next_action"] is None, (
+        "已經刪掉的 id 還卡在 pending,指引繼續教一個做不到的 source_delete"
+    )
+
+
+async def test_gate_refuses_to_write_ownership_it_computed_before_the_await(
+    fake_client, tmp_path, monkeypatch
+):
+    """`await sources.list()` 期間 manifest 動過 → 不拿舊 ownership 寫新狀態。(盲審 P1)
+
+    競態:snapshot 顯示 src-X 還沒被認領 → await → 另一個 finalizer 把 src-X 認領成它那
+    一集的合法 continuity source → 我們仍把它排進待刪清單 → 呼叫端照指引刪掉合法來源。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    expected_title = _upload(manifest_path, attempt_id)["expected_title"]
+    contested = fake_client.sources._add(expected_title, kind="media")
+    real_list = fake_client.sources.list
+
+    async def claim_during_the_await(notebook_id):
+        result = await real_list(notebook_id)
+
+        def another_writer(manifest):
+            manifest["episodes"][0]["attempts"][0].setdefault("note", "touched")
+
+        ManifestStore(manifest_path).update(another_writer)
+        return result
+
+    monkeypatch.setattr(fake_client.sources, "list", claim_during_the_await)
+
+    with pytest.raises(ValueError, match="manifest 被改動過"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    # 過期的歸屬一個字都不准落盤。
+    assert contested not in (_episode(manifest_path).get("pending_source_cleanup") or [])
+
+
 async def test_gate_keeps_the_obligation_when_the_notebook_cannot_be_listed(
     fake_client, tmp_path, monkeypatch
 ):
@@ -1274,10 +1355,14 @@ async def test_gate_refuses_to_discharge_an_obligation_it_cannot_identify(
     def strip_notebook_identity(manifest):
         manifest.pop("notebook_id", None)
         manifest["episodes"][0].pop("notebook_id", None)
+        # attempt 自己的 notebook_id 是清理義務的**權威來源**(tombstone 允許保留建立時
+        # 綁的舊 notebook),所以三層都清掉才是真正的「身分不明」。
+        for attempt in manifest["episodes"][0]["attempts"]:
+            attempt.pop("notebook_id", None)
 
     ManifestStore(manifest_path).update(strip_notebook_identity)
 
-    with pytest.raises(ValueError, match="canonical notebook_id"):
+    with pytest.raises(ValueError, match="沒有可核對的 notebook 身分"):
         await p.podcast_episode(
             "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
             output_dir=str(tmp_path), manifest_path=manifest_path,
@@ -1288,6 +1373,147 @@ async def test_gate_refuses_to_discharge_an_obligation_it_cannot_identify(
         if row["attempt_id"] == attempt_id
     )
     assert retraction["source_cleanup_unresolved"] is True
+
+
+async def test_gate_never_nominates_a_candidate_from_an_unverified_notebook(
+    fake_client, tmp_path, monkeypatch
+):
+    """**身分未確認時,連「撈候選」都不准做。**(盲審 P1)
+
+    舊版先篩候選、只有零候選才檢查身分,於是「碰巧同名、同 kind、同時間窗」的別本
+    筆記本來源會被寫進 `pending_source_cleanup`,錯誤訊息再叫呼叫端去 `source_delete`
+    它 —— 那是對無關 notebook 下的破壞性指令,比漏掉義務更糟。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    expected_title = _upload(manifest_path, attempt_id)["expected_title"]
+    # 呼叫端傳來的那本 notebook 裡剛好有一筆長得一模一樣的來源。
+    decoy = fake_client.sources._add(expected_title, kind="media")
+
+    def strip_notebook_identity(manifest):
+        manifest.pop("notebook_id", None)
+        manifest["episodes"][0].pop("notebook_id", None)
+        for attempt in manifest["episodes"][0]["attempts"]:
+            attempt.pop("notebook_id", None)
+
+    ManifestStore(manifest_path).update(strip_notebook_identity)
+
+    with pytest.raises(ValueError, match="沒有可核對的 notebook 身分") as blocked:
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    # 那筆 decoy 不准出現在任何地方:不被指名、不被持久化。
+    assert decoy not in str(blocked.value)
+    assert "pending_source_cleanup" not in _episode(manifest_path)
+    # 也不准在身分驗證之前就打 RPC。
+    assert not [call for call in fake_client.sources.calls if call[0] == "delete"]
+
+
+async def test_cleanup_identity_follows_the_attempt_not_the_episode(
+    fake_client, tmp_path, monkeypatch
+):
+    """清理義務綁的是**當初上傳的那本 notebook**,不是 episode 當下那本。(盲審 P1)
+
+    `manifest_store._validate` 明文允許 tombstone 保留建立時綁的舊 notebook(否則
+    retract 之後想換 notebook 重生就寫不進去)。拿 episode 當下的 notebook 去查,
+    等於「換一本 notebook 重生」就能把舊本的孤兒洗掉 —— 永久失憶。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    _age_the_dispatch_window(manifest_path, attempt_id)
+
+    def move_the_episode_to_another_notebook(manifest):
+        manifest["episodes"][0]["notebook_id"] = "nb-new"
+        # attempt 仍綁著當初真的上傳過的那一本。
+        for attempt in manifest["episodes"][0]["attempts"]:
+            if attempt["attempt_id"] == attempt_id:
+                attempt["notebook_id"] = "nb-old"
+
+    ManifestStore(manifest_path).update(move_the_episode_to_another_notebook)
+
+    # 在**新**的 notebook 生成:舊本的義務不屬於這裡,不該被這一次查詢結案。
+    await p.podcast_episode(
+        "nb-new", episode_n=2, title="實戰篇", brief="第二集",
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+    retraction = next(
+        row["retraction"]
+        for row in _episode(manifest_path)["attempts"]
+        if row["attempt_id"] == attempt_id
+    )
+    assert retraction["source_cleanup_unresolved"] is True, (
+        "舊 notebook 的清理義務被另一本 notebook 的查詢誤清了"
+    )
+
+
+async def test_gate_persists_discoveries_even_when_a_later_checkpoint_is_broken(
+    fake_client, tmp_path, monkeypatch
+):
+    """A 撈到候選、B 的 checkpoint 壞掉時,A 的發現必須先落盤。(盲審 P1/P2)
+
+    舊版在迴圈裡直接 raise,永遠到不了寫入 —— 那批 id 從此沒人記得。
+    """
+    manifest_path = str(tmp_path / "series_manifest.json")
+    remote_created = asyncio.Event()
+    release_response = asyncio.Event()
+    real_add_file = fake_client.sources.add_file
+
+    async def pause_after_remote_create(*args, **kwargs):
+        source = await real_add_file(*args, **kwargs)
+        remote_created.set()
+        await release_response.wait()
+        return source
+
+    monkeypatch.setattr(fake_client.sources, "add_file", pause_after_remote_create)
+    running = asyncio.create_task(
+        p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    )
+    await remote_created.wait()
+    attempt_a = _episode(manifest_path)["active_attempt_id"]
+    orphan_a = fake_client.sources.sources[-1]["id"]
+    await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_a, reason="放棄 A", abandon_in_flight=True
+    )
+    release_response.set()
+    with pytest.raises(ValueError, match="was retracted"):
+        await running
+    monkeypatch.undo()
+
+    # B:同一本 notebook 的另一集,義務未結案但 checkpoint 缺 dispatched_at。
+    def add_a_broken_sibling(manifest):
+        source_episode = manifest["episodes"][0]
+        broken = copy.deepcopy(
+            next(a for a in source_episode["attempts"] if a["attempt_id"] == attempt_a)
+        )
+        broken["attempt_id"] = "att-broken"
+        broken["episode"] = 9
+        broken["finalize"]["feedback_source_upload"]["dispatched_at"] = None
+        manifest["episodes"].append(
+            {
+                "episode": 9,
+                "title": "壞掉的那一集",
+                "notebook_id": "nb-1",
+                "attempts": [broken],
+                "retracted_attempt_ids": ["att-broken"],
+            }
+        )
+
+    ManifestStore(manifest_path).update(add_a_broken_sibling)
+
+    with pytest.raises(ValueError) as failure:
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    # A 的發現要落盤(不是只活在錯誤訊息裡),而 B 的問題照樣要被報出來。
+    assert _episode(manifest_path)["pending_source_cleanup"] == [orphan_a]
+    assert orphan_a in str(failure.value)
 
 
 async def test_gate_names_the_attempt_when_its_checkpoint_cannot_be_reconciled(
