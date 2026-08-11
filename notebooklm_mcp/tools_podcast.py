@@ -222,6 +222,8 @@ def _attempt_capabilities(
     attempt_id: str,
     *,
     reconciliation_window_closed: bool | None = None,
+    candidate_selection_required: bool = False,
+    post_retract: bool = False,
 ) -> dict:
     """**「這顆 attempt 現在能做什麼」的單一事實來源。**
 
@@ -309,10 +311,30 @@ def _attempt_capabilities(
         and not reconciliation_window_closed
     )
     regeneration_entry = _regeneration_entry_point(attempt)
+    preserves_existing_output = (
+        post_retract
+        and episode.get("output_attempt_id") not in (None, attempt_id)
+    )
+    pending_source_cleanup = False
+    if post_retract:
+        pending_source_ids = set(episode.get("pending_source_cleanup") or [])
+        retracted_source_ids = (
+            (attempt.get("retraction") or {}).get("stale_source_ids") or []
+        )
+        pending_source_cleanup = any(
+            source_id in pending_source_ids for source_id in retracted_source_ids
+        )
 
     # **`safe_next_action` 的優先序必須跟 `_attempt_next_step()` 的分支順序逐字
     # 對齊**(見上方 docstring)。
-    if not is_active and not is_output:
+    if post_retract:
+        if pending_source_cleanup:
+            safe_next_action = ACTION_SOURCE_DELETE
+        elif preserves_existing_output:
+            safe_next_action = None
+        else:
+            safe_next_action = regeneration_entry
+    elif not is_active and not is_output:
         safe_next_action = None  # 歷史紀錄,沒有可執行的下一步——要動的是 active/output
     elif is_output:
         safe_next_action = ACTION_RETRACT
@@ -334,6 +356,10 @@ def _attempt_capabilities(
         safe_next_action = regeneration_entry
     elif basis == "settled":
         safe_next_action = ACTION_RETRACT
+    elif candidate_selection_required and can_reconcile:
+        # 候選歸屬需要 manifest 之外的知識，但 output owner 等更高優先序
+        # 仍必須先接手；這樣 guard 停點不會再蓋掉 active≠output 的正門。
+        safe_next_action = ACTION_ADOPT
     elif can_resume:
         safe_next_action = ACTION_RESUME
     elif can_reconcile:
@@ -354,8 +380,14 @@ def _attempt_capabilities(
         # 三態原始值(不是 can_reconcile 那個已經跟 dispatch_status 混在一起的布林)
         # 留給 `_attempt_next_step()` 判斷要不要講窗宣稱——`None` 時不准講。
         "reconciliation_window_closed": reconciliation_window_closed,
+        "candidate_selection_required": candidate_selection_required,
+        "post_retract": post_retract,
+        "pending_source_cleanup": pending_source_cleanup,
+        "preserves_existing_output": preserves_existing_output,
         "regeneration_entry": regeneration_entry,
-        "regeneration_hint": _regeneration_hint(attempt, resend_possible=can_resend),
+        "regeneration_hint": _regeneration_hint(
+            attempt, resend_possible=can_resend and not post_retract
+        ),
         "safe_next_action": safe_next_action,
     }
 
@@ -416,6 +448,19 @@ def _attempt_next_step(caps: dict) -> str:
     有機會撈到更晚建立的 artifact**(候選篩選窗會跟著放大,關閉判斷窗的保守下限不受
     影響,見 `_promised_reconciliation_window_seconds` docstring)。
     """
+    if caps["post_retract"]:
+        cleanup = (
+            "先把 stale_source_ids 全部 source_delete。"
+            if caps["pending_source_cleanup"]
+            else ""
+        )
+        if caps["preserves_existing_output"]:
+            return cleanup + "這一集的既有正式輸出不受影響，不必重生。"
+        return (
+            cleanup
+            + f"用 {caps['regeneration_entry']} 重生。"
+            + caps["regeneration_hint"]
+        )
     if not caps["is_active"] and not caps["is_output"]:
         return "它已經被取代,是歷史紀錄 —— 要動的是現在的 active／output attempt。"
     if caps["is_output"]:
@@ -466,6 +511,13 @@ def _attempt_next_step(caps: dict) -> str:
     retract_hint = _retract_hint(caps)
     if caps["can_resume"]:
         return "遠端有 artifact:先 podcast_episode_resume 續完 finalize。" + retract_hint
+    if caps["candidate_selection_required"] and caps["can_reconcile"]:
+        return (
+            "manifest 無法判定候選 artifact 的歸屬:確認屬於這次 dispatch 就用 "
+            f"{ACTION_ADOPT} 明確綁定;確認不屬於這次就不要 adopt。"
+            + retract_hint
+            + "作廢後再照 retract 回傳的入口重生。"
+        )
     if caps["can_reconcile"]:
         if caps["reconciliation_window_closed"] is False:
             # 明確算過、窗還沒關——才有資格講「還有機會撈到」這句時間性宣稱。
@@ -1454,14 +1506,24 @@ def _bind_reconciled_artifact(
     episode_n: int,
     attempt_id: str,
     artifact_id: str,
-) -> None:
-    def mutate(manifest: dict) -> None:
+) -> list[str]:
+    def mutate(manifest: dict) -> list[str]:
         _, attempt = _attempt_record(manifest, episode_n, attempt_id)
         remote = attempt.get("remote")
         if not isinstance(remote, dict) or remote.get("artifact_id") is not None:
             raise ValueError("attempt already has a remote artifact mapping")
         if artifact_id in _claimed_artifact_ids(manifest, attempt_id):
             raise ValueError(f"artifact {artifact_id!r} was claimed during reconciliation")
+        notebook_id = attempt.get("notebook_id")
+        if not isinstance(notebook_id, str) or not notebook_id:
+            raise ValueError("attempt notebook_id must be a non-empty string")
+        blocking_attempt_ids = _unresolved_attempt_ids(
+            manifest, notebook_id, excluding_attempt_id=attempt_id
+        )
+        if blocking_attempt_ids:
+            # RPC 前的 snapshot 只是廉價早退；歸屬會在 await 期間變動，
+            # 所以真正的綁定許可必須與 claimed 重驗共用這次原子 update。
+            return blocking_attempt_ids
         now = datetime.now(timezone.utc).isoformat()
         attempt["dispatch"]["status"] = "accepted"
         attempt["dispatch"]["accepted_at"] = now
@@ -1473,8 +1535,10 @@ def _bind_reconciled_artifact(
                 "observed_at": now,
             }
         )
+        return []
 
-    store.update(mutate)
+    _, blocking_attempt_ids = store.update(mutate)
+    return blocking_attempt_ids
 
 
 def _mark_reconciliation_ambiguous(
@@ -2323,13 +2387,16 @@ async def podcast_episode_reconcile(
     if remote_artifact_id is not None:
         if dispatch_status != "accepted":
             raise ValueError("attempt has an inconsistent remote artifact mapping")
+        episode_row, _ = _attempt_record(snapshot, episode_n, attempt_id)
+        caps = _attempt_capabilities(episode_row, attempt, attempt_id)
         return {
             "complete": False,
             "episode_n": episode_n,
             "attempt_id": attempt_id,
             "observed_state": "accepted",
             "artifact_id": remote_artifact_id,
-            "safe_next_action": ACTION_RESUME,
+            "safe_next_action": caps["safe_next_action"],
+            "next_step": _attempt_next_step(caps),
         }
     if dispatch_status == "dispatching":
         def mark_unknown(manifest: dict) -> None:
@@ -2399,41 +2466,41 @@ async def podcast_episode_reconcile(
         )
         if not blocking_attempt_ids:
             artifact_id = candidate_ids[0]
-            _bind_reconciled_artifact(
+            blocking_attempt_ids = _bind_reconciled_artifact(
                 store, episode_n, attempt_id, artifact_id
             )
-            return {
-                "complete": False,
-                "episode_n": episode_n,
-                "attempt_id": attempt_id,
-                "observed_state": "accepted",
-                "artifact_id": artifact_id,
-                "safe_next_action": ACTION_RESUME,
-            }
+            if not blocking_attempt_ids:
+                latest = store.read()
+                episode_row, accepted_attempt = _attempt_record(
+                    latest, episode_n, attempt_id
+                )
+                caps = _attempt_capabilities(
+                    episode_row, accepted_attempt, attempt_id
+                )
+                return {
+                    "complete": False,
+                    "episode_n": episode_n,
+                    "attempt_id": attempt_id,
+                    "observed_state": "accepted",
+                    "artifact_id": artifact_id,
+                    "safe_next_action": caps["safe_next_action"],
+                    "next_step": _attempt_next_step(caps),
+                }
         # 跟「真的有多筆候選」共用同一個安全停點(`reconciliation_ambiguous` +
         # `podcast_attempt_adopt`):道理相同,都是「manifest 自己分不出這顆屬於誰,
         # 需要呼叫端帶外部知識來指名」。
         _mark_reconciliation_ambiguous(
             store, episode_n, attempt_id, candidate_ids
         )
-        return {
-            "complete": False,
-            "episode_n": episode_n,
-            "attempt_id": attempt_id,
-            "observed_state": "reconciliation_ambiguous",
-            "candidate_artifact_ids": candidate_ids,
-            "safe_next_action": ACTION_ADOPT,
-            "next_step": (
-                "時間窗內只有一個候選 artifact,但同一本 notebook 底下還有其他尚未 "
-                f"claim 到 artifact 的 attempt 也在飛(attempt_id: {blocking_attempt_ids!r})"
-                "——這顆 artifact 有可能是它們的產物,時間窗判定不了真正的歸屬,不自動"
-                f"綁定。用 artifact_list 或其他外部知識確認它確實屬於這次 dispatch 之後,"
-                f"呼叫 {ACTION_ADOPT} 明確指名 artifact_id 綁定。"
-            ),
-        }
-    if len(candidate_ids) > 1:
-        _mark_reconciliation_ambiguous(
-            store, episode_n, attempt_id, candidate_ids
+        latest = store.read()
+        episode_row, ambiguous_attempt = _attempt_record(
+            latest, episode_n, attempt_id
+        )
+        caps = _attempt_capabilities(
+            episode_row,
+            ambiguous_attempt,
+            attempt_id,
+            candidate_selection_required=True,
         )
         return {
             "complete": False,
@@ -2441,7 +2508,32 @@ async def podcast_episode_reconcile(
             "attempt_id": attempt_id,
             "observed_state": "reconciliation_ambiguous",
             "candidate_artifact_ids": candidate_ids,
-            "safe_next_action": ACTION_ADOPT,
+            "blocking_attempt_ids": blocking_attempt_ids,
+            "safe_next_action": caps["safe_next_action"],
+            "next_step": _attempt_next_step(caps),
+        }
+    if len(candidate_ids) > 1:
+        _mark_reconciliation_ambiguous(
+            store, episode_n, attempt_id, candidate_ids
+        )
+        latest = store.read()
+        episode_row, ambiguous_attempt = _attempt_record(
+            latest, episode_n, attempt_id
+        )
+        caps = _attempt_capabilities(
+            episode_row,
+            ambiguous_attempt,
+            attempt_id,
+            candidate_selection_required=True,
+        )
+        return {
+            "complete": False,
+            "episode_n": episode_n,
+            "attempt_id": attempt_id,
+            "observed_state": "reconciliation_ambiguous",
+            "candidate_artifact_ids": candidate_ids,
+            "safe_next_action": caps["safe_next_action"],
+            "next_step": _attempt_next_step(caps),
         }
 
     latest = store.read()
@@ -2450,13 +2542,16 @@ async def podcast_episode_reconcile(
     )
     latest_artifact_id = latest_attempt["remote"].get("artifact_id")
     if latest_artifact_id is not None:
+        episode_row, _ = _attempt_record(latest, episode_n, attempt_id)
+        caps = _attempt_capabilities(episode_row, latest_attempt, attempt_id)
         return {
             "complete": False,
             "episode_n": episode_n,
             "attempt_id": attempt_id,
             "observed_state": "accepted",
             "artifact_id": latest_artifact_id,
-            "safe_next_action": ACTION_RESUME,
+            "safe_next_action": caps["safe_next_action"],
+            "next_step": _attempt_next_step(caps),
         }
     # **零候選:出路要寫在回傳裡,不能只寫在 skill 散文。**(v0.9.6 驗收 FINDING-1)
     # 這條路上 `safe_next_action` 指回本工具自己,而連呼兩次的回傳**逐欄位相同** ——
@@ -2842,7 +2937,7 @@ async def podcast_attempt_adopt(
             ):
                 raise ValueError("explicit artifact is outside the dispatch window")
 
-        def adopt_artifact(manifest: dict) -> None:
+        def adopt_artifact(manifest: dict) -> dict:
             current_episode, current = _attempt_record(
                 manifest, episode_n, attempt_id
             )
@@ -2886,15 +2981,17 @@ async def podcast_attempt_adopt(
                     "error_code": None,
                 }
             )
+            return _attempt_capabilities(current_episode, current, attempt_id)
 
-        store.update(adopt_artifact)
+        _, caps = store.update(adopt_artifact)
         return {
             "complete": False,
             "episode_n": episode_n,
             "attempt_id": attempt_id,
             "artifact_id": artifact_id,
             "observed_state": "accepted",
-            "safe_next_action": ACTION_RESUME,
+            "safe_next_action": caps["safe_next_action"],
+            "next_step": _attempt_next_step(caps),
         }
 
     assert feedback_source_id is not None
@@ -3138,7 +3235,7 @@ async def podcast_attempt_retract(
         "feedback_source_adopted_at",
     )
 
-    def mutate(manifest: dict) -> dict:
+    def mutate(manifest: dict) -> tuple[dict, dict]:
         episode, attempt = _attempt_record(
             manifest, episode_n, attempt_id, allow_retracted=True
         )
@@ -3153,12 +3250,17 @@ async def podcast_attempt_retract(
                         del episode[key]
                 if episode.get("active_attempt_id") == attempt_id:
                     del episode["active_attempt_id"]
-            # 不重寫 retracted_at／reason;重生入口每次現算(它是導引不是紀錄)。
+            # 不重寫 retracted_at／reason;重生入口每次從同一顆 capabilities 算，
+            # 才不會讓冪等回傳與第一次的實際後狀態分岔。
+            caps = _attempt_capabilities(
+                episode,
+                attempt,
+                attempt_id,
+                post_retract=True,
+            )
             return (
                 dict(existing),
-                _regeneration_entry_point(attempt),
-                # 已經是 tombstone,沒有「原樣重送」這個選項可言——一律走 regeneration_entry。
-                _regeneration_hint(attempt, resend_possible=False),
+                caps,
             )
 
         output_attempt_id = episode.get("output_attempt_id")
@@ -3327,37 +3429,25 @@ async def podcast_attempt_retract(
         }
         attempt["retraction"] = retraction
         episode.setdefault("retracted_attempt_ids", []).append(attempt_id)
+        caps = _attempt_capabilities(
+            episode,
+            attempt,
+            attempt_id,
+            post_retract=True,
+        )
         return (
             dict(retraction),
-            _regeneration_entry_point(attempt),
-            # 這顆剛被作廢,沒有「原樣重送」這個選項可言——一律走 regeneration_entry。
-            _regeneration_hint(attempt, resend_possible=False),
+            caps,
         )
 
-    _, (retraction, entry_point, regeneration_hint) = ManifestStore(
+    _, (retraction, caps) = ManifestStore(
         manifest_path
     ).update(mutate)
-    needs_cleanup = bool(retraction.get("stale_source_id"))
-    # **重生入口跟著被作廢那顆的生成輸入走**,不是一律 `podcast_series`。指名過來源
-    # (或用 frozen bundle)的一集只有 `podcast_episode` 生得出相同 settings ——
-    # 指回 series 會靜默把「只讀這幾筆」變成「讀整本筆記本」,實測兩次 dispatch 送出
-    # `[["src-1"], None]`。清理義務仍然先走:`source_delete` 沒做完,下一次生成會
-    # fail-closed。
-    # 注意事項由 `_regeneration_hint()` 產生 —— 它與 `_regeneration_entry_point()`
-    # **同源**。v0.9.6 在這裡自己 if/else 猜,結果對「認不出原本用了哪些來源」那類
-    # (resume 建的 attempt)說了一句事實錯誤的話(驗收 FINDING-4)。
     return {
         **retraction,
         "observed_state": "retracted",
-        "safe_next_action": ACTION_SOURCE_DELETE if needs_cleanup else entry_point,
-        "next_step": (
-            (
-                f"先把 stale_source_ids 全部 source_delete,再用 {entry_point} 重生。"
-                if needs_cleanup
-                else f"用 {entry_point} 重生。"
-            )
-            + regeneration_hint
-        ),
+        "safe_next_action": caps["safe_next_action"],
+        "next_step": _attempt_next_step(caps),
     }
 
 

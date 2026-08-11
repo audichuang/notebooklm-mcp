@@ -13,6 +13,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import audio_finalize
 from notebooklm_mcp import tools_basic as b
@@ -60,6 +61,45 @@ def _episode(manifest_path: str) -> dict:
     return json.loads(open(manifest_path, encoding="utf-8").read())["episodes"][0]
 
 
+# 候選歸屬雖來自外部知識，仍已用 `candidate_selection_required` 維度收進
+# capabilities。唯一例外是同名工具的 feedback-source 模式：它問的不是
+# audio attempt 下一步，而是遠端 source 是否待 rename／cleanup，legacy 甚至沒有 attempt_id。
+PUBLIC_GUIDANCE_EXCEPTIONS = {
+    "podcast_attempt_adopt.feedback_source": (
+        "safe_next_action 由遠端 source rename／cleanup 後狀態決定，"
+        "不是 audio-attempt capabilities 的狀態空間。"
+    )
+}
+
+
+def _assert_public_guidance_matches_capabilities(
+    manifest_path: str,
+    attempt_id: str,
+    result: dict,
+    *,
+    tool: str,
+    candidate_selection_required: bool = False,
+    post_retract: bool = False,
+) -> None:
+    snapshot = ManifestStore(manifest_path).read()
+    episode, attempt = p._attempt_record(
+        snapshot, 1, attempt_id, allow_retracted=post_retract
+    )
+    caps = p._attempt_capabilities(
+        episode,
+        attempt,
+        attempt_id,
+        candidate_selection_required=candidate_selection_required,
+        post_retract=post_retract,
+    )
+    exception_key = f"{tool}.artifact.{result['observed_state']}"
+    if exception_key in PUBLIC_GUIDANCE_EXCEPTIONS:
+        assert PUBLIC_GUIDANCE_EXCEPTIONS[exception_key].strip()
+        return
+    assert result["safe_next_action"] == caps["safe_next_action"]
+    assert result["next_step"] == p._attempt_next_step(caps)
+
+
 async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(
     fake_client, tmp_path
 ):
@@ -70,6 +110,13 @@ async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(
         manifest_path, 1, attempt_id, reason="QA 拒收:把 hook 和權限邊界混為一談"
     )
 
+    _assert_public_guidance_matches_capabilities(
+        manifest_path,
+        attempt_id,
+        out,
+        tool="podcast_attempt_retract",
+        post_retract=True,
+    )
     # 回傳給呼叫端的善後 handle
     assert out["stale_artifact_id"] == before["artifact_id"]
     assert out["stale_source_id"] == before["feedback_source_id"]
@@ -508,6 +555,147 @@ async def test_retract_can_abandon_an_unauthorized_candidate_to_break_a_split(
     assert "output_attempt_id" not in _episode(manifest_path)
 
 
+async def _split_with_guarded_candidate(
+    fake_client, tmp_path, *, add_blocker: bool = True
+) -> tuple[str, str]:
+    """建出 active=B/output=A，並讓另一顆 unresolved C 觸發單候選 guard。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    attempt_b = "att-split-b"
+
+    def add_candidates(manifest: dict) -> None:
+        episode = manifest["episodes"][0]
+        common = {
+            "episode": 1,
+            "title": EP["title"],
+            "notebook_id": "nb-1",
+            "settings": {
+                "language": "zh",
+                "audio_format": None,
+                "audio_length": None,
+                "source_ids": ["src-1"],
+            },
+            "remote": {"artifact_id": None, "status": None},
+            "finalize": audio_finalize.new_finalize_state(),
+        }
+        episode["attempts"].append(
+            {
+                **common,
+                "attempt_id": attempt_b,
+                "dispatch": {
+                    "status": "acceptance_unknown",
+                    "artifact_ids_before": [before["artifact_id"]],
+                    "dispatched_at": datetime.now(timezone.utc).isoformat(),
+                    "wait_timeout": 1200.0,
+                },
+            }
+        )
+        if add_blocker:
+            episode["attempts"].append(
+                {
+                    **common,
+                    "attempt_id": "att-blocker-c",
+                    "dispatch": {"status": "acceptance_unknown"},
+                }
+            )
+        episode["active_attempt_id"] = attempt_b
+
+    ManifestStore(manifest_path).update(add_candidates)
+    fake_client.artifacts.seed_artifact(
+        "artifact-b", kind=ArtifactType.AUDIO, title="Audio Overview"
+    )
+    return manifest_path, attempt_b
+
+
+async def test_reconcile_public_guidance_respects_output_owner(fake_client, tmp_path):
+    manifest_path, attempt_b = await _split_with_guarded_candidate(
+        fake_client, tmp_path
+    )
+
+    out = await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
+
+    _assert_public_guidance_matches_capabilities(
+        manifest_path,
+        attempt_b,
+        out,
+        tool="podcast_episode_reconcile",
+        candidate_selection_required=True,
+    )
+    assert out["safe_next_action"] == p.ACTION_RETRACT
+    assert "podcast_attempt_retract" in out["next_step"]
+    assert "podcast_attempt_adopt" not in out["next_step"]
+
+
+async def test_reconcile_unique_bind_guidance_respects_output_owner(
+    fake_client, tmp_path
+):
+    manifest_path, attempt_b = await _split_with_guarded_candidate(
+        fake_client, tmp_path, add_blocker=False
+    )
+
+    out = await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
+
+    _assert_public_guidance_matches_capabilities(
+        manifest_path, attempt_b, out, tool="podcast_episode_reconcile"
+    )
+    assert out["artifact_id"] == "artifact-b"
+    assert out["safe_next_action"] == p.ACTION_RETRACT
+
+
+async def test_adopt_public_guidance_respects_output_owner(fake_client, tmp_path):
+    manifest_path, attempt_b = await _split_with_guarded_candidate(
+        fake_client, tmp_path
+    )
+    await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
+
+    out = await p.podcast_attempt_adopt(
+        manifest_path, 1, attempt_id=attempt_b, artifact_id="artifact-b"
+    )
+
+    _assert_public_guidance_matches_capabilities(
+        manifest_path, attempt_b, out, tool="podcast_attempt_adopt"
+    )
+    assert out["safe_next_action"] == p.ACTION_RETRACT
+    assert "podcast_attempt_retract" in out["next_step"]
+    assert "podcast_episode_resume" not in out["next_step"]
+
+    reconciled_again = await p.podcast_episode_reconcile(
+        manifest_path, 1, attempt_b
+    )
+    _assert_public_guidance_matches_capabilities(
+        manifest_path,
+        attempt_b,
+        reconciled_again,
+        tool="podcast_episode_reconcile",
+    )
+    assert reconciled_again["safe_next_action"] == p.ACTION_RETRACT
+
+
+async def test_retract_public_guidance_keeps_the_existing_output(fake_client, tmp_path):
+    manifest_path, attempt_b = await _split_with_guarded_candidate(
+        fake_client, tmp_path
+    )
+    await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
+    await p.podcast_attempt_adopt(
+        manifest_path, 1, attempt_id=attempt_b, artifact_id="artifact-b"
+    )
+
+    out = await p.podcast_attempt_retract(
+        manifest_path, 1, attempt_b, reason="放棄未授權 candidate"
+    )
+
+    _assert_public_guidance_matches_capabilities(
+        manifest_path,
+        attempt_b,
+        out,
+        tool="podcast_attempt_retract",
+        post_retract=True,
+    )
+    assert out["safe_next_action"] is None
+    assert "不必重生" in out["next_step"]
+    assert "podcast_episode" not in out["next_step"]
+    assert "podcast_series" not in out["next_step"]
+
+
 async def test_promote_refuses_when_another_attempt_owns_the_output(
     fake_client, tmp_path
 ):
@@ -809,6 +997,9 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
         str(manifest_path), episode_n=1, attempt_id=attempt_id,
         feedback_source_id=candidate_a,
     )
+    assert PUBLIC_GUIDANCE_EXCEPTIONS[
+        "podcast_attempt_adopt.feedback_source"
+    ].strip()
     assert adopted["stale_source_ids"] == [candidate_b]
     assert adopted["safe_next_action"] == "source_delete"
     pending = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][

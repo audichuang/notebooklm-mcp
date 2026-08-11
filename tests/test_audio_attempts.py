@@ -360,6 +360,123 @@ async def test_reconcile_does_not_auto_bind_when_another_attempt_is_still_unreso
     )
 
 
+async def test_reconcile_rechecks_unresolved_attempts_atomically_before_binding(
+    fake_client, tmp_path, monkeypatch
+):
+    """A 讀完 snapshot 後 B 才 dispatch，綁定區段仍必須看得到 B。"""
+    manifest_path, attempt_a = await _leave_acceptance_unknown(
+        fake_client, tmp_path, [], wait_timeout=7200
+    )
+    original_list = fake_client.artifacts.list
+
+    async def list_after_b_dispatches(notebook_id, artifact_type=None):
+        # 只在 A 已讀完 manifest、尚未綁定的 await 期間插入 B。
+        monkeypatch.setattr(fake_client.artifacts, "list", original_list)
+        fake_client.artifacts.generate_remote_artifacts_before_raise = [
+            _remote_audio("artifact-from-b")
+        ]
+        fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+        with pytest.raises(TimeoutError, match="response lost"):
+            await p.podcast_episode(
+                "nb-1",
+                episode_n=2,
+                title="續集",
+                brief="第二集",
+                output_dir=str(tmp_path),
+                manifest_path=str(manifest_path),
+            )
+        return await original_list(notebook_id, artifact_type=artifact_type)
+
+    monkeypatch.setattr(fake_client.artifacts, "list", list_after_b_dispatches)
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_a
+    )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    episode_a = next(row for row in stored["episodes"] if row["episode"] == 1)
+    episode_b = next(row for row in stored["episodes"] if row["episode"] == 2)
+    attempt_a_row = next(
+        row for row in episode_a["attempts"] if row["attempt_id"] == attempt_a
+    )
+    attempt_b_row = next(
+        row
+        for row in episode_b["attempts"]
+        if row["attempt_id"] == episode_b["active_attempt_id"]
+    )
+    assert attempt_b_row["dispatch"]["status"] == "acceptance_unknown"
+    assert attempt_a_row["remote"]["artifact_id"] is None
+    assert out["candidate_artifact_ids"] == ["artifact-from-b"]
+    assert out["safe_next_action"] == p.ACTION_ADOPT
+
+
+async def test_tombstone_blocker_offers_and_executes_the_negative_candidate_path(
+    fake_client, tmp_path
+):
+    """晚到 orphan 仍被 tombstone 擋住；確認不屬於 A 後要有真正走得通的路。"""
+    manifest_path = tmp_path / "series_manifest.json"
+
+    async def dispatch_and_lose(episode_n: int, title: str) -> str:
+        fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+        with pytest.raises(TimeoutError, match="response lost"):
+            await p.podcast_episode(
+                "nb-1",
+                episode_n=episode_n,
+                title=title,
+                brief=f"第{episode_n}集",
+                output_dir=str(tmp_path),
+                manifest_path=str(manifest_path),
+            )
+        stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+        episode = next(row for row in stored["episodes"] if row["episode"] == episode_n)
+        return episode["active_attempt_id"]
+
+    tombstone_id = await dispatch_and_lose(2, "早先已作廢的續集")
+    await p.podcast_attempt_retract(
+        str(manifest_path),
+        2,
+        tombstone_id,
+        reason="已確認原生成要作廢",
+        abandon_in_flight=True,
+    )
+    attempt_a = await dispatch_and_lose(1, "心法篇")
+    fake_client.artifacts.seed_artifacts(_remote_audio("late-orphan-from-tombstone"))
+
+    out = await p.podcast_episode_reconcile(
+        str(manifest_path), 1, attempt_a
+    )
+
+    assert out["candidate_artifact_ids"] == ["late-orphan-from-tombstone"]
+    assert out["blocking_attempt_ids"] == [tombstone_id]
+    assert out["safe_next_action"] == p.ACTION_ADOPT
+    assert "確認不屬於這次" in out["next_step"]
+    assert "abandon_in_flight=true" in out["next_step"]
+    with pytest.raises(ValueError, match="retracted"):
+        await p.podcast_attempt_adopt(
+            str(manifest_path),
+            2,
+            attempt_id=tombstone_id,
+            artifact_id="late-orphan-from-tombstone",
+        )
+
+    retracted = await p.podcast_attempt_retract(
+        str(manifest_path),
+        1,
+        attempt_a,
+        reason="已確認候選不屬於這次",
+        abandon_in_flight=True,
+    )
+    assert retracted["safe_next_action"] == p.ACTION_SERIES
+
+    fake_client.artifacts.generate_audio_exc = None
+    regenerated = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第1集"}],
+        output_dir=str(tmp_path),
+    )
+    assert regenerated["complete"] is True
+
+
 async def test_dispatch_persists_the_original_wait_timeout_promise(
     fake_client, tmp_path
 ):
