@@ -439,6 +439,16 @@ async def test_label_lookup_failure_says_why(monkeypatch, caplog):
     assert "cookie 已失效" in caplog.text, "但退回 #N 的真正原因必須留在 log 裡"
 
 
+async def test_empty_account_label_warns_before_fallback(caplog):
+    client = _FakeClientCM()
+
+    with caplog.at_level(logging.WARNING, logger=app.logger.name):
+        assert await app._account_label(client, 2) == "#2"
+
+    assert "取不到 email" in caplog.text
+    assert "#2" in caplog.text
+
+
 def test_precheck_agrees_with_the_sdk_strict_loader(tmp_path):
     """整段安全論證的地基:落檔前的預驗證與 SDK strict loader **判定必須一致**。
 

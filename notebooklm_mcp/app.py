@@ -227,7 +227,15 @@ async def _account_label(client: object, slot: int) -> str:
             exc,
         )
         return f"#{slot}"
-    return email or f"#{slot}"
+    if not email:
+        logger.warning(
+            "第 %d 個帳號取不到 email,退回槽位編號 #%d(pool 的稽核標籤會少一個真名):"
+            "get_account_email 回傳空值",
+            slot,
+            slot,
+        )
+        return f"#{slot}"
+    return email
 
 
 @contextlib.asynccontextmanager
