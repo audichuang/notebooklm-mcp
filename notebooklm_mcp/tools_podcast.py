@@ -31,6 +31,7 @@ from ._sources import (
 from ._status import TerminalGenerationError, ensure_completed, ensure_started
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
+    claimed_source_ids,
     finalize_attempt,
     has_durable_output_evidence,
     has_hard_output_evidence,
@@ -2041,6 +2042,85 @@ async def _finalize_episode(
     }
 
 
+#: 對帳結果寫回時撞上並行寫入的重試上限。撞這麼多次代表有別的東西在狂寫 manifest,
+#: 那時候硬拚不會比讓呼叫端重跑更好。
+_CLEANUP_SETTLE_RETRIES = 5
+
+
+def _settle_cleanup_state(
+    store: ManifestStore,
+    settle,
+    *,
+    expected_revision: object,
+    discovered: dict,
+    settled_attempt_ids: set,
+    checked_absent_by_episode: dict,
+    notebook_id: str,
+) -> None:
+    """把這一輪算出來的清理狀態寫回去,**永遠帶 revision CAS**。
+
+    **為什麼清除那一側也要 CAS**(盲審 P1,靜默遺失義務):上一版只在「有新發現」時才 CAS,
+    理由是「沒有新發現時 settle 只做對並行天生安全的事」—— 那個論證只看了 manifest 側的
+    競態,漏了**兩個 process 對遠端的觀測不同**這件事:
+
+        A、B 同讀 revision R
+        A 的 sources.list 回零候選(orphan 還沒出現在清單裡)、窗已關
+        B 的 sources.list 撈到 orphan
+        A 無條件寫入 → 清掉 source_cleanup_unresolved,成為 R+1
+        B ── 下一輪連這筆記錄都不會收集(旗標沒了)→ 不算候選、不寫任何東西、**成功返回**
+
+    結果是 orphan 從 manifest 完全消失,而且全程零錯誤、零告警,下一次生成直接放行。
+    清旗標是破壞性方向,卻是唯一沒有保護的那條路。
+
+    **只加 CAS 還不夠**:誰先 commit 誰贏,零候選那方先贏的話,正候選那方重跑也看不到旗標。
+    所以衝突時的處置是不對稱的 ——
+
+    - **保留「加義務」**(fail-closed 方向):重讀最新 manifest、**重驗 ownership**(await
+      期間別集可能剛把某個 source 認領成它的合法 continuity source,那筆就不再是孤兒),
+      再條件寫入。已觀測到的證據不因為衝突而消失。
+    - **丟掉「結案 unresolved 旗標」**(`settled_attempt_ids`):那是拿可能過期的零候選觀測
+      算出來的,而清錯就是永久遺失。下一輪 gate 會用新的 manifest 重算,代價只是多跑一次。
+    - **保留 `checked_absent_by_episode`**:它逐筆比對「這次真的去 notebook 查過、確認不在」
+      的那幾個 id,別的 writer 併發追加的是**別的** id,不會被它碰到 —— 這一個清除方向對
+      並行是真的安全(「await 期間又一次 retract 追加新義務不得被吞掉」有既有測試鎖著)。
+    """
+    try:
+        store.update(settle, expected_revision=expected_revision)
+        return
+    except ManifestConflictError:
+        pass
+
+    settled_attempt_ids.clear()
+    if not discovered and not checked_absent_by_episode:
+        return
+
+    for _ in range(_CLEANUP_SETTLE_RETRIES):
+        fresh = store.read()
+        claimed = claimed_source_ids(fresh)
+        for ep_n in list(discovered):
+            still_orphan = [
+                source_id
+                for source_id in discovered[ep_n]
+                if source_id not in claimed
+            ]
+            if still_orphan:
+                discovered[ep_n] = still_orphan
+            else:
+                del discovered[ep_n]
+        if not discovered and not checked_absent_by_episode:
+            return
+        try:
+            store.update(settle, expected_revision=fresh.get("revision"))
+            return
+        except ManifestConflictError:
+            continue
+    raise ValueError(
+        f"notebook {notebook_id!r} 的回錄 source 清理義務對帳期間 manifest 一直被改動,"
+        f"連續 {_CLEANUP_SETTLE_RETRIES} 次寫不進去。已經撈到的候選還沒落盤,"
+        "**不要當成沒事**:等並行的工作停下來後重呼同一支工具重新對帳。"
+    )
+
+
 async def _assert_source_cleanup_done(
     client: object, store: ManifestStore, notebook_id: str, episode_n: int
 ) -> None:
@@ -2071,19 +2151,23 @@ async def _assert_source_cleanup_done(
        episode 當下的 notebook 只是 fallback,不是判準。身分沒對上就**不篩選、不持久化、
        不回傳任何候選**:拿呼叫端隨手傳的 notebook 去撈,撈到的是**別本筆記本裡碰巧同名
        同時間窗**的 source,而我們會把它寫進清理義務、再叫呼叫端 `source_delete` —— 那是
-       對無關 notebook 下dest構性指令,比漏掉義務更糟。
+       對無關 notebook 下破壞性指令,比漏掉義務更糟。
     ② **一次 list,純計算,不中途拋。** 掃描過程只累積結果(candidates / settled /
        waiting / checkpoint 壞掉的),**不在迴圈裡 raise** —— 前面幾顆已經撈到的候選還沒
        落盤,一拋就永遠回不來(那些 id 從此沒人記得)。
-    ③ **單次 revision-CAS mutation。** `_claimed_source_ids` 是在 `await` **之前**的
-       snapshot 上算的,而 await 期間另一個 finalizer 可能剛好把某個 source claim 成它那
-       一集的合法 continuity source。拿舊 ownership 寫新 manifest = 把合法 source 排進
-       待刪清單、呼叫端照指引刪掉。所以整批寫入帶 `expected_revision`,manifest 在這段
-       期間動過就衝突、fail-closed,由呼叫端重跑(重跑會拿到新的 ownership)。
-    ④ **寫完才 raise。** 「已確認不在」的清除、撈到的新義務、結案的 unresolved 旗標,
-       全部在同一次 mutation 裡結算 —— 否則已經刪掉的 id 會卡在 `pending_source_cleanup`
-       裡(因為這一輪先在 waiting 那裡拋了),而 `podcast_attempt_retract` 的冪等回傳會
-       繼續說 `source_delete`,指向一個早就不存在的東西。
+    ③ **單次 revision-CAS mutation,而衝突時「加義務」不准跟著陪葬。**
+       `_claimed_source_ids` 是在 `await` **之前**的 snapshot 上算的,await 期間另一個
+       finalizer 可能剛好把某個 source claim 成它那一集的合法 continuity source —— 拿舊
+       ownership 寫新 manifest 就是把合法來源排進待刪清單。所以寫入一律帶
+       `expected_revision`。**但衝突不能一律放棄**:那會讓「零候選那方先 commit、正候選
+       那方撞衝突」變成孤兒永久失憶(見 `_settle_cleanup_state`)。處置是不對稱的 ——
+       重驗 ownership 後把候選寫進去,清旗標那一側則丟掉、留給下一輪重算。
+    ④ **寫完才 raise;完全沒變更就不寫。** 「已確認不在」的清除、撈到的新義務、結案的
+       unresolved 旗標,全部在同一次 mutation 裡結算 —— 否則已經刪掉的 id 會卡在
+       `pending_source_cleanup` 裡(因為這一輪先在 waiting 那裡拋了),而
+       `podcast_attempt_retract` 的冪等回傳會繼續說 `source_delete`,指向一個早就不存在的
+       東西。反過來,blocked/waiting 這種什麼都沒改的路徑**一次 `store.update` 都不准發**:
+       `ManifestStore` 的 revision 是無條件 +1,無效寫盤還會平白撞掉別人的 discovery CAS。
 
     `sources.list` / 認證失敗一律往上拋 —— 義務不會被誤清。"""
     snapshot = store.read()
@@ -2242,23 +2326,19 @@ async def _assert_source_cleanup_done(
             if checked_absent:
                 _drop_cleanup_obligations(row, checked_absent)
 
-    try:
-        # **CAS 只掛在「有新發現要寫」那條路**(docstring ③)。`discovered` 是拿 await
-        # 之前的 `_claimed_source_ids` 算出來的,manifest 在這段期間動過就可能有別集剛
-        # 認領走某個 source —— 拿舊 ownership 寫新狀態 = 把合法 source 排進待刪清單。
-        # 反過來,沒有新發現時 settle 只做兩件對並行天生安全的事:清掉「這次真的查過、
-        # 確認不在」的那幾筆(逐筆比對,不整欄 pop),與清掉 tombstone 上已結案的旗標
-        # (tombstone 不可變)。那時候硬要 CAS 會把「await 期間又有一次 retract 追加新
-        # 義務」這個**本來就被正確吸收**的情形變成硬失敗,而它有既有測試鎖著。
-        store.update(
-            settle, expected_revision=snapshot_revision if discovered else None
+    # **完全沒有變更就不要寫**(盲審 P2):`ManifestStore.update` 的 revision 是無條件 +1,
+    # 所以 blocked/waiting 這種「只是來查一下」的路徑照樣會 bump —— 除了無效寫盤,還會
+    # 平白撞掉另一個 process 正在做的 discovery CAS。
+    if discovered or settled_attempt_ids or checked_absent_by_episode:
+        _settle_cleanup_state(
+            store,
+            settle,
+            expected_revision=snapshot_revision,
+            discovered=discovered,
+            settled_attempt_ids=settled_attempt_ids,
+            checked_absent_by_episode=checked_absent_by_episode,
+            notebook_id=notebook_id,
         )
-    except ManifestConflictError as conflict:
-        raise ValueError(
-            f"notebook {notebook_id!r} 的回錄 source 清理義務對帳期間 manifest 被改動過"
-            f"({conflict});這次算出來的歸屬可能已經過期,不套用。重呼同一支工具即可 —— "
-            "它會用新的 manifest 重新對帳。"
-        ) from conflict
 
     if violations:
         details = ", ".join(f"episode {ep_n}: {sid}" for ep_n, sid in violations)

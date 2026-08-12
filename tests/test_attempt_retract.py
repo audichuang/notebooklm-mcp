@@ -1238,13 +1238,49 @@ async def test_gate_settles_verified_deletions_before_it_raises_on_the_window(
     )
 
 
-async def test_gate_refuses_to_write_ownership_it_computed_before_the_await(
+async def test_gate_revalidates_ownership_instead_of_dropping_the_discovery(
     fake_client, tmp_path, monkeypatch
 ):
-    """`await sources.list()` 期間 manifest 動過 → 不拿舊 ownership 寫新狀態。(盲審 P1)
+    """`await sources.list()` 期間 manifest 動過:**不拿舊 ownership 寫新狀態,也不因此
+    丟掉已經觀測到的證據。**(盲審 P1)
 
-    競態:snapshot 顯示 src-X 還沒被認領 → await → 另一個 finalizer 把 src-X 認領成它那
-    一集的合法 continuity source → 我們仍把它排進待刪清單 → 呼叫端照指引刪掉合法來源。
+    舊版一律 raise。那會讓「零候選那方先 commit、正候選那方撞衝突」變成孤兒永久失憶 ——
+    而這裡的無關寫入(別的欄位被碰一下)根本不影響歸屬,證據不該跟著陪葬。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    expected_title = _upload(manifest_path, attempt_id)["expected_title"]
+    orphan = fake_client.sources._add(expected_title, kind="media")
+    real_list = fake_client.sources.list
+
+    async def touch_during_the_await(notebook_id):
+        result = await real_list(notebook_id)
+
+        def unrelated_writer(manifest):
+            manifest["episodes"][0]["attempts"][0].setdefault("note", "touched")
+
+        ManifestStore(manifest_path).update(unrelated_writer)
+        return result
+
+    monkeypatch.setattr(fake_client.sources, "list", touch_during_the_await)
+
+    with pytest.raises(ValueError, match="retracted feedback sources still in"):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    # 重驗過歸屬:它仍然是孤兒 → 必須落盤,不能只活在那句錯誤訊息裡。
+    assert _pending_ids(manifest_path) == [orphan]
+
+
+async def test_gate_drops_a_candidate_that_got_claimed_during_the_await(
+    fake_client, tmp_path, monkeypatch
+):
+    """await 期間別集把它認領成合法的 continuity source → **它不再是孤兒,不得排進待刪**。
+
+    這才是「不拿過期 ownership 寫新狀態」真正要防的事:照指引刪下去就是刪掉別集正在用的
+    來源。舊版用「manifest 動過就整批放棄」當代理,連無關的寫入也一起陪葬。
     """
     manifest_path, attempt_id = await _abandon_an_unresolved_upload(
         fake_client, tmp_path, monkeypatch
@@ -1256,20 +1292,26 @@ async def test_gate_refuses_to_write_ownership_it_computed_before_the_await(
     async def claim_during_the_await(notebook_id):
         result = await real_list(notebook_id)
 
-        def another_writer(manifest):
-            manifest["episodes"][0]["attempts"][0].setdefault("note", "touched")
+        def another_episode_claims_it(manifest):
+            sibling = copy.deepcopy(manifest["episodes"][0]["attempts"][0])
+            sibling["attempt_id"] = "att-sibling"
+            sibling.pop("retraction", None)
+            sibling["finalize"]["feedback_source_upload"].update(
+                {"status": "completed", "source_id": contested}
+            )
+            manifest["episodes"][0]["attempts"].append(sibling)
 
-        ManifestStore(manifest_path).update(another_writer)
+        ManifestStore(manifest_path).update(another_episode_claims_it)
         return result
 
     monkeypatch.setattr(fake_client.sources, "list", claim_during_the_await)
 
-    with pytest.raises(ValueError, match="manifest 被改動過"):
+    with pytest.raises(ValueError):
         await p.podcast_episode(
             "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
             output_dir=str(tmp_path), manifest_path=manifest_path,
         )
-    # 過期的歸屬一個字都不准落盤。
+    # 別人的合法來源一個字都不准進待刪清單。
     assert contested not in _pending_ids(manifest_path)
 
 
@@ -2297,3 +2339,104 @@ async def test_retract_return_carries_both_source_delete_arguments(
     step = _attempt_next_step_for(manifest_path, before["output_attempt_id"])
     assert "notebook_id='nb-1'" in step
     assert before["feedback_source_id"] in step
+
+
+# ---- 零候選／正候選併發:無論誰先 commit,孤兒都必須留在耐久義務裡(盲審 P1) ------
+
+
+def _gate_client(sources, *, entered=None, release=None):
+    """一顆只回固定 sources 快照的 client;可在 `sources.list` 裡停下來製造交錯。"""
+
+    class _Client:
+        def __init__(self):
+            self.sources = type("S", (), {"list": self._list})()
+
+        async def _list(self, notebook_id):
+            if entered is not None:
+                entered.set()
+            if release is not None:
+                await release.wait()
+            return sources
+
+    return _Client()
+
+
+async def _run_gate(manifest_path, client):
+    """跑一次 gate,把預期內的 fail-closed 吞掉(這裡只關心它寫了什麼)。"""
+    try:
+        await p._assert_source_cleanup_done(
+            client, ManifestStore(manifest_path), "nb-1", 1
+        )
+    except ValueError:
+        pass
+
+
+@pytest.mark.parametrize("zero_commits_first", (True, False))
+async def test_concurrent_zero_and_positive_reconciliation_never_forgets_the_orphan(
+    fake_client, tmp_path, monkeypatch, zero_commits_first
+):
+    """**兩個 process 對遠端的觀測不同時,孤兒不准消失。**
+
+        A、B 同讀 revision R
+        A 的 sources.list 回零候選(orphan 還沒出現在清單裡)、窗已關
+        B 的 sources.list 撈到 orphan
+
+    舊版:A 無條件寫入清掉 `source_cleanup_unresolved`;B 之後連這筆記錄都不會收集
+    (旗標沒了)→ 不算候選、不寫任何東西、**成功返回**。orphan 從 manifest 完全消失,
+    全程零錯誤零告警,下一次生成直接放行。
+
+    **兩種 commit 順序都要驗**:誰先贏都不能讓證據不見。關鍵是兩邊都持有同一個
+    revision 的讀取 —— 那才是這個 bug 的形狀,序列跑兩次是碰不到的。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    _age_the_dispatch_window(manifest_path, attempt_id)
+    upload = _upload(manifest_path, attempt_id)
+    # **orphan 的 created_at 必須落在候選窗內**(窗是以 dispatched_at 為心算的)。窗推老之後
+    # 才用 `now` 建 source 的話,它會落在窗外、兩邊都看到零候選 —— 那就測不到這個競態了。
+    orphan = fake_client.sources._add(
+        upload["expected_title"],
+        kind="media",
+        created_at=datetime.fromisoformat(upload["dispatched_at"]) + timedelta(minutes=1),
+    )
+    seen_by_b = await fake_client.sources.list("nb-1")
+
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    if zero_commits_first:
+        # B(正候選)先讀進去卡住;A(零候選)整輪跑完先 commit;再放 B 寫。
+        slow, fast = seen_by_b, []
+    else:
+        # A(零候選)先讀進去卡住;B(正候選)整輪跑完先 commit;再放 A 寫。
+        slow, fast = [], seen_by_b
+
+    slow_task = asyncio.create_task(
+        _run_gate(manifest_path, _gate_client(slow, entered=parked, release=release))
+    )
+    await parked.wait()                     # 這一邊已經讀到 revision R,停在 await 上
+    await _run_gate(manifest_path, _gate_client(fast))   # 另一邊整輪跑完並 commit
+    release.set()
+    await slow_task                         # 停住的那邊才寫 → 撞上 CAS
+
+    assert orphan in _pending_ids(manifest_path), "orphan 已經從 manifest 完全消失"
+
+
+async def test_blocked_gate_does_not_bump_the_revision(fake_client, tmp_path, monkeypatch):
+    """只是來查一下、什麼都沒改的路徑不准寫盤(盲審 P2)。
+
+    `ManifestStore.update` 的 revision 是無條件 +1,所以 blocked/waiting 每跑一次就 bump
+    —— 除了無效寫盤,還會平白撞掉另一個 process 正在做的 discovery CAS。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    before = ManifestStore(manifest_path).read()["revision"]
+
+    # 候選窗還沒關 + 零候選 → 一定 fail-closed,而且什麼都沒得改
+    with pytest.raises(ValueError, match="候選窗還沒關"):
+        await p._assert_source_cleanup_done(
+            fake_client, ManifestStore(manifest_path), "nb-1", 1
+        )
+
+    assert ManifestStore(manifest_path).read()["revision"] == before

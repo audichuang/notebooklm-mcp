@@ -169,6 +169,15 @@ def _claimed_source_ids(manifest: dict, excluding_attempt_id: str) -> set[str]:
     return claimed
 
 
+def claimed_source_ids(manifest: dict) -> set[str]:
+    """所有已被某顆 attempt 認領成回錄 source 的 id。
+
+    「這筆 source 有人認領」= 它不是孤兒,清理義務不該把它排進待刪清單 —— 對帳結果撞上
+    並行寫入而要重算時,這是唯一要重驗的那件事(見 `tools_podcast._settle_cleanup_state`)。
+    """
+    return _claimed_source_ids(manifest, "")
+
+
 def _kind_value(value: Any) -> str | None:
     raw = getattr(value, "value", value)
     return raw if isinstance(raw, str) else None
