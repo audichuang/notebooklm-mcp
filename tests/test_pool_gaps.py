@@ -261,6 +261,76 @@ async def test_series_dispatch_uses_the_client_that_passed_per_episode_probe(
     assert account_b.artifacts.calls == []
 
 
+async def test_series_ignores_an_external_rotation_between_episodes(fake_client, tmp_path):
+    """別的 request 推進 global pool，不得讓同一個 series 的下一集偷換帳號。"""
+    account_b = FakeClient()
+    account_b.artifacts._generate_count = 100
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
+    generated = 0
+
+    def rotate_during_first_episode():
+        nonlocal generated
+        generated += 1
+        if generated == 1:
+            runtime.rotate_client()
+
+    fake_client.artifacts.on_generate_audio = rotate_during_first_episode
+
+    await p.podcast_series(
+        "nb-1",
+        episodes=[
+            {"title": "心法篇", "brief": "1"},
+            {"title": "實戰篇", "brief": "2"},
+        ],
+        output_dir=str(tmp_path),
+    )
+
+    assert generated == 2
+    assert not [call for call in account_b.artifacts.calls if call[0] == "generate_audio"]
+
+
+async def test_series_carries_its_own_failover_client_to_the_next_episode(fake_client, tmp_path):
+    """A 被本 series 的配額 failover 換成 B 後，即使 global 又被推到 C，EP2 仍用 B。"""
+    account_b = FakeClient()
+    account_c = FakeClient()
+    account_c.artifacts._generate_count = 200
+    runtime.set_clients(
+        [("a@x", fake_client), ("b@x", account_b), ("c@x", account_c)]
+    )
+    calls: list[str] = []
+
+    async def refuse_a(*_args, **_kwargs):
+        calls.append("a@x")
+        raise RateLimitError("每日配額已用盡")
+
+    original_b = account_b.artifacts.generate_audio
+    b_calls = 0
+
+    async def generate_b_then_external_rotate(*args, **kwargs):
+        nonlocal b_calls
+        calls.append("b@x")
+        b_calls += 1
+        status = await original_b(*args, **kwargs)
+        if b_calls == 1:
+            assert runtime.rotate_client() == "c@x"
+        return status
+
+    fake_client.artifacts.generate_audio = refuse_a
+    account_b.artifacts.generate_audio = generate_b_then_external_rotate
+
+    await p.podcast_series(
+        "nb-1",
+        episodes=[
+            {"title": "心法篇", "brief": "1"},
+            {"title": "實戰篇", "brief": "2"},
+        ],
+        output_dir=str(tmp_path),
+    )
+
+    assert calls == ["a@x", "b@x", "b@x"]
+    assert not [call for call in account_c.artifacts.calls if call[0] == "generate_audio"]
+
+
 async def test_resume_pins_client_after_auth_probe(fake_client, tmp_path):
     account_b = FakeClient()
     runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])

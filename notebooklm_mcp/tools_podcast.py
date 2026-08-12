@@ -2461,7 +2461,7 @@ async def _run_episode(
     manifest_path: str | None = None,
     prepared_generation_input: dict | None = None,
     source_ids: list[str] | None = None,
-) -> dict:
+) -> tuple[dict, str | None, object]:
     os.makedirs(output_dir, exist_ok=True)
 
     _validate_episode_args(episode_n, title, prior_mp3_path)
@@ -2675,7 +2675,7 @@ async def _run_episode(
             output = await _finalize_episode(
                 client, notebook_id, episode_n, title, artifact_id, output_dir, wait_timeout
             )
-        return output
+        return output, dispatch_account, client
     except TerminalGenerationError:
         # 伺服器端終態(failed / removed,如每日配額耗盡):artifact 已被下架,resume
         # 也救不回——原樣往上拋,不誤導成「可續跑」。用專屬型別而非 except RuntimeError,
@@ -2814,7 +2814,7 @@ async def podcast_episode(
         raise ValueError("brief must be a non-empty string without input_bundle_path")
     account, client = runtime.snapshot()
     await probe_auth(client)
-    return await _run_episode(
+    output, _, _ = await _run_episode(
         notebook_id,
         episode_n,
         title,
@@ -2831,6 +2831,7 @@ async def podcast_episode(
         prepared_generation_input=prepared_generation_input,
         source_ids=source_ids,
     )
+    return output
 
 
 # P1(Codex adversarial review 實跑驗證,主迴圈裁決採納):**時間窗本身判定不了
@@ -4368,13 +4369,9 @@ async def podcast_series(
     await probe_auth(client)
 
     for episode_n in range(start, len(episodes) + 1):
-        # 第一集沿用通過上方 auth probe 的 snapshot；之後每集重新抓一次,因為前一集
-        # 可能已經 failover 換過帳號。否則清理義務對帳／
-        # drift 複驗／baseline `artifacts.list`／認證預檢會繼續打在被拒帳號上
-        # (v0.8.1 的自動分享讓 pool 全員都看得到 notebook,這件事被巧合遮住,
-        # 不是設計上安全)。
-        if episode_n != start:
-            account, client = runtime.snapshot()
+        # series 在入口固定自己的帳號狀態；只有本呼叫的明確配額 failover 能更新它。
+        # 每集重讀 global snapshot 會讓別的並行 request 在 EP1 期間 rotate 後，EP2 在
+        # 沒有任何配額拒絕與稽核紀錄的情況下偷換帳號。
         plan = episodes[episode_n - 1]
         expected_title = plan["title"].strip()
         expected_brief_hash = hashlib.sha256(
@@ -4673,6 +4670,7 @@ async def podcast_series(
                             account=dispatch_account,
                             client=dispatch_client,
                         )
+                        account = dispatch_account
                     except asyncio.CancelledError:
                         raise
                     except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH) as exc:
@@ -4877,7 +4875,7 @@ async def podcast_series(
         if stop is not None:
             return stop
         try:
-            result = await _run_episode(
+            result, account, client = await _run_episode(
                 notebook_id,
                 episode_n,
                 plan["title"],
