@@ -6,6 +6,79 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.12
+
+**這一版修的全是「補一半」。** 上一版為了不 tombstone 一顆還在飛的 attempt,把 retract 整個
+關掉;這一版把那個決定倒過來 —— **記下義務,而不是擋住操作** —— 並收掉隨之而來的四個並行/
+身分缺口。三輪獨立審查(兩輪盲審 + Codex)各自抓到不同層,列在下面。
+
+### 回錄 upload 未結案時的 retract:從「擋住」改成「留下義務」
+
+`dispatching` 不是短暫的 commit-point 窗口,是**耐久 checkpoint**:`claim_upload` 先寫進
+manifest 才 `await add_file`,而收尾的 `except Exception` **收不到 `CancelledError`**。
+MCP 長 request 被 client 取消是常態,取消或 process 被 kill 都會把狀態永久留在那裡。而唯一
+出口 `_reconcile_source_upload` 只從 `finalize_attempt` 進得去 —— 等於「要作廢一顆輸入本來
+就錯的 attempt,得先把它完整 finalize、上傳、promote」,比 `abandon_in_flight` 本來要避免的
+後果還多一輪遠端副作用;notebook 已刪／share 撤掉時更是永久死鎖。
+
+改成:retract 放行,tombstone 記 `source_cleanup_unresolved`,由生成前的 gate 用候選窗對帳
+結案。涵蓋三種 unresolved 狀態(`dispatching` / `acceptance_unknown` /
+`reconciliation_ambiguous`)—— 三者的後果相同,只修一種等於另外兩種的孤兒照樣沒人記得。
+候選判準抽成 `unresolved_upload_candidates()`,finalize 對帳與清理義務**共用同一份**。
+`add_file` 周圍顯式收 `CancelledError`(不用 `except BaseException`)。
+代價寫在 [gotchas-attempt](docs/gotchas-attempt.md):作廢這種 attempt 之後最多 12 分鐘不能
+重生,**即使孤兒已經刪掉也一樣**(窗還開著時晚到的 upload 仍可能冒出來)。
+
+### 清理義務自帶 notebook 身分
+
+`manifest_store` 明文允許 tombstone 保留建立時綁的舊 notebook,所以「attempt 在 nb-old、
+episode 現在指向 nb-new」是合法狀態。舊版拿 episode 當下的 canonical 去查 —— 新本裡當然沒有
+那筆 source,於是義務被判成已結案,而它還躺在舊本裡污染那邊每一集的 context。
+`pending_source_cleanup` 每筆升級成 `{"source_id", "notebook_id"}`(舊字串仍可讀),身分在
+**寫入當下**決定;讀寫收斂成三支共用 helper,四個站點全走它們。連 canonical 都沒有的 legacy
+義務改成 fail-closed(舊版是直接放行)。
+
+### 對帳寫回一律 CAS,衝突時保留已觀測候選
+
+**孤兒靜默消失**:A、B 同讀 revision R,A 的 `sources.list` 回零候選、B 撈到 orphan;A 無條件
+寫入清掉旗標,B 下一輪連這筆記錄都不會收集 → 不算候選、不寫任何東西、**成功返回**。全程零
+錯誤零告警,下一次生成直接放行。上一版只在「有新發現」時才 CAS,那個論證只看了 manifest 側
+的競態,漏了**兩個 process 對遠端的觀測不同**。
+
+而只補 CAS 不夠(誰先 commit 誰贏),所以衝突時的處置是不對稱的:**保留「加義務」**(重讀
+manifest、重驗 ownership、再條件寫入,有界重試)、**丟掉「清旗標」**(下一輪重算)、
+**保留 `checked_absent`**(它逐筆比對自己查過的 id,併發追加的是別的 id,碰不到)。
+另外 blocked/waiting 這種什麼都沒改的路徑不再寫盤 —— `ManifestStore` 的 revision 無條件 +1,
+無效寫盤會平白撞掉別人正在做的 discovery CAS。
+
+### 回傳自足:`source_cleanup_obligations`
+
+`safe_next_action == "source_delete"` 時,舊版真實 id 只藏在 `next_step` 散文裡,而
+`stale_source_ids` 在「gate 對帳後才撈到候選」的情形下是空的(tombstone 不回寫)。改成回
+`[{notebook_id, source_id}]`(`source_delete` 兩個參數都在),**retract 與 adopt 兩個入口都補**
+—— 只補一個又是補一半。指引也改成列出完整可執行的呼叫,而身分不明時不印假的
+`source_delete(notebook_id=None, ...)`。
+
+### `publish_series` 支援 `itunes:type`
+
+兩個題庫節目(SAA 51 集 / SAP 36 集)在 Apple 裡的集序跟題號對不起來。根因:feed 從來沒輸出
+過 `<itunes:type>`,Apple 因此當 `episodic` —— 照 `pubDate` 由新到舊排、`itunes:episode` 基本
+被忽略。`itunes_type` 加成第 12 欄季級設定(serial/episodic,預設 episodic = Apple 的隱含值),
+channel 層一律輸出。**item 的文件順序刻意不反轉**:Apple 對 serial 用 `itunes:episode` 排、
+不看文件順序,而照文件順序顯示的播放器,現行的遞增正好是連載要的順序。既有節目重跑一次即可,
+不動 GUID／音檔 URL,不需重生音檔。
+
+### 其他
+
+- `source_delete` 查無 id 時不發 destructive RPC 也不 raise,回 `was_present=False`
+  —— 安全性質留在「不打 RPC」、冪等留在「不 raise」,清理迴圈可以重放。
+- 原子換檔收回 `_atomic.prepared_replacement` 一份共用(紅線寫下之後又被違反兩次);
+  必要-cookie 判準抽成 `_cookies`,pool 落檔與 auth CLI 共用同一份。
+- cover `--skip-existing` 撞到壞檔改成重畫而不是整批 abort;Chrome lookup 延到真的要 render。
+- `check_skill_sync` 現在**也掃 `SKILL.md`** 的核心契約詞。v0.9.12 教訓:
+  `source_cleanup_obligations` 只補進 tool-reference、SKILL.md 仍教 `stale_source_ids`,
+  而 checker 只掃 tool-reference —— 整條從那個洞掉出去,CI 照樣綠。
+
 ## v0.9.11
 
 **「回傳要自足」的三層,一版收完。** v0.9.10 立的紅線是「指引一律由

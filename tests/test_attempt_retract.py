@@ -2440,3 +2440,53 @@ async def test_blocked_gate_does_not_bump_the_revision(fake_client, tmp_path, mo
         )
 
     assert ManifestStore(manifest_path).read()["revision"] == before
+
+
+async def test_adopt_also_returns_both_source_delete_arguments(fake_client, tmp_path):
+    """`safe_next_action == "source_delete"` 的**另一個入口**也要自足。
+
+    adopt 的參數表裡沒有 `notebook_id`,呼叫端拿到純 id 時第二個參數無處可拿 ——
+    retract 那邊補了結構化義務、這邊沒補的話就是補一半。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    old_source_id = before["feedback_source_id"]
+    replacement = fake_client.sources._add(before["label"], kind="media")
+
+    adopted = await p.podcast_attempt_adopt(
+        manifest_path,
+        1,
+        before["output_attempt_id"],
+        feedback_source_id=replacement,
+    )
+
+    assert adopted["safe_next_action"] == p.ACTION_SOURCE_DELETE
+    assert adopted["stale_source_ids"] == [old_source_id]
+    assert adopted["source_cleanup_obligations"] == [
+        {"source_id": old_source_id, "notebook_id": "nb-1"}
+    ]
+
+
+async def test_identity_unknown_obligation_never_prints_an_unexecutable_call(
+    fake_client, tmp_path
+):
+    """身分不明時指引不准印出 `source_delete(notebook_id=None, ...)`。
+
+    照抄會失敗 —— 又是一句「在它自己產生的狀態下不可執行」的指引。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA"
+    )
+
+    def strip_identity(manifest):
+        manifest.pop("notebook_id", None)
+        episode = manifest["episodes"][0]
+        episode.pop("notebook_id", None)
+        # 舊格式(純字串,沒有身分),而且這一集連 canonical notebook 都沒有
+        episode["pending_source_cleanup"] = [before["feedback_source_id"]]
+
+    ManifestStore(manifest_path).update(strip_identity)
+
+    step = _attempt_next_step_for(manifest_path, before["output_attempt_id"])
+    assert "notebook_id=None" not in step
+    assert "沒有記到 notebook 身分" in step

@@ -51,6 +51,9 @@ REQUIRED_CONTRACT_TERMS = (
     "source_cleanup_obligations",  # podcast_attempt_retract:safe_next_action 是
                               # source_delete 時要用的**兩個**參數(notebook_id + source_id)。
                               # stale_source_ids 涵蓋不到 gate 對帳後才撈到的候選
+    "next_step",             # reconcile／adopt／retract／series 停點都回這個欄位,而它是
+                              # capabilities 那幾個內部維度(cleanup_state /
+                              # feedback_upload_unresolved)**唯一**的對外通道
     "itunes_type",           # publish_series 的季級設定:缺這個宣告時 Apple 當 episodic,
                               # 連載節目的集序會整個顛倒(實測 SAA/SAP 兩個 feed 都中)
     "source_cleanup_unresolved",  # podcast_attempt_retract:upload 還沒落盤時作廢會留下
@@ -64,9 +67,22 @@ def _missing(tool_names: list[str], path: Path) -> list[str]:
     return [name for name in tool_names if f"`{name}`" not in text]
 
 
-def _missing_terms(path: Path) -> list[str]:
+#: `SKILL.md` 是**每次載入的路由層**,它教錯 = 主流程錯,references 修得再對也沒用。
+#: 但它刻意精簡,不該背全部契約詞 —— 所以只硬性要求「照做會出錯」的那幾個。
+#: (v0.9.12 教訓:`source_cleanup_obligations` 只補進 tool-reference,SKILL.md 仍教
+#: `stale_source_ids`,而那個欄位在 gate 對帳後是空的 —— checker 只掃 tool-reference,
+#: 整條從這個洞掉出去,CI 照樣綠。)
+SKILL_MD_REQUIRED_TERMS = (
+    "source_cleanup_obligations",
+    "itunes_type",
+    "next_step",
+    "abandon_in_flight",
+)
+
+
+def _missing_terms(path: Path, terms: tuple[str, ...]) -> list[str]:
     text = path.read_text(encoding="utf-8")
-    return [term for term in REQUIRED_CONTRACT_TERMS if f"`{term}`" not in text]
+    return [term for term in terms if f"`{term}`" not in text]
 
 
 async def main() -> int:
@@ -83,11 +99,15 @@ async def main() -> int:
         if missing:
             failures.append(f"{path}: missing {', '.join(missing)}")
 
-    missing_terms = _missing_terms(TOOL_REFERENCE)
-    if missing_terms:
-        failures.append(
-            f"{TOOL_REFERENCE}: missing contract term(s) {', '.join(missing_terms)}"
-        )
+    for path, terms in (
+        (TOOL_REFERENCE, REQUIRED_CONTRACT_TERMS),
+        (SKILL_MD, SKILL_MD_REQUIRED_TERMS),
+    ):
+        missing_terms = _missing_terms(path, terms)
+        if missing_terms:
+            failures.append(
+                f"{path}: missing contract term(s) {', '.join(missing_terms)}"
+            )
 
     if failures:
         print("\n".join(failures))
@@ -95,7 +115,8 @@ async def main() -> int:
 
     print(
         f"skill docs cover {len(names)} MCP tools "
-        f"+ {len(REQUIRED_CONTRACT_TERMS)} contract terms"
+        f"+ {len(REQUIRED_CONTRACT_TERMS)} contract terms "
+        f"({len(SKILL_MD_REQUIRED_TERMS)} of them also required in SKILL.md)"
     )
     return 0
 

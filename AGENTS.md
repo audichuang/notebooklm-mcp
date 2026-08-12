@@ -18,7 +18,7 @@ uv run pytest -q
 #   再跑一次或 rm -rf .venv 重建即收斂。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.11"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.12"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
@@ -118,8 +118,8 @@ claude mcp add-json notebooklm -s local \
   `source_id`、`notebook_id` 只是 routing header；公開工具 `source_delete` 會先用
   `source_list` 驗證該 id 屬於指定 notebook，**查無此 id 就不發那個 destructive RPC**
   (否則打錯 notebook 會刪到別本的來源)，回 `was_present=False`。
-  **刻意不 fail-loud**:`podcast_attempt_retract` 的清理契約要求呼叫端把回傳的
-  `stale_source_ids`「逐一 `source_delete`」，而 response 遺失後重放整個迴圈是預期操作
+  **刻意不 fail-loud**:`podcast_attempt_retract` 的清理契約要求呼叫端照回傳的
+  `source_cleanup_obligations`「逐一 `source_delete`」，而 response 遺失後重放整個迴圈是預期操作
   —— 對已刪掉的那一筆拋錯會讓自動化 host 停在半路，剩下的 id 從此沒人刪。安全性質留在
   「不打 RPC」、冪等留在「不 raise」，所以 `idempotentHint` 保留。
   `deleted` 只代表「呼叫後該 id 已不在這個 notebook」，要區分「本來就不在」看

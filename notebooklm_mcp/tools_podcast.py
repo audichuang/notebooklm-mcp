@@ -635,11 +635,22 @@ def _attempt_next_step(caps: dict) -> str:
         # 在 gate 對帳撈到候選之後是**假的**:那個欄位是空的(tombstone 不回寫),id 只在
         # episode 的 `pending_source_cleanup` 裡 —— 照字面做的呼叫端會拿到空清單而以為
         # 沒事要做,但生成 gate 正拿著同一批 id 擋著。
+        # **身分不明時不准印出假的可執行呼叫。** legacy 純字串義務 + episode 沒有
+        # notebook_id 時算出來的是 `None`,印成 `source_delete(notebook_id=None, ...)`
+        # 照抄會失敗 —— 那又是一句「在它自己產生的狀態下不可執行」的指引。這種只講清楚
+        # 缺什麼(生成前的 gate 會用同一個理由 fail-closed,兩邊說法一致)。
         cleanup = (
             "先把這幾筆 source_delete 掉:"
             + "、".join(
-                f"source_delete(notebook_id={row['notebook_id']!r}, "
-                f"source_id={row['source_id']!r})"
+                (
+                    f"source_delete(notebook_id={row['notebook_id']!r}, "
+                    f"source_id={row['source_id']!r})"
+                    if row["notebook_id"] is not None
+                    else (
+                        f"source_id={row['source_id']!r}(這一筆沒有記到 notebook 身分,"
+                        "補上 episode／manifest 的 notebook_id 後重呼本工具才算得出來)"
+                    )
+                )
                 for row in caps["source_cleanup_obligations"]
             )
             + "。"
@@ -2256,8 +2267,16 @@ async def _assert_source_cleanup_done(
         )
         raise ValueError(
             f"這幾筆回錄 source 清理義務沒有可核對的 notebook 身分:{details}。"
-            "補上 attempt／episode／manifest 任一層的 notebook_id 再重試 —— 拿別本筆記本"
-            "查到「沒有」不能當成義務結案,而拿它查到的候選更不能當成要刪的東西。"
+            "拿別本筆記本查到「沒有」不能當成義務結案,而拿它查到的候選更不能當成要刪的東西。"
+            # **不要教「去 manifest 補 notebook_id」** —— `series_manifest.json` 只由工具
+            # 寫入(手寫的紀錄繞過 artifact claim 唯一性與 advisory lock),而且沒有任何
+            # 工具設得了那個欄位:那句話會把呼叫端導進一條它做不到、也不准做的路。
+            # 這種狀態只出現在 v0.9.11 之前留下的純字串義務 + 該集連 canonical notebook
+            # 都沒有的 legacy manifest 上,出路是人工判斷後用 source_delete 收掉。
+            "這是 v0.9.11 之前的 legacy 義務(當時沒有記身分)且該集沒有 canonical "
+            "notebook_id 才會出現。**不要手改 manifest**(它只由工具寫入):用 "
+            "source_list 在候選的 notebook 裡找到這幾筆,確認之後 source_delete 掉;"
+            "刪乾淨後這道 gate 就會放行。"
         )
 
     if not pending_here and not unresolved_here:
@@ -3735,6 +3754,13 @@ async def podcast_attempt_adopt(
     }
     if stale_source_ids:
         result["stale_source_ids"] = stale_source_ids
+        # **同一個義務的另一個入口也要自足。** retract 那邊補了結構化義務,adopt 這邊
+        # 沒補的話,呼叫端拿到 `safe_next_action="source_delete"` 卻只有 source_id ——
+        # 而這支工具的參數表裡根本沒有 notebook_id,第二個參數無處可拿(補一半的又一例)。
+        result["source_cleanup_obligations"] = [
+            {"source_id": source_id, "notebook_id": notebook_id}
+            for source_id in stale_source_ids
+        ]
         result["safe_next_action"] = ACTION_SOURCE_DELETE
     return result
 
