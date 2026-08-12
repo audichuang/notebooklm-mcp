@@ -143,7 +143,7 @@ async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(
     assert after["retracted_attempt_ids"] == [attempt_id]
     # 沿用 adopt 既有的歷史欄位 + 一筆「還沒做完」的清理義務
     assert after["previous_feedback_source_ids"] == [before["feedback_source_id"]]
-    assert after["pending_source_cleanup"] == [before["feedback_source_id"]]
+    assert _pending_ids(manifest_path) == [before["feedback_source_id"]]
 
 
 # ---- pubDate 不得漂移(真實事故:saa-drill EP05/EP09)---------------------------
@@ -798,11 +798,11 @@ async def test_cleanup_cannot_be_discharged_from_another_notebook(
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
 
-    with pytest.raises(ValueError, match="belongs to notebook"):
+    with pytest.raises(ValueError, match="清理義務屬於 notebook"):
         await p._assert_source_cleanup_done(
             fake_client, ManifestStore(manifest_path), "nb-wrong", 1
         )
-    assert _episode(manifest_path)["pending_source_cleanup"] == [
+    assert _pending_ids(manifest_path) == [
         before["feedback_source_id"]
     ]
 
@@ -830,7 +830,7 @@ async def test_cleanup_does_not_swallow_an_obligation_added_during_the_check(
         await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
     finally:
         fake_client.sources.list = real_list
-    assert _episode(manifest_path)["pending_source_cleanup"] == ["src-added-during-await"]
+    assert _pending_ids(manifest_path) == ["src-added-during-await"]
 
 
 async def test_retract_refuses_an_attempt_that_is_not_the_durable_output(
@@ -904,6 +904,14 @@ async def test_retract_rejects_bad_arguments_before_touching_the_manifest(
 # 停在 `dispatching`,而唯一的出路 `_reconcile_source_upload` 只從 finalize 進得去
 # ——「要作廢一顆輸入本來就錯的 attempt,得先把它完整 finalize、上傳、promote」,
 # 比旗標本來要避免的後果還多一輪遠端副作用。
+
+
+def _pending_ids(manifest_path):
+    """`pending_source_cleanup` 現在每筆帶 notebook 身分;測試多半只關心 id。"""
+    return [
+        row if isinstance(row, str) else row["source_id"]
+        for row in (_episode(manifest_path).get("pending_source_cleanup") or [])
+    ]
 
 
 def _upload(manifest_path, attempt_id):
@@ -1014,7 +1022,7 @@ async def test_retract_abandons_an_in_flight_upload_and_the_gate_finds_the_orpha
         call[0] == "generate_audio" for call in fake_client.artifacts.calls
     ) == dispatches_before
     # 撈到的候選要變成耐久義務,不能只活在那句錯誤訊息裡。
-    assert _episode(manifest_path)["pending_source_cleanup"] == [orphan_id]
+    assert _pending_ids(manifest_path) == [orphan_id]
 
     # **gate 撈到之後,retract 的冪等回傳要跟著改口。** 這一刻已經有具體 id 可刪,
     # 若還回 `reconcile_after`／`safe_next_action=None`,呼叫端會以為只能乾等,而生成
@@ -1179,7 +1187,7 @@ async def test_gate_queues_every_candidate_it_finds_not_just_the_first(
         )
     assert first_orphan in str(blocked.value)
     assert second_orphan in str(blocked.value)
-    assert set(_episode(manifest_path)["pending_source_cleanup"]) == {
+    assert set(_pending_ids(manifest_path)) == {
         first_orphan,
         second_orphan,
     }
@@ -1208,7 +1216,7 @@ async def test_gate_settles_verified_deletions_before_it_raises_on_the_window(
         manifest_path, 1, attempt_id, reason="QA 拒收", abandon_in_flight=True
     )
     known_stale = retracted["stale_source_ids"]
-    assert known_stale and _episode(manifest_path)["pending_source_cleanup"] == known_stale
+    assert known_stale and _pending_ids(manifest_path) == known_stale
 
     # 呼叫端照指引刪乾淨了,但 unresolved 的候選窗還開著。
     for source_id in known_stale:
@@ -1262,7 +1270,7 @@ async def test_gate_refuses_to_write_ownership_it_computed_before_the_await(
             output_dir=str(tmp_path), manifest_path=manifest_path,
         )
     # 過期的歸屬一個字都不准落盤。
-    assert contested not in (_episode(manifest_path).get("pending_source_cleanup") or [])
+    assert contested not in _pending_ids(manifest_path)
 
 
 async def test_gate_keeps_the_obligation_when_the_notebook_cannot_be_listed(
@@ -1512,7 +1520,7 @@ async def test_gate_persists_discoveries_even_when_a_later_checkpoint_is_broken(
             output_dir=str(tmp_path), manifest_path=manifest_path,
         )
     # A 的發現要落盤(不是只活在錯誤訊息裡),而 B 的問題照樣要被報出來。
-    assert _episode(manifest_path)["pending_source_cleanup"] == [orphan_a]
+    assert _pending_ids(manifest_path) == [orphan_a]
     assert orphan_a in str(failure.value)
 
 
@@ -1582,7 +1590,7 @@ async def test_every_unresolved_upload_status_carries_the_obligation(
     if status == "reconciliation_ambiguous":
         # 身分不確定但範圍確定:算出來的候選直接全部排進清理義務,最保守。
         assert set(candidates) <= set(retracted["stale_source_ids"])
-        assert set(candidates) <= set(_episode(manifest_path)["pending_source_cleanup"])
+        assert set(candidates) <= set(_pending_ids(manifest_path))
     else:
         assert not set(candidates) & set(retracted["stale_source_ids"])
 
@@ -1661,9 +1669,15 @@ async def test_cleanup_gate_does_not_cross_different_notebooks(fake_client, tmp_
     await p.podcast_attempt_retract(
         manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
     )
-    ManifestStore(manifest_path).update(
-        lambda manifest: manifest["episodes"][0].update({"notebook_id": "nb-other"})
-    )
+    def move_obligation_elsewhere(manifest):
+        episode = manifest["episodes"][0]
+        episode["notebook_id"] = "nb-other"
+        # **義務的身分要自己改**:episode 換本不會、也不該改變「這筆 source 躺在哪一本」。
+        episode["pending_source_cleanup"] = [
+            {"source_id": before["feedback_source_id"], "notebook_id": "nb-other"}
+        ]
+
+    ManifestStore(manifest_path).update(move_obligation_elsewhere)
 
     out = await p.podcast_episode(
         "nb-1", episode_n=2, title="實戰篇", brief="第二集",
@@ -1673,7 +1687,9 @@ async def test_cleanup_gate_does_not_cross_different_notebooks(fake_client, tmp_
     stored = json.loads(open(manifest_path, encoding="utf-8").read())
     ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
     # EP1 的義務原封不動,沒被誤判成已結案
-    assert ep1["pending_source_cleanup"] == [before["feedback_source_id"]]
+    assert [row["source_id"] for row in ep1["pending_source_cleanup"]] == [
+        before["feedback_source_id"]
+    ]
 
 
 # ---- _create_audio_attempt 也要驗 episode notebook 一致性(review #9) -------------
@@ -1754,8 +1770,11 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     ].strip()
     assert adopted["stale_source_ids"] == [candidate_b]
     assert adopted["safe_next_action"] == "source_delete"
-    pending = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
-        "pending_source_cleanup"
+    pending = [
+        row["source_id"]
+        for row in json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+            "pending_source_cleanup"
+        ]
     ]
     assert pending == [candidate_b]
 
@@ -1770,8 +1789,11 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     # stale_source_ids 刪才刪得乾淨。
     assert set(corrected["stale_source_ids"]) == {candidate_a, candidate_b}
     assert corrected["safe_next_action"] == "source_delete"
-    pending = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
-        "pending_source_cleanup"
+    pending = [
+        row["source_id"]
+        for row in json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+            "pending_source_cleanup"
+        ]
     ]
     assert set(pending) == {candidate_a, candidate_b}
 
@@ -1783,11 +1805,12 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     )
     assert set(again["stale_source_ids"]) == {candidate_a, candidate_b}
     assert again["safe_next_action"] == "source_delete"
-    assert set(
-        json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
+    assert {
+        row["source_id"]
+        for row in json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
             "pending_source_cleanup"
         ]
-    ) == {candidate_a, candidate_b}          # 不累積
+    } == {candidate_a, candidate_b}          # 不累積
 
     # 下一次生成前不刪就 fail-closed
     store = ManifestStore(manifest_path)
@@ -1847,7 +1870,9 @@ async def test_legacy_adopt_source_replacement_queues_previous_for_cleanup(
     assert result["stale_source_ids"] == [old_source_id]
     assert result["safe_next_action"] == "source_delete"
     episode = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]
-    assert episode["pending_source_cleanup"] == [old_source_id]
+    assert [row["source_id"] for row in episode["pending_source_cleanup"]] == [
+        old_source_id
+    ]
     assert episode["previous_feedback_source_ids"] == [old_source_id]
 
 
@@ -2192,3 +2217,83 @@ async def test_a_retracted_frozen_bundle_is_not_offered_for_reuse(
         await p.podcast_episode("nb-1", **args)
     after = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
     assert after == before, "撞 tombstone 時不該有任何新 dispatch"
+
+
+# ---- 清理義務自帶 notebook 身分(盲審 P1:查錯本會誤清) ---------------------------
+
+
+async def test_cleanup_obligation_identity_survives_switching_the_episode_notebook(
+    fake_client, tmp_path
+):
+    """**義務綁的是「這筆 source 躺在哪一本」,不是 episode 當下的 notebook。**
+
+    `manifest_store` 明文允許 retract 的 tombstone 保留舊 notebook,所以同一集之後換本
+    重生是合法狀態。舊版拿 episode 當下的 canonical 去查:新本裡當然沒有那筆 source,
+    於是義務被當成已結案清掉,而它其實還躺在舊本裡污染那邊每一集的 context。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
+    )
+    stale = before["feedback_source_id"]
+    assert _pending_ids(manifest_path) == [stale]
+
+    # 合法地把這一集改綁新 notebook(tombstone 仍記得自己是 nb-1 建的)
+    ManifestStore(manifest_path).update(
+        lambda manifest: manifest["episodes"][0].update({"notebook_id": "nb-new"})
+    )
+
+    # 拿新本來查:nb-new 裡沒有 src,但**不准**因此把義務判成已結案。
+    with pytest.raises(ValueError, match="清理義務屬於 notebook"):
+        await p._assert_source_cleanup_done(
+            fake_client, ManifestStore(manifest_path), "nb-new", 1
+        )
+    assert _pending_ids(manifest_path) == [stale], "義務被別本的查詢結果清掉了"
+
+
+async def test_legacy_string_obligation_without_any_identity_fails_closed(
+    fake_client, tmp_path
+):
+    """v0.9.11 之前寫進去的純字串沒有身分。補得出 canonical 就用它;連 canonical 都沒有
+    的,是身分不明 —— 不准放行生成(舊版會直接通過,而那筆 source 可能還在某本裡)。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
+    )
+
+    def strip_all_identity(manifest):
+        manifest.pop("notebook_id", None)
+        episode = manifest["episodes"][0]
+        episode.pop("notebook_id", None)
+        episode["pending_source_cleanup"] = ["src-legacy"]   # 舊格式:純字串
+
+    ManifestStore(manifest_path).update(strip_all_identity)
+
+    with pytest.raises(ValueError, match="沒有可核對的 notebook 身分"):
+        await p._assert_source_cleanup_done(
+            fake_client, ManifestStore(manifest_path), "nb-1", 1
+        )
+    assert _pending_ids(manifest_path) == ["src-legacy"]
+
+
+async def test_retract_return_carries_both_source_delete_arguments(
+    fake_client, tmp_path, monkeypatch
+):
+    """`safe_next_action == "source_delete"` 時,回傳要自足到照抄就能執行。
+
+    `source_delete` 要 notebook_id + source_id 兩個參數,而 gate 對帳之後才撈到的候選
+    連 id 都不在 `stale_source_ids` 裡(tombstone 不回寫)。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    retracted = await p.podcast_attempt_retract(
+        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
+    )
+
+    assert retracted["safe_next_action"] == p.ACTION_SOURCE_DELETE
+    assert retracted["source_cleanup_obligations"] == [
+        {"source_id": before["feedback_source_id"], "notebook_id": "nb-1"}
+    ]
+    # 指引也要列得出兩個參數,不是只報欄位名
+    step = _attempt_next_step_for(manifest_path, before["output_attempt_id"])
+    assert "notebook_id='nb-1'" in step
+    assert before["feedback_source_id"] in step

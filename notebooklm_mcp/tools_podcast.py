@@ -396,9 +396,12 @@ def _attempt_capabilities(
     )
     pending_source_cleanup = False
     source_cleanup_unresolved = False
-    cleanup_source_ids: list[str] = []
+    cleanup_obligations: list[dict] = []
     if post_retract:
-        pending_source_ids = set(episode.get("pending_source_cleanup") or [])
+        obligations = _cleanup_obligations(
+            episode, fallback_notebook=episode.get("notebook_id")
+        )
+        pending_source_ids = {row["source_id"] for row in obligations}
         retracted_source_ids = (
             (attempt.get("retraction") or {}).get("stale_source_ids") or []
         )
@@ -425,8 +428,13 @@ def _attempt_capabilities(
         }
         if source_cleanup_unresolved:
             covered |= pending_source_ids
-        cleanup_source_ids = sorted(covered)
-        pending_source_cleanup = bool(cleanup_source_ids)
+        # **回傳結構化的義務,不是只有 id。** `source_delete` 要 notebook_id + source_id
+        # 兩個參數,只給 id 的話「下一步的公開回傳必須自足」這條紅線不成立。
+        cleanup_obligations = sorted(
+            (row for row in obligations if row["source_id"] in covered),
+            key=lambda row: row["source_id"],
+        )
+        pending_source_cleanup = bool(cleanup_obligations)
     cleanup_state = None
     if pending_source_cleanup:
         cleanup_state = "pending_delete"
@@ -541,9 +549,11 @@ def _attempt_capabilities(
         "candidate_selection_required": candidate_selection_required,
         "post_retract": post_retract,
         "pending_source_cleanup": pending_source_cleanup,
-        # 具體要刪的 id。**指引必須列得出它們**——「把 stale_source_ids 全部 source_delete」
-        # 在 gate 撈到候選的情形下是假的(那個欄位是空的,id 只在 episode 的 pending 裡)。
-        "cleanup_source_ids": cleanup_source_ids,
+        # 具體要刪的義務,`[{"notebook_id", "source_id"}]`。**指引與回傳都必須列得出它們**
+        # ——「把 stale_source_ids 全部 source_delete」在 gate 撈到候選之後是假的(那個
+        # 欄位是空的,id 只在 episode 的 pending 裡);而只給 source_id 也不夠,
+        # `source_delete` 兩個參數都要。
+        "source_cleanup_obligations": cleanup_obligations,
         "source_cleanup_unresolved": source_cleanup_unresolved,
         "cleanup_state": cleanup_state,
         "preserves_existing_output": preserves_existing_output,
@@ -626,7 +636,11 @@ def _attempt_next_step(caps: dict) -> str:
         # 沒事要做,但生成 gate 正拿著同一批 id 擋著。
         cleanup = (
             "先把這幾筆 source_delete 掉:"
-            + "、".join(caps["cleanup_source_ids"])
+            + "、".join(
+                f"source_delete(notebook_id={row['notebook_id']!r}, "
+                f"source_id={row['source_id']!r})"
+                for row in caps["source_cleanup_obligations"]
+            )
             + "。"
             if caps["pending_source_cleanup"]
             else ""
@@ -2109,50 +2123,66 @@ async def _assert_source_cleanup_done(
                 if owner is None:
                     unresolved_elsewhere.append((*record, owner))
 
-    pending_by_episode = [
-        (row.get("episode"), list(row["pending_source_cleanup"]))
-        for row in episodes
-        if row.get("pending_source_cleanup")
-        and canonical_notebook(row) in (None, notebook_id)
-    ]
+    # **每筆義務用它自己的 notebook 身分分流**(盲審 P1):
+    #   == 這一本 → 這次要驗;
+    #   != 這一本 → 別本的問題,不參與(目標這一集自己的另外擋,見下);
+    #   None(legacy 純字串且該集連 canonical 都沒有)→ 身分不明,fail-closed。
+    pending_here: list[tuple[object, str]] = []
+    pending_identity_unknown: list[tuple[object, str]] = []
+    for row in episodes:
+        for obligation in _cleanup_obligations(
+            row, fallback_notebook=canonical_notebook(row)
+        ):
+            owner = obligation["notebook_id"]
+            if owner == notebook_id:
+                pending_here.append((row.get("episode"), obligation["source_id"]))
+            elif owner is None:
+                pending_identity_unknown.append(
+                    (row.get("episode"), obligation["source_id"])
+                )
 
-    target_episode = next(
-        (row for row in episodes if row.get("episode") == episode_n), None
-    )
-    if target_episode is not None and (target_episode.get("pending_source_cleanup") or []):
-        # 先驗這一集本身的 notebook 身分,再拿它查。`notebook_id` 是呼叫端給的,而清理
-        # 義務是綁在 manifest 那個 notebook 上——拿一個空的別的 notebook 來查,會「查無
-        # 此 source」而把義務誤判成已結案(舊來源其實還躺在真正的筆記本裡)。
-        canonical = canonical_notebook(target_episode)
-        if canonical is not None and canonical != notebook_id:
-            raise ValueError(
-                f"episode {episode_n} belongs to notebook {canonical!r}, not "
-                f"{notebook_id!r}; cannot discharge its source cleanup from another notebook"
+    # 目標這一集自己的義務若屬於**別本** notebook,不該在這裡「順便放行」:那筆 source
+    # 仍在原本那本污染它的 context,而這次生成不會去碰它。明確擋下來並說出是哪一本,
+    # 比靜默跳過誠實(判準是義務自己的身分,不再是 episode 當下的 canonical)。
+    target_elsewhere = sorted(
+        {
+            row["notebook_id"]
+            for episode_row in episodes
+            if episode_row.get("episode") == episode_n
+            for row in _cleanup_obligations(
+                episode_row, fallback_notebook=canonical_notebook(episode_row)
             )
+            if row["notebook_id"] not in (None, notebook_id)
+        },
+        key=str,
+    )
+    if target_elsewhere:
+        raise ValueError(
+            f"episode {episode_n} 的回錄 source 清理義務屬於 notebook {target_elsewhere!r},"
+            f"不是 {notebook_id!r};不能從別本筆記本結案(那幾筆仍在原本那本污染 context)。"
+        )
 
-    # **身分不明的 unresolved 義務在打 RPC 之前就擋掉**(docstring ①):不篩選、不持久化、
+    # **身分不明的義務在打 RPC 之前就擋掉**(docstring ①):不篩選、不持久化、
     # 不回傳任何候選 —— 這一條必須排在 `sources.list` 之前,否則「撈到的候選」已經被算出來
     # 並寫進義務了,擋在後面沒有意義。
-    if unresolved_elsewhere:
+    if unresolved_elsewhere or pending_identity_unknown:
         details = ", ".join(
-            f"episode {ep_n}: {att!r}" for ep_n, att, _ in unresolved_elsewhere
+            [f"episode {ep_n}: attempt {att!r}" for ep_n, att, _ in unresolved_elsewhere]
+            + [f"episode {ep_n}: source {sid!r}" for ep_n, sid in pending_identity_unknown]
         )
         raise ValueError(
-            f"這幾顆 retracted attempt 的回錄 source 清理義務沒有可核對的 notebook 身分:"
-            f"{details}。補上 attempt／episode／manifest 任一層的 notebook_id 再重試 —— "
-            "拿別本筆記本查到「沒有」不能當成義務結案,而拿它查到的候選更不能當成要刪的東西。"
+            f"這幾筆回錄 source 清理義務沒有可核對的 notebook 身分:{details}。"
+            "補上 attempt／episode／manifest 任一層的 notebook_id 再重試 —— 拿別本筆記本"
+            "查到「沒有」不能當成義務結案,而拿它查到的候選更不能當成要刪的東西。"
         )
 
-    if not pending_by_episode and not unresolved_here:
+    if not pending_here and not unresolved_here:
         return
 
     sources = await client.sources.list(notebook_id)
     live = {getattr(source, "id", None) for source in sources}
     violations = [
-        (ep_n, source_id)
-        for ep_n, pending in pending_by_episode
-        for source_id in pending
-        if source_id in live
+        (ep_n, source_id) for ep_n, source_id in pending_here if source_id in live
     ]
 
     # 純計算:全部累積,迴圈裡一律不 raise(docstring ②)。
@@ -2184,18 +2214,13 @@ async def _assert_source_cleanup_done(
         else:
             waiting.append((ep_n, unresolved_attempt_id))
 
-    clearable = {
-        row.get("episode")
-        for row in episodes
-        if row.get("pending_source_cleanup") and canonical_notebook(row) == notebook_id
-    }
-    # 只清「這次真的查過、確認不在」的那幾筆:await 期間可能又有一次 retract 追加新義務,
-    # 無條件 pop 整個欄位會把它一起吞掉。
-    checked_absent_by_episode = {
-        ep_n: {source_id for source_id in pending if source_id not in live}
-        for ep_n, pending in pending_by_episode
-        if ep_n in clearable
-    }
+    # 「這次真的查過、確認不在」的那幾筆。**只涵蓋身分等於這一本的義務** —— 別本的
+    # 根本沒查過,不可能算「確認不在」(逐筆比對、不整欄 pop:await 期間可能又有一次
+    # retract 追加新義務)。
+    checked_absent_by_episode: dict[object, set[str]] = {}
+    for ep_n, source_id in pending_here:
+        if source_id not in live:
+            checked_absent_by_episode.setdefault(ep_n, set()).add(source_id)
 
     def settle(manifest: dict) -> None:
         for row in manifest["episodes"]:
@@ -2208,24 +2233,14 @@ async def _assert_source_cleanup_done(
             found = discovered.get(row.get("episode"))
             if found:
                 history = row.setdefault("previous_feedback_source_ids", [])
-                pending = row.setdefault("pending_source_cleanup", [])
                 for source_id in found:
                     if source_id not in history:
                         history.append(source_id)
-                    if source_id not in pending:
-                        pending.append(source_id)
+                    # 候選是從**這一本**的 sources.list 撈出來的,身分就是它。
+                    _record_cleanup_obligation(row, source_id, notebook_id)
             checked_absent = checked_absent_by_episode.get(row.get("episode"))
-            if not checked_absent:
-                continue
-            left = [
-                source_id
-                for source_id in row.get("pending_source_cleanup", [])
-                if source_id not in checked_absent
-            ]
-            if left:
-                row["pending_source_cleanup"] = left
-            else:
-                row.pop("pending_source_cleanup", None)
+            if checked_absent:
+                _drop_cleanup_obligations(row, checked_absent)
 
     try:
         # **CAS 只掛在「有新發現要寫」那條路**(docstring ③)。`discovered` 是拿 await
@@ -3190,8 +3205,67 @@ def _attempt_can_adopt_source(attempt: dict) -> bool:
     )
 
 
+def _cleanup_obligations(
+    episode: dict, *, fallback_notebook: object = None
+) -> list[dict]:
+    """讀出這一集未結案的清理義務,**每一筆都帶自己的 notebook 身分**。
+
+    身分要跟著義務走,不能拿 episode 當下的 notebook 回推(盲審 P1):`manifest_store`
+    明文允許 retract 的 tombstone 保留建立時綁的舊 notebook(否則 retract 之後想換
+    notebook 重生就寫不進去),於是同一集換本重生之後,舊義務的 source 其實躺在**別本**
+    筆記本裡 —— 拿新本去查會「查無此 source」而把義務誤判成已結案,舊來源從此沒人記得,
+    卻仍在原本那本污染後續每一集的 context。
+
+    v0.9.11 之前寫進去的是純字串(沒有身分)。那些只能補上 `fallback_notebook`
+    (通常是 episode 當下的 canonical)—— best effort,補不出來(`None`)就是身分不明,
+    由呼叫端 fail-closed,**不准當成已結案**。
+    """
+    obligations: list[dict] = []
+    for row in episode.get("pending_source_cleanup") or []:
+        if isinstance(row, str) and row:
+            obligations.append({"source_id": row, "notebook_id": fallback_notebook})
+        elif isinstance(row, dict) and isinstance(row.get("source_id"), str):
+            if row["source_id"]:
+                obligations.append(
+                    {
+                        "source_id": row["source_id"],
+                        "notebook_id": row.get("notebook_id"),
+                    }
+                )
+    return obligations
+
+
+def _record_cleanup_obligation(
+    episode: dict, source_id: str, notebook_id: object
+) -> None:
+    """把一筆帶身分的義務排進這一集(同一個 source_id 已在就不重複加)。
+
+    只在真的有東西要排時才建 key,維持「沒有義務就沒有這個欄位」的既有形狀。
+    """
+    pending = episode.setdefault("pending_source_cleanup", [])
+    for row in pending:
+        existing = row if isinstance(row, str) else (row or {}).get("source_id")
+        if existing == source_id:
+            return
+    pending.append({"source_id": source_id, "notebook_id": notebook_id})
+
+
+def _drop_cleanup_obligations(episode: dict, source_ids: set[str]) -> None:
+    """清掉「這次真的查過、確認不在」的那幾筆(逐筆比對,不整欄 pop)。"""
+    left = [
+        row
+        for row in episode.get("pending_source_cleanup") or []
+        if (row if isinstance(row, str) else (row or {}).get("source_id"))
+        not in source_ids
+    ]
+    if left:
+        episode["pending_source_cleanup"] = left
+    else:
+        episode.pop("pending_source_cleanup", None)
+
+
 def _queue_pending_source_cleanup(
-    episode: dict, source_ids: list[str], *, exclude: str
+    episode: dict, source_ids: list[str], *, exclude: str, notebook_id: object
 ) -> list[str]:
     """把 adopt 換掉的舊 source(s)排進這一集的 ``pending_source_cleanup``(去重、
     排除這次選中的那筆),讓 `_assert_source_cleanup_done` 在下一次生成前逼刪——
@@ -3201,18 +3275,10 @@ def _queue_pending_source_cleanup(
     host 會冪等重呼,若第二次回傳空清單、`safe_next_action` 就會從 source_delete 翻回
     series,host 照著走卻被 gate 硬擋成 ValueError(狀態冪等、指引卻不冪等,等於把
     自動化 host 導進死路)。"""
-    to_queue = [
-        source_id
-        for source_id in dict.fromkeys(source_ids)  # 去重、保留順序
-        if isinstance(source_id, str) and source_id and source_id != exclude
-    ]
-    if to_queue:
-        # 只在真的有東西要排時才建 key,維持「沒有義務就沒有這個欄位」的既有形狀。
-        pending = episode.setdefault("pending_source_cleanup", [])
-        for source_id in to_queue:
-            if source_id not in pending:
-                pending.append(source_id)
-    return list(episode.get("pending_source_cleanup", []))
+    for source_id in dict.fromkeys(source_ids):  # 去重、保留順序
+        if isinstance(source_id, str) and source_id and source_id != exclude:
+            _record_cleanup_obligation(episode, source_id, notebook_id)
+    return [row["source_id"] for row in _cleanup_obligations(episode)]
 
 
 @mcp.tool()
@@ -3516,6 +3582,9 @@ async def podcast_attempt_adopt(
                 current_episode,
                 [previous] if isinstance(previous, str) else [],
                 exclude=feedback_source_id,
+                # 義務要記在**這筆 source 實際所在**的那本 notebook 上,不是 episode
+                # 當下的 default —— adopt 認的就是這個 notebook 裡的 source。
+                notebook_id=notebook_id,
             )
 
         assert current_attempt is not None
@@ -3570,6 +3639,7 @@ async def podcast_attempt_adopt(
             current_episode,
             [*stale_candidates, previous] if isinstance(previous, str) else stale_candidates,
             exclude=feedback_source_id,
+            notebook_id=notebook_id,
         )
 
     _, stale_source_ids = store.update(adopt_source)
@@ -3872,12 +3942,16 @@ async def podcast_attempt_retract(
             history = episode.setdefault("previous_feedback_source_ids", [])
             # 未完成的清理義務。這不只是提示:下一次生成／resume 前會真的去 notebook
             # 驗它已經不在(見 `_assert_source_cleanup_done`),還在就 fail-closed。
-            pending = episode.setdefault("pending_source_cleanup", [])
+            # **身分綁 attempt 自己的 notebook**:tombstone 可以合法保留舊 notebook,
+            # 而這筆 source 就躺在那一本裡 —— 記成 episode 當下的 default 的話,之後
+            # 換本重生時會拿新本去查、查無此 source 就把義務誤清(盲審 P1)。
+            obligation_notebook = attempt.get("notebook_id") or episode.get(
+                "notebook_id"
+            )
             for source_id in stale_source_ids:
                 if source_id not in history:
                     history.append(source_id)
-                if source_id not in pending:
-                    pending.append(source_id)
+                _record_cleanup_obligation(episode, source_id, obligation_notebook)
         retraction = {
             "episode": episode_n,
             "attempt_id": attempt_id,
@@ -3939,6 +4013,11 @@ async def podcast_attempt_retract(
         **retraction,
         "observed_state": "retracted",
         "safe_next_action": caps["safe_next_action"],
+        # **`safe_next_action == "source_delete"` 時,執行它要用這個。**
+        # `stale_source_ids` 只涵蓋 retract 當下就知道身分的那幾筆;gate 對帳之後才撈到的
+        # 候選只進 episode 的 pending(tombstone 不回寫),那時它是空的、真實 id 只在散文
+        # 裡 —— 而 `source_delete` 還需要 notebook_id。兩者都在這裡。
+        "source_cleanup_obligations": caps["source_cleanup_obligations"],
         # P1 修復:委派給 sibling 時這兩個欄位跟 `retraction["attempt_id"]`(稽核主體,
         # 即被 retract 的這一顆)不同——執行 `safe_next_action` 要用這兩個,不是
         # `attempt_id`(見上方 docstring)。
