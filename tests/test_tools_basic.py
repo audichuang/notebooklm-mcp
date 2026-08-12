@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from notebooklm.rpc.types import AudioFormat, AudioLength
 from notebooklm.types import ArtifactType
@@ -205,6 +207,16 @@ async def test_auth_check_dead_gives_relogin_hint(fake_client):
         await t.auth_check()
 
 
+@pytest.mark.parametrize("error_type", [pytest.param("network"), pytest.param("rate_limit")])
+async def test_auth_check_preserves_transient_error_type(fake_client, error_type):
+    from notebooklm.exceptions import NetworkError, RateLimitError
+
+    error = NetworkError("offline") if error_type == "network" else RateLimitError("busy")
+    fake_client.notebooks.list = AsyncMock(side_effect=error)
+    with pytest.raises(type(error)):
+        await t.auth_check()
+
+
 async def test_source_add_file_title_whitespace_not_false_positive(fake_client, tmp_path):
     """SDK 會 strip title;呼叫端傳前後空白不該讓後檢誤判 fail。"""
     f = tmp_path / "ep.mp3"
@@ -286,6 +298,7 @@ async def test_source_add_probe_failure_is_best_effort(fake_client):
     out = await t.source_add_url("nb-1", "https://example.com/post")
     assert out["source_id"].startswith("src-")   # add 本身成功,probe 掛掉不連坐
     assert out["char_count"] is None and "note" in out
+    assert "RuntimeError" in out["note"]
 
 
 async def test_source_add_file_title_check_still_fails_loud_before_probe(fake_client, tmp_path):

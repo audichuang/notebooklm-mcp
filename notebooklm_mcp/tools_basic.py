@@ -88,7 +88,8 @@ async def _probe_extraction(notebook_id: str, source_id: str, *, is_file: bool) 
         n = ft.char_count
     except Exception as exc:  # noqa: BLE001 — probe 是加值檢查,任何失敗都不該讓 add 白做
         return {"char_count": None,
-                "note": f"extraction probe failed (best-effort, source 已上傳): {exc}"}
+                "note": "extraction probe failed (best-effort, source 已上傳): "
+                f"{type(exc).__name__}: {exc}"}
     out: dict = {"char_count": n}
     if not n:
         out["warning"] = (

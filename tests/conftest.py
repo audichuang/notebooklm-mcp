@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from notebooklm.exceptions import AuthError
 from notebooklm._types.research import (
     RESEARCH_RESULT_TYPE_REPORT,
     ResearchSource,
@@ -398,7 +399,7 @@ class FakeNotebooks:
 
     async def list(self):
         if self.fail_list:
-            raise ValueError("Authentication expired or invalid. Please re-authenticate.")
+            raise AuthError("Authentication expired or invalid. Please re-authenticate.")
         return [type("NB", (), {"id": "nb-123", "title": "Test"})()]
 
     async def get(self, notebook_id):
