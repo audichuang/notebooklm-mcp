@@ -47,8 +47,11 @@ For HTTP transport:
 
 ```bash
 doppler run -p notebooklm -c prd -- \
-  nblm-mcp --transport streamable-http --host 0.0.0.0 --port 8484
+  nblm-mcp --transport streamable-http --host 127.0.0.1 --port 8484
 ```
+
+HTTP/SSE transport 本身沒有認證，server 預設拒絕綁定非 loopback host。只有在前方已有
+可信任的認證與網路邊界時，才明確加上 `--allow-insecure-remote`；不要直接把服務暴露到公網。
 
 When auth expires, refresh on a GUI machine and sync the storage state back to Doppler:
 

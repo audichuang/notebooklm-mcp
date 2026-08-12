@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -59,6 +60,16 @@ _INLINE_AUTH_ENV_OVERRIDES: dict[str, str | None] = {
 
 # pool 掃描的上限。只是「打錯字偵測」的搜尋範圍,不是帳號數上限的產品決策。
 _MAX_POOL_SLOTS = 20
+
+
+def _is_loopback_host(host: str) -> bool:
+    """只接受明確的 localhost 或 loopback IP；不做可能被 DNS 改寫的解析。"""
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _slot_env_name(slot: int) -> str:
@@ -327,10 +338,20 @@ def main() -> None:
     parser.add_argument("--transport", choices=["stdio", "streamable-http", "sse"], default="stdio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8484)
+    parser.add_argument(
+        "--allow-insecure-remote",
+        action="store_true",
+        help="允許無認證的 HTTP/SSE server 綁定非 loopback host",
+    )
     args = parser.parse_args()
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     else:
+        if not args.allow_insecure_remote and not _is_loopback_host(args.host):
+            raise SystemExit(
+                "HTTP/SSE transport 沒有認證；非 loopback host 必須明確傳入 "
+                "--allow-insecure-remote"
+            )
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport=args.transport)
