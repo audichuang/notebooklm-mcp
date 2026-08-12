@@ -2455,11 +2455,13 @@ async def _run_episode(
     audio_format: str | None,
     audio_length: str | None,
     wait_timeout: float,
+    *,
+    account: str | None,
+    client: object,
     manifest_path: str | None = None,
     prepared_generation_input: dict | None = None,
     source_ids: list[str] | None = None,
 ) -> dict:
-    client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
 
     _validate_episode_args(episode_n, title, prior_mp3_path)
@@ -2565,11 +2567,11 @@ async def _run_episode(
             notebook_id, prior_src.id, f"EP{episode_n - 1:02d}", return_object=False
         )
 
-    # 一次取好「送出這次生成的帳號 + 它的 client」:baseline / 記帳 / 實際送出三者
-    # 必須同源。分開讀 `active_account()` 與 `get_client()` 中間隔著 await,並行的
+    # caller 一次取好「通過 auth probe 的帳號 + 它的 client」並傳進來:
+    # preflight / baseline / 記帳 / 實際送出四者必須同源。分開讀全域狀態時,並行的
     # 另一個工具呼叫在那個縫裡 rotate,就會變成 baseline 是 A 看到的、manifest 記 A、
     # 實際卻由 B 送出(ADR-0010 §Transparency:manifest 是唯一的稽核憑據)。
-    dispatch_account, dispatch_client = runtime.snapshot()
+    dispatch_account, dispatch_client = account, client
     if store is not None:
         baseline = await dispatch_client.artifacts.list(
             notebook_id, artifact_type=ArtifactType.AUDIO
@@ -2810,7 +2812,8 @@ async def podcast_episode(
         brief = prepared_generation_input["brief"]
     elif not isinstance(brief, str) or not brief.strip():
         raise ValueError("brief must be a non-empty string without input_bundle_path")
-    await probe_auth(runtime.get_client())
+    account, client = runtime.snapshot()
+    await probe_auth(client)
     return await _run_episode(
         notebook_id,
         episode_n,
@@ -2822,6 +2825,8 @@ async def podcast_episode(
         audio_format,
         audio_length,
         wait_timeout,
+        account=account,
+        client=client,
         manifest_path=manifest_path,
         prepared_generation_input=prepared_generation_input,
         source_ids=source_ids,
@@ -4255,7 +4260,7 @@ async def podcast_series(
         raise ValueError(
             "series manifest belongs to a different notebook"
         )
-    client = runtime.get_client()
+    account, client = runtime.snapshot()
     run_results: list[dict] = []
 
     def partial(
@@ -4363,12 +4368,13 @@ async def podcast_series(
     await probe_auth(client)
 
     for episode_n in range(start, len(episodes) + 1):
-        # 前一集可能已經 failover 換過帳號 —— `client` 是函式開頭抓的區域變數,不會
-        # 自動跟著 runtime 的作用中帳號走。每集開頭重新抓一次,否則清理義務對帳／
+        # 第一集沿用通過上方 auth probe 的 snapshot；之後每集重新抓一次,因為前一集
+        # 可能已經 failover 換過帳號。否則清理義務對帳／
         # drift 複驗／baseline `artifacts.list`／認證預檢會繼續打在被拒帳號上
         # (v0.8.1 的自動分享讓 pool 全員都看得到 notebook,這件事被巧合遮住,
         # 不是設計上安全)。
-        client = runtime.get_client()
+        if episode_n != start:
+            account, client = runtime.snapshot()
         plan = episodes[episode_n - 1]
         expected_title = plan["title"].strip()
         expected_brief_hash = hashlib.sha256(
@@ -4610,7 +4616,8 @@ async def podcast_series(
                     )
                     # baseline / 記帳 / 實際送出三者同源,理由同 `_run_episode`
                     # 那條路徑(並行 rotate 會讓 manifest 記 A、實際 B 送出)。
-                    dispatch_account, dispatch_client = runtime.snapshot()
+                    dispatch_account, dispatch_client = account, client
+                    await probe_auth(dispatch_client)
                     # 來源筆數守門**不在這裡**:它在上面 re-arm/supersede 的共同上游,
                     # 也就是任何 manifest mutation 之前(`refuse_if_too_many_sources`)。
                     # 曾經擺在這一行,結果是「先把 not_accepted re-arm 成 prepared、
@@ -4881,6 +4888,8 @@ async def podcast_series(
                 audio_format,
                 audio_length,
                 wait_timeout,
+                account=account,
+                client=client,
                 manifest_path=manifest_path,
             )
         except TooManySourcesError as exc:

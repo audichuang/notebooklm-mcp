@@ -212,6 +212,55 @@ async def test_standalone_finalize_keeps_dispatch_client(fake_client, tmp_path):
     assert any(call[0] == "download" for call in fake_client.artifacts.calls)
 
 
+async def test_episode_dispatch_uses_the_client_that_passed_auth_probe(fake_client, tmp_path):
+    account_b = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
+    original = fake_client.notebooks.list
+
+    async def probe_then_rotate():
+        notebooks = await original()
+        runtime.rotate_client()
+        return notebooks
+
+    fake_client.notebooks.list = probe_then_rotate
+
+    await p.podcast_episode(
+        "nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path)
+    )
+
+    assert any(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
+    assert account_b.artifacts.calls == []
+
+
+async def test_series_dispatch_uses_the_client_that_passed_per_episode_probe(
+    fake_client, tmp_path
+):
+    account_b = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
+    original = fake_client.notebooks.list
+    probes = 0
+
+    async def rotate_during_per_episode_probe():
+        nonlocal probes
+        notebooks = await original()
+        probes += 1
+        if probes == 2:
+            runtime.rotate_client()
+        return notebooks
+
+    fake_client.notebooks.list = rotate_during_per_episode_probe
+
+    await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "b"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert probes >= 2
+    assert any(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
+    assert account_b.artifacts.calls == []
+
+
 async def test_resume_pins_client_after_auth_probe(fake_client, tmp_path):
     account_b = FakeClient()
     runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
