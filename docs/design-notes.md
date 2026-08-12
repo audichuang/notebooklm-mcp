@@ -34,7 +34,9 @@
     別重生燒配額。另含
     `episode_set_description`(show notes 回寫 manifest,預設清引用標記;同 process 讀改寫)
   - `tools_research.py` — NotebookLM 內建 Web / Deep Research 的薄包:`research_start`(回
-    `task_id` 就走)/ `research_wait`(可重入,回候選 + 報告)/ `research_import`(只匯入
+    可輪詢的 `task_id` 就走;deep 取 SDK `report_id`,fast 取 SDK `task_id`)/
+    `research_wait`(可重入,
+    回候選 + 報告)/ `research_import`(只匯入
     host 指名的 URL)。**三支分開不是為了彈性,是為了跟 ADR-0001 的 attempt/resume 紀律
     一致**:deep 動輒數十分鐘,start+wait 合一保證踩到外層 client timeout,而重跑合一版
     會再起一個新 task 燒配額;分開之後斷線只要重跑 `research_wait`。
@@ -111,4 +113,3 @@
 (Caddy 唯讀對外,由使用者既有的 Cloudflare Tunnel 指過來;寫端 uploader 僅內網,不進
 tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `show_id`(**永不改**),
 不綁 notebook_id。
-

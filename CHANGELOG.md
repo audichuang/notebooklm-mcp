@@ -6,6 +6,14 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## Unreleased
+
+- Deep Research 後續輪詢改用 SDK 的 `report_id`;fast 仍用 SDK `task_id`。MCP 對外
+  保持原本必填的 `task_id` 欄位,但值改為可輪詢 handle,不再把 deep 的不可輪詢
+  sessionId 交給呼叫端。deep 缺 `report_id` 時直接拋 `DecodingError`,不等到 timeout。
+- 多步驟工具在入口固定同一個 account client,避免並行 quota failover 讓一次呼叫
+  跨帳號;auth probe 只把 `AuthError` 翻成重登提示,網路與限流錯誤保留原型別。
+
 ## v0.9.12
 
 **這一版修的全是「補一半」。** 上一版為了不 tombstone 一顆還在飛的 attempt,把 retract 整個

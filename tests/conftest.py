@@ -434,7 +434,6 @@ class FakeResearch:
     def __init__(self):
         self.calls = []
         # True 時 start() 回 None —— 模擬「後端沒建出 task」(SDK 不 raise)。
-        self.start_returns_none = False
         self.status = ResearchStatus.COMPLETED
         # 報告只引用 A 與 B;C 是 NotebookLM 找到但報告沒用到的邊緣命中。
         self.report = (
@@ -464,10 +463,8 @@ class FakeResearch:
     async def start(self, notebook_id, query, source="web", mode="fast"):
         self.calls.append(("start", dict(notebook_id=notebook_id, query=query,
                                          source=source, mode=mode)))
-        if self.start_returns_none:
-            return None
         return ResearchStart(task_id="res-1", report_id="rep-1", notebook_id=notebook_id,
-                             query=query, mode=mode)
+                             query=query, mode=mode.lower())
 
     async def poll(self, notebook_id, task_id=None):
         self.calls.append(("poll", dict(notebook_id=notebook_id, task_id=task_id)))

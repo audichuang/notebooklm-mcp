@@ -15,6 +15,9 @@
   `ResearchTimeoutError`(TimeoutError 子類),對 **FAILED 是回傳而非 raise** → 工具端自己擋。
   匯入一律走 `import_sources_with_verification`:`IMPORT_RESEARCH` 在 deep 負載下常超過 30 秒、
   client 先 timeout 但伺服器已 commit,它用 source list 對帳只補送缺的那幾筆。
+- **start 回的兩種 id 不能猜**:fast 用 `task_id` 輪詢;deep 的 `task_id` 是不可輪詢的
+  sessionId,必須用 `report_id`。MCP 對外仍叫 `task_id`,但它是已按 mode 選好的 polling
+  handle;deep 沒有 `report_id` 時 fail-loud,不能退回 sessionId 等到 timeout。
 - **`select_cited_sources` 不是 `ResearchAPI` 的方法**,是 `notebooklm/research.py` 的
   module-level 純函式(不打 RPC)。ResearchAPI 本體只有 5 個 RPC 方法。cited 判定因此是純本地
   計算,我們只用 `extract_report_urls` / `normalize_citation_url` 算出事實標記回傳,不把

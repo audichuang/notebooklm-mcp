@@ -21,6 +21,7 @@ from __future__ import annotations
 # `#a` / `#b` 兩個候選在我們眼中是兩筆、在 verification 眼中是同一筆,對帳數字就會錯。
 # 是私有 API,故 test_contracts 有鎖(改名會在發版前紅,不會等到 production ImportError)。
 from mcp.types import ToolAnnotations
+from notebooklm import DecodingError
 from notebooklm._research import _normalize_import_verification_url as _import_url_key
 from notebooklm.research import extract_report_urls, normalize_citation_url
 
@@ -56,7 +57,7 @@ async def research_start(
     source: str = "web",
     mode: str = "fast",
 ) -> dict:
-    """啟動 NotebookLM 內建研究,**立即**回 task_id(不等完成)。
+    """啟動 NotebookLM 內建研究,**立即**回可輪詢的 task_id(不等完成)。
 
     `mode="fast"` 快速網路搜尋(預設,便宜);`mode="deep"` Deep Research,會產出一份
     引用導向的報告,但要數十分鐘且吃配額——只用在跨來源有爭議、需要引用地圖的題目。
@@ -65,23 +66,26 @@ async def research_start(
     ⚠️ 這支 RPC **只送 query 字串**:筆記本裡已有的來源對搜尋內容毫無影響。要讓搜尋
     貼著你已查證的種子走,得把專有名詞、別名、版本號、時間界線寫進 `query` 本身。
 
-    回傳的 task_id 請先落地,再呼叫 `research_wait`——中途斷線可以重跑 wait 接回來。"""
+    回傳的 task_id 請先落地,再呼叫 `research_wait`——中途斷線可以重跑 wait 接回來。
+    這是 MCP 統一的 polling handle:deep 取 SDK report_id,fast 取 SDK task_id。"""
     query = _require(query, "query")
     res = await runtime.get_client().research.start(
         notebook_id, query, source=source, mode=mode
     )
-    # SDK 對「後端沒建出 task」回 None(或 task_id 空),不是 raise。讓它靜默通過的話,
-    # 呼叫端會拿空 id 去 wait,最後以誤導性的 timeout 收場。
-    task_id = getattr(res, "task_id", "") if res is not None else ""
-    if not task_id:
-        raise RuntimeError(
-            f"research 未啟動(後端沒有建立 task);query={query!r} mode={mode!r} source={source!r}"
-        )
+    if res.mode == "deep":
+        if not res.report_id:
+            raise DecodingError(
+                f"deep research start returned no report_id (session {res.task_id!r}); "
+                "this run cannot be polled — retry"
+            )
+        task_id = res.report_id
+    else:
+        task_id = res.task_id
     return {
         "task_id": task_id,
-        "report_id": getattr(res, "report_id", None),
-        "query": getattr(res, "query", query),
-        "mode": getattr(res, "mode", mode),
+        "report_id": res.report_id,
+        "query": res.query,
+        "mode": res.mode,
         "source": source,
     }
 

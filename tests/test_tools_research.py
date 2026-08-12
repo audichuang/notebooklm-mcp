@@ -14,14 +14,46 @@ from notebooklm_mcp import tools_research as r
 # ---- start:先落地 task_id,再等 ---------------------------------------------------
 
 
-async def test_research_start_returns_task_id_and_passes_mode(fake_client):
-    out = await r.research_start("nb-1", "advisor tool history forwarding", mode="deep")
+@pytest.mark.parametrize(
+    ("mode", "expected_task_id"),
+    [("fast", "res-1"), ("deep", "rep-1"), ("DEEP", "rep-1")],
+)
+async def test_research_start_returns_the_mode_specific_poll_handle(
+    fake_client, mode, expected_task_id
+):
+    out = await r.research_start("nb-1", "advisor tool history forwarding", mode=mode)
     call = next(c[1] for c in fake_client.research.calls if c[0] == "start")
     assert call["query"] == "advisor tool history forwarding"
-    assert call["mode"] == "deep" and call["source"] == "web"
-    assert out["task_id"] == "res-1" and out["mode"] == "deep"
+    assert call["mode"] == mode and call["source"] == "web"
+    assert out["task_id"] == expected_task_id
+    assert out["mode"] == mode.lower()
     # 只啟動,不等待 —— 這正是 deep(可能數十分鐘)不能 start+wait 合一的理由。
     assert not [c for c in fake_client.research.calls if c[0] == "wait"]
+
+
+async def test_deep_research_threads_report_id_from_start_into_wait(fake_client):
+    started = await r.research_start("nb-1", "some query", mode="deep")
+    await r.research_wait("nb-1", task_id=started["task_id"])
+
+    wait = next(c[1] for c in fake_client.research.calls if c[0] == "wait")
+    assert wait["task_id"] == "rep-1"
+
+
+async def test_deep_research_fails_loud_without_a_report_id(fake_client, monkeypatch):
+    from notebooklm import DecodingError, ResearchStart
+
+    async def start_without_report_id(notebook_id, query, source="web", mode="deep"):
+        return ResearchStart(
+            task_id="session-1",
+            report_id=None,
+            notebook_id=notebook_id,
+            query=query,
+            mode=mode,
+        )
+
+    monkeypatch.setattr(fake_client.research, "start", start_without_report_id)
+    with pytest.raises(DecodingError, match="report_id"):
+        await r.research_start("nb-1", "some query", mode="deep")
 
 
 async def test_research_start_requires_a_query(fake_client):
@@ -29,13 +61,6 @@ async def test_research_start_requires_a_query(fake_client):
         with pytest.raises(ValueError, match="query"):
             await r.research_start("nb-1", bad)
     assert not fake_client.research.calls
-
-
-async def test_research_start_fails_loud_when_no_task_was_created(fake_client):
-    """SDK 對「後端沒建 task」回 None 而非 raise;放行會讓呼叫端拿空 id 去等到 timeout。"""
-    fake_client.research.start_returns_none = True
-    with pytest.raises(RuntimeError, match="research 未啟動"):
-        await r.research_start("nb-1", "some query")
 
 
 # ---- wait:只產候選 ---------------------------------------------------------------
@@ -80,6 +105,14 @@ async def test_research_wait_requires_a_task_id(fake_client):
     assert not fake_client.research.calls
 
 
+async def test_research_ids_remain_required_in_the_mcp_schema():
+    from notebooklm_mcp.app import mcp
+
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    assert tools["research_wait"].inputSchema["required"] == ["notebook_id", "task_id"]
+    assert tools["research_import"].inputSchema["required"] == ["notebook_id", "task_id"]
+
+
 async def test_research_wait_propagates_the_typed_timeout(fake_client):
     """逾時必須原樣冒出去(ResearchTimeoutError 是 TimeoutError 子類),不能被包成別的錯——
     呼叫端就是靠「這是 timeout 不是失敗」決定「重跑 wait,別重開 task」。"""
@@ -98,7 +131,7 @@ async def test_research_wait_propagates_the_typed_timeout(fake_client):
 
 
 async def test_research_import_only_imports_named_urls(fake_client):
-    out = await r.research_import("nb-1", "res-1", urls=["https://c.example/blog"])
+    out = await r.research_import("nb-1", task_id="res-1", urls=["https://c.example/blog"])
     call = next(c[1] for c in fake_client.research.calls if c[0] == "import")
     assert call["titles"] == ["來源C(未被引用)"]        # A/B 沒被指名就不進來
     assert call["is_report"] == [False]
@@ -118,7 +151,7 @@ async def test_research_import_pins_client_between_poll_and_import(fake_client):
 
     fake_client.research.poll = poll_then_rotate
 
-    await r.research_import("nb-1", "res-1", urls=["https://c.example/blog"])
+    await r.research_import("nb-1", task_id="res-1", urls=["https://c.example/blog"])
 
     assert not [call for call in other.research.calls if call[0] == "import"]
 
