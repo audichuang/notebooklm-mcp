@@ -1,7 +1,9 @@
 import json
 
 import pytest
+from conftest import FakeClient
 
+from notebooklm_mcp import runtime
 from notebooklm_mcp import tools_artifacts as a
 
 
@@ -54,6 +56,29 @@ async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp
     data = json.loads(open(m, encoding="utf-8").read())
     assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
     assert data["episodes"][0]["report_format"] == "study_guide"
+
+
+@pytest.mark.parametrize("kind", ["slides", "report"])
+async def test_generation_pins_client_through_download(fake_client, tmp_path, kind):
+    other = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    method_name = "generate_slide_deck" if kind == "slides" else "generate_report"
+    original = getattr(fake_client.artifacts, method_name)
+
+    async def generate_then_rotate(*args, **kwargs):
+        status = await original(*args, **kwargs)
+        runtime.rotate_client()
+        return status
+
+    setattr(fake_client.artifacts, method_name, generate_then_rotate)
+
+    if kind == "slides":
+        await a.generate_slides("nb-1", m, 1)
+    else:
+        await a.generate_report("nb-1", m, 1)
+
+    assert other.artifacts.calls == []
 
 
 # ---- custom report:ReportFormat.CUSTOM + custom_prompt --------------------------
@@ -166,6 +191,25 @@ async def test_revise_slide_revises_then_redownloads_without_regenerating(fake_c
     assert res["slides_pdf_path"].endswith("ep05-slides.pdf")
     data = json.loads(open(m, encoding="utf-8").read())
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
+
+
+async def test_revise_slide_pins_client_from_preflight_through_download(fake_client, tmp_path):
+    other = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+    m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
+    fake_client.artifacts.seed_artifact("deck-1")
+    original = fake_client.artifacts.get_or_none
+
+    async def get_then_rotate(*args, **kwargs):
+        artifact = await original(*args, **kwargs)
+        runtime.rotate_client()
+        return artifact
+
+    fake_client.artifacts.get_or_none = get_then_rotate
+
+    await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
+
+    assert other.artifacts.calls == []
 
 
 async def test_revise_slide_follows_the_returned_id_not_the_input(fake_client, tmp_path):

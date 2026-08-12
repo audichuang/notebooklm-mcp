@@ -108,14 +108,14 @@ def _require_episode(manifest_path: str, episode_n: int) -> None:
         raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
 
 
-async def _require_completed_slide_deck(notebook_id: str, artifact_id: str):
+async def _require_completed_slide_deck(client: object, notebook_id: str, artifact_id: str):
     """遠端 mutation 前驗 artifact:存在、屬於這個 notebook、是簡報、已完成。
 
     `get_or_none` 是「list 一次再比對 id」,所以一次呼叫同時回答「存不存在」與
     「屬不屬於這個 notebook」——`revise_slide` 的 RPC 只靠 artifact_id 定位,
     notebook_id 只是 routing header,錯配的 ID 不會被伺服器擋下來。
     (`get()` 在 0.8.0 會改成 raise,故用 sanctioned 的 `get_or_none`。)"""
-    art = await runtime.get_client().artifacts.get_or_none(notebook_id, artifact_id)
+    art = await client.artifacts.get_or_none(notebook_id, artifact_id)  # type: ignore[attr-defined]
     if art is None:
         raise ValueError(
             f"artifact {artifact_id} 不在 notebook {notebook_id}"
@@ -136,13 +136,18 @@ async def _require_completed_slide_deck(notebook_id: str, artifact_id: str):
 
 
 async def _finish_slides(
-    notebook_id: str, manifest_path: str, episode_n: int, artifact_id: str, wait_timeout: float
+    client: object,
+    notebook_id: str,
+    manifest_path: str,
+    episode_n: int,
+    artifact_id: str,
+    wait_timeout: float,
 ) -> dict:
     """生成之後的共用尾段:等完成→下載→回寫 manifest。
 
     抽出來是為了讓「已經生好、但 client 端斷線／timeout 丟掉結果」的 artifact 能只走
     這段救回來(`artifact_download_slides`),而不必重生一次燒配額。"""
-    client = runtime.get_client()
+    # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
     final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
 
@@ -174,7 +179,7 @@ async def generate_slides(
     """生成該集簡報並下載 PDF,路徑回寫 manifest 的 slides_pdf_path。"""
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 打錯集號別燒一次生成配額
-    client = runtime.get_client()
+    _, client = runtime.snapshot()
     if selected is not None:
         # 打錯/已刪的 source_id 伺服器不擋——燒完一次生成配額才發現拿到聚焦錯誤的簡報。
         await assert_sources_exist(client, notebook_id, selected)
@@ -187,7 +192,9 @@ async def generate_slides(
         slide_length=to_slide_length(slide_length),
     )
     artifact_id = ensure_started(status)
-    return await _finish_slides(notebook_id, manifest_path, episode_n, artifact_id, wait_timeout)
+    return await _finish_slides(
+        client, notebook_id, manifest_path, episode_n, artifact_id, wait_timeout
+    )
 
 
 @mcp.tool()
@@ -203,8 +210,14 @@ async def artifact_download_slides(
     救援用:client timeout 砍掉 `generate_slides` 時雲端那份其實生完了,用
     `artifact_list(kind="slide_deck")` 找回 ID 就能省一次配額。不確定是哪一筆別猜
     ——重生比綁錯便宜。"""
+    _, client = runtime.snapshot()
     return await _finish_slides(
-        notebook_id, manifest_path, episode_n, _require_artifact_id(artifact_id), wait_timeout
+        client,
+        notebook_id,
+        manifest_path,
+        episode_n,
+        _require_artifact_id(artifact_id),
+        wait_timeout,
     )
 
 
@@ -236,13 +249,14 @@ async def artifact_revise_slide(
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")
     artifact_id = _require_artifact_id(artifact_id)
+    _, client = runtime.snapshot()
     # 所有可預判的錯都擋在第一個遠端副作用之前。**注意這不是 durable attempt**:
     # 外層 client 在 revise 成功之後、下載回寫之前斷線,重跑仍會再 revise 一次
     # ——那是整個 slides/report 家族共有的架構債(generate_slides 逐字同形),
     # 要修得連同 generate 一起做成 attachment attempt,不在本工具的範圍。
     _require_episode(manifest_path, episode_n)
-    await _require_completed_slide_deck(notebook_id, artifact_id)
-    status = await runtime.get_client().artifacts.revise_slide(
+    await _require_completed_slide_deck(client, notebook_id, artifact_id)
+    status = await client.artifacts.revise_slide(
         notebook_id, artifact_id, slide_index, prompt.strip()
     )
     # **以回傳值為準,不假設它是同一顆** —— 這個「不自己假設」的寫法救了這支工具:
@@ -250,7 +264,9 @@ async def artifact_revise_slide(
     # `<原標題> (2)`,舊的留著。當初若照 docstring 寫死用輸入的 artifact_id,下載到的
     # 會是**沒改過的舊那份**,而且看起來完全成功。
     revised_id = ensure_started(status)
-    out = await _finish_slides(notebook_id, manifest_path, episode_n, revised_id, wait_timeout)
+    out = await _finish_slides(
+        client, notebook_id, manifest_path, episode_n, revised_id, wait_timeout
+    )
     out["slide_index"] = slide_index
     # 讓呼叫端看得出 id 換了、舊的還在遠端 —— 否則它只會拿到一個「artifact_id 跟我傳的
     # 不一樣」的回傳值,無從判斷是 fork 還是自己記錯。
@@ -260,6 +276,7 @@ async def artifact_revise_slide(
 
 
 async def _finish_report(
+    client: object,
     notebook_id: str,
     manifest_path: str,
     episode_n: int,
@@ -268,7 +285,7 @@ async def _finish_report(
     wait_timeout: float,
 ) -> dict:
     """生成之後的共用尾段(同 `_finish_slides` 的理由)。"""
-    client = runtime.get_client()
+    # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
     final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
 
@@ -334,7 +351,7 @@ async def generate_report(
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 同上
-    client = runtime.get_client()
+    _, client = runtime.snapshot()
     if selected is not None:
         # 同 generate_slides:打錯/已刪的 source_id 伺服器不擋,先唯讀對帳。
         await assert_sources_exist(client, notebook_id, selected)
@@ -348,7 +365,13 @@ async def generate_report(
     )
     artifact_id = ensure_started(status)
     return await _finish_report(
-        notebook_id, manifest_path, episode_n, artifact_id, report_format, wait_timeout
+        client,
+        notebook_id,
+        manifest_path,
+        episode_n,
+        artifact_id,
+        report_format,
+        wait_timeout,
     )
 
 
@@ -365,7 +388,9 @@ async def artifact_download_report(
 
     救援用,同 `artifact_download_slides`(client timeout 丟掉結果時省一次配額)。
     `report_format` 只影響回寫 manifest 的標記,傳當初生成用的那個值。"""
+    _, client = runtime.snapshot()
     return await _finish_report(
+        client,
         notebook_id,
         manifest_path,
         episode_n,

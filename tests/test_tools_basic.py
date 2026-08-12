@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -213,8 +214,62 @@ async def test_auth_check_preserves_transient_error_type(fake_client, error_type
 
     error = NetworkError("offline") if error_type == "network" else RateLimitError("busy")
     fake_client.notebooks.list = AsyncMock(side_effect=error)
-    with pytest.raises(type(error)):
+    with pytest.raises(type(error)) as caught:
         await t.auth_check()
+    assert caught.value is error
+
+
+async def test_source_add_url_pins_client_across_probe(fake_client):
+    from notebooklm_mcp import runtime
+
+    class FirstSources:
+        async def add_url(self, *_args, **_kwargs):
+            runtime.set_client(second_client)
+            return SimpleNamespace(id="src-a")
+
+        async def get_fulltext(self, *_args):
+            return SimpleNamespace(char_count=7)
+
+    class SecondSources:
+        async def get_fulltext(self, *_args):
+            raise AssertionError("probe switched account mid-tool")
+
+    first_client = SimpleNamespace(sources=FirstSources())
+    second_client = SimpleNamespace(sources=SecondSources())
+    runtime.set_client(first_client)
+
+    assert await t.source_add_url("nb-1", "https://example.com") == {
+        "source_id": "src-a",
+        "char_count": 7,
+    }
+
+
+async def test_source_add_file_pins_client_across_probe(fake_client, tmp_path):
+    from notebooklm_mcp import runtime
+
+    upload = tmp_path / "episode.mp3"
+    upload.write_bytes(b"audio")
+
+    class FirstSources:
+        async def add_file(self, *_args, **_kwargs):
+            runtime.set_client(second_client)
+            return SimpleNamespace(id="src-file", title="episode.mp3")
+
+        async def get_fulltext(self, *_args):
+            return SimpleNamespace(char_count=9)
+
+    class SecondSources:
+        async def get_fulltext(self, *_args):
+            raise AssertionError("file probe switched account mid-tool")
+
+    first_client = SimpleNamespace(sources=FirstSources())
+    second_client = SimpleNamespace(sources=SecondSources())
+    runtime.set_client(first_client)
+
+    out = await t.source_add_file("nb-1", str(upload))
+
+    assert out["source_id"] == "src-file"
+    assert out["char_count"] == 9
 
 
 async def test_source_add_file_title_whitespace_not_false_positive(fake_client, tmp_path):

@@ -192,6 +192,46 @@ async def test_download_after_failover_runs_on_the_new_accounts_client(
     assert os.environ["NOTEBOOKLM_AUTH_JSON"] == "CRED_ORIGINAL"
 
 
+async def test_standalone_finalize_keeps_dispatch_client(fake_client, tmp_path):
+    account_b = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
+    original = fake_client.artifacts.generate_audio
+
+    async def generate_then_rotate(*args, **kwargs):
+        status = await original(*args, **kwargs)
+        runtime.rotate_client()
+        return status
+
+    fake_client.artifacts.generate_audio = generate_then_rotate
+
+    await p.podcast_episode(
+        "nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path)
+    )
+
+    assert account_b.artifacts.calls == []
+    assert any(call[0] == "download" for call in fake_client.artifacts.calls)
+
+
+async def test_resume_pins_client_after_auth_probe(fake_client, tmp_path):
+    account_b = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
+    original = fake_client.notebooks.list
+
+    async def probe_then_rotate():
+        notebooks = await original()
+        runtime.rotate_client()
+        return notebooks
+
+    fake_client.notebooks.list = probe_then_rotate
+
+    await p.podcast_episode_resume(
+        "nb-1", 1, "心法篇", "art-1", str(tmp_path)
+    )
+
+    assert account_b.artifacts.calls == []
+    assert any(call[0] == "download" for call in fake_client.artifacts.calls)
+
+
 async def test_failover_credits_the_account_that_actually_dispatched(fake_client, tmp_path):
     """並行的另一個呼叫在 `generate` 的 await 期間 rotate 掉全域游標時,failover 紀錄的
     `from_account` 必須是**這次實際送出**的那個帳號。

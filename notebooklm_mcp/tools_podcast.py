@@ -1995,6 +1995,7 @@ def _require_existing_manifest(
 
 
 async def _finalize_episode(
+    client: object,
     notebook_id: str,
     episode_n: int,
     title: str,
@@ -2007,7 +2008,6 @@ async def _finalize_episode(
     抽成獨立函式,讓 `podcast_episode_resume` 能拿一個「已在雲端啟動」的 artifact_id
     直接續完,不重生、不燒 quota。artifact_id 就是 generate_audio 的 task_id
     (task_id ≡ artifact id;GenerationStatus 無 artifact_id 欄位)。"""
-    client = runtime.get_client()
     os.makedirs(output_dir, exist_ok=True)
     label = _episode_label(episode_n, title)
 
@@ -2671,7 +2671,7 @@ async def _run_episode(
             _promote_attempt_output(store, episode_n, attempt_id, output)
         else:
             output = await _finalize_episode(
-                notebook_id, episode_n, title, artifact_id, output_dir, wait_timeout
+                client, notebook_id, episode_n, title, artifact_id, output_dir, wait_timeout
             )
         return output
     except TerminalGenerationError:
@@ -3187,13 +3187,14 @@ async def podcast_episode_resume(
                 "without manifest_path (standalone best-effort)"
             ),
         )
-    await probe_auth(runtime.get_client())
+    _, client = runtime.snapshot()
+    await probe_auth(client)
     if manifest_path:
         store = ManifestStore(manifest_path)
         # 與 `_run_episode` 同一道 gate:retract 留下的清理義務未結案前不得繼續產出。
         # resume 也會 upload 回錄 source,漏這道就等於留一條繞過去的路(舊版真的漏了)。
         await _assert_source_cleanup_done(
-            runtime.get_client(), store, notebook_id, episode_n
+            client, store, notebook_id, episode_n
         )
         attempt_id = _ensure_resume_attempt(
             store,
@@ -3203,7 +3204,7 @@ async def podcast_episode_resume(
             artifact_id=artifact_id.strip(),
         )
         output = await finalize_attempt(
-            runtime.get_client(),
+            client,
             store,
             episode_n=episode_n,
             attempt_id=attempt_id,
@@ -3214,7 +3215,7 @@ async def podcast_episode_resume(
         return output
 
     output = await _finalize_episode(
-        notebook_id, episode_n, title, artifact_id.strip(), output_dir, wait_timeout
+        client, notebook_id, episode_n, title, artifact_id.strip(), output_dir, wait_timeout
     )
     output["durability_warning"] = (
         "manifest_path 未提供；這次 standalone resume 只有 best-effort，"

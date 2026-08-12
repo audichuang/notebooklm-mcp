@@ -78,13 +78,15 @@ def _as_uploadable_text(file_path: str, tmpdir: str) -> tuple[str, str | None]:
     return str(dest), p.name
 
 
-async def _probe_extraction(notebook_id: str, source_id: str, *, is_file: bool) -> dict:
+async def _probe_extraction(
+    client: object, notebook_id: str, source_id: str, *, is_file: bool
+) -> dict:
     """加來源後的 best-effort 落地驗證:只回 char_count(+空殼 warning),不回全文。
 
     probe 失敗不連坐 add(來源已成功上傳),回 char_count=None + note。
     措辭分流:URL 空殼多半是 paywall/動態頁;檔案空殼可能只是音檔/掃描 PDF,不能亂指控。"""
     try:
-        ft = await runtime.get_client().sources.get_fulltext(notebook_id, source_id)
+        ft = await client.sources.get_fulltext(notebook_id, source_id)  # type: ignore[attr-defined]
         n = ft.char_count
     except Exception as exc:  # noqa: BLE001 — probe 是加值檢查,任何失敗都不該讓 add 白做
         return {"char_count": None,
@@ -404,10 +406,11 @@ async def source_add_url(notebook_id: str, url: str, wait: bool = True) -> dict:
     """Add a URL or YouTube link as a source. wait=True(預設)時回傳附帶 best-effort
     落地驗證:char_count(擷取字數;0 = 疑似 paywall/空殼,附 warning)——多數情況
     看回傳即完成對帳,不用再跑 source_list + source_fulltext。"""
-    src = await runtime.get_client().sources.add_url(notebook_id, url, wait=wait, wait_timeout=600.0)
+    _, client = runtime.snapshot()
+    src = await client.sources.add_url(notebook_id, url, wait=wait, wait_timeout=600.0)
     out = {"source_id": src.id}
     if wait:
-        out.update(await _probe_extraction(notebook_id, src.id, is_file=False))
+        out.update(await _probe_extraction(client, notebook_id, src.id, is_file=False))
     return out
 
 
@@ -437,6 +440,7 @@ async def source_add_file(
     # SDK 會 strip title 後才落地;先在這裡 strip,後檢比較基準才會一致,
     # 否則呼叫端傳前後空白會被誤判成「title 未生效」而 raise(明明成功了)。
     title = title.strip() if title is not None else None
+    _, client = runtime.snapshot()
     with tempfile.TemporaryDirectory() as tmpdir:
         # 判定 + 複製最多 _MAX_CONVERT_BYTES 的同步 I/O 丟到 thread:直接跑在事件迴圈上
         # 會卡住整個 MCP server(其他 request、取消、長跑狀態查詢全停,外層 client 可能
@@ -445,7 +449,7 @@ async def source_add_file(
             (file_path, None) if mime_type is not None       # 顯式宣告優先,不猜
             else await asyncio.to_thread(_as_uploadable_text, file_path, tmpdir)
         )
-        src = await runtime.get_client().sources.add_file(
+        src = await client.sources.add_file(
             notebook_id,
             upload_path,
             mime_type=mime_type,
@@ -467,7 +471,7 @@ async def source_add_file(
         # 只有真的轉換過才出現;未傳 title 時來源會以 `<原檔名>.md` 落地,對帳看得到。
         out["converted_from"] = converted_from
     if wait:
-        out.update(await _probe_extraction(notebook_id, src.id, is_file=True))
+        out.update(await _probe_extraction(client, notebook_id, src.id, is_file=True))
     return out
 
 

@@ -4,8 +4,10 @@
 URL——研究能力進來的同時,不能讓 NotebookLM 自己找到的來源一股腦落進筆記本。
 """
 import pytest
+from conftest import FakeClient
 from notebooklm._types.research import ResearchStatus
 
+from notebooklm_mcp import runtime
 from notebooklm_mcp import tools_research as r
 
 
@@ -102,6 +104,23 @@ async def test_research_import_only_imports_named_urls(fake_client):
     assert call["is_report"] == [False]
     assert out["imported"] == [{"source_id": "src-r1", "title": "來源A"}]
     assert out["requested"] == 1
+
+
+async def test_research_import_pins_client_between_poll_and_import(fake_client):
+    other = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+    original = fake_client.research.poll
+
+    async def poll_then_rotate(*args, **kwargs):
+        task = await original(*args, **kwargs)
+        runtime.rotate_client()
+        return task
+
+    fake_client.research.poll = poll_then_rotate
+
+    await r.research_import("nb-1", "res-1", urls=["https://c.example/blog"])
+
+    assert not [call for call in other.research.calls if call[0] == "import"]
 
 
 async def test_research_import_dedupes_and_keeps_caller_order(fake_client):
