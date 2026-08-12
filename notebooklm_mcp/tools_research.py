@@ -182,7 +182,7 @@ async def research_import(
     if not clean_urls and not include_report:
         raise ValueError("urls 為空且 include_report=False —— 沒有任何東西要匯入")
 
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     # 從 task 重新取回完整 source 物件:呼叫端只需要傳 URL,不必把 research 報告與
     # 每筆 metadata 原封不動 round-trip 過 host context。
     task = await client.research.poll(notebook_id, task_id)

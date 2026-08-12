@@ -179,7 +179,7 @@ async def generate_slides(
     """生成該集簡報並下載 PDF,路徑回寫 manifest 的 slides_pdf_path。"""
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 打錯集號別燒一次生成配額
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     if selected is not None:
         # 打錯/已刪的 source_id 伺服器不擋——燒完一次生成配額才發現拿到聚焦錯誤的簡報。
         await assert_sources_exist(client, notebook_id, selected)
@@ -210,7 +210,7 @@ async def artifact_download_slides(
     救援用:client timeout 砍掉 `generate_slides` 時雲端那份其實生完了,用
     `artifact_list(kind="slide_deck")` 找回 ID 就能省一次配額。不確定是哪一筆別猜
     ——重生比綁錯便宜。"""
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     return await _finish_slides(
         client,
         notebook_id,
@@ -249,7 +249,7 @@ async def artifact_revise_slide(
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")
     artifact_id = _require_artifact_id(artifact_id)
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     # 所有可預判的錯都擋在第一個遠端副作用之前。**注意這不是 durable attempt**:
     # 外層 client 在 revise 成功之後、下載回寫之前斷線,重跑仍會再 revise 一次
     # ——那是整個 slides/report 家族共有的架構債(generate_slides 逐字同形),
@@ -351,7 +351,7 @@ async def generate_report(
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 同上
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     if selected is not None:
         # 同 generate_slides:打錯/已刪的 source_id 伺服器不擋,先唯讀對帳。
         await assert_sources_exist(client, notebook_id, selected)
@@ -388,7 +388,7 @@ async def artifact_download_report(
 
     救援用,同 `artifact_download_slides`(client timeout 丟掉結果時省一次配額)。
     `report_format` 只影響回寫 manifest 的標記,傳當初生成用的那個值。"""
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     return await _finish_report(
         client,
         notebook_id,

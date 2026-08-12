@@ -3192,7 +3192,7 @@ async def podcast_episode_resume(
                 "without manifest_path (standalone best-effort)"
             ),
         )
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     await probe_auth(client)
     if manifest_path:
         store = ManifestStore(manifest_path)

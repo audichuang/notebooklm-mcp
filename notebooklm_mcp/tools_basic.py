@@ -266,7 +266,7 @@ async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object
 async def _share_each(notebook_id: str, emails: list[str], client) -> list[str]:
     """逐一分享,失敗時說出已經完成到哪裡。
 
-    `client` 由呼叫端 `runtime.snapshot()` 一次取好傳進來,這裡不回頭讀
+    `client` 由呼叫端 `runtime.get_client()` 一次取好傳進來,這裡不回頭讀
     `runtime.get_client()`。呼叫端與這裡之間隔著至少一次 await
     (`notebooks.create()` 或 `sharing.get_status()`),MCP 是並行的
     (`mcp/server/lowlevel/server.py` 對每則 message `tg.start_soon`),另一個工具
@@ -406,7 +406,7 @@ async def source_add_url(notebook_id: str, url: str, wait: bool = True) -> dict:
     """Add a URL or YouTube link as a source. wait=True(預設)時回傳附帶 best-effort
     落地驗證:char_count(擷取字數;0 = 疑似 paywall/空殼,附 warning)——多數情況
     看回傳即完成對帳,不用再跑 source_list + source_fulltext。"""
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     src = await client.sources.add_url(notebook_id, url, wait=wait, wait_timeout=600.0)
     out = {"source_id": src.id}
     if wait:
@@ -440,7 +440,7 @@ async def source_add_file(
     # SDK 會 strip title 後才落地;先在這裡 strip,後檢比較基準才會一致,
     # 否則呼叫端傳前後空白會被誤判成「title 未生效」而 raise(明明成功了)。
     title = title.strip() if title is not None else None
-    _, client = runtime.snapshot()
+    client = runtime.get_client()
     with tempfile.TemporaryDirectory() as tmpdir:
         # 判定 + 複製最多 _MAX_CONVERT_BYTES 的同步 I/O 丟到 thread:直接跑在事件迴圈上
         # 會卡住整個 MCP server(其他 request、取消、長跑狀態查詢全停,外層 client 可能
