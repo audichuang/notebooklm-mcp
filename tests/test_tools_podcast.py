@@ -199,14 +199,17 @@ async def test_all_renames_are_fire_and_forget(fake_client, tmp_path):
 
 
 async def test_podcast_series_fails_fast_when_auth_dead(fake_client, tmp_path):
-    """整季開跑前先預檢:cookie 死了要秒退,一個生成都不能燒。"""
+    """整季開跑前先預檢:cookie 死了要結構化秒退,一個生成都不能燒。"""
     fake_client.notebooks.fail_list = True
-    with pytest.raises(RuntimeError, match="sync-auth"):
-        await p.podcast_series(
-            "nb-123",
-            episodes=[{"title": "心法篇", "brief": "b"}],
-            output_dir=str(tmp_path),
-        )
+    result = await p.podcast_series(
+        "nb-123",
+        episodes=[{"title": "心法篇", "brief": "b"}],
+        output_dir=str(tmp_path),
+    )
+    assert result["observed_state"] == "auth_expired"
+    assert result["safe_next_action"] == "podcast_series"
+    assert "sync-auth" in result["error"]
+    assert result["episodes"] == []
     assert fake_client.artifacts.calls == []
 
 
@@ -401,6 +404,80 @@ async def test_episode_without_manifest_path_writes_nothing(fake_client, tmp_pat
 # `ManifestStore.read()`,缺檔時本來就會在下游乾淨失敗、不會寫出任何東西;真正會在
 # 缺檔路徑上 bootstrap 一份新 manifest、還緊接著打遠端 RPC 的只有 resume——秒退對
 # 這四個工具的價值不同,但都是好過讓錯的路徑悄悄往下走。
+
+
+def _dispatching_reconcile_attempt(tmp_path):
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="1",
+        language=p.resolve_language(None),
+        audio_format="deep-dive",
+        audio_length="long",
+    )
+    assert p._claim_prepared_dispatch(
+        store, 1, attempt_id, [], account="#1", wait_timeout=1200.0
+    )
+    return manifest_path, store, attempt_id
+
+
+async def test_reconcile_reads_an_accepted_attempt_while_auth_is_unavailable(
+    fake_client, tmp_path
+):
+    """已 accepted 的耐久對應是純本機讀取,認證斷掉時仍必須讀得到。"""
+    manifest_path, store, attempt_id = _dispatching_reconcile_attempt(tmp_path)
+    p._bind_accepted_artifact(store, 1, attempt_id, "art-accepted")
+    fake_client.notebooks.fail_list = True
+
+    result = await p.podcast_episode_reconcile(
+        str(manifest_path), episode_n=1, attempt_id=attempt_id
+    )
+
+    assert result["observed_state"] == "accepted"
+    assert result["artifact_id"] == "art-accepted"
+    assert fake_client.artifacts.calls == []
+
+
+async def test_reconcile_reports_invalid_local_state_before_auth(
+    fake_client, tmp_path
+):
+    """本機狀態錯誤不得被無關的認證中斷蓋掉。"""
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path, store, attempt_id = _dispatching_reconcile_attempt(tmp_path)
+    p._mark_not_accepted(store, 1, attempt_id, RateLimitError("quota refused"))
+    fake_client.notebooks.fail_list = True
+
+    with pytest.raises(ValueError, match="cannot be reconciled"):
+        await p.podcast_episode_reconcile(
+            str(manifest_path), episode_n=1, attempt_id=attempt_id
+        )
+    assert fake_client.artifacts.calls == []
+
+
+async def test_reconcile_auth_failure_does_not_mutate_dispatching_attempt(
+    fake_client, tmp_path
+):
+    """dispatching 被耐久改成 acceptance_unknown 之前,認證必須先過。"""
+    manifest_path, store, attempt_id = _dispatching_reconcile_attempt(tmp_path)
+    before = store.read()
+    fake_client.notebooks.fail_list = True
+
+    with pytest.raises(RuntimeError, match="sync-auth"):
+        await p.podcast_episode_reconcile(
+            str(manifest_path), episode_n=1, attempt_id=attempt_id
+        )
+
+    after = store.read()
+    assert after["revision"] == before["revision"]
+    attempt = after["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "dispatching"
+    assert fake_client.artifacts.calls == []
+
 
 async def test_resume_rejects_a_manifest_path_that_does_not_exist(fake_client, tmp_path):
     fake_client.notebooks.fail_list = True  # 若先 probe 會變別的錯誤 → 抓不到這個 ValueError

@@ -56,7 +56,7 @@ HTTP/SSE transport 本身沒有認證，server 預設拒絕綁定非 loopback ho
 When auth expires, refresh on a GUI machine and sync the storage state back to Doppler:
 
 ```bash
-uv run python scripts/login_notebooklm.py
+uv run notebooklm login
 bash scripts/sync-auth.sh
 ```
 

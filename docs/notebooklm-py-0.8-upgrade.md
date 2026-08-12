@@ -131,16 +131,6 @@ normalizer 都還在、`chat.ask` / `notebooks.*` / `download_*` / `wait_for_com
 
 ---
 
-## 升級**沒有**解掉的事
-
-**登入還是壞的。** 0.8.0 的 `_ALLOWED_BASE_HOSTS` 仍然只有
-`notebooklm.google.com` / `notebooklm.cloud.google.com`,沒有 Google 現在用的
-`notebook.google.com`。`scripts/login_notebooklm.py` 仍是必要的,而
-`test_login_script_should_be_retired_once_upstream_knows_the_new_host`
-這條退場 tripwire 在 0.8.0 下**維持綠燈** —— 它正確地說「還不能退」。
-
----
-
 ## 新能力:評估過、**這輪刻意不採用**
 
 - **Master-token headless auth**(`headless` extra,`notebooklm login --master-token`)。

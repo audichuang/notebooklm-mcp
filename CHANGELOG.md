@@ -10,9 +10,80 @@
 
 - Deep Research 後續輪詢改用 SDK 的 `report_id`;fast 仍用 SDK `task_id`。MCP 對外
   保持原本必填的 `task_id` 欄位,但值改為可輪詢 handle,不再把 deep 的不可輪詢
-  sessionId 交給呼叫端。deep 缺 `report_id` 時直接拋 `DecodingError`,不等到 timeout。
+  sessionId 交給呼叫端。deep 缺少或只回空白 `report_id` 時直接拋 `DecodingError`,
+  且不建議可能重複消耗配額的 retry。
 - 多步驟工具在入口固定同一個 account client,避免並行 quota failover 讓一次呼叫
-  跨帳號;auth probe 只把 `AuthError` 翻成重登提示,網路與限流錯誤保留原型別。
+  跨帳號;series 對帳沿用該 client,重送前先驗認證、失效時保留已完成結果且不先 rearm /
+  supersede manifest,並回 `observed_state="auth_expired"` 讓 caller 重登後安全續跑。
+- auth probe 改用 SDK 的 `is_auth_error`,涵蓋 `AuthError`、RPC auth code、HTTP 401/403 與
+  mapper 保留的 cause;網路、限流、server 與其他錯誤仍原型別拋出。
+- account label 讀取失敗時會保留原 RPC 並輸出警告，不再讓觀測資訊中斷操作。
+- 移除已不需要、依賴 SDK 私有 API 的登入替代腳本；原生 `notebooklm login` 已支援
+  `notebook.google.com`，`sync-auth.sh` 改由公開 `get_storage_path()` 解析 profile 路徑。
+
+### `podcast_series` 不再把指名來源的 attempt supersede 成不指名的(內容錯置)
+
+**症狀**:`podcast_episode(source_ids=["src-1"])` 遠端生成失敗(`dispatch=accepted` +
+`remote=failed`)之後重呼 `podcast_series`,兩次 dispatch 送出 `[["src-1"], None]` ——
+第二次靜默改讀**整本筆記本**(含後面各集的回錄音檔),而工具回報 `complete=True`。
+這是 v0.9.5 花整輪在防的內容錯置形狀,從任何成功訊號都看不出來。**v0.9.12 與更早皆可重現**。
+
+**根因是「補一半」的又一例**:接手守門 `_assert_series_owns_attempt` 只掛在
+`prepared`/`not_accepted` 兩格,而會產生新 dispatch 的狀態有**三種** —— `failed`/`removed`
+的 supersede 分支整條漏掉,`_create_audio_attempt` 在那裡不帶 `source_ids`。
+`_attempt_next_step()` 的 `settled` 分支註解早就點名過這個形狀、也刻意不教人重呼 series,
+但**只防了訊息、沒防程式路徑**。判準收斂成 `_series_will_redispatch()`,兩道守門(接手歸屬 +
+來源筆數)共用同一個上游條件,不再各自列狀態字面值。
+
+**訊息也一併從紅線的反面救回來**:舊 `owner_hint` 無條件說「原樣重呼 `podcast_episode`
+就會沿用同一顆重送」,但那只對 `_NEVER_DISPATCHED` 成立 —— `accepted`+`failed` 的
+`can_resend` 是 False,照做會撞 `already has durable active attempt`。改由
+`_attempt_capabilities()` / `_attempt_next_step()` 產生(docs/gotchas-attempt.md 紅線),
+那一格給的是「先 retract,再用 `podcast_episode` 帶回原本的 `source_ids` 重生」,
+並由測試實走一遍證明走得出去。
+
+### 認證停點的 `safe_next_action` 不再寫死 `podcast_series`
+
+同一輪新加的每集 auth probe,停點硬寫 `ACTION_SERIES`。對指名來源／frozen bundle 的
+attempt 而言,照著這個欄位重呼**正是上面那條內容錯置的觸發路徑**。改由
+`_series_handoff_caps()` 判斷「series 重新進來接不接得住這一集」,接不住就交棒給
+`_attempt_capabilities()` 算出的工具並附上同源的 `next_step`。
+
+判準的**順序**是安全性質的一部分:先問「series 會不會在這顆上重新 dispatch」,再問歸屬。
+反過來的話,一集已完成的 output attempt 也帶著 `source_ids`,會被交棒指引拖去
+`podcast_attempt_retract` —— 叫人作廢一集已經做好的正式輸出(突變驗證確認)。
+參數漂移(形狀是 series 的、只有 language/format/length 不同)刻意**不算交棒**:
+那一格 caps 會算出 `podcast_series`,貼上去等於把呼叫端送回剛剛拒絕它的工具;
+它的附帶條件(要用原本那組參數)由 `_SERIES_ARGUMENT_DRIFT_HINT` 一份講,守門的例外
+訊息與認證停點的 `next_step` 共用 —— **只指對工具不夠**,照這次的參數重呼仍會裸拋。
+
+### 復原路徑的回傳要自足:`regeneration_source_ids`
+
+上面兩條把呼叫端導向「retract → `podcast_episode` 重生」,而那條路自己會把來源弄丟:
+retract 的回傳說「重生時必須帶回原本那組 `source_ids`」,**卻沒有給那組** ——
+`podcast_episode` 的 `source_ids` 預設是 `None`,省略就直接讀整本筆記本。整條官方
+復原路徑因此仍會靜默擴大生成輸入(認證失效 → 停點指向 retract → retract 指向
+`podcast_episode` → 兩次 dispatch 送出 `[['src-1'], None]`)。
+
+`_attempt_capabilities()` 因此多算一個 `regeneration_source_ids`,由
+`podcast_attempt_retract` 與 series 的認證停點一起公開;`_regeneration_hint()` 也把
+id **逐字列出來**(同 `_attempt_next_step()` 清理義務分支早就立下的「列得出 id,不能
+只報欄位名」)。這是 docs/gotchas-attempt.md 自足性紅線的又一次現形 —— 而它能撐到
+這一輪,是因為原本那條「照指引走得通」的 E2E 測試在執行下一步時**從 fixture 硬寫**
+`source_ids=["src-1"]`,繞過了公開回傳,所以測了等於沒測(那正是同一份文件裡
+「只准用公開回傳裡的值」那條紅線在講的事,現已改用回傳值)。
+
+### 兩道守門的順序:筆數在前、歸屬在後
+
+歸屬是純本機判斷,擺在要打一趟 RPC 的筆數守門之前看起來更划算,但它把一條原本回
+結構化 `too_many_sources` 停點的路改成裸拋(外來 attempt 撞上超標筆記本時,整批
+`run_results` 隨 exception 消失)。兩道守門都不改 manifest,順序只決定「先講哪個
+理由」,那就讓保住進度的那個先講。
+
+同理,這一集**已經有完成的輸出**時,歸屬也不是該講的那件事:`_create_audio_attempt`
+的「拒絕靜默覆蓋既有輸出」更根本,而歸屬訊息教的 retract-then-regenerate 對一集
+已發布的節目是破壞性建議。終態那條路因此讓位給它(`prepared`/`not_accepted` 不經過
+`_create_audio_attempt`,歸屬仍在原處驗)。
 
 ## v0.9.12
 

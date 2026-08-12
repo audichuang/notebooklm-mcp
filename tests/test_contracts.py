@@ -2,6 +2,9 @@
 under us - our single tripwire against silent upstream API drift."""
 import inspect
 
+import httpx
+import pytest
+
 from notebooklm.rpc.types import AudioFormat, AudioLength
 
 
@@ -433,11 +436,6 @@ def test_research_task_and_source_fields():
     assert ResearchSource(url="u", title="t").is_report is False
 
 
-# ---- 暫時的登入替代腳本(scripts/login_notebooklm.py)的兩道 tripwire ------------
-# 背景:2026-08 Google 把未認證的登入流程轉到 notebook.google.com,而 SDK 的登入偵測
-# 寫死等舊 host,於是 `notebooklm login` 永遠等不到。我們用 scripts/login_notebooklm.py
-# 暫代(只改那一行偵測,其餘重用 SDK helper)。下面兩條分別鎖「還能用」與「該退場了」。
-
 def test_console_script_name_does_not_collide_with_upstream():
     """我們的 server 命令必須是 `nblm-mcp`,**不能**叫 `notebooklm-mcp`。
 
@@ -463,49 +461,51 @@ def test_console_script_name_does_not_collide_with_upstream():
     )
 
 
-def test_login_script_still_has_the_sdk_helpers_it_borrows():
-    """替代腳本刻意直接用 SDK 內部 helper,好讓產出的 storage_state 與 `notebooklm login`
-    逐字等價(cookie domain 過濾、原子寫檔、帳號 metadata)。上游改名這裡就要紅——
-    那代表替代腳本會在使用者登入到一半時 ImportError。"""
-    from notebooklm.cli.services.playwright_login import (  # noqa: F401
-        GOOGLE_ACCOUNTS_URL,
-        ensure_chromium_installed,
-        filter_storage_state_cookies_by_domain_policy,
-        repair_playwright_account_metadata,
-    )
-    from notebooklm.io import atomic_write_json  # noqa: F401
-    from notebooklm.paths import get_browser_profile_dir, get_storage_path  # noqa: F401
+def test_upstream_login_accepts_rebrand_host():
+    """The pinned SDK's native login must accept Google's rebranded landing host."""
+    from notebooklm.cli.services.playwright_login import url_matches_base_host
+
+    assert url_matches_base_host("https://notebook.google.com/")
 
 
-def test_login_script_should_be_retired_once_upstream_knows_the_new_host():
-    """**廢棄觸發器**:上游把 notebook.google.com 納入白名單的那天,這條會紅。
-    紅了就照 scripts/login_notebooklm.py 的「廢棄條件」把它刪掉、改回
-    `uv run notebooklm login`,並清掉 docs/test-account.md 的對應段落。"""
-    from notebooklm._env import _ALLOWED_BASE_HOSTS
-
-    assert "notebook.google.com" not in _ALLOWED_BASE_HOSTS, (
-        "上游已認得 notebook.google.com —— scripts/login_notebooklm.py 可以退場了"
-    )
-
-
-def test_relogin_hint_does_not_point_at_the_broken_login_command():
-    """認證失效訊息**不能**教人跑 `notebooklm login`。
-
-    2026-08 起 Google 把未認證的登入流程轉到 notebook.google.com,SDK(含 0.8.0)的
-    偵測仍寫死舊網域 —— 照著跑會卡滿 5 分鐘 timeout。而這段訊息出現的時機正是
-    「認證死了、使用者最會照著做」的時候,指錯就是直接浪費五分鐘。
-
-    這條與 test_login_script_should_be_retired_once_upstream_knows_the_new_host 成對:
-    上游修好那天那條會紅,提醒把腳本刪掉,**順便**把這段訊息改回去。
-    """
+def test_relogin_hint_uses_the_native_login_command():
     from notebooklm_mcp.auth_probe import RELOGIN_HINT
 
-    assert "scripts/login_notebooklm.py" in RELOGIN_HINT
+    assert "uv run notebooklm login" in RELOGIN_HINT
     assert "sync-auth.sh" in RELOGIN_HINT
-    # 只允許出現在「不要用它」的告誡裡,不能是被建議執行的指令。
-    for line in RELOGIN_HINT.splitlines():
-        if "notebooklm login" in line:
-            assert "不要用" in line, f"這行像是在叫人跑壞掉的登入指令:{line!r}"
+
+
+def test_sync_auth_uses_the_sdk_profile_path_resolver():
+    """Default and named profiles must follow the SDK's storage migration rules."""
+    from pathlib import Path
+
+    script = Path("scripts/sync-auth.sh").read_text(encoding="utf-8")
+    assert "get_storage_path" in script
+    assert 'NBLM_HOME=' not in script
+
+
+def test_auth_probe_matches_the_sdk_http_auth_error_shape():
+    """The compatibility shim must follow the HTTP cause retained by SDK 0.8.0."""
+    from notebooklm._rpc_executor import RpcExecutor
+    from notebooklm._runtime import is_auth_error
+    from notebooklm.exceptions import RPCError
+    from notebooklm.rpc.types import RPCMethod
+
+    from notebooklm_mcp.auth_probe import _is_probe_auth_error
+
+    assert callable(is_auth_error)
+    request = httpx.Request("POST", "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute")
+    for status in (401, 403):
+        response = httpx.Response(status, request=request)
+        http_error = httpx.HTTPStatusError(
+            response.reason_phrase, request=request, response=response
+        )
+        with pytest.raises(RPCError) as caught:
+            RpcExecutor.raise_rpc_error_from_http_status(
+                None, http_error, RPCMethod.LIST_NOTEBOOKS
+            )
+        assert caught.value.__cause__ is http_error
+        assert _is_probe_auth_error(caught.value)
 
 
 def test_generation_takes_its_source_list_from_the_notebook_not_the_server():

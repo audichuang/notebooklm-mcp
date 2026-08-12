@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from notebooklm.exceptions import AuthError
+from notebooklm.exceptions import RPCError
 from notebooklm._types.research import (
     RESEARCH_RESULT_TYPE_REPORT,
     ResearchSource,
@@ -399,7 +399,8 @@ class FakeNotebooks:
 
     async def list(self):
         if self.fail_list:
-            raise AuthError("Authentication expired or invalid. Please re-authenticate.")
+            # 鏡射一種真實 dead-cookie 形狀;其餘 HTTP/RPC 形狀有專屬契約測試。
+            raise RPCError("The server rejected this request (unauthenticated).", rpc_code=16)
         return [type("NB", (), {"id": "nb-123", "title": "Test"})()]
 
     async def get(self, notebook_id):

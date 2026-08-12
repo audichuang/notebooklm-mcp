@@ -42,7 +42,7 @@ from .audio_finalize import (
 )
 from ._errors import NotebookAccessDenied, is_permission_denied
 from .app import mcp
-from .auth_probe import probe_auth
+from .auth_probe import _AuthProbeError, probe_auth
 from .enums import to_audio_format, to_audio_length
 from .generation_input import (
     load_frozen_generation_input,
@@ -210,16 +210,22 @@ def _regeneration_hint(attempt: dict, *, resend_possible: bool) -> str:
     settings = attempt.get("settings") or {}
     if set(settings) == _SERIES_SETTINGS_KEYS:
         return ""
-    if settings.get("source_ids"):
+    pinned = settings.get("source_ids")
+    if pinned:
+        # **列得出 id,不能只報欄位名。** 同一條紀律在 `_attempt_next_step()` 的清理義務
+        # 分支已經寫過:呼叫端照著公開回傳就要做得到,不准要求它自己去翻 manifest
+        # (docs/gotchas-attempt.md 的自足性紅線)。同一組值也在 caps 的
+        # `regeneration_source_ids` 欄位裡,給只讀欄位的自動化用。
+        listed = f"(逐字是 {list(pinned)!r})"
         if resend_possible:
             return (
-                "**若只更換 brief,必須保留原 `source_ids`**;若刻意更換來源,"
+                f"**若只更換 brief,必須保留原 `source_ids`{listed}**;若刻意更換來源,"
                 "podcast_attempt_retract(**不需要** abandon_in_flight)後帶新的 "
                 "`source_ids` 明確重生 —— 兩種情況都不會靜默改成讀整本筆記本。"
             )
         return (
-            "**重生時必須帶回原本那組 `source_ids`** —— 這一集的生成輸入指名了來源,"
-            "改用 podcast_series 會靜默改成讀整本筆記本。"
+            f"**重生時必須帶回原本那組 `source_ids`{listed}** —— 這一集的生成輸入指名了"
+            "來源,改用 podcast_series 會靜默改成讀整本筆記本。"
         )
     # 認不出來的形狀(例如 resume 建的 `{"origin": "explicit_resume"}`)。**不能假裝
     # 知道**它原本讀了哪幾筆 —— manifest 裡沒有那個資訊。
@@ -563,6 +569,13 @@ def _attempt_capabilities(
         # 呼叫端只讀 `safe_next_action` 與 `_attempt_next_step()` 的文字。
         "post_retract_replacement_caps": replacement_caps,
         "regeneration_entry": regeneration_entry,
+        # **重生／原樣重呼要帶回的那組 `source_ids`,逐字列出來。**(Codex 獨立複審
+        # 實跑抓到)`regeneration_hint` 說「必須帶回原本那組」,但公開回傳裡沒有那組
+        # —— 呼叫端只能去翻 manifest,而 docs/gotchas-attempt.md 的自足性紅線正好禁止
+        # 那件事。照著做不了的結果是靜默不指名:`podcast_episode` 的 `source_ids`
+        # 預設 `None`,直接讀整本筆記本。`None` = manifest 沒記(例如 resume 建的
+        # `{"origin": "explicit_resume"}`),那時 hint 會說「要自己指名」。
+        "regeneration_source_ids": (attempt.get("settings") or {}).get("source_ids"),
         "regeneration_hint": _regeneration_hint(
             attempt, resend_possible=can_resend and not post_retract
         ),
@@ -1602,7 +1615,83 @@ def _mark_not_accepted(
     store.update(mutate)
 
 
+def _series_will_redispatch(attempt: dict) -> bool:
+    """series 走到這顆 attempt 時,會不會產生**新的一次 dispatch**。
+
+    三種狀態會(`prepared` 直接送、`not_accepted` 先 re-arm 再送、`failed`/`removed`
+    建 superseding attempt 再送),其餘的 series 只是 finalize／對帳／跳過。接手守門
+    與認證停點的交棒判準都要用這一個,不要各自列狀態字面值 —— 舊版接手守門只列了前
+    兩種,`accepted`+`failed` 那格因此整條漏掉(見 `_series_handoff_caps`)。
+    """
+    dispatch_status = (attempt.get("dispatch") or {}).get("status")
+    remote_status = (attempt.get("remote") or {}).get("status")
+    return dispatch_status in _NEVER_DISPATCHED or remote_status in _TERMINAL_REMOTE
+
+
+# 形狀是 series 生得出來的、只有這次呼叫的參數對不上。**這不是 attempt 狀態問題**,
+# 所以不從 `_attempt_capabilities()` 取(它在這一格會算出 `podcast_series`,貼上去等於
+# 叫人拿同一組參數撞回同一道牆)。守門的例外訊息與認證停點的 `next_step` 共用這一份,
+# 兩處講的是同一件事,不要各寫一句。
+_SERIES_ARGUMENT_DRIFT_HINT = (
+    "這一集的 attempt 是 podcast_series 建的,但**這次呼叫的 language／audio_format／"
+    "audio_length 與它不同**。用原本那組參數重呼 podcast_series 就會續下去;真的要換"
+    "設定就先 podcast_attempt_retract 作廢它再重生 —— 照這次的參數重呼會被 settings "
+    "守門擋下來。"
+)
+
+
+def _series_owns_attempt(attempt: dict, series_settings: dict) -> bool:
+    """這顆 attempt 是不是 `podcast_series` 自己建的 —— 兩個條件缺一不可。
+
+    **只比 settings 等值會漏掉 frozen bundle**(Codex 獨立複審實跑抓到):一顆不指名
+    `source_ids`、language/format/length 全用預設的 frozen attempt,它的 settings 與整季
+    **逐字相同**,但生成輸入是 bundle,series 生不出來 —— `_regeneration_entry_point()`
+    因此優先看 `input_bundle`。判成自己的就會 supersede 掉、改讀整本筆記本,與
+    `source_ids` 那條同型的內容錯置,而且更難發現:兩邊的 settings 看起來一模一樣。
+    """
+    return (
+        attempt.get("settings") == series_settings
+        and _regeneration_entry_point(attempt) == ACTION_SERIES
+    )
+
+
+def _series_handoff_caps(
+    episode: dict,
+    attempt: dict,
+    attempt_id: str,
+) -> dict | None:
+    """series 接不住這顆 attempt 時,回**它自己的 caps**(誰接得住由那裡說);接得住回 `None`。
+
+    回 `None` 有三種,每一種都不是「交棒」:
+
+    1. series 根本不會在它上面重新 dispatch(`_series_will_redispatch` 為假)——
+       只等 finalize 的一集在這裡。**這格必須排第一**:一集已經產出正式輸出時它的
+       output attempt 照樣帶著 `source_ids`,只看「settings 認不認得」會回
+       `podcast_attempt_retract`,叫人作廢一集已經做好的東西(突變驗證確認)。
+    2. 它就是這一集的 output —— series 走 output 分支,不會重新 dispatch 它。
+       第 1 格擋掉的是「已完成」的正常形狀,這一格補的是「output 但遠端終態」那種
+       畸形 manifest(第 1 格對它為真,但 series 一樣不會重生它)。
+    3. 形狀是 series 生得出來的(`_regeneration_entry_point` 回 `podcast_series`)——
+       settings 逐字相同就是它自己的;只有 language／format／length 對不上則是
+       **呼叫端這次帶錯參數**,不是 attempt 歸屬問題。後者 caps 會算出 `podcast_series`
+       (can_resend → regeneration_entry),拿它當指引等於叫人原地撞回同一道牆,
+       正是紅線要擋的自我迴圈。
+
+    兩個呼叫點傳進來的 `attempt_id` 都是 `active_attempt_id`(守門)或
+    `active or output`(認證停點),所以「既非 active 也非 output 的歷史紀錄／tombstone」
+    到不了這裡;真的到了的話 caps 會回 `safe_next_action=None`,呼叫端已各自處理。
+    """
+    if not _series_will_redispatch(attempt):
+        return None
+    if attempt_id == episode.get("output_attempt_id"):
+        return None
+    if _regeneration_entry_point(attempt) == ACTION_SERIES:
+        return None
+    return _attempt_capabilities(episode, attempt, attempt_id)
+
+
 def _assert_series_owns_attempt(
+    episode: dict,
     attempt: dict,
     series_settings: dict,
     episode_n: int,
@@ -1616,19 +1705,21 @@ def _assert_series_owns_attempt(
     全部來源續生。
 
     但只講「設定變了」會把人卡死:v0.7.1 驗收 F-8 就是這樣走進死路的,而
-    troubleshooting 對 not_accepted 的指示恰好是「重呼 podcast_series」。訊息因此要
-    明講正確的續跑者是 `podcast_episode` 原樣重呼(見 `_is_resendable_same_request`)。
+    troubleshooting 對 not_accepted 的指示恰好是「重呼 podcast_series」。
+
+    **指引由 `_attempt_capabilities()` 產生,不再手寫**(docs/gotchas-attempt.md 紅線)。
+    舊版無條件說「原樣重呼 podcast_episode 就會沿用同一顆重送」,那句話只對
+    `_NEVER_DISPATCHED` 成立;`accepted`+`failed` 的 `can_resend` 是 False,照做會撞
+    `already has durable active attempt` —— 又一次「指引在它自己產生的狀態下不可執行」。
+    那一格 caps 給的是「先 retract,再用 podcast_episode 帶回原本的 source_ids 重生」。
     """
-    stored = attempt.get("settings")
-    if stored == series_settings:
+    if _series_owns_attempt(attempt, series_settings):
         return
+    caps = _series_handoff_caps(episode, attempt, attempt_id)
     owner_hint = (
-        " This attempt carries per-episode source_ids, so podcast_series cannot"
-        " reproduce its settings — continue it by re-calling podcast_episode with the"
-        " identical arguments (same title/brief/source_ids), which resends that same"
-        " attempt without burning a new one."
-        if isinstance(stored, dict) and "source_ids" in stored
-        else " Restore the original language/format/length, or retract the attempt."
+        " " + _attempt_next_step(caps)
+        if caps is not None
+        else " " + _SERIES_ARGUMENT_DRIFT_HINT
     )
     raise ValueError(
         f"episode {episode_n} attempt {attempt_id!r} settings do not match this"
@@ -2916,6 +3007,26 @@ async def podcast_episode_reconcile(
     _validate_wait_timeout(wait_timeout)
     _require_existing_manifest(manifest_path)
 
+    return await _podcast_episode_reconcile(
+        runtime.get_client(),
+        manifest_path,
+        episode_n,
+        attempt_id,
+        wait_timeout,
+    )
+
+
+async def _podcast_episode_reconcile(
+    client: object,
+    manifest_path: str,
+    episode_n: int,
+    attempt_id: str,
+    wait_timeout: float,
+    *,
+    auth_probed: bool = False,
+) -> dict:
+    """用呼叫端固定的 client 執行已驗證參數的 artifact 對帳。"""
+
     store = ManifestStore(manifest_path)
     snapshot = store.read()
     attempt, notebook_id, baseline, dispatched_at = _reconciliation_subject(
@@ -2937,6 +3048,16 @@ async def podcast_episode_reconcile(
             "safe_next_action": caps["safe_next_action"],
             "next_step": _attempt_next_step(caps),
         }
+    if dispatch_status not in (
+        "dispatching",
+        "acceptance_unknown",
+        "reconciliation_ambiguous",
+    ):
+        raise ValueError(
+            f"attempt state {dispatch_status!r} cannot be reconciled"
+        )
+    if not auth_probed:
+        await probe_auth(client)
     if dispatch_status == "dispatching":
         def mark_unknown(manifest: dict) -> None:
             _, current = _attempt_record(manifest, episode_n, attempt_id)
@@ -2948,13 +3069,14 @@ async def podcast_episode_reconcile(
             snapshot, episode_n, attempt_id
         )
         dispatch_status = attempt["dispatch"].get("status")
-    if dispatch_status not in ("acceptance_unknown", "reconciliation_ambiguous"):
-        raise ValueError(
-            f"attempt state {dispatch_status!r} cannot be reconciled"
-        )
+        if dispatch_status not in (
+            "acceptance_unknown",
+            "reconciliation_ambiguous",
+        ):
+            raise ValueError(
+                f"attempt state {dispatch_status!r} cannot be reconciled"
+            )
 
-    client = runtime.get_client()
-    await probe_auth(client)
     artifacts = await client.artifacts.list(
         notebook_id, artifact_type=ArtifactType.AUDIO
     )
@@ -4136,6 +4258,13 @@ async def podcast_attempt_retract(
         # `attempt_id`(見上方 docstring)。
         "safe_next_attempt_id": caps["safe_next_attempt_id"],
         "safe_next_artifact_id": caps["safe_next_artifact_id"],
+        # **`safe_next_action == "podcast_episode"` 時,執行它要用這個。**
+        # 少了它,retract 的回傳教人「重生時必須帶回原本那組 source_ids」卻沒給那組,
+        # 呼叫端只能省略 → `podcast_episode` 的預設是 `None` → 讀整本筆記本。整條
+        # 官方復原路徑因此會靜默擴大生成輸入(Codex 獨立複審實跑抓到:認證失效 →
+        # 停點指向 retract → retract 指向 podcast_episode → 兩次 dispatch 送出
+        # `[['src-1'], None]`)。`None` 代表 manifest 真的沒記,`next_step` 會說要自己指名。
+        "regeneration_source_ids": caps["regeneration_source_ids"],
         "next_step": _attempt_next_step(caps),
     }
 
@@ -4263,6 +4392,11 @@ async def podcast_series(
         )
     account, client = runtime.snapshot()
     run_results: list[dict] = []
+    # 整季共用一組生成設定,與集數無關 —— 接手守門與認證停點的交棒判準都要拿它比對,
+    # 所以提到迴圈外算一次。
+    series_settings = _audio_settings(
+        resolve_language(language), audio_format, audio_length
+    )
 
     def partial(
         episode_n: int,
@@ -4302,6 +4436,82 @@ async def podcast_series(
             ),
             **extra,
         }
+
+    def reentry(episode: dict | None, attempt_id: str | None) -> dict:
+        """認證恢復／連線恢復之後要呼哪一支工具,以及那句話怎麼講。
+
+        **不能寫死 `podcast_series`。** 這一集的 attempt 可能指名了 `source_ids`(或
+        綁著 frozen bundle),而 series 生不出那種 settings —— 照著寫死的欄位重呼,
+        series 會把它 supersede 成不指名的新 attempt、改讀整本筆記本(含後面各集的
+        回錄音檔),然後回報 `complete=True`。這正是 docs/gotchas-attempt.md 那條
+        紅線要擋的形狀:**狀態相關的指引一律由 `_attempt_capabilities()` 產生**。
+
+        認證本身確實是外部前提、不是 attempt 狀態,所以判準不是「這顆現在能做什麼」
+        而是「series 重新進來時接不接得住它」——那由 `_series_handoff_caps()` 回答,
+        與接手守門同一支,不會再有一邊漏補的第二個決策來源。
+        """
+        if episode is None or attempt_id is None:
+            return {"safe_next_action": ACTION_SERIES}
+        attempt = next(
+            (
+                row
+                for row in episode.get("attempts", [])
+                if row.get("attempt_id") == attempt_id
+            ),
+            None,
+        )
+        if attempt is None:
+            return {"safe_next_action": ACTION_SERIES}
+        caps = _series_handoff_caps(episode, attempt, attempt_id)
+        if caps is None or caps["safe_next_action"] is None:
+            # series 接得住 —— 但「接得住」不等於「照這次的參數重呼就會過」。
+            # 參數漂移那一格(形狀是 series 的、language／format／length 不同)重呼
+            # 會撞 settings 守門而裸拋:工具名對了、附帶條件沒講,呼叫端照做仍然
+            # 走不通(Codex 獨立複審實跑抓到)。
+            if _series_will_redispatch(attempt) and not _series_owns_attempt(
+                attempt, series_settings
+            ):
+                return {
+                    "safe_next_action": ACTION_SERIES,
+                    "next_step": _SERIES_ARGUMENT_DRIFT_HINT,
+                }
+            return {"safe_next_action": ACTION_SERIES}
+        return {
+            "safe_next_action": caps["safe_next_action"],
+            "next_step": _attempt_next_step(caps),
+            # 交棒的下一步若是 `podcast_episode`,呼叫端要帶回原本那組來源才不會靜默
+            # 改讀整本筆記本 —— 值必須在公開回傳裡(自足性紅線),不能要它翻 manifest。
+            "regeneration_source_ids": caps["regeneration_source_ids"],
+        }
+
+    async def stop_if_auth_expired(
+        episode_n: int,
+        attempt_id: str | None,
+        guard_client: object,
+        episode: dict | None,
+    ) -> dict | None:
+        """把認證失效或暫時無法驗證轉成保留本次進度的安全停點。
+
+        兩條例外的下一步是**同一個問題**(重登／重連之後 series 接不接得住這一集),
+        所以共用 `reentry()`;差別只在 `observed_state` 要誠實區分「確認失效」與
+        「這次驗不出來」。
+        """
+        try:
+            await probe_auth(guard_client)
+            return None
+        except _AuthProbeError as exc:
+            observed_state, error = "auth_expired", exc
+        except _TRANSIENT_TRANSPORT_ERRORS as exc:
+            observed_state, error = "verification_incomplete", exc
+        handoff = reentry(episode, attempt_id)
+        return partial(
+            episode_n,
+            attempt_id,
+            observed_state,
+            handoff.pop("safe_next_action"),
+            error=str(error),
+            **handoff,
+        )
 
     async def refuse_if_too_many_sources(
         episode_n: int, attempt_id: str | None, guard_client: object
@@ -4364,10 +4574,6 @@ async def podcast_series(
             return partial(episode_n, attempt_id, observed_state, action, **extra)
         return None
 
-    # Resume/finalize 也需要有效認證；每個新 generation 前會再 probe 一次，
-    # 避免數小時 series 中途 cookie 失效後仍燒 submit。
-    await probe_auth(client)
-
     for episode_n in range(start, len(episodes) + 1):
         # series 在入口固定自己的帳號狀態；只有本呼叫的明確配額 failover 能更新它。
         # 每集重讀 global snapshot 會讓別的並行 request 在 EP1 期間 rotate 後，EP2 在
@@ -4377,6 +4583,21 @@ async def podcast_series(
         expected_brief_hash = hashlib.sha256(
             plan["brief"].encode("utf-8")
         ).hexdigest()
+        snapshot = store.read()
+        episode = next(
+            (row for row in snapshot["episodes"] if row.get("episode") == episode_n),
+            None,
+        )
+        attempt_id = (
+            episode.get("active_attempt_id") or episode.get("output_attempt_id")
+            if episode is not None
+            else None
+        )
+        # 每集的第一個遠端操作先驗認證，涵蓋 cleanup、續跑、對帳與全新 dispatch；
+        # 一集一次也取代各分支重複 probe，避免長季節中間失效時裸拋並丟掉既有結果。
+        stop = await stop_if_auth_expired(episode_n, attempt_id, client, episode)
+        if stop is not None:
+            return stop
         # retract 留下的清理義務先結案,才輪到這一集的任何分支(finalize 續跑、prepared
         # 重送、supersede 重生都會產出或上傳)。只在真的有義務時才打 RPC。
         await _assert_source_cleanup_done(client, store, notebook_id, episode_n)
@@ -4529,34 +4750,53 @@ async def podcast_series(
                 remote = attempt.get("remote", {})
                 remote_state = remote.get("status")
                 artifact_id = remote.get("artifact_id")
-                # 整季能不能接手這個 attempt,由 settings 是否可重現決定。**這件事要在
-                # 任何變更之前判斷**:下面的 rearm 會把 remote.error / error_code /
-                # dispatched_at 全部清掉,擺在驗證之前的話,一個註定失敗的呼叫仍然會先
-                # 毀掉「為什麼被拒」的診斷(v0.7.1 驗收 F-7:抹完的 manifest 看起來就像
-                # 分類從未生效過)。
-                series_settings = _audio_settings(
-                    resolve_language(language), audio_format, audio_length
-                )
-                if dispatch_state in ("prepared", "not_accepted"):
-                    _assert_series_owns_attempt(
-                        attempt, series_settings, episode_n, active_attempt_id
-                    )
                 # 這三種狀態接下來都會產生新的 dispatch(`prepared` 直接送、
                 # `not_accepted` 先 re-arm 再送、`failed`/`removed` 建 superseding
-                # attempt 再送),所以守門擺在它們的**共同上游**、在任何 manifest
-                # mutation 之前。擺在各自的 dispatch 點會先 re-arm/先建 attempt 才拒絕,
-                # 留下半成品狀態、還讓 `attempt_count` 白長一格。
-                # 已經 dispatch 出去、只等 finalize 的 attempt 不在這裡面 —— 它不會再
-                # 生成一次,擋它只會把一集卡在半路。
-                if dispatch_state in ("prepared", "not_accepted") or remote_state in (
-                    "failed",
-                    "removed",
-                ):
+                # attempt 再送),所以兩道守門都擺在它們的**共同上游**(判準集中在
+                # `_series_will_redispatch()`)、在任何 manifest mutation 之前。擺在
+                # 各自的 dispatch 點會先 re-arm/先建 attempt 才拒絕,留下半成品狀態、
+                # 還讓 `attempt_count` 白長一格(v0.7.1 驗收 F-7:抹完的 manifest 看
+                # 起來就像分類從未生效過)。已經 dispatch 出去、只等 finalize 的
+                # attempt 不在這裡面 —— 它不會再生成一次,擋它只會把一集卡在半路。
+                #
+                # **接手守門曾經只掛在 `prepared`/`not_accepted` 兩格**,於是
+                # `accepted`+`failed`(送出去了、伺服器判定失敗)的指名來源 attempt
+                # 直接落進下面的 supersede 分支,被換成不指名的新 attempt、改讀整本
+                # 筆記本 —— 兩次 dispatch 送出 `[["src-1"], None]`,而工具回報
+                # `complete=True`。`_attempt_next_step()` 的 settled 分支註解早就點名
+                # 過這個形狀,但只防了訊息、沒防程式路徑。
+                if _series_will_redispatch(attempt):
+                    # **筆數守門排在歸屬之前。** 反過來(純本機檢查先跑、省一趟 RPC)看起來
+                    # 更划算,但它把一條原本回結構化 `too_many_sources` 停點的路改成裸拋
+                    # ——`accepted`+`failed` 的外來 attempt 撞上超標筆記本時,舊行為是
+                    # 回 partial(已跑完的集仍在 `episodes` 裡),新行為會丟掉整批
+                    # `run_results`(Codex 獨立複審實跑抓到)。兩道守門都不改 manifest,
+                    # 順序只影響「先講哪個理由」,那就讓保住進度的那個先講。
                     stop = await refuse_if_too_many_sources(
                         episode_n, active_attempt_id, client
                     )
                     if stop is not None:
                         return stop
+                    # **這一集已經有完成的輸出時,歸屬不是該講的那件事。**
+                    # supersede 會走到 `_create_audio_attempt`,它有一道「拒絕靜默覆蓋
+                    # 既有輸出」的守門 —— 那個理由更根本,而歸屬訊息教的
+                    # 「retract 之後重生」對一集**已發布**的節目是破壞性建議。把歸屬
+                    # 擺到共同上游時一併把它搶先了(`test_published_legacy_output_
+                    # blocks_implicit_supersede_after_failed_resume` 逐字抓到)。
+                    # 只讓終態那條路讓位:`prepared`/`not_accepted` 不經過
+                    # `_create_audio_attempt`(re-arm 後直接送出),歸屬仍要在這裡驗,
+                    # 否則等於為它們開一條沒有守門的路。
+                    defers_to_output_guard = remote_state in _TERMINAL_REMOTE and (
+                        has_hard_output_evidence(episode)
+                    )
+                    if not defers_to_output_guard:
+                        _assert_series_owns_attempt(
+                            episode,
+                            attempt,
+                            series_settings,
+                            episode_n,
+                            active_attempt_id,
+                        )
                 if dispatch_state == "not_accepted":
                     rearmed = _rearm_not_accepted_attempt(
                         store, episode_n, active_attempt_id
@@ -4573,7 +4813,7 @@ async def podcast_series(
                             ACTION_SERIES,
                         )
                     snapshot = store.read()
-                    _, attempt = _attempt_record(
+                    episode, attempt = _attempt_record(
                         snapshot, episode_n, active_attempt_id
                     )
                     dispatch_state = attempt["dispatch"]["status"]
@@ -4594,7 +4834,7 @@ async def podcast_series(
                         supersedes_attempt_id=superseded_attempt_id,
                     )
                     snapshot = store.read()
-                    _, attempt = _attempt_record(
+                    episode, attempt = _attempt_record(
                         snapshot, episode_n, active_attempt_id
                     )
                     dispatch_state = attempt["dispatch"]["status"]
@@ -4608,13 +4848,15 @@ async def podcast_series(
                     # 而 remote failed/removed 的 supersede 分支會**新建**一個 prepared
                     # attempt 落到這裡——那顆是 series 自己建的,必然相符,但顯式驗過
                     # 才不會在未來有人改動 supersede 分支時靜默漏掉。
+                    # `episode` 必須跟著 `attempt` 一起從最新 snapshot 取(上面兩處都
+                    # 已改成接住它)——用 supersede 之前的舊 dict,`active_attempt_id`
+                    # 還指著被取代的那顆,caps 會把新 attempt 判成「歷史紀錄」。
                     _assert_series_owns_attempt(
-                        attempt, series_settings, episode_n, active_attempt_id
+                        episode, attempt, series_settings, episode_n, active_attempt_id
                     )
                     # baseline / 記帳 / 實際送出三者同源,理由同 `_run_episode`
                     # 那條路徑(並行 rotate 會讓 manifest 記 A、實際 B 送出)。
                     dispatch_account, dispatch_client = account, client
-                    await probe_auth(dispatch_client)
                     # 來源筆數守門**不在這裡**:它在上面 re-arm/supersede 的共同上游,
                     # 也就是任何 manifest mutation 之前(`refuse_if_too_many_sources`)。
                     # 曾經擺在這一行,結果是「先把 not_accepted re-arm 成 prepared、
@@ -4743,11 +4985,13 @@ async def podcast_series(
                             f"episode {episode_n} attempt has no remote artifact "
                             f"in state {dispatch_state!r}"
                         )
-                    reconciled = await podcast_episode_reconcile(
+                    reconciled = await _podcast_episode_reconcile(
+                        client,
                         manifest_path,
                         episode_n=episode_n,
                         attempt_id=active_attempt_id,
                         wait_timeout=wait_timeout,
+                        auth_probed=True,
                     )
                     if reconciled["observed_state"] != "accepted":
                         # P2:零候選那格的出路寫在 `next_step`(見
@@ -4864,7 +5108,6 @@ async def podcast_series(
                 continue
 
         # candidate range 內完全沒有 attempt 才能產生新的遠端副作用。
-        await probe_auth(client)
         # 全新一集的守門。`_run_episode` 內部還有一道(那道是給 `podcast_episode` 直呼
         # 用的,series 走到那裡時會冗餘再打一次唯讀 list —— 一集要跑二十分鐘,一趟
         # list 換「兩個入口各自守得住」很划算)。這裡先擋是因為**例外分類走不通**:

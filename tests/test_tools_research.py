@@ -39,21 +39,26 @@ async def test_deep_research_threads_report_id_from_start_into_wait(fake_client)
     assert wait["task_id"] == "rep-1"
 
 
-async def test_deep_research_fails_loud_without_a_report_id(fake_client, monkeypatch):
+@pytest.mark.parametrize("report_id", [None, "", "   "])
+async def test_deep_research_fails_loud_without_a_report_id(
+    fake_client, monkeypatch, report_id
+):
     from notebooklm import DecodingError, ResearchStart
 
     async def start_without_report_id(notebook_id, query, source="web", mode="deep"):
         return ResearchStart(
             task_id="session-1",
-            report_id=None,
+            report_id=report_id,
             notebook_id=notebook_id,
             query=query,
             mode=mode,
         )
 
     monkeypatch.setattr(fake_client.research, "start", start_without_report_id)
-    with pytest.raises(DecodingError, match="report_id"):
+    with pytest.raises(DecodingError, match="report_id") as excinfo:
         await r.research_start("nb-1", "some query", mode="deep")
+    assert "retry" not in str(excinfo.value).lower()
+    assert "may already have succeeded" in str(excinfo.value)
 
 
 async def test_research_start_requires_a_query(fake_client):

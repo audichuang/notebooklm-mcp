@@ -37,15 +37,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 解析 storage_state.json 路徑。named profile 落在 profiles/<name>/ 底下（SDK 慣例），
-# 這正是「測試帳號不會蓋掉主力帳號本機認證」的關鍵——兩個帳號各自一個目錄。
-NBLM_HOME="${NOTEBOOKLM_HOME:-$HOME/.notebooklm}"
 if [[ -z "$STORAGE_PATH" ]]; then
-  if [[ -n "$PROFILE" ]]; then
-    STORAGE_PATH="$NBLM_HOME/profiles/$PROFILE/storage_state.json"
-  else
-    STORAGE_PATH="$NBLM_HOME/storage_state.json"
-  fi
+  STORAGE_PATH=$(uv run python -c \
+    'import sys; from notebooklm.paths import get_storage_path; print(get_storage_path(sys.argv[1] or None))' \
+    "$PROFILE")
 fi
 
 if [[ ! -f "$STORAGE_PATH" ]]; then

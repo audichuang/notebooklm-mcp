@@ -776,7 +776,7 @@ Phase 1 排查時我用 `tr '\0' '\n' < /proc/<pid>/environ | sed 's/=.*/=<value
 變數,但 `NOTEBOOKLM_AUTH_JSON` 的值**本身含換行**,`tr` 把它拆成多行、`sed` 的
 行首錨點失效,於是 **stg 測試帳號的真實 cookie 值被印進 session transcript**。
 不是工具洩漏,是我的操作失誤。stg 是拋棄式測試池,但若要保險,重跑
-`scripts/login_notebooklm.py --profile test` + `sync-auth.sh` 換掉即可。
+`uv run notebooklm -p test login` + `sync-auth.sh --profile test --config stg` 換掉即可。
 教訓:**不要用 `/proc/*/environ` 取含 JSON 的環境變數**;要看有沒有設某個變數,
 用 `doppler secrets --only-names`,或在 process 內部讀 `os.environ.get()` 只印
 `is None` / 布林。

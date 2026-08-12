@@ -1,7 +1,16 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from notebooklm.exceptions import (
+    AuthError,
+    DecodingError,
+    NetworkError,
+    RateLimitError,
+    RPCError,
+    ServerError,
+)
 from notebooklm.rpc.types import AudioFormat, AudioLength
 from notebooklm.types import ArtifactType
 
@@ -208,14 +217,73 @@ async def test_auth_check_dead_gives_relogin_hint(fake_client):
         await t.auth_check()
 
 
-@pytest.mark.parametrize("error_type", [pytest.param("network"), pytest.param("rate_limit")])
-async def test_auth_check_preserves_transient_error_type(fake_client, error_type):
-    from notebooklm.exceptions import NetworkError, RateLimitError
+def _http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request(
+        "POST", "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute"
+    )
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(str(status_code), request=request, response=response)
 
-    error = NetworkError("offline") if error_type == "network" else RateLimitError("busy")
+
+def _rpc_http_status_error(status_code: int) -> RPCError:
+    cause = _http_status_error(status_code)
+    error = RPCError("RPC transport failed")
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(AuthError("expired"), id="auth-error"),
+        pytest.param(RPCError("auth", rpc_code=401), id="rpc-401"),
+        pytest.param(RPCError("unauthenticated", rpc_code=16), id="grpc-16"),
+        pytest.param(_rpc_http_status_error(401), id="mapped-http-401"),
+        pytest.param(_rpc_http_status_error(403), id="mapped-http-403"),
+        pytest.param(_http_status_error(401), id="raw-http-401"),
+        pytest.param(_http_status_error(403), id="raw-http-403"),
+    ],
+)
+async def test_auth_check_hints_relogin_for_real_sdk_auth_shapes(fake_client, error):
+    fake_client.notebooks.list = AsyncMock(side_effect=error)
+
+    with pytest.raises(RuntimeError) as caught:
+        await t.auth_check()
+
+    message = str(caught.value)
+    assert "uv run notebooklm login" in message
+    assert "sync-auth.sh" in message
+    assert caught.value.__cause__ is error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(NetworkError("offline"), id="network"),
+        pytest.param(RateLimitError("busy"), id="rate-limit"),
+        pytest.param(ServerError("down", status_code=503), id="server"),
+        pytest.param(DecodingError("malformed response"), id="decoding"),
+        pytest.param(
+            RPCError("explicitly non-auth", rpc_code=999),
+            id="explicit-non-auth-rpc-code",
+        ),
+    ],
+)
+async def test_auth_check_preserves_non_auth_error_type(fake_client, error):
     fake_client.notebooks.list = AsyncMock(side_effect=error)
     with pytest.raises(type(error)) as caught:
         await t.auth_check()
+
+
+async def test_auth_check_prefers_explicit_non_auth_code_over_http_cause(fake_client):
+    error = RPCError("explicitly non-auth", rpc_code=999)
+    error.__cause__ = _http_status_error(401)
+    fake_client.notebooks.list = AsyncMock(side_effect=error)
+
+    with pytest.raises(RPCError) as caught:
+        await t.auth_check()
+
+    assert caught.value is error
     assert caught.value is error
 
 

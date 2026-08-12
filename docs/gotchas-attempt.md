@@ -26,6 +26,17 @@
   **這條紅線只管「訊息從哪裡來」,不管「回傳完不完整」——那是下一條的守備範圍**
   （第十一次現形正是在這條紅線徹底遵守之後才發生的:`safe_next_action` 確實是
   `_attempt_capabilities()` 算的,但公開回傳漏了那個動作要用的目標身分)。
+  **「外部前置條件不算 attempt 狀態,所以可以寫死」是假的 —— 那正是第八次現形。**
+  這句話曾經逐字寫在這裡,用來合理化 `podcast_series` 的認證停點硬寫
+  `safe_next_action="podcast_series"`(理由是「重登後重入冪等的 series,再由它交給
+  capabilities」)。**冪等重入的前提是 series 接得住那顆 attempt**,而指名了
+  `source_ids` 或綁著 frozen bundle 的 attempt 它接不住:重呼會走 supersede 分支、
+  建一顆不指名的新 attempt、改讀整本筆記本,然後回報 `complete=True`。
+  外部前置條件決定的是**這次停在哪裡**(`observed_state`),不是**下一步呼叫誰** ——
+  後者永遠是 attempt 狀態問題,永遠要問 capabilities。現在由 `_series_handoff_caps()`
+  回答,而它的第一個判準是「series 會不會在這顆上重新 dispatch」:順序反了的話,
+  一集**已完成**的 output attempt 也帶著 `source_ids`,會被交棒指引拖去 retract
+  一個已經做好的正式輸出(突變驗證確認)。
 - **紅線(第十一次現形):`safe_next_action` 委派給另一顆 attempt 時,目標身分要跟著換,
   不能只換動作名。** `podcast_attempt_retract` 的 `post_retract` 分支發現
   `active_attempt_id` 指向另一顆還在飛的 attempt B 時,會遞迴算 B 的 capabilities 並

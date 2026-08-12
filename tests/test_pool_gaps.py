@@ -244,7 +244,7 @@ async def test_series_dispatch_uses_the_client_that_passed_per_episode_probe(
         nonlocal probes
         notebooks = await original()
         probes += 1
-        if probes == 2:
+        if probes == 1:
             runtime.rotate_client()
         return notebooks
 
@@ -256,7 +256,7 @@ async def test_series_dispatch_uses_the_client_that_passed_per_episode_probe(
         output_dir=str(tmp_path),
     )
 
-    assert probes >= 2
+    assert probes == 1
     assert any(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
     assert account_b.artifacts.calls == []
 
@@ -329,6 +329,49 @@ async def test_series_carries_its_own_failover_client_to_the_next_episode(fake_c
 
     assert calls == ["a@x", "b@x", "b@x"]
     assert not [call for call in account_c.artifacts.calls if call[0] == "generate_audio"]
+    manifest_path = tmp_path / "series_manifest.json"
+    assert _episode(manifest_path, 2)["attempts"][0]["dispatch"]["account"] == "b@x"
+
+
+async def test_series_reconcile_keeps_its_pinned_client(fake_client, tmp_path):
+    """series 取好 snapshot 之後,global 再 rotate 也不能換掉對帳用的帳號。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
+    with pytest.raises(TimeoutError, match="response lost"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="1",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+    fake_client.artifacts.generate_audio_exc = None
+
+    account_b = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
+    original_probe = fake_client.notebooks.list
+    rotated = False
+
+    async def probe_then_rotate():
+        nonlocal rotated
+        notebooks = await original_probe()
+        if not rotated:
+            rotated = True
+            assert runtime.rotate_client() == "b@x"
+        return notebooks
+
+    fake_client.notebooks.list = probe_then_rotate
+    result = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "1"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert rotated
+    assert result["safe_next_action"] == "podcast_episode_reconcile"
+    assert not account_b.artifacts.calls
+    assert any(call[0] == "list" for call in fake_client.artifacts.calls)
 
 
 async def test_resume_pins_client_after_auth_probe(fake_client, tmp_path):

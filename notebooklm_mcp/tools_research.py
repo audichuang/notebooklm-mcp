@@ -73,10 +73,11 @@ async def research_start(
         notebook_id, query, source=source, mode=mode
     )
     if res.mode == "deep":
-        if not res.report_id:
+        if not isinstance(res.report_id, str) or not res.report_id.strip():
             raise DecodingError(
                 f"deep research start returned no report_id (session {res.task_id!r}); "
-                "this run cannot be polled — retry"
+                "this run cannot be polled or cancelled; the remote start may already "
+                "have succeeded"
             )
         task_id = res.report_id
     else:

@@ -43,7 +43,9 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport streamable-http --host 
 ```
 
 ⚠️ `streamable-http` / `sse` carry **no authentication** — never bind a non-loopback host
-(`0.0.0.0` or a LAN IP); anything on the same network segment could then drive the account.
+(`0.0.0.0` or a LAN IP); the server now refuses that startup by default. Existing remote
+deployments must explicitly accept the risk with `--allow-insecure-remote`; anything on the
+same network segment could then drive the account.
 
 ## Auth refresh
 
@@ -52,8 +54,16 @@ On a GUI machine:
 ```bash
 uv pip install -e ".[login]"
 uv run playwright install chromium
-notebooklm login
+uv run notebooklm login
 bash scripts/sync-auth.sh
+```
+
+測試帳號先建立獨立 profile，再登入並同步到 `stg`：
+
+```bash
+uv run notebooklm profile create test
+uv run notebooklm -p test login
+bash scripts/sync-auth.sh --profile test --config stg
 ```
 
 Headless machines consume the synced Doppler secret and do not run `notebooklm login`.

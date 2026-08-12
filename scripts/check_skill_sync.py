@@ -59,6 +59,7 @@ REQUIRED_CONTRACT_TERMS = (
     "source_cleanup_unresolved",  # podcast_attempt_retract:upload 還沒落盤時作廢會留下
                               # 身分未定的清理義務,safe_next_action 是 null 而重生會被
                               # 生成前的 gate 擋住 —— 不寫進文件,呼叫端會誤判成死路
+    "auth_expired",           # podcast_series 改以安全停點回報 cookie 失效,不再裸 raise
 )
 
 
@@ -77,6 +78,7 @@ SKILL_MD_REQUIRED_TERMS = (
     "itunes_type",
     "next_step",
     "abandon_in_flight",
+    "auth_expired",
 )
 
 

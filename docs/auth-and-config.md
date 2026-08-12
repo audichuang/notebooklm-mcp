@@ -15,7 +15,7 @@
 
 ```bash
 uv pip install -e ".[login]" && uv run playwright install chromium   # 僅登入機需要
-uv run python scripts/login_notebooklm.py   # 開瀏覽器登入,登入完成即可,不必按鍵
+uv run notebooklm login                     # 開瀏覽器登入
 bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次啟動即生效
 ```
 
@@ -64,15 +64,6 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
   (`dev_alt` 就是這樣,pool 落地後已刪。**刪 config 會弄壞任何指向它的 MCP 註冊** ——
   刪之前先 `claude mcp list` 掃一遍每一台。)
 
-**登入為什麼不用原生 `notebooklm login`**(2026-08):Google 把未認證的登入流程轉到
-`notebook.google.com`(少了 `lm`),而 SDK 的偵測寫死等 `notebooklm.google.com/**`,
-於是登入完成後永遠等不到、卡滿 5 分鐘 timeout。**我們已經升到 0.8.0,它的 host 白名單
-仍然只有舊的兩個——升級沒有解掉這件事**。`scripts/login_notebooklm.py` **只改掉那一行偵測**
-(兩個 host 都收),其餘全部重用 SDK helper,產出的 storage_state 與原生指令等價。
-**已認證的 RPC 仍走舊網域且正常**,壞的只有登入這段。上游修好時
-`tests/test_contracts.py::test_login_script_should_be_retired_once_upstream_knows_the_new_host`
-會紅,提醒把這支刪掉。**若哪天 API 端點也搬家,notebooklm-py 會整個壞、我們跟著壞** —— 那是要盯的頭號上游風險。
-
 **CLI 一律走 `uv run notebooklm`,不要另外裝全域版**:全域安裝會與 repo pin 的版本悄悄
 漂開。2026-08 踩過一次:pipx 的全域版停在 **0.3.2**,`profile` 子指令不存在,而且對現行
 認證一律回 `Authentication expired or invalid` —— 那個訊息會把人誤導成「NotebookLM 搬
@@ -95,4 +86,3 @@ SDK 只讀不帶後綴的那一個,所以多的那幾份在 pool 實作前不生
 獨立 Google 帳號 + Doppler `notebooklm/stg` + **另一組 `PODCAST_TOKEN_SALT`**(salt 不同 ⇒
 測試 feed 落在完全不同的 URL 空間,而 uploader 不刪檔,所以「不要撞」比「事後清」重要)。
 一次性設定與登入流程見 [docs/test-account.md](docs/test-account.md)。
-

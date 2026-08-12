@@ -86,43 +86,15 @@ bash scripts/sync-auth.sh --profile test --config stg
   `--config <name>`(那個 config 必須先在 Doppler 主控台存在)。
 - 測試帳號一樣有每日生成配額,而且是**獨立**的一份 —— 這正是切開的好處之一。
 
-## ⚠️ 2026-08 上游突變:登入偵測不到(Google 把 NotebookLM 搬網域)
-
-**症狀**:`uv run notebooklm -p test login` 在瀏覽器登入完成後,終端機一直停在
-`Waiting for login (up to 5 minutes)...`,沒有「按 ENTER」的提示,最後 timeout;
-關掉瀏覽器則得到 `TargetClosedError`。
-
-**根因**:0.7.3 的偵測條件是「這個分頁的網址變成 `notebooklm.google.com/**`」
-(`playwright_login.py` 的 `page.wait_for_url`)。但 Google 已經把未認證的登入流程轉到
-**`notebook.google.com`**(少了 `lm`)——實測 `curl -L https://notebooklm.google.com/`
-的 `continue=` 參數就是 `https://notebook.google.com/`。登入後分頁停在新網域,
-SDK 等的舊網域永遠不匹配。**我們已經升到 0.8.0(2026-08-08),它的 host 白名單仍然只有
-`notebooklm.google.com` / `notebooklm.cloud.google.com` —— 升級沒有解掉這件事。**
-`NOTEBOOKLM_BASE_URL` 也不能指到新網域——它有白名單,會直接 raise。
-
-**還沒壞的部分**:已認證的 RPC 仍走舊網域且正常(實測 `notebooks.list()` 回 289 本)。
-所以這隻影響**登入**,不影響既有 session 的生成/發布。
-
-### 解法 A(建議):用我們自己的登入腳本
-
-`scripts/login_notebooklm.py` 是 `notebooklm login` 的暫時替代品:**只改掉那一行壞掉的
-偵測**(改成「網址落在任一已知 NotebookLM host 就算登入」),其餘每一步都呼叫 SDK 自己的
-helper(cookie domain 過濾、原子寫檔 0600、帳號 metadata),產出的 `storage_state.json`
-與原生指令等價。
+## 登入與同步
 
 ```bash
 cd /home/user/research/audiskill/notebooklm-mcp
-uv run python scripts/login_notebooklm.py --profile test
+uv run notebooklm -p test login
 bash scripts/sync-auth.sh --profile test --config stg
 ```
 
-在瀏覽器登入完成即可,**不必按任何鍵,也不用管網址是 notebooklm 還是 notebook**。
-
-上游修好之後就刪掉這支 —— `tests/test_contracts.py` 有一條
-`test_login_script_should_be_retired_once_upstream_knows_the_new_host`,上游把新 host
-納入白名單那天它會紅,提醒我們退場。
-
-### 解法 B(備援,完全不開瀏覽器等待)
+### 備援:直接讀既有瀏覽器 cookie
 
 `--browser-cookies` 直接從已安裝的瀏覽器讀 cookie,不啟動 Playwright、也就沒有那個等待:
 
@@ -134,9 +106,3 @@ bash scripts/sync-auth.sh --profile test --config stg
 ```
 相依已裝(`notebooklm-py[cookies]` → rookiepy)。這台目前只有一個 Chrome profile
 (`Default`);若之後有多個,用 `chrome::Profile 1` 指名,**免得抓到主力帳號的 cookie**。
-
-### 要盯的後續
-
-Google 若把 API 端點也搬到 `notebook.google.com`,`notebooklm-py` 會整個壞掉(我們的 MCP
-跟著壞)。追蹤點照 AGENTS.md:`_research/notebooklm-mcp-cli` 的 CHANGELOG / KNOWN_ISSUES
-(目前尚無記載)與 notebooklm-py 的 GitHub issues。
