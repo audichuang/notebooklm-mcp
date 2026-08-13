@@ -271,7 +271,8 @@ async def test_episode_set_description_writes_and_strips(tmp_path):
     m = _manifest(tmp_path, [{"episode": 21, "title": "EP21 標題"}])
     res = await a.episode_set_description(m, 21, "重點整理 [1],結論 [3, 4]。")
     data = json.loads(open(m, encoding="utf-8").read())
-    assert data["episodes"][0]["description"] == "重點整理 ,結論 。"   # 標記清掉
+    # 標記清掉,**標點前不留空格**(v0.9.13 驗收:show notes 是公開文案,那一格看得到)
+    assert data["episodes"][0]["description"] == "重點整理,結論。"
     assert "[" not in data["episodes"][0]["description"]
     assert res["episode"] == 21 and res["description"] == data["episodes"][0]["description"]
 

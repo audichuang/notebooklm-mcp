@@ -537,6 +537,20 @@ async def test_chat_ask_strip_citations(fake_client):
     assert "重點一" in out["answer"] and "重點二" in out["answer"]
 
 
+async def test_chat_ask_strip_citations_leaves_no_gap_before_punctuation(fake_client):
+    """清掉標記不能留下標點前的空格 —— 這支的用途就是產 show notes(公開文案)。
+
+    v0.9.13 驗收實錄:「…等待被處理的時間** 。」標記前面那個空格留著,標點前多一格。
+    只清標記**前面**的 space/tab:兩邊都清會把 `see [1] and` 黏成 `seeand`,而換行不能
+    吃 —— 行首的引用連著換行清掉會把 markdown 結構拉平。
+    """
+    fake_client.chat.answer_override = (
+        "延遲來自等待 [1]。利用率放大 [3, 4],而不是服務時間 [2-5]!\n第二段 [1] 說明"
+    )
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+    assert out["answer"] == "延遲來自等待。利用率放大,而不是服務時間!\n第二段 說明"
+
+
 async def test_chat_ask_exclude_references(fake_client):
     out = await t.chat_ask("nb-1", "重點?", include_references=False)
     assert out["references"] == []   # show notes 路徑不需要 references,省 token
