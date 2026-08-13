@@ -60,6 +60,9 @@ REQUIRED_CONTRACT_TERMS = (
                               # 身分未定的清理義務,safe_next_action 是 null 而重生會被
                               # 生成前的 gate 擋住 —— 不寫進文件,呼叫端會誤判成死路
     "auth_expired",           # podcast_series 改以安全停點回報 cookie 失效,不再裸 raise
+    "account",                # research_start 回傳、wait/import 要原樣帶回:research
+                              # session 綁發起帳號,pool 換人只會拿到 no_research —— 而
+                              # 那個失敗形狀是「輪詢滿 timeout」,不寫進文件沒人查得動
 )
 
 

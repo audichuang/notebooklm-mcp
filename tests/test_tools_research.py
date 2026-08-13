@@ -303,3 +303,63 @@ async def test_research_wait_rejects_a_negative_cap(fake_client):
     with pytest.raises(ValueError, match="max_report_chars"):
         await r.research_wait("nb-1", "res-1", max_report_chars=-1)
     assert not fake_client.research.calls
+
+
+# ---- handle 綁帳號:pool 輪替之後仍要回到發起它的那個 -----------------------------
+
+
+async def test_research_start_names_the_account_that_owns_the_handle(fake_client):
+    other = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+    out = await r.research_start("nb-1", "some query")
+    # 記帳與送出同源(runtime.snapshot()),不是事後補讀 active_account()。
+    assert out["account"] == "a@x"
+
+
+async def test_research_wait_polls_the_account_that_started_it(fake_client):
+    """research session 綁在發起它的帳號上,notebook 分享給全 pool 也沒用。
+
+    v0.9.13 真實驗收:同一個 task_id,發起它的 server 立刻回 completed,另一個帳號的
+    server 輪詢 900 秒只拿到 no_research。start/wait 是兩次獨立呼叫,中間只要一次配額
+    failover 游標就換人 ——「斷線救援用 research_wait、不要重新 start」那條指引就走不通。
+    """
+    other = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+    started = await r.research_start("nb-1", "some query")
+    runtime.rotate_client()                      # 配額 failover 把游標推到 b@x
+
+    await r.research_wait(
+        "nb-1", task_id=started["task_id"], account=started["account"]
+    )
+
+    assert [c[0] for c in fake_client.research.calls] == ["start", "wait"]
+    assert other.research.calls == []
+    assert runtime.active_account() == "b@x"     # 游標不動:這裡不是配額輪替
+
+
+async def test_research_import_uses_the_account_that_owns_the_handle(fake_client):
+    other = FakeClient()
+    runtime.set_clients([("a@x", other), ("b@x", fake_client)])
+    await r.research_import(
+        "nb-1", task_id="res-1", urls=["https://c.example/blog"], account="b@x"
+    )
+    assert [c[0] for c in fake_client.research.calls] == ["poll", "import"]
+    assert other.research.calls == []
+
+
+@pytest.mark.parametrize("tool", ("wait", "import"))
+async def test_research_refuses_an_account_that_is_not_in_this_pool(fake_client, tool):
+    """指名了 pool 裡沒有的帳號就當場說明白 —— 讓人輪詢滿 timeout 才拿到
+    no_research 是最糟的失敗方式,而那正是這條 FINDING 觀測到的形狀。"""
+    runtime.set_clients([("a@x", fake_client)])
+    call = (
+        r.research_wait("nb-1", task_id="res-1", account="gone@x")
+        if tool == "wait"
+        else r.research_import(
+            "nb-1", task_id="res-1", urls=["https://c.example/blog"], account="gone@x"
+        )
+    )
+    with pytest.raises(ValueError, match="gone@x") as excinfo:
+        await call
+    assert "a@x" in str(excinfo.value)           # 可用的有哪些要講出來
+    assert fake_client.research.calls == []

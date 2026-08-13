@@ -35,6 +35,34 @@ def _require(value: str, name: str) -> str:
     return value.strip()
 
 
+def _handle_client(account: str | None) -> object:
+    """research handle 綁在**發起它的帳號**上,不是「現在作用中的那個」。
+
+    v0.9.13 真實驗收:同一個 task_id、同一本(已分享給全 pool 的)notebook,發起它的
+    server 立刻回 `completed`,另一個帳號的 server 輪詢 900 秒只拿到 `no_research`
+    —— research session 不跟著 notebook 分享走。而 start / wait / import 是三次獨立
+    呼叫,中間只要一次配額 failover 游標就換人,「斷線救援用 `research_wait`、不要重新
+    `research_start`」那條指引就永遠走不通(而重新 start 要再燒一次配額)。
+
+    `account` 沒給 = 舊行為(作用中那個),單帳號與同一次呼叫內都不受影響。指名了但
+    pool 裡沒有就**當場 raise**:讓人輪詢滿 timeout 才拿到 `no_research`,是這條
+    FINDING 觀測到的最糟失敗形狀。
+
+    **游標一律不動** —— `_ACTIVE` 的語意是「配額輪替走到哪」,這裡只是「這件事只有
+    某個帳號做得到」,正是 `runtime.all_clients()` 的用途(見它的 docstring)。
+    """
+    if account is None:
+        return runtime.get_client()
+    for label, client in runtime.all_clients():
+        if label == account:
+            return client
+    raise ValueError(
+        f"account {account!r} 不在這個 server 的 pool 裡"
+        f"(可用:{runtime.all_accounts()});research handle 只有發起它的那個帳號"
+        "輪詢得到,換帳號會拿到 no_research"
+    )
+
+
 def _status_str(task) -> str:
     status = getattr(task, "status", None)
     return getattr(status, "value", None) or str(status)
@@ -67,9 +95,16 @@ async def research_start(
     貼著你已查證的種子走,得把專有名詞、別名、版本號、時間界線寫進 `query` 本身。
 
     回傳的 task_id 請先落地,再呼叫 `research_wait`——中途斷線可以重跑 wait 接回來。
-    這是 MCP 統一的 polling handle:deep 取 SDK report_id,fast 取 SDK task_id。"""
+    這是 MCP 統一的 polling handle:deep 取 SDK report_id,fast 取 SDK task_id。
+
+    **`account` 也要一起落地,並原樣傳回給 `research_wait` / `research_import`**:
+    research session 綁在發起它的帳號上(把 notebook 分享給全 pool 也沒用),而多帳號
+    pool 只要發生一次配額 failover,下一次呼叫就換人輪詢,拿到的會是 `no_research`。"""
     query = _require(query, "query")
-    res = await runtime.get_client().research.start(
+    # 記帳與送出同源:snapshot() 一次取 (label, client),之後任何 rotate 都影響不到
+    # 這一次——分兩次讀會讓回傳的 account 記到別人身上(同 ADR-0010 ③)。
+    account, client = runtime.snapshot()
+    res = await client.research.start(
         notebook_id, query, source=source, mode=mode
     )
     if res.mode == "deep":
@@ -88,6 +123,7 @@ async def research_start(
         "query": res.query,
         "mode": res.mode,
         "source": source,
+        "account": account,
     }
 
 
@@ -97,10 +133,13 @@ async def research_wait(
     task_id: str,
     timeout: float = 1800.0,
     max_report_chars: int = 0,
+    account: str | None = None,
 ) -> dict:
     """等 research 完成,回**候選來源 + 報告**。不匯入任何東西。
 
     可重入:同一個 task_id 重跑就是繼續等(斷線救援用這支,不要重新 `research_start`)。
+    **`account` 傳 `research_start` 回的那個值**:handle 綁在發起它的帳號上,pool 換人
+    輪詢會拿到 `no_research`(見 `_handle_client`)。沒傳 = 用作用中帳號(單帳號無差)。
     `candidates` 每筆有 `url` / `title` / `cited`(該 URL 是否被報告引用)。挑完之後把
     URL 交給 `research_import`。
 
@@ -117,7 +156,7 @@ async def research_wait(
         raise ValueError("max_report_chars must be an int")
     if max_report_chars < 0:
         raise ValueError("max_report_chars must be >= 0(0 = 只回字數,不回本文)")
-    task = await runtime.get_client().research.wait_for_completion(
+    task = await _handle_client(account).research.wait_for_completion(
         notebook_id, task_id, timeout=timeout
     )
     status_str = _status_str(task)
@@ -163,8 +202,12 @@ async def research_import(
     urls: list[str] | None = None,
     include_report: bool = False,
     max_elapsed: float = 1800.0,
+    account: str | None = None,
 ) -> dict:
     """把 **host 指名的**候選來源匯入筆記本。沒指名的一律不進來。
+
+    `account` 同 `research_wait`:傳 `research_start` 回的那個值,否則 pool 換人之後
+    這裡的 `research.poll` 會查不到這個 task。
 
     `urls` 用 `research_wait` 回的候選 URL 原樣傳(比對前會做正規化)。指名了不存在的
     URL 會直接 raise 並列出來——寧可爆掉,也不要靜默少匯入幾筆讓你以為都進去了。
@@ -187,7 +230,7 @@ async def research_import(
     if not clean_urls and not include_report:
         raise ValueError("urls 為空且 include_report=False —— 沒有任何東西要匯入")
 
-    client = runtime.get_client()
+    client = _handle_client(account)
     # 從 task 重新取回完整 source 物件:呼叫端只需要傳 URL,不必把 research 報告與
     # 每筆 metadata 原封不動 round-trip 過 host context。
     task = await client.research.poll(notebook_id, task_id)
