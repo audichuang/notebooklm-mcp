@@ -8,6 +8,31 @@
 
 ## Unreleased
 
+### v0.9.13-rc 真實驗收抓到的四條(FINDINGS 全文見 `docs/acceptance-v0.9.13-findings.md`)
+
+- **卡在 ingest 的回錄對清理義務隱形**(中):上傳成功但 NotebookLM 端 ingest 卡死,
+  那筆 source 逾 13 小時停在 `kind=unknown` / `ready=false`。`unresolved_upload_candidates()`
+  的 kind 條件只認 `media`,而它是**唯一一份候選判準** —— 於是同一筆對 finalize 對帳
+  (→ `acceptance_unknown`,resume 續不下去)與 retract 後的清理義務對帳(→ 零候選、
+  義務誤結案放行)同時隱形,孤兒永遠留在 notebook 裡被之後每一集讀進生成 context,
+  而工具全程回報成功。實測三項對照:retract 當下 `source_cleanup_unresolved: true`
+  → 重呼 `podcast_series` 後變 `null`,孤兒還在。kind 放寬成「`media` 或尚未分類
+  (`unknown`/`None` 且 not ready)」;對 finalize 那側的效果是**把身分綁回來、不是放行**
+  (postcondition 仍要 `_source_ready`),retract 這時走身分確定的 `stale_source_ids` 路徑。
+- **research 的輪詢 handle 綁帳號**(中):同一個 `task_id`、同一本已分享給全 pool 的
+  notebook —— 發起它的 server 立刻回 `completed`,另一個帳號的 server 輪詢 900 秒只拿到
+  `no_research`。research session 不跟著 notebook 分享走,而 start / wait / import 是三次
+  獨立呼叫,中間一次配額 failover 就換人,「斷線救援用 `research_wait`、不要重新 start」
+  那條指引因此永遠走不通。`research_start` 改回傳 `account`(`runtime.snapshot()` 取,
+  記帳與送出同源),`research_wait` / `research_import` 收 optional `account` 反查 client
+  (**游標不動**);指名的帳號不在這個 server 的 pool 裡就當場 raise 並列出可用的。
+- `strip_citations` 清掉標記後留下標點前的空格(「…時間 。」),而它的用途正是產
+  show notes。`_CITATION_RE` 前面加 `[ \t]*`:只吃前面(否則 `see [1] and` 會黏起來)、
+  不吃換行(否則行首引用會把 markdown 結構拉平)。
+- streamable-http 被 Ctrl-C(只有子 process 收到 SIGINT)時,憑證目錄在 rmtree 之後會被
+  filelock 的 `parent.mkdir()` 用 umask **重建**成 0775 空目錄。非外洩(憑證檔一律 0600),
+  但「正常結束會自己刪乾淨」只對 stdio 成立 —— 只改註解,行為不動。
+
 - Deep Research 後續輪詢改用 SDK 的 `report_id`;fast 仍用 SDK `task_id`。MCP 對外
   保持原本必填的 `task_id` 欄位,但值改為可輪詢 handle,不再把 deep 的不可輪詢
   sessionId 交給呼叫端。deep 缺少或只回空白 `report_id` 時直接拋 `DecodingError`,
