@@ -279,10 +279,14 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 #     `filelock/_util.py` 的 `parent.mkdir(...)` —— 那個 mkdir 走 umask,
                 #     所以留下的是 0775 空目錄(不是 mkdtemp 的 0700)。**不是外洩**:
                 #     憑證檔一律 0600(SDK `_atomic_io` 的 `fchmod`),與目錄模式無關。
-                #     v0.9.13 驗收也量到更壞的交錯:rmtree 刪到一半被打斷,留下兩份真憑證。
-                #     stdio 正常結束(stdin EOF)實測 14→14 刪乾淨;**「Ctrl-C 停 HTTP
-                #     server」不能當成保證清乾淨的路徑**,要乾淨就把 SIGINT 送給整個
-                #     process group。
+                #     v0.9.13 驗收也量到更壞的交錯:rmtree 刪到一半被打斷,留下真憑證。
+                #     **送 SIGINT 給整個 process group 也救不了**(發 tag 後重跑 Phase 1
+                #     實測:兩台 HTTP server 都用 group SIGINT 停,仍留下 4 個目錄,其中
+                #     一個含一份 slot-*.json)—— 一開始以為那是乾淨路徑,是樣本數 1 的
+                #     錯覺。**stdio 正常結束(stdin EOF)才是唯一實測可靠的那條**;
+                #     HTTP 模式停掉之後要自己檢查 `$TMPDIR/notebooklm-mcp-auth-*`。
+                #     (順帶:streamable-http 的 lifespan 是 **per-session**,一個 process
+                #      會建出多個憑證目錄,清的時候別只找一個。)
                 # **不要改成「啟動時掃掉舊目錄」** —— 同機並行的 MCP process 會互刪。
                 stack.callback(shutil.rmtree, cred_dir, ignore_errors=True)
                 for slot, cred in enumerate(creds, start=1):

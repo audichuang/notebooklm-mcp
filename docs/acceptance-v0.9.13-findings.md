@@ -1002,3 +1002,77 @@ NAS 上不留任何測試 blob。`feed_info` 已單獨覆蓋(純計算,不寫 NA
   發 `v0.9.13` 之後要用 `uv tool install "git+…@v0.9.13"` 重裝再跑一次
   (`uv tool install` 不讀 `uv.lock`,消費端每次自由解析相依;且 `nblm-mcp`
   與上游撞名,`uv tool list` 看不出來)。
+
+---
+
+## 收工 §5 補跑 —— 發 tag(v0.9.13)之後重跑 Phase 0 / Phase 1
+
+驗的對象是**用 tag 裝的那份**(`UV_TOOL_DIR=$PWD/.tool uv tool install --python 3.12
+--force "git+…@v0.9.13"`,commit `03ef59e`),不是本機工作樹 —— `uv tool install` 不讀
+`uv.lock`,消費端每次自由解析相依。
+
+### Phase 0:19 / 0
+
+原本 17 項全過,版本 identity 那格改成 `0.9.13`(已 bump,版本字串這次分得出新舊,
+但符號檢查保留 —— uv git cache 壞掉時版本號會騙人)。實裝相依:`notebooklm-py 0.8.0`、
+`mcp 1.29.0`(與 `uv.lock` 一致)。`nblm-mcp --help` 印的是我們這支(撞名檢查過)。
+
+新增兩條判別實驗,對照組是另裝一份 **v0.9.12**:
+
+| 檢查 | v0.9.12 | v0.9.13 |
+|---|---|---|
+| 8-5 `kind=unknown`/`ready=false` 的孤兒算不算候選 | ❌ `卡在 ingest 的孤兒沒被撈到:[]` | ✅ PASS |
+| 8-6 research handle 釘得回發起帳號 | ❌ `research_wait 少了 account` | ✅ PASS |
+
+8-5 同時驗「沒放寬過頭」:已分類成 `web_page` 的、以及 baseline 內的 `media`,仍然不是候選。
+
+### Phase 1:12 個事實,10 ✅ + 2 個「探針判準過嚴」
+
+| # | 事實 | 結果 |
+|---|---|---|
+| 1 | stdio | ✅ exit 0、stdout **剛好 2 行**合法 JSON-RPC、`tools=35` |
+| 2 | streamable-http 綁 127.0.0.1 | ✅ `POST /mcp` → 200 + SSE `event: message` + `serverInfo` |
+| 3 | `--host 0.0.0.0` 無旗標 | ✅ 被拒 `exit=1`,stdout 全空,訊息逐字同上一輪 |
+| 3b | 被拒那次的憑證落檔 | ✅ **7 → 7,一份都沒落**(守門確實在 lifespan 之前) |
+| 4 | `0.0.0.0 --allow-insecure-remote` | ✅ 逃生門還在,`POST /mcp` → 200 |
+| 5 | stderr 漏進 stdout | ⚠️ 見下 |
+
+#### 更正上一輪的一句話:「全部 SDK log 都在 stderr」對 **stdio** 成立,對 HTTP 模式不成立
+
+HTTP 模式的 stdout 有 uvicorn 的 **access log**:
+
+```
+INFO:     127.0.0.1:51754 - "GET /mcp HTTP/1.1" 406 Not Acceptable
+INFO:     127.0.0.1:51758 - "POST /mcp HTTP/1.1" 200 OK
+```
+
+uvicorn 預設的 `LOGGING_CONFIG` 把 access handler 指向 stdout(error handler 才是 stderr)。
+**不是缺陷**:HTTP 模式的 stdout 不是協定通道。而 stdio 模式沒有 uvicorn,實測 stdout
+剛好 2 行。我那兩條 ❌ 是探針把「stdout 全空」當成通過條件,對 HTTP 模式訂錯了。
+
+#### 新觀測(推翻 FINDING-1 的其中一句):**process group SIGINT 也不保證清乾淨**
+
+FINDING-1 的表格記「SIGINT 給整個 process group → 乾淨,無殘留」。這次兩台 HTTP server
+都用 group SIGINT 停(`setsid` 起、`kill -INT -<pgid>`),結果:
+
+```
+07:06:10 drwxrwxr-x  …-ck8rgxyp  [.slot-1.json.lock]
+07:06:10 drwxrwxr-x  …-hg2a3b6p  [.slot-1.json.lock]
+07:06:20 drwxrwxr-x  …-69eb46dx  [.slot-1.json.lock]
+07:06:20 drwx------  …-heh9otai  [.slot-1.json.lock, slot-2.json]   ← 一份真憑證
+```
+
+三個是 FINDING-1 描述的「rmtree 之後被 filelock 用 umask 重建」的 0775 空目錄,
+第四個是那個更壞的交錯(0700、留下真憑證)。所以上一輪那格是**樣本數 1 的錯覺**,
+不是乾淨路徑。**stdio 正常結束(stdin EOF)才是唯一實測可靠的那條。**
+
+另外注意:兩台 server 留下**四個**目錄 —— 因為 streamable-http 的 lifespan 是
+**per-session**(上一輪已記),一個 process 會建出多個憑證目錄,清理時別只找一個。
+`app.py` 的註解已照這個觀測更正(原本寫「要乾淨就送 group SIGINT」,是錯的)。
+
+### 收工清理
+
+刪掉 7 個孤兒憑證目錄(其中 3 個各含 5 份真憑證,是本機 MCP server 重啟累積的;
+4 個是這次 Phase 1 留下的)。**保留 2 個正在跑的 server 在用的**(用 process 啟動時間
+對出來:`20:36:35` 的 workspace `-c stg`、`06:22:59` 的全機 `-c prd`)。清理後
+`auth_check` 仍 `ok`(300 notebooks),證明沒誤刪活的那份。
