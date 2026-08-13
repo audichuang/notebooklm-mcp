@@ -140,8 +140,9 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
     加鎖方式能讓一個全域槽同時是兩個值**。`from_storage(path=…)` 建構時把路徑注入
     download service,身分於是跟著 client 走,race 從根上消失。
     代價是憑證在 server 生命週期內存在於 0700 目錄下的 0600 檔案(lifespan 結束、
-    含例外路徑,整個目錄刪除)——同機器上的同一個 user 讀得到。**那個 user 本來就
-    讀得到 `/proc/<pid>/environ`**,所以攻擊面沒有實際擴大。
+    含例外路徑,整個目錄刪除;**AsyncExitStack 沒展開完的路徑不保證**,見下方
+    `stack.callback` 那裡的三條註解)——同機器上的同一個 user 讀得到。**那個 user
+    本來就讀得到 `/proc/<pid>/environ`**,所以攻擊面沒有實際擴大。
 
     落檔前先驗一次憑證形狀,不只是為了早點爆:給了 path 之後,SDK 的 **L2 inline
     PSIDTS recovery**(`_auth/psidts_recovery.py` 的 `_resolve_recovery_path`:env 模式
@@ -270,8 +271,18 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 # 兩個講出來的取捨,別讀成「憑證一定被刪掉」:
                 #   - `ignore_errors=True`:刪不掉時無聲跳過(換來的是「清理失敗不會蓋掉
                 #     真正該讀的那個例外」,同 `_account_label` 的取捨)。殘留的是 $TMPDIR
-                #     下一個 0700 目錄,同 user 本來就讀得到 `/proc/<pid>/environ`。
+                #     下一個目錄,同 user 本來就讀得到 `/proc/<pid>/environ`。
                 #   - SIGTERM 不展開 AsyncExitStack,憑證會原封留在 $TMPDIR 直到重開機。
+                #   - **streamable-http 被 Ctrl-C(只有子 process 收到 SIGINT)時,rmtree
+                #     跑完之後目錄還會被「重建」**:uvicorn 的 `capture_signals` 離場時
+                #     `raise_signal` 打斷 AsyncExitStack 展開,遲到的 cookie 回寫走
+                #     `filelock/_util.py` 的 `parent.mkdir(...)` —— 那個 mkdir 走 umask,
+                #     所以留下的是 0775 空目錄(不是 mkdtemp 的 0700)。**不是外洩**:
+                #     憑證檔一律 0600(SDK `_atomic_io` 的 `fchmod`),與目錄模式無關。
+                #     v0.9.13 驗收也量到更壞的交錯:rmtree 刪到一半被打斷,留下兩份真憑證。
+                #     stdio 正常結束(stdin EOF)實測 14→14 刪乾淨;**「Ctrl-C 停 HTTP
+                #     server」不能當成保證清乾淨的路徑**,要乾淨就把 SIGINT 送給整個
+                #     process group。
                 # **不要改成「啟動時掃掉舊目錄」** —— 同機並行的 MCP process 會互刪。
                 stack.callback(shutil.rmtree, cred_dir, ignore_errors=True)
                 for slot, cred in enumerate(creds, start=1):
