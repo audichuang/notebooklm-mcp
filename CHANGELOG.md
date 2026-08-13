@@ -6,9 +6,9 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
-## Unreleased
+## v0.9.13
 
-### v0.9.13-rc 真實驗收抓到的四條(FINDINGS 全文見 `docs/acceptance-v0.9.13-findings.md`)
+### 真實驗收抓到的四條(FINDINGS 全文見 `docs/acceptance-v0.9.13-findings.md`)
 
 - **卡在 ingest 的回錄對清理義務隱形**(中):上傳成功但 NotebookLM 端 ingest 卡死,
   那筆 source 逾 13 小時停在 `kind=unknown` / `ready=false`。`unresolved_upload_candidates()`
