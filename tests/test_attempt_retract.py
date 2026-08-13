@@ -1388,6 +1388,35 @@ async def _abandon_an_unresolved_upload(fake_client, tmp_path, monkeypatch):
     return manifest_path, attempt_id
 
 
+async def test_gate_sees_an_orphan_that_is_still_ingesting(
+    fake_client, tmp_path, monkeypatch
+):
+    """卡在 ingest 的回錄(`kind: unknown` / `ready: false`)也是孤兒,gate 必須擋。
+
+    v0.9.13 真實驗收:上傳成功、NotebookLM 端 ingest 卡死逾 13 小時,那筆 source 一直
+    停在 `kind=unknown` / `ready=false`。候選判準只認 `media` 的話它對清理義務對帳
+    **隱形** → 義務被當成「零候選」結案 → 孤兒永遠留在 notebook 裡被之後每一集讀進
+    生成 context,而工具全程回報成功。那正是這套機制要防的那個結果。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    expected_title = _upload(manifest_path, attempt_id)["expected_title"]
+    ingesting = fake_client.sources._add(
+        expected_title, kind="unknown", is_ready=False
+    )
+
+    with pytest.raises(
+        ValueError, match="retracted feedback sources still in"
+    ) as blocked:
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    assert ingesting in str(blocked.value)
+    assert _pending_ids(manifest_path) == [ingesting]
+
+
 async def test_gate_refuses_to_discharge_an_obligation_it_cannot_identify(
     fake_client, tmp_path, monkeypatch
 ):

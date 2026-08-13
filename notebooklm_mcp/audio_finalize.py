@@ -294,6 +294,29 @@ def upload_dispatch_window_closed(upload: dict, *, now: datetime | None = None) 
     return moment > _dispatched_at_utc(upload) + UPLOAD_DISPATCH_WINDOW
 
 
+def _upload_kind_matches(source: object) -> bool:
+    """回錄 upload 的候選 kind:已分類成 `media`,**或還在 ingest**(未分類且 not ready)。
+
+    v0.9.13 真實驗收:上傳成功但 NotebookLM 端 ingest 卡死,那筆 source 逾 13 小時
+    停在 `kind=unknown` / `ready=false`。只認 `media` 的話它對兩個呼叫端同時隱形——
+    對 finalize 對帳是「零候選 → acceptance_unknown」(續不下去),對清理義務對帳是
+    「零候選 → 義務結案放行」,而孤兒還躺在 notebook 裡被之後每一集讀進生成 context。
+
+    放寬只針對「尚未分類」,不含任何已分類成非 media 的來源;而且 kind 只是五個條件
+    之一,還要 title 逐字等於 `expected_title`(= 上傳當下的檔名)、落在 dispatch 窗內、
+    不在 baseline、未被別顆認領。
+
+    對 finalize 這一側的效果是**把身分綁回來**,不是放行:認回來之後
+    `finalize_attempt` 的 postcondition 仍然要 `_source_ready`,沒 ingest 完照樣停在
+    「postcondition is not satisfied」,而 `_completed_output` 要四個 checkpoint 都
+    completed 才產出。差別在於 retract 這時走的是身分確定的 `stale_source_ids` 路徑。
+    """
+    kind = _kind_value(getattr(source, "kind", None))
+    if kind == "media":
+        return True
+    return kind in (None, "unknown") and not _source_ready(source)
+
+
 def unresolved_upload_candidates(
     manifest: dict, attempt: dict, attempt_id: str, sources: Iterable[object]
 ) -> list[str]:
@@ -324,7 +347,7 @@ def unresolved_upload_candidates(
             or not source_id
             or source_id in baseline
             or source_id in claimed
-            or _kind_value(getattr(source, "kind", None)) != "media"
+            or not _upload_kind_matches(source)
             or getattr(source, "title", None) != expected_title
             or created_at is None
         ):
