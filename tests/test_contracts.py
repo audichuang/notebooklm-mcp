@@ -73,8 +73,8 @@ def test_read_surface_signatures_and_fields():
     from notebooklm._sources import SourcesAPI
     from notebooklm.types import Notebook, Source, SourceFulltext
 
-    # 0.4.1 加了尾端 strict=False(malformed 回應改可 fail-loud;預設維持舊寬鬆行為)
-    assert _params(SourcesAPI.list) == ["self", "notebook_id", "strict"]
+    # 0.8.1 加了 statuses/types 來源過濾。
+    assert _params(SourcesAPI.list) == ["self", "notebook_id", "strict", "statuses", "types"]
     assert _params(SourcesAPI.get_fulltext) == ["self", "notebook_id", "source_id", "output_format"]
     assert _params(NotebooksAPI.get) == ["self", "notebook_id"]
     # chat_ask focuses on a subset / continues a thread via these kwargs.
@@ -364,6 +364,113 @@ def test_add_user_permission_is_positional():
     ]
     kind = inspect.signature(SharingAPI.add_user).parameters["permission"].kind
     assert kind is not inspect.Parameter.KEYWORD_ONLY
+
+
+def test_set_users_signature():
+    """0.8.1 的批次分享契約變動時要同步改 tools_basic._share_each。
+
+    它是 upsert 而不是覆寫；add_user 現在只是它的 wrapper。
+    上游若拿掉尾端 `return await self.get_status(...)` 改回傳 None，
+    `_has_sufficient_permission(None, email)` 會誤判每次成功分享未生效，觸發重跑。
+    """
+    from typing import get_type_hints
+
+    from notebooklm._sharing import SharingAPI
+    from notebooklm.types import ShareStatus
+
+    assert _params(SharingAPI.set_users) == [
+        "self", "notebook_id", "grants", "notify", "welcome_message",
+    ]
+    assert get_type_hints(SharingAPI.set_users)["return"] is ShareStatus
+
+
+def test_rpc_permission_code_helpers():
+    """這條紅了代表要跟著改 notebooklm_mcp/_errors.py 的權限判斷。
+
+    _errors.is_permission_denied 依賴上游的 GrpcStatusCode 與 normalize_rpc_code。
+    """
+    from notebooklm.rpc.types import GrpcStatusCode, normalize_rpc_code
+
+    assert int(GrpcStatusCode.PERMISSION_DENIED) == 7
+    assert normalize_rpc_code(7) == 7
+    assert normalize_rpc_code("7") == 7
+    assert normalize_rpc_code(None) is None
+
+
+def test_ask_result_has_structured_answer_document():
+    """這條紅了代表要跟著改 notebooklm_mcp/tools_basic.py 的 chat_ask。
+
+    chat_ask 的 strip_citations 依賴 answer_document 不帶 inline [N] 標記；
+    上游文件保證無法解碼時它是 empty，而不是 None。
+    tools_basic.chat_ask 的 strip_citations 也依賴 render() 的可讀性(block 之間可分隔)；
+    這條紅了代表要重新決定 chat_ask 該用 .text 還是 .render()。
+    """
+    import dataclasses
+    from typing import get_type_hints
+
+    from notebooklm import AskResult
+    from notebooklm.types import DocumentBlock, StructuredDocument, TextSpan
+
+    fields = {f.name for f in dataclasses.fields(AskResult)}
+    assert "answer_document" in fields
+    assert get_type_hints(AskResult)["answer_document"] is StructuredDocument
+    doc = StructuredDocument(
+        blocks=(
+            DocumentBlock(0, 5, spans=(TextSpan(0, 5, "Hello"),)),
+            DocumentBlock(5, 10, spans=(TextSpan(5, 10, "World"),)),
+        ),
+    )
+    assert doc.render() == "Hello\nWorld"
+    assert "\n" not in doc.text and doc.text == "HelloWorld"
+    assert "[1]" not in doc.render()
+
+
+def test_from_storage_has_allow_headless_guard():
+    """這條紅了代表要跟著改 notebooklm_mcp/app.py 的認證護欄。
+
+    app.py 會顯式傳 False，阻止 L3 headless re-auth。
+    """
+    from notebooklm import NotebookLMClient
+
+    parameter = inspect.signature(NotebookLMClient.from_storage).parameters["allow_headless"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False
+
+
+def test_artifact_exposes_source_ids():
+    """這條紅了代表要跟著改 notebooklm_mcp/tools_basic.py 的 artifact_list。
+
+    artifact_list 會把 source_ids 帶出來作為觀測面；本輪尚未以真實驗收把它當 gate。
+    """
+    import dataclasses
+    from datetime import datetime
+    from typing import get_type_hints
+
+    from notebooklm.types import Artifact
+    import notebooklm.types as notebooklm_types
+
+    assert "source_ids" in {f.name for f in dataclasses.fields(Artifact)}
+    hints = get_type_hints(
+        Artifact,
+        globalns={**vars(notebooklm_types), "datetime": datetime},
+    )
+    assert hints["source_ids"] == tuple[str, ...]
+
+
+def test_psidts_recovery_and_cookie_sanitizer_private_surface():
+    """`_cookies.assert_usable_storage_state` 依賴這幾個上游私有函式判斷
+    「這份憑證會不會讓 0.8.1 的載入路徑觸發 inline RotateCookies」。
+
+    這是私有 API,所以更需要 tripwire:紅了就要回頭確認 heal 的觸發條件
+    有沒有換地方(F1 那個 agent 正在寫用到它們的程式碼,這裡只負責鎖)。
+    """
+    from notebooklm._auth import cookies, psidts_recovery
+
+    assert _params(psidts_recovery._psidts_routes_to_rotate) == [
+        "entries", "to_cookie", "now",
+    ]
+    assert _params(psidts_recovery._storage_cookie) == ["entry"]
+    assert _params(cookies._sanitized_auth_entries) == ["storage_state"]
 
 
 def test_share_status_and_shared_user_fields():

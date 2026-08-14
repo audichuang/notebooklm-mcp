@@ -3,8 +3,9 @@ import json
 import os
 
 import pytest
-from notebooklm.exceptions import NetworkError
+from notebooklm.exceptions import ClientError, NetworkError
 
+from notebooklm_mcp import _errors
 from notebooklm_mcp import tools_basic as t
 from notebooklm_mcp import tools_podcast as p
 
@@ -129,15 +130,19 @@ async def test_removed_status_during_wait_fails_fast(fake_client, tmp_path):
     assert fake_client.sources.titles() == []
 
 
-from notebooklm.exceptions import ClientError
-
-from notebooklm_mcp import _errors
-
-
 def _client_error_without_rpc_code() -> ClientError:
     exc = ClientError("permission denied")
-    del exc.rpc_code
+    try:
+        del exc.rpc_code
+    except AttributeError:
+        pass
     return exc
+
+
+class _NotAClientError(Exception):
+    """形狀跟 ClientError 一樣(有 rpc_code)但型別不對 —— 只有 isinstance guard 擋得住。"""
+
+    rpc_code = 7
 
 
 @pytest.mark.parametrize(
@@ -158,12 +163,15 @@ def test_is_permission_denied_normalizes_upstream_rpc_codes(rpc_code, expected):
 
 
 @pytest.mark.parametrize(
-    "exc",
-    [RuntimeError("permission denied"), _client_error_without_rpc_code()],
-    ids=["not-client-error", "client-error-without-rpc-code"],
+    "exc", [RuntimeError("permission denied"), _NotAClientError()],
+    ids=["not-client-error", "not-client-error-with-rpc-code"],
 )
 def test_is_permission_denied_rejects_non_client_errors_and_missing_codes(exc):
     assert _errors.is_permission_denied(exc) is False
+
+    # 建構在測試執行期，避免上游改變 rpc_code 的屬性形狀時 collection 先炸掉。
+    if isinstance(exc, RuntimeError):
+        assert _errors.is_permission_denied(_client_error_without_rpc_code()) is False
 
 
 def test_is_permission_denied_uses_upstream_normalizer(monkeypatch):

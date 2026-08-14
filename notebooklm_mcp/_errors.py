@@ -30,6 +30,8 @@ def is_permission_denied(exc: BaseException) -> bool:
     gRPC 狀態碼的定義與正規化由上游 API 統一處理,我們不再自行記住數字 7。
     contract 測試 `test_client_error_still_carries_rpc_code` 守著這個欄位還在。
     """
+    # 承重判準：_sources._list_sources 與 tools_basic.notebook_share_with_pool 都依賴它；
+    # 退化會把 not-found 誤判成權限問題，進而繼續白跑整個 pool。
     if not isinstance(exc, ClientError):
         return False
     return normalize_rpc_code(getattr(exc, "rpc_code", None)) == GrpcStatusCode.PERMISSION_DENIED
