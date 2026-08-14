@@ -525,8 +525,14 @@ def test_max_convert_bytes_value_is_locked():
 # ---- v0.2.9 token-diet:P4 chat_ask 清引用 + 可關 references --------------------
 
 async def test_chat_ask_default_keeps_citations_and_references(fake_client):
-    """預設不清標記、照回 references(非破壞性:既有 caller 靠標記對照引用)。"""
+    """預設不清標記、照回 references(非破壞性:既有 caller 靠標記對照引用)。
+    answer_document 刻意設成非空、內容完全不同——證明 strip_citations=False
+    這條路徑完全不讀 answer_document,不會因為它非空就被污染。
+    """
+    from conftest import _structured_document
+
     fake_client.chat.answer_override = "重點一 [1] 重點二 [3, 4]。"
+    fake_client.chat.answer_document = _structured_document("不相關的文件內容")
     out = await t.chat_ask("nb-1", "重點?")
     assert out["answer"] == "重點一 [1] 重點二 [3, 4]。"
     assert out["references"]
@@ -540,13 +546,43 @@ async def test_chat_ask_strip_citations(fake_client):
 
 
 async def test_chat_ask_strip_citations_prefers_answer_document(fake_client):
+    from conftest import _structured_document
+
     fake_client.chat.answer_override = "回答 [1-2] 會被 regex 留下不同內容"
-    fake_client.chat.answer_document_text = "乾淨純文字，不含引用標記"
+    fake_client.chat.answer_document = _structured_document("乾淨純文字，不含引用標記")
 
     out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
 
     assert out["answer"] == "乾淨純文字，不含引用標記"
     assert out["answer"] != "回答 會被 regex 留下不同內容"
+
+
+async def test_chat_ask_strip_citations_falls_back_when_document_is_whitespace_only(
+    fake_client,
+):
+    """render() 非空但全是空白時一樣要退回 `_CITATION_RE`——`.strip()` 判斷
+    要留著,上游只保證解碼不出東西時是**空字串**,沒保證不是全空白。
+    """
+    from conftest import _structured_document
+
+    fake_client.chat.answer_override = "重點一 [1] 收尾。"
+    fake_client.chat.answer_document = _structured_document("   \n")
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+    assert out["answer"] == "重點一 收尾。"
+
+
+async def test_chat_ask_strip_citations_render_keeps_paragraph_breaks(fake_client):
+    """`.render()` 才會在 block 之間插入 `\n`;`.text` 是 offset-faithful、
+    完全不插分隔符,段落會黏在一起。這條測試是 (1) 的絆線——有人把
+    `chat_ask` 改回讀 `.text` 這裡會紅。
+    """
+    from conftest import _structured_document
+
+    fake_client.chat.answer_document = _structured_document(
+        "重點一", "重點二", "重點三"
+    )
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+    assert out["answer"] == "重點一\n重點二\n重點三"
 
 
 async def test_chat_ask_strip_citations_leaves_no_gap_before_punctuation(fake_client):

@@ -284,6 +284,7 @@ async def _share_each(notebook_id: str, emails: list[str], client) -> list[str]:
     except (Exception, asyncio.CancelledError) as exc:
         exc.args = (
             f"notebook {notebook_id!r} set_users 分享失敗({exc})。"
+            "沒分享到的帳號在 failover 換過去時會 permission denied。"
             "請改跑 notebook_share_with_pool 重試對帳。",
         )
         raise
@@ -569,7 +570,7 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
                 "completed": a.is_completed,
                 "status": a.status_str,
                 "created_at": a.created_at.isoformat() if a.created_at else None,
-                "source_ids": list(getattr(a, "source_ids", ()) or ()),
+                "source_ids": list(a.source_ids),
             }
             for a in arts
         ]
@@ -674,9 +675,13 @@ async def chat_ask(
     excluding earlier episodes' audio) so show notes don't get polluted; pass
     conversation_id to continue a thread. Returns answer + citation references +
     conversation_id. NOTE: answer carries citation markers like [1]/[3, 4].
-    產公開文案(show notes)時傳 strip_citations=True 會優先取 0.8.1 的
-    `answer_document.text`；它不帶引用標記，也不帶 Markdown 強調，刻意得到純文字。
-    若文件為空才由 server 清標記、
+    產公開文案(show notes)時傳 strip_citations=True 會優先取 0.8.1 起新增的
+    `answer_document.render()`——上游把同一份文件的三種 rendering 分工寫死:
+    `.text` 是 offset-faithful layout,為了讓 citation `slice()` 精確,刻意不插入
+    任何分隔符(段落會黏在一起),且用 U+FFFC 填補圖片/程式碼區塊等無法解碼的位置
+    (文字裡會留下可見的 ￼);`render()` 才是上游文件寫明「唯一為閱讀而造」的
+    rendering——join 同一個 block 內的文字、分隔不同 block,同樣不帶 markdown
+    標記。render() 為空或全空白時才退回 server 端 `_CITATION_RE` 清標記。
     include_references=False 省掉引用清單——省 token 也免手動 regex;
     預設兩者不動(既有 caller 依標記對照 references 的行為不變)。
     """
@@ -685,10 +690,11 @@ async def chat_ask(
     )
     answer = res.answer
     if strip_citations:
-        document_text = getattr(getattr(res, "answer_document", None), "text", "")
+        document = getattr(res, "answer_document", None)
+        rendered = document.render() if document is not None else ""
         answer = (
-            document_text
-            if isinstance(document_text, str) and document_text.strip()
+            rendered
+            if isinstance(rendered, str) and rendered.strip()
             else _CITATION_RE.sub("", answer)
         )
     return {
@@ -765,10 +771,15 @@ async def notebook_get(notebook_id: str) -> dict:
     """Get a notebook's metadata (title, source count, owner) — confirm you're
     targeting the right notebook before generating or publishing.
 
-    ⚠️ `is_owner` 在 notebook **有任何共享者時一律回 False**,即使呼叫的就是 owner
-    本人(v0.8.1 驗收 G-1:同一份 owner 憑證,移除共享者之後同一個欄位才變 True)。
-    多帳號 pool 模式下自動分享是常態,所以這個欄位實務上恆為 False,**不能拿來判斷
-    歸屬**。行為來自上游 SDK 對 share status 的解讀,不是這一版引入的;我們照實轉發。
+    `is_owner` 由上游 0.8.1(#2125)重新推導:欄位來源從「有沒有共享者」
+    (有共享者就恆為 False,即使呼叫的正是 owner 本人)改成真正的 userRole,
+    並保證 `is_owner == (role is SharePermission.OWNER)`
+    (`Notebook.__setattr__` 在設定 `role` 時同步維持這個不變式)。
+    **同一支呼叫在升版前後回傳值會不同**——升版前多帳號 pool 模式下這個
+    欄位實務上恆為 False,升版後才反映真實歸屬。上游同時新增了語意更完整的
+    `Notebook.role: SharePermission | None`(能分辨 EDITOR/VIEWER,不只是
+    「是不是 owner」),之後要更細緻的權限判斷可以改讀那個欄位——這支工具
+    目前還沒有轉發它。
     """
     nb = await runtime.get_client().notebooks.get(notebook_id)
     # SDK 0.3.4 的 get() 不一定回 None——找不到可能回帶空 id 的物件,兩種都當「找不到」。

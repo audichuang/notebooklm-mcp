@@ -12,7 +12,14 @@ from notebooklm._types.research import (
     ResearchTask,
 )
 from notebooklm.rpc.types import SharePermission
-from notebooklm.types import ArtifactType
+from notebooklm.types import (
+    ArtifactType,
+    BlockKind,
+    DocumentBlock,
+    StructuredDocument,
+    TextSpan,
+    utf16_len,
+)
 
 from notebooklm_mcp import runtime
 
@@ -410,12 +417,37 @@ class FakeNotebooks:
                                "is_owner": True, "created_at": None})()
 
 
+def _structured_document(*paragraphs: str) -> StructuredDocument:
+    """依段落文字組出一份真的 StructuredDocument,段落間 offset 依序累加、
+    無分隔符(鏡射上游 `.text` 的語意)。用真 dataclass 建構,而不是
+    SimpleNamespace,fake 才不會自己長出一套 rendering 語意——上一輪的 finding 根因正是
+    fake 太扁測不出 `.text` 與 `.render()` 的差異。
+    """
+    blocks = []
+    cursor = 0
+    for text in paragraphs:
+        end = cursor + utf16_len(text)
+        blocks.append(
+            DocumentBlock(
+                start_index=cursor,
+                end_index=end,
+                spans=(TextSpan(start_index=cursor, end_index=end, text=text),),
+                kind=BlockKind.PARAGRAPH,
+            )
+        )
+        cursor = end
+    return StructuredDocument(blocks=tuple(blocks))
+
+
 class FakeChat:
     def __init__(self):
         self.calls = []
         # 設定後蓋掉預設 answer——供 strip_citations 測試餵帶 [n] 標記的回答。
         self.answer_override = None
-        self.answer_document_text = ""
+        # 預設空文件(`StructuredDocument()` 的 `.text`/`.render()` 都回 ""),
+        # 讓既有測試維持退回 `_CITATION_RE` regex 的行為;要驗證 render() 路徑
+        # 的測試自己把這個換成 `_structured_document(...)` 建出來的非空文件。
+        self.answer_document: StructuredDocument = StructuredDocument()
 
     # Signature mirrors notebooklm-py 0.3.4 ChatAPI.ask (source_ids + conversation_id).
     async def ask(self, notebook_id, question, source_ids=None, conversation_id=None):
@@ -424,7 +456,7 @@ class FakeChat:
         refs = [type("Ref", (), {"source_id": "src-1", "citation_number": 1,
                                  "cited_text": "引用片段"})()]
         return type("R", (), {"answer": self.answer_override or f"answer to {question}",
-                              "answer_document": SimpleNamespace(text=self.answer_document_text),
+                              "answer_document": self.answer_document,
                               "conversation_id": conversation_id or "conv-1",
                               "references": refs})()
 
@@ -512,6 +544,12 @@ class FakeSharing:
        `get_status`** 的實作永遠是綠的 —— v0.9.1 的單帳號回歸就這樣溜過 591 個測試。
        `get_status` 因此另記 `status_calls`,**刻意不併進 `calls`**:既有測試用
        `calls == []` 表達「沒打 add_user」(冪等那條),混在一起那個意思會消失。
+    5. `set_users` 的 `notify` **預設是 `True`**,不是 `False`——真 SDK 就是這樣
+       (`_sharing.py`)。`notebook_create` 的實作永遠顯式傳 `notify=False`(同一個
+       人的帳號不用收通知信),把 fake 的預設值故意寫反成 `False` 會讓「拿掉那個
+       顯式參數」的回歸測不出來:呼叫端沒傳,Python 用 fake 的預設值頂上,若那個
+       預設值剛好也是 `False`,`calls` 記錄的還是 `False`,既有斷言全綠。預設值
+       跟真 SDK 一致,這個回歸才會讓 `calls` 記錄的變成 `True`,測試才會紅。
     """
 
     def __init__(self):
@@ -558,7 +596,7 @@ class FakeSharing:
             self.existing.append((email, permission))
         return await self.get_status(notebook_id)
 
-    async def set_users(self, notebook_id, grants, notify=False):
+    async def set_users(self, notebook_id, grants, notify=True, welcome_message=""):
         if self.set_users_exc is not None:
             raise self.set_users_exc
         if len({email.casefold() for email, _ in grants}) != len(grants):

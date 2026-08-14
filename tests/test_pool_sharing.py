@@ -275,6 +275,7 @@ async def test_share_failure_message_reports_retry_guidance(fake_client):
     message = str(excinfo.value)
     assert "nb-old" in message
     assert "notebook_share_with_pool" in message
+    assert "permission denied" in message
 
 
 async def test_cancelled_during_share_still_carries_notebook_id(fake_client):
