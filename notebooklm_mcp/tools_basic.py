@@ -264,7 +264,10 @@ async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object
 
 
 async def _share_each(notebook_id: str, emails: list[str], client) -> list[str]:
-    """逐一分享,失敗時說出已經完成到哪裡。
+    """一次送出全部分享,失敗時提供 notebook 對帳指引。
+
+    0.8.1 的 `set_users` 是 upsert,所以不需要逐個 RPC 與進度回報；但取消或逾時
+    仍可能發生在伺服器受理後,錯誤訊息必須保留 notebook id 並指引重跑本工具對帳。
 
     `client` 由呼叫端 `runtime.get_client()` 一次取好傳進來,這裡不回頭讀
     `runtime.get_client()`。呼叫端與這裡之間隔著至少一次 await
@@ -273,37 +276,29 @@ async def _share_each(notebook_id: str, emails: list[str], client) -> list[str]:
     呼叫可能在那個 await 裡撞到配額並 `rotate_client()`——回頭讀全域會讓分享由
     **跟建立/查詢時不同的帳號**發出,對方甚至還看不到這個剛建的 notebook。
     """
-    shared: list[str] = []
+    if not emails:
+        return []
+    grants = [(email, SharePermission.EDITOR) for email in emails]
+    try:
+        status = await client.sharing.set_users(notebook_id, grants, notify=False)
+    except (Exception, asyncio.CancelledError) as exc:
+        exc.args = (
+            f"notebook {notebook_id!r} set_users 分享失敗({exc})。"
+            "請改跑 notebook_share_with_pool 重試對帳。",
+        )
+        raise
     for email in emails:
-        try:
-            status = await client.sharing.add_user(
-                notebook_id, email, SharePermission.EDITOR, notify=False
-            )
-        except (Exception, asyncio.CancelledError) as exc:
-            # 5 帳號 pool 的自動分享 = 4×(SHARE_NOTEBOOK+GET_SHARE_STATUS) = 8 趟
-            # RPC,外層 client timeout 砍掉時呼叫端拿到的是裸例外——不吞掉
-            # CancelledError(繼續往外拋才對),但要讓 notebook id + 已完成進度
-            # 帶得出來,否則雲端留下部分共享的孤兒卻找不回來(這支工具沒有任何
-            # 冪等/對帳機制)。
-            exc.args = (
-                f"notebook {notebook_id!r} 分享給 {email} 失敗({exc})。已分享:{shared}。"
-                "手動補分享(EDITOR),或改跑 notebook_share_with_pool 重試——"
-                "沒分享到的帳號在 failover 換過去時會 permission denied。",
-            )
-            raise
         if not _has_sufficient_permission(status, email):
-            # add_user 回傳的 ShareStatus 是零成本的後檢(那趟 RPC 本來就打了):
+            # set_users 回傳的 ShareStatus 是零成本的後檢(那趟 RPC 本來就打了):
             # workspace 網域政策擋外部分享、email 打錯字、或伺服器靜默忽略,都不會
             # raise,回應成功但實際沒生效——根因在這裡,症狀要等十幾分鐘後
             # failover 才爆(source_add_file 的 title= 後檢立的同一條紀律)。
             raise RuntimeError(
                 f"notebook {notebook_id!r} 分享給 {email} 呼叫成功但未生效"
                 "(get_status 後檢仍不是 EDITOR/OWNER——可能是 workspace 網域政策"
-                f"擋外部分享,或伺服器靜默忽略)。已分享:{shared}。"
-                "請確認 email 正確後改跑 notebook_share_with_pool 重試。"
+                f"擋外部分享,或伺服器靜默忽略)。請改跑 notebook_share_with_pool 重試對帳。"
             )
-        shared.append(email)
-    return shared
+    return list(emails)
 
 
 def _nothing_to_share(notebook_id: str, executor_label: str | None) -> dict:
@@ -553,6 +548,9 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
     here, then artifact_download_audio). Pass kind to filter: "audio", "video",
     "report", "quiz", "flashcards", "mind_map", "infographic", "slide_deck",
     "data_table"; omit for everything.
+
+    `source_ids` 是 0.8.1 的觀測欄位，僅原樣回傳供人工查看；尚未在生產資料驗收，
+    不得拿它當 gate 或驗證條件。
     """
     from notebooklm.types import ArtifactType
 
@@ -571,6 +569,7 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
                 "completed": a.is_completed,
                 "status": a.status_str,
                 "created_at": a.created_at.isoformat() if a.created_at else None,
+                "source_ids": list(getattr(a, "source_ids", ()) or ()),
             }
             for a in arts
         ]
@@ -675,7 +674,9 @@ async def chat_ask(
     excluding earlier episodes' audio) so show notes don't get polluted; pass
     conversation_id to continue a thread. Returns answer + citation references +
     conversation_id. NOTE: answer carries citation markers like [1]/[3, 4].
-    產公開文案(show notes)時傳 strip_citations=True 由 server 清標記、
+    產公開文案(show notes)時傳 strip_citations=True 會優先取 0.8.1 的
+    `answer_document.text`；它不帶引用標記，也不帶 Markdown 強調，刻意得到純文字。
+    若文件為空才由 server 清標記、
     include_references=False 省掉引用清單——省 token 也免手動 regex;
     預設兩者不動(既有 caller 依標記對照 references 的行為不變)。
     """
@@ -684,7 +685,12 @@ async def chat_ask(
     )
     answer = res.answer
     if strip_citations:
-        answer = _CITATION_RE.sub("", answer)
+        document_text = getattr(getattr(res, "answer_document", None), "text", "")
+        answer = (
+            document_text
+            if isinstance(document_text, str) and document_text.strip()
+            else _CITATION_RE.sub("", answer)
+        )
     return {
         "answer": answer,
         "conversation_id": getattr(res, "conversation_id", None),

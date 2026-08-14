@@ -73,7 +73,7 @@ class FakeArtifacts:
         self.artifacts.extend(arts)
 
     def seed_artifact(self, artifact_id, *, kind=ArtifactType.SLIDE_DECK, title="art",
-                      completed=True, failed=False, status=None):
+                      completed=True, failed=False, status=None, source_ids=()):
         """建一筆帶完整 preflight 欄位的 artifact(kind / is_completed / is_failed /
         status_str)——`get_or_none` 的 preflight 靠這四個判斷。"""
         art = SimpleNamespace(
@@ -82,6 +82,7 @@ class FakeArtifacts:
             status_str=status or ("failed" if failed else
                                   "completed" if completed else "processing"),
             created_at=datetime.now(timezone.utc),
+            source_ids=tuple(source_ids),
         )
         self.artifacts.append(art)
         return art
@@ -139,6 +140,7 @@ class FakeArtifacts:
                 title="Audio Overview",
                 kind=ArtifactType.AUDIO,
                 created_at=datetime.now(timezone.utc),
+                source_ids=(),
             )
         )
         return type("S", (), {"task_id": task_id, "is_failed": False})()
@@ -413,6 +415,7 @@ class FakeChat:
         self.calls = []
         # 設定後蓋掉預設 answer——供 strip_citations 測試餵帶 [n] 標記的回答。
         self.answer_override = None
+        self.answer_document_text = ""
 
     # Signature mirrors notebooklm-py 0.3.4 ChatAPI.ask (source_ids + conversation_id).
     async def ask(self, notebook_id, question, source_ids=None, conversation_id=None):
@@ -421,6 +424,7 @@ class FakeChat:
         refs = [type("Ref", (), {"source_id": "src-1", "citation_number": 1,
                                  "cited_text": "引用片段"})()]
         return type("R", (), {"answer": self.answer_override or f"answer to {question}",
+                              "answer_document": SimpleNamespace(text=self.answer_document_text),
                               "conversation_id": conversation_id or "conv-1",
                               "references": refs})()
 
@@ -518,6 +522,8 @@ class FakeSharing:
         # 一支只打 `get_status` 的實作永遠是綠的。
         self.status_calls: list[str] = []
         self.add_user_exc = None
+        self.set_users_exc = None
+        self.set_users_result = None
         # 只對這個 email 失敗(部分成功的進度回報要測得到「已經完成到哪裡」)。
         self.fail_on_email: str | None = None
         # 既有共享者。寫 `"a@x.com"` 等同 `("a@x.com", SharePermission.EDITOR)`;
@@ -551,6 +557,21 @@ class FakeSharing:
             self.existing = [e for e in self.existing if self._entry(e)[0] != email]
             self.existing.append((email, permission))
         return await self.get_status(notebook_id)
+
+    async def set_users(self, notebook_id, grants, notify=False):
+        if self.set_users_exc is not None:
+            raise self.set_users_exc
+        if len({email.casefold() for email, _ in grants}) != len(grants):
+            raise ValueError("duplicate email")
+        self.calls.append((notebook_id, grants, notify))
+        for email, permission in grants:
+            if email not in self.silently_ignore:
+                self.existing = [
+                    e for e in self.existing
+                    if self._entry(e)[0].casefold() != email.casefold()
+                ]
+                self.existing.append((email, permission))
+        return self.set_users_result if self.set_users_result is not None else await self.get_status(notebook_id)
 
     async def get_status(self, notebook_id):
         self.status_calls.append(notebook_id)

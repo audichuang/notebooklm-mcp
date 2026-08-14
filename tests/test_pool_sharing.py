@@ -4,6 +4,8 @@ failover 換帳號後是拿新帳號對**同一個 notebook_id** 送出 —— �
 的話,整條 pool 是空談。而 MCP 自己建的 notebook 預設只屬於建立它的帳號,**沒有任何
 機制建立那個前置狀態**:驗收時是人工用 SDK 補上才走得動,真實使用者不會知道要做這件事。
 """
+from types import SimpleNamespace
+
 import pytest
 from conftest import FakeClient
 from notebooklm.exceptions import ClientError
@@ -25,8 +27,8 @@ async def test_notebook_create_shares_with_the_rest_of_the_pool(fake_client):
     assert out["shared_with"] == ["b@x.com", "c@x.com"], "作用中的帳號自己不用分享"
     # notify=False:這是同一個人的帳號,不需要寄通知信。
     assert fake_client.sharing.calls == [
-        (out["notebook_id"], "b@x.com", SharePermission.EDITOR, False),
-        (out["notebook_id"], "c@x.com", SharePermission.EDITOR, False),
+        (out["notebook_id"], [("b@x.com", SharePermission.EDITOR),
+                               ("c@x.com", SharePermission.EDITOR)], False),
     ]
 
 
@@ -60,7 +62,7 @@ async def test_share_is_dispatched_by_the_client_that_created_the_notebook(fake_
 
     assert out["shared_with"] == ["b@x.com"]
     assert account_a.sharing.calls == [
-        (out["notebook_id"], "b@x.com", SharePermission.EDITOR, False)
+        (out["notebook_id"], [("b@x.com", SharePermission.EDITOR)], False)
     ], "分享必須由建立 notebook 的 a@x.com 發出,不是 create() 之後遊標停的位置"
     assert account_b.sharing.calls == [], (
         "b@x.com 只是被並行呼叫推到的游標位置,它自己還看不到剛建的 notebook,"
@@ -95,7 +97,7 @@ async def test_share_with_pool_backfills_an_existing_notebook(fake_client):
     assert out["shared_with"] == ["c@x.com"], "只補缺的那些"
     assert out["already_shared"] == ["b@x.com"]
     assert fake_client.sharing.calls == [
-        ("nb-old", "c@x.com", SharePermission.EDITOR, False)
+        ("nb-old", [("c@x.com", SharePermission.EDITOR)], False)
     ]
 
 
@@ -153,7 +155,7 @@ async def test_share_failure_names_the_notebook_it_left_behind(fake_client):
     否則呼叫端只看到一個錯誤,不知道雲端多了一個孤兒 notebook,也無從手動補分享。
     """
     runtime.set_clients([("a@x.com", fake_client), ("b@x.com", fake_client)])
-    fake_client.sharing.add_user_exc = RuntimeError("boom")
+    fake_client.sharing.set_users_exc = RuntimeError("boom")
 
     with pytest.raises(RuntimeError) as excinfo:
         await basic.notebook_create("分享會失敗")
@@ -176,8 +178,8 @@ async def test_existing_viewer_is_not_counted_as_already_shared(fake_client):
     assert out["already_shared"] == [], "VIEWER 不夠,不能算已分享"
     assert out["shared_with"] == ["b@x.com"]
     assert fake_client.sharing.calls == [
-        ("nb-old", "b@x.com", SharePermission.EDITOR, False)
-    ], "升級成 EDITOR 不需要新路徑——add_user 本身就是 upsert"
+        ("nb-old", [("b@x.com", SharePermission.EDITOR)], False)
+    ], "升級成 EDITOR 直接走 set_users 的 upsert"
 
 
 async def test_owner_is_never_the_target_of_add_user(fake_client):
@@ -196,8 +198,8 @@ async def test_owner_is_never_the_target_of_add_user(fake_client):
     out = await basic.notebook_share_with_pool("nb-old")
 
     assert out["shared_by"] == "b@x.com", "owner 是唯一改得動分享設定的那個"
-    assert "b@x.com" not in [c[1] for c in fake_client.sharing.calls], (
-        "不能對 owner 打 add_user(EDITOR)"
+    assert all("b@x.com" not in [email for email, _ in c[1]] for c in fake_client.sharing.calls), (
+        "不能對 owner 打 set_users(EDITOR)"
     )
     # 最後防線本身:OWNER 必須跟 EDITOR 一樣算「已足夠」。主路徑攔掉之後,只剩
     # 這一層擋得住降權,而它已經沒有整合層測試會走到——所以直接釘判準。
@@ -256,30 +258,23 @@ async def test_duplicate_pool_slots_are_deduped(fake_client):
 
     assert out["shared_with"] == ["b@x.com"]
     assert fake_client.sharing.calls == [
-        (out["notebook_id"], "b@x.com", SharePermission.EDITOR, False)
+        (out["notebook_id"], [("b@x.com", SharePermission.EDITOR)], False)
     ]
 
 
-async def test_share_failure_message_reports_progress_so_far(fake_client):
-    """部分成功的進度回報要說出「已經完成到哪裡」——docstring 自稱的行為從沒被
-    驗證過(既有的唯一失敗測試讓*第一次*呼叫就失敗,shared 因此恆為 [])。
-    這裡讓第二個 peer 失敗,第一個必須已經分享成功,訊息要看得到它。
-    """
+async def test_share_failure_message_reports_retry_guidance(fake_client):
+    """單趟 set_users 失敗時仍要留下 notebook 與可重試的對帳指引。"""
     runtime.set_clients([
         ("a@x.com", fake_client), ("b@x.com", fake_client), ("c@x.com", fake_client),
     ])
-    fake_client.sharing.add_user_exc = RuntimeError("boom")
-    fake_client.sharing.fail_on_email = "c@x.com"
+    fake_client.sharing.set_users_exc = RuntimeError("boom")
 
     with pytest.raises(RuntimeError) as excinfo:
         await basic.notebook_share_with_pool("nb-old")
 
     message = str(excinfo.value)
-    assert "b@x.com" in message, "第一個已經分享成功,訊息要說出來"
-    assert "c@x.com" in message, "這個是失敗的那一個"
-    assert fake_client.sharing.calls == [
-        ("nb-old", "b@x.com", SharePermission.EDITOR, False)
-    ], "第二個 add_user 沒真的打成,只有第一個記進 calls"
+    assert "nb-old" in message
+    assert "notebook_share_with_pool" in message
 
 
 async def test_cancelled_during_share_still_carries_notebook_id(fake_client):
@@ -291,7 +286,7 @@ async def test_cancelled_during_share_still_carries_notebook_id(fake_client):
     import asyncio
 
     runtime.set_clients([("a@x.com", fake_client), ("b@x.com", fake_client)])
-    fake_client.sharing.add_user_exc = asyncio.CancelledError()
+    fake_client.sharing.set_users_exc = asyncio.CancelledError()
 
     with pytest.raises(asyncio.CancelledError) as excinfo:
         await basic.notebook_create("砍線")
@@ -299,6 +294,21 @@ async def test_cancelled_during_share_still_carries_notebook_id(fake_client):
     message = str(excinfo.value)
     assert "已建立" in message
     assert fake_client.notebooks.created[-1] in message
+    assert "notebook_share_with_pool" in message
+
+
+async def test_set_users_postcheck_rejects_a_missing_email(fake_client):
+    runtime.set_clients([("a@x.com", fake_client), ("b@x.com", fake_client)])
+    fake_client.sharing.set_users_result = SimpleNamespace(
+        shared_users=[SimpleNamespace(email="a@x.com", permission=SharePermission.OWNER)]
+    )
+
+    with pytest.raises(RuntimeError, match="b@x.com"):
+        await basic.notebook_share_with_pool("nb-old")
+
+    assert fake_client.sharing.calls == [
+        ("nb-old", [("b@x.com", SharePermission.EDITOR)], False)
+    ]
 
 
 def _denied() -> ClientError:
@@ -368,7 +378,7 @@ async def test_share_is_executed_by_the_owner_not_merely_someone_who_can_see_it(
     assert out["shared_by"] == "owner@x", "只有 owner 改得動分享設定"
     assert out["already_shared"] == ["editor@x"], "作用中那個已經是 EDITOR,不必重打"
     assert out["shared_with"] == ["third@x"]
-    assert [c[1] for c in owner_c.sharing.calls] == ["third@x"]
+    assert owner_c.sharing.calls[0][1] == [("third@x", SharePermission.EDITOR)]
     assert editor_c.sharing.calls == [], "EDITOR 不該被拿來打 add_user"
     assert runtime.active_account() == "editor@x", "定位 owner 不得改動輪替游標"
 

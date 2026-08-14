@@ -17,10 +17,11 @@ from notebooklm.types import ArtifactType
 from notebooklm_mcp import tools_basic as t
 
 
-def _fake_art(id, title, kind, completed=True):
+def _fake_art(id, title, kind, completed=True, source_ids=("src-1", "src-2")):
     return type("A", (), {
         "id": id, "title": title, "kind": kind, "is_completed": completed,
         "status_str": "completed" if completed else "processing", "created_at": None,
+        "source_ids": source_ids,
     })()
 
 
@@ -105,7 +106,8 @@ async def test_artifact_list_maps_fields(fake_client):
     rows = out["artifacts"]
     assert [r["artifact_id"] for r in rows] == ["a1", "a2"]
     assert rows[0] == {"artifact_id": "a1", "title": "EP01 心法篇", "kind": "audio",
-                       "completed": True, "status": "completed", "created_at": None}
+                       "completed": True, "status": "completed", "created_at": None,
+                       "source_ids": ["src-1", "src-2"]}
     assert rows[1]["kind"] == "report" and rows[1]["completed"] is False
     assert rows[1]["status"] == "processing"
 
@@ -535,6 +537,16 @@ async def test_chat_ask_strip_citations(fake_client):
     out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
     assert "[" not in out["answer"] and "]" not in out["answer"]
     assert "重點一" in out["answer"] and "重點二" in out["answer"]
+
+
+async def test_chat_ask_strip_citations_prefers_answer_document(fake_client):
+    fake_client.chat.answer_override = "回答 [1-2] 會被 regex 留下不同內容"
+    fake_client.chat.answer_document_text = "乾淨純文字，不含引用標記"
+
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+
+    assert out["answer"] == "乾淨純文字，不含引用標記"
+    assert out["answer"] != "回答 會被 regex 留下不同內容"
 
 
 async def test_chat_ask_strip_citations_leaves_no_gap_before_punctuation(fake_client):
