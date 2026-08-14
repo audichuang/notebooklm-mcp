@@ -127,3 +127,57 @@ async def test_removed_status_during_wait_fails_fast(fake_client, tmp_path):
     # 停在 wait 之後,沒進 rename/download/自上傳。
     assert [c[0] for c in fake_client.artifacts.calls] == ["generate_audio", "wait"]
     assert fake_client.sources.titles() == []
+
+
+from notebooklm.exceptions import ClientError
+
+from notebooklm_mcp import _errors
+
+
+def _client_error_without_rpc_code() -> ClientError:
+    exc = ClientError("permission denied")
+    del exc.rpc_code
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("rpc_code", "expected"),
+    [
+        (7, True),
+        ("7", True),
+        (5, False),
+        ("5", False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_is_permission_denied_normalizes_upstream_rpc_codes(rpc_code, expected):
+    exc = ClientError("request failed", rpc_code=rpc_code)
+
+    assert _errors.is_permission_denied(exc) is expected
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [RuntimeError("permission denied"), _client_error_without_rpc_code()],
+    ids=["not-client-error", "client-error-without-rpc-code"],
+)
+def test_is_permission_denied_rejects_non_client_errors_and_missing_codes(exc):
+    assert _errors.is_permission_denied(exc) is False
+
+
+def test_is_permission_denied_uses_upstream_normalizer(monkeypatch):
+    seen = []
+
+    def fake_normalize_rpc_code(code):
+        seen.append(code)
+        return 7
+
+    monkeypatch.setattr(_errors, "normalize_rpc_code", fake_normalize_rpc_code)
+
+    assert _errors.is_permission_denied(ClientError("request failed", rpc_code="7"))
+    assert seen == ["7"]
+
+
+def test_notebook_access_denied_remains_runtime_error():
+    assert issubclass(_errors.NotebookAccessDenied, RuntimeError)

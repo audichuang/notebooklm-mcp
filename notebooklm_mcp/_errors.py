@@ -8,9 +8,7 @@ v0.9.0 真實驗收(Phase 9-1)之後 `tools_basic.notebook_share_with_pool` 也�
 from __future__ import annotations
 
 from notebooklm.exceptions import ClientError
-
-# gRPC PERMISSION_DENIED。pool 換到的帳號看不到那個 notebook 時就是這個。
-_RPC_PERMISSION_DENIED = 7
+from notebooklm.rpc.types import GrpcStatusCode, normalize_rpc_code
 
 
 class NotebookAccessDenied(RuntimeError):
@@ -29,10 +27,9 @@ class NotebookAccessDenied(RuntimeError):
 def is_permission_denied(exc: BaseException) -> bool:
     """這個例外是不是「這個帳號看不到那個 notebook」。
 
-    `rpc_code` 的型別在上游是 `str | int | None`,所以兩種形狀都比。
+    gRPC 狀態碼的定義與正規化由上游 API 統一處理,我們不再自行記住數字 7。
     contract 測試 `test_client_error_still_carries_rpc_code` 守著這個欄位還在。
     """
     if not isinstance(exc, ClientError):
         return False
-    code = getattr(exc, "rpc_code", None)
-    return code == _RPC_PERMISSION_DENIED or str(code) == str(_RPC_PERMISSION_DENIED)
+    return normalize_rpc_code(getattr(exc, "rpc_code", None)) == GrpcStatusCode.PERMISSION_DENIED
