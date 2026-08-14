@@ -6,11 +6,15 @@
 而 `tests/test_client_pool.py::test_precheck_agrees_with_the_sdk_strict_loader` 只守著
 `app` 那一份,`auth_cli` 那份會靜默漂走。
 
+0.8.1 之後上游 `extract_cookies_from_storage` 對缺 key 會直接丟英文
+`ValueError`,但對空字串 value 仍會放行。因此這裡包住上游例外並統一成中文訊息,
+再補上非空值檢查；兩個入口看到的接受條件與錯誤語意仍只有這一份。上游原文留在
+例外 cause,方便追查版本差異。
+
 判準本身的推導(為什麼**值**也要非空)在 `app._write_credential_file` 的 docstring:
-`extract_cookies_from_storage` 只看 `name`,空字串 value 照樣算「這個 cookie 存在」,
-strict loader 則把空值當不存在。兩邊分岔時,預驗證放行、SDK 開檔時 raise,正好掉進
-L2 inline PSIDTS recovery 那條 `except` —— 而它會在本 process 內發一次 RotateCookies,
-把 3 VM 共用的 cookie 重鑄掉。
+strict loader 把空值當不存在。若預驗證放行、SDK 開檔時 raise,正好掉進 L2 inline
+PSIDTS recovery 那條 `except` —— 而它會在本 process 內發一次 RotateCookies,把 3 VM
+共用的 cookie 重鑄掉。
 """
 from __future__ import annotations
 
@@ -25,7 +29,10 @@ def assert_usable_storage_state(storage_state: Any) -> dict[str, str]:
     兩個 caller 各自包裝自己的錯誤語意(CLI 的 `SystemExit` / startup 的
     `RuntimeError`),但**接受條件只有這裡這一份**。
     """
-    cookies = extract_cookies_from_storage(storage_state)
+    try:
+        cookies = extract_cookies_from_storage(storage_state)
+    except ValueError as exc:
+        raise ValueError(f"必要 cookie 缺少或值是空的:上游驗證失敗:{exc}") from exc
     if blank := sorted(name for name in MINIMUM_REQUIRED_COOKIES if not cookies.get(name)):
         raise ValueError(f"必要 cookie 缺少或值是空的:{blank}")
     return cookies

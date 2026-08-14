@@ -36,6 +36,7 @@ _AUTH_JSON_ENV = "NOTEBOOKLM_AUTH_JSON"
 _DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
 _HEADLESS_REAUTH_ENV = "NOTEBOOKLM_HEADLESS_REAUTH"
 _REFRESH_CMD_ENV = "NOTEBOOKLM_REFRESH_CMD"
+_REFRESH_CMD_MIDSESSION_ENV = "NOTEBOOKLM_REFRESH_CMD_MIDSESSION"
 
 # inline auth(Doppler 注入 NOTEBOOKLM_AUTH_JSON)期間強制成這樣;None = 刪掉該變數。
 # 共同理由:**任何會在本 process 內重鑄 cookie 的機制,在 inline 模式都是淨損失**——
@@ -50,11 +51,16 @@ _REFRESH_CMD_ENV = "NOTEBOOKLM_REFRESH_CMD"
 #     `build_httpx_cookies_from_storage`,`_should_try_refresh` 只看這個變數有沒有值)
 #     —— 同一類「本 process 內重鑄」。生產目前沒設,但 `docs/superpowers/specs/` 的
 #     設計文件把它列為「Doppler 過期自癒」方案,誰照著做就打開這條路。
-# 三者都只在 inline 模式壓:登入機讀本機 storage_state 時,重鑄後寫得回檔案,是對的行為。
+#   - REFRESH_CMD_MIDSESSION 刪掉:0.8.1 新增的 L2.5「session 中途跑 refresh cmd」開關。
+#     但 `NOTEBOOKLM_REFRESH_CMD` 已經刪掉,沒有 cmd 就沒有東西可跑,所以這是防禦深度,
+#     不是修現存漏洞；仍顯式壓掉,別讓紀律取決於別人的環境。
+# 這些 override 都只在 inline 模式壓:登入機讀本機 storage_state 時,重鑄後寫得回檔案,
+# 是對的行為。
 _INLINE_AUTH_ENV_OVERRIDES: dict[str, str | None] = {
     _DISABLE_KEEPALIVE_ENV: "1",
     _HEADLESS_REAUTH_ENV: None,
     _REFRESH_CMD_ENV: None,
+    _REFRESH_CMD_MIDSESSION_ENV: None,
 }
 
 
@@ -291,12 +297,17 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 stack.callback(shutil.rmtree, cred_dir, ignore_errors=True)
                 for slot, cred in enumerate(creds, start=1):
                     path = _write_credential_file(cred, cred_dir / f"slot-{slot}.json", slot)
+                    # 0.8.1 將 L3 護欄升為建構參數；與上面刪除
+                    # `NOTEBOOKLM_HEADLESS_REAUTH` 的 env 護欄互補,兩層都保留。
                     client = await stack.enter_async_context(
-                        NotebookLMClient.from_storage(path=str(path))
+                        NotebookLMClient.from_storage(path=str(path), allow_headless=False)
                     )
                     pool.append((await _account_label(client, slot), client))
             else:
-                client = await stack.enter_async_context(NotebookLMClient.from_storage())
+                # 顯式關閉 0.8.1 的 L3 headless re-auth；也與刪除同名 env 的護欄互補。
+                client = await stack.enter_async_context(
+                    NotebookLMClient.from_storage(allow_headless=False)
+                )
                 pool.append((await _account_label(client, 1), client))
             _reject_duplicate_accounts(pool)
             runtime.set_clients(pool)

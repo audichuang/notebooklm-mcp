@@ -80,20 +80,38 @@ def test_auth_cli_and_pool_precheck_share_one_cookie_policy(tmp_path, monkeypatc
     assert auth_cli.assert_usable_storage_state is _cookies.assert_usable_storage_state
     assert app.assert_usable_storage_state is _cookies.assert_usable_storage_state
 
-    # 空值 PSIDTS(實跑重現過的那個形狀)在兩個入口都必須被拒。
-    blank_psidts = {
-        "cookies": [
-            {"name": "SID", "value": "x", "domain": ".google.com", "path": "/"},
-            {"name": "__Secure-1PSIDTS", "value": "", "domain": ".google.com", "path": "/"},
-        ]
-    }
-    with pytest.raises(ValueError, match="必要 cookie"):
-        _cookies.assert_usable_storage_state(blank_psidts)
-
     target = tmp_path / "storage_state.json"
     target.write_text("old-secret", encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", ["notebooklm-auth", "--out", str(target)])
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(blank_psidts)))
-    with pytest.raises(SystemExit, match="Invalid storage_state"):
-        auth_cli.main()
+    states = [
+        (
+            {
+                "cookies": [
+                    {"name": "SID", "value": "x", "domain": ".google.com", "path": "/"},
+                ]
+            },
+            "Missing required cookies",
+        ),
+        (
+            {
+                "cookies": [
+                    {"name": "SID", "value": "x", "domain": ".google.com", "path": "/"},
+                    {"name": "__Secure-1PSIDTS", "value": "", "domain": ".google.com", "path": "/"},
+                ]
+            },
+            None,
+        ),
+    ]
+    for state, upstream_message in states:
+        with pytest.raises(ValueError, match="必要 cookie 缺少或值是空的") as exc_info:
+            _cookies.assert_usable_storage_state(state)
+        if upstream_message:
+            assert upstream_message in str(exc_info.value.__cause__)
+
+        with pytest.raises(RuntimeError, match="必要 cookie 缺少或值是空的"):
+            app._write_credential_file(json.dumps(state), tmp_path / "pool.json", 1)
+
+        monkeypatch.setattr(sys, "argv", ["notebooklm-auth", "--out", str(target)])
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(state)))
+        with pytest.raises(SystemExit, match="Invalid storage_state: 必要 cookie"):
+            auth_cli.main()
     assert target.read_text(encoding="utf-8") == "old-secret"

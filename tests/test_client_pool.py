@@ -354,6 +354,33 @@ async def test_inline_auth_suppresses_the_refresh_command(monkeypatch):
     assert app.os.environ["NOTEBOOKLM_REFRESH_CMD"] == "doppler-relogin"
 
 
+def test_inline_auth_suppresses_mid_session_refresh_command():
+    assert app._INLINE_AUTH_ENV_OVERRIDES["NOTEBOOKLM_REFRESH_CMD_MIDSESSION"] is None
+
+
+async def test_from_storage_disables_headless_reauth_explicitly(monkeypatch):
+    calls = []
+
+    def fake(*args, **kwargs):
+        calls.append(kwargs)
+        return _FakeClientCM()
+
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", fake)
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", _cred("1"))
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", _cred("2"))
+
+    async with app._lifespan(app.mcp):
+        pass
+    assert all(call.get("allow_headless") is False for call in calls)
+    assert all("path" in call for call in calls)
+
+    calls.clear()
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON_2")
+    async with app._lifespan(app.mcp):
+        pass
+    assert calls == [{"allow_headless": False}]
+
+
 async def test_empty_base_credential_fails_loud(monkeypatch):
     """空字串檢查原本只做在 `_2` 以後,第 1 槽沒做 —— 教科書級的補一半。"""
     monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "   ")
