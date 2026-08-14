@@ -154,20 +154,21 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
     PSIDTS recovery**(`_auth/psidts_recovery.py` 的 `_resolve_recovery_path`:env 模式
     回 None 而拒絕、有 path 就接受)會重新武裝,而它**不受
     `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管**,會在本 process 內發一次 RotateCookies。
-    它唯一的入口是 strict loader 丟 ValueError 那條 `except`,所以先在這裡用**同樣的
-    條件**驗過,那條路就到不了:「不在本 process 內重鑄 cookie」的紀律維持不變,
-    而缺憑證仍然是啟動時的大聲失敗(現況),不會被靜默治好 —— ADR-0010 §Transparency
-    最怕的正是 pool 默默吸收一個快死的憑證。
+    0.8.1 的生產路徑即使 strict loader 使用 NAME_ONLY 而接受過期 PSIDTS,heal 自己的
+    routability predicate 仍會把它判成可觸發 RotateCookies;因此這裡要同時做本地
+    非空值 backstop 與 routability gate,兩道都通過才給 SDK path。這樣「不在本 process
+    內重鑄 cookie」的紀律維持不變,而缺憑證或不可路由的憑證都在啟動時大聲失敗 ——
+    ADR-0010 §Transparency 最怕的正是 pool 默默吸收一個快死的憑證。
 
-    **「同樣的條件」是這裡的全部重點,而它曾經不成立**:`extract_cookies_from_storage`
-    (`_auth/cookies.py:216`)只看 `name`,空字串 value 照樣算「這個 cookie 存在」;
-    strict loader(同檔 `:446`)則是 `… or not name or not value`,空值等於不存在。
-    於是 `__Secure-1PSIDTS: ""` 的憑證預驗證放行、SDK 開檔時 raise,recovery 真的
-    發出 RotateCookies POST(實跑重現過)。所以必要 cookie 的**值**也要在這裡驗。
-    兩者仍非逐字等價:同名 cookie 跨網域時 extract 取優先網域那一筆、strict 取任一
-    非空的,所以「高優先網域空值 + 低優先網域有值」我們會拒、SDK 會收。方向是
-    fail-closed(啟動時大聲失敗),可接受;真正的等價前提由
-    `tests/test_client_pool.py::test_precheck_agrees_with_the_sdk_strict_loader` 守著。
+    **0.8.1 的實際語義是**:`extract_cookies_from_storage` 的 sanitizer 在解析階段
+    就把空字串 value 的 cookie row 整列丟棄,所以缺 key 與空值對上游而言都是同一種
+    `ValueError`;本地必要 cookie 非空檢查現在是 backstop,用來擋繞過 sanitizer 的
+    呼叫端與上游未來改回放行空值的情況。真正擋住 heal 的承重牆是後面的 routability
+    gate:它直接使用上游 heal 自己的 `_psidts_routes_to_rotate` 判準,拒絕已過期或
+    scope 錯的 PSIDTS,把原本靜默啟動並重鑄改成 fail-loud。憑證過期本來就該更新
+    Doppler;舊行為讓其他 VM 下次啟動才炸,而且看不出根因。
+    `tests/test_client_pool.py::test_precheck_agrees_with_the_sdk_strict_loader` 現在
+    只守著指定 good / blank case 的等價前提;過期情境由同檔的獨立測試守著。
 
     **判準本身住在 `_cookies.assert_usable_storage_state`,`auth_cli` 走同一支。**
     那條 tripwire 只認得這裡的呼叫路徑,所以 CLI 自己抄一份的話它照不到 —— 上游改語義

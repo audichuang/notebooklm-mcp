@@ -13,6 +13,12 @@ from pathlib import Path
 
 import pytest
 
+from notebooklm.auth import (
+    NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV,
+    NOTEBOOKLM_REFRESH_CMD_ENV,
+    NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV,
+)
+from notebooklm._auth.headless_reauth import NOTEBOOKLM_HEADLESS_REAUTH_ENV
 from notebooklm_mcp import app, runtime
 
 
@@ -68,9 +74,10 @@ def _cred(tag: str) -> str:
 def _blank_psidts_cred() -> str:
     """必要 cookie 都「在」,但 `__Secure-1PSIDTS` 的值是空字串。
 
-    這是實跑重現出來的形狀:`extract_cookies_from_storage` 只看 name(空值照樣算
-    存在)而 strict loader 把空值當不存在,兩邊結論相反 —— 於是預驗證放行、SDK 開檔
-    時 raise,正好掉進 L2 PSIDTS recovery 那條 except。
+    真實 0.8.1 的 sanitizer 會在解析階段把空值 row 整列丟掉,所以缺 key 與空值對
+    `extract_cookies_from_storage` 而言都是同一種 raise。這裡仍保留本地非空值檢查作
+    backstop,擋繞過 sanitizer 的呼叫端與上游未來改回放行空值的情況;真正擋住過期或
+    scope 錯 PSIDTS 觸發 heal 的承重牆是 routability gate。
     """
     return json.dumps(
         {
@@ -82,6 +89,43 @@ def _blank_psidts_cred() -> str:
             ]
         }
     )
+
+
+def _expired_psidts_cred() -> str:
+    """必要 cookie 都非空,但 PSIDTS 的固定 expiry 已經在過去。"""
+    return json.dumps(
+        {
+            "cookies": [
+                {"name": "SID", "value": "x", "domain": ".google.com", "path": "/"},
+                {
+                    "name": "__Secure-1PSIDTS",
+                    "value": "t",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": 1,
+                },
+                {"name": "APISID", "value": "a", "domain": ".google.com", "path": "/"},
+                {"name": "SAPISID", "value": "s", "domain": ".google.com", "path": "/"},
+            ]
+        }
+    )
+
+
+def test_blank_value_is_rejected_even_if_upstream_stops_doing_it(monkeypatch):
+    """本地非空值檢查目前零覆蓋——註解掉它,全套照樣可能全綠,因為真實 0.8.1 的
+    sanitizer 已經在 `extract_cookies_from_storage` 那一關把空值攔下來。這條測試
+    monkeypatch 掉上游函式、繞過 sanitizer,直接打中本地分支,鎖住它是 backstop
+    這件事本身：上游哪天把預設行為改回「放行空值」,這裡不能跟著失守。
+    """
+    from notebooklm_mcp import _cookies
+
+    monkeypatch.setattr(
+        _cookies,
+        "extract_cookies_from_storage",
+        lambda _storage_state: {"SID": "x", "__Secure-1PSIDTS": ""},
+    )
+    with pytest.raises(ValueError, match="必要 cookie 缺少或值是空的"):
+        _cookies.assert_usable_storage_state({"cookies": []})
 
 
 def _strict_loader_accepts(cred: str, path: Path) -> bool:
@@ -355,7 +399,14 @@ async def test_inline_auth_suppresses_the_refresh_command(monkeypatch):
 
 
 def test_inline_auth_suppresses_mid_session_refresh_command():
-    assert app._INLINE_AUTH_ENV_OVERRIDES["NOTEBOOKLM_REFRESH_CMD_MIDSESSION"] is None
+    """綁上游公開常數,避免測試只拿 app 自己的字面 key 做同義反覆。"""
+    assert set(app._INLINE_AUTH_ENV_OVERRIDES) >= {
+        NOTEBOOKLM_REFRESH_CMD_ENV,
+        NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV,
+        NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV,
+        NOTEBOOKLM_HEADLESS_REAUTH_ENV,
+    }
+    assert app._INLINE_AUTH_ENV_OVERRIDES[NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV] is None
 
 
 async def test_from_storage_disables_headless_reauth_explicitly(monkeypatch):
@@ -371,6 +422,7 @@ async def test_from_storage_disables_headless_reauth_explicitly(monkeypatch):
 
     async with app._lifespan(app.mcp):
         pass
+    assert len(calls) == 2
     assert all(call.get("allow_headless") is False for call in calls)
     assert all("path" in call for call in calls)
 
@@ -477,16 +529,15 @@ async def test_empty_account_label_warns_before_fallback(caplog):
 
 
 def test_precheck_agrees_with_the_sdk_strict_loader(tmp_path):
-    """整段安全論證的地基:落檔前的預驗證與 SDK strict loader **判定必須一致**。
+    """`good` / `blank-psidts` 兩個 case 上,預驗證與 SDK strict loader 判定一致。
 
-    「給 SDK 一個真 path ⇒ L2 PSIDTS recovery 重新武裝,但我們先驗過所以那條
-    except 到不了」—— 這句話只有在兩顆驗證器的接受條件相同時才成立,而它們曾經
-    不同(`_auth/cookies.py`:`extract_cookies_from_storage` 只看 name,
-    `_build_httpx_cookies_from_storage_strict` 連 value 也要非空),空值 PSIDTS
-    因此預驗證放行、開檔時 raise、真的發出一次 RotateCookies POST(實跑重現)。
+    真實 0.8.1 的 sanitizer 會把空值 row 整列丟掉,所以缺 key 與空值對上游而言都是
+    同一種 raise;本地非空值檢查是 backstop,而 routability gate 才是擋住 heal 的承重牆。
+    這兩個 case 的等價前提仍由這條迴圈守著。
 
-    這條測試就是那個假設的絆線:上游哪天讓兩者再度分岔(任一方向),這裡先紅,
-    而不是等 3 VM 共用的 cookie 被本 process 重鑄掉才發現。
+    expired-psidts 沒塞進同一個迴圈,因為 strict loader 使用 NAME_ONLY、明說 never
+    fires a heal,不檢查過期;它的生產路徑差異由
+    `test_precheck_rejects_expired_psidts_that_would_trigger_heal` 獨立守住。
     """
     cases = {"good": (_cred("1"), True), "blank-psidts": (_blank_psidts_cred(), False)}
     for tag, (cred, accepted) in cases.items():
@@ -496,6 +547,31 @@ def test_precheck_agrees_with_the_sdk_strict_loader(tmp_path):
         assert _precheck_accepts(cred, tmp_path / f"{tag}-precheck.json") is accepted, (
             f"{tag}:預驗證與 strict loader 分岔了 —— L2 recovery 那條路又打開了"
         )
+
+
+def test_precheck_rejects_expired_psidts_that_would_trigger_heal(tmp_path, monkeypatch):
+    """expired-psidts：strict loader 不檢查過期,但生產路徑會因 not routable 觸發 heal。
+
+    這條測試直接證明兩件事：(a) 我們的預驗證拒收；(b) 若繞過 gate 走生產路徑,
+    `_recover_psidts_inline` 確實會被呼叫。heal 本身不連網,只驗證它是否被觸發。
+    """
+    from notebooklm._auth import psidts_recovery
+    from notebooklm._auth.cookies import build_httpx_cookies_from_storage
+
+    cred = _expired_psidts_cred()
+    assert _strict_loader_accepts(cred, tmp_path / "expired-strict.json") is True
+    assert _precheck_accepts(cred, tmp_path / "expired-precheck.json") is False
+
+    heal_calls = []
+    monkeypatch.setattr(
+        psidts_recovery,
+        "_recover_psidts_inline",
+        lambda path: heal_calls.append(path) or False,
+    )
+    raw_path = tmp_path / "expired-raw.json"
+    raw_path.write_text(cred, encoding="utf-8")
+    build_httpx_cookies_from_storage(raw_path)
+    assert heal_calls == [raw_path]
 
 
 @pytest.mark.parametrize(
