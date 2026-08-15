@@ -9,30 +9,42 @@
 真實 0.8.1 的 sanitizer 會在解析階段把空字串 value 的 cookie row 整列丟棄,所以
 缺 key 與空 value 對 `extract_cookies_from_storage` 而言是同一種 `ValueError`。因此
 這裡包住上游例外並統一成中文訊息,再補上非空值檢查作 backstop,擋繞過 sanitizer 的
-呼叫端與上游未來改回放行空值的情況。真正擋住過期或 scope 錯 PSIDTS 觸發 inline
-RotateCookies heal 的承重牆是後面的 routability gate。上游原文留在例外 cause,方便
-追查版本差異。
+呼叫端與上游未來改回放行空值的情況。routability 只回答 PSIDTS 能不能 refresh,
+不回答這份憑證能不能用;真正擋住 inline RotateCookies heal 的承重牆是
+`app._lifespan` 持有 rotation flock。上游原文留在例外 cause,方便追查版本差異。
 
 判準本身的推導(為什麼**值**也要非空)在 `app._write_credential_file` 的 docstring:
 本地非空值檢查是 backstop,用來擋繞過 sanitizer 的呼叫端與上游未來的語義變更;
-routability gate 則直接沿用上游 heal 的 predicate。兩道檢查都先於給 SDK 的明確
-storage path,所以不會讓 L2 inline PSIDTS recovery 在本 process 內發出 RotateCookies,
-把 3 VM 共用的 cookie 重鑄掉。
+`would_trigger_inline_heal` 只沿用上游 heal 的 predicate 產生可見 warning。真正的
+rotation flock 在 `app._lifespan` 持有,所以不會讓 L2 inline PSIDTS recovery 在
+本 process 內發出 RotateCookies,把 3 VM 共用的 cookie 重鑄掉。
 """
 from __future__ import annotations
 
 from typing import Any
 
-from notebooklm.auth import MINIMUM_REQUIRED_COOKIES, extract_cookies_from_storage
 from notebooklm._auth.cookies import _sanitized_auth_entries
 from notebooklm._auth.psidts_recovery import _psidts_routes_to_rotate, _storage_cookie
+from notebooklm.auth import MINIMUM_REQUIRED_COOKIES, extract_cookies_from_storage
+
+
+def would_trigger_inline_heal(storage_state: Any) -> bool:
+    """判斷上游的 routability predicate 是否會觸發 inline heal。
+
+    這個 predicate 問的是 `__Secure-1PSIDTS` 能不能 refresh,不是這份憑證能不能
+    使用;沿用上游的 cookie sanitizer 與 expiry/domain 判準,避免本地重寫一份。
+    """
+    entries = list(_sanitized_auth_entries(storage_state))
+    return not _psidts_routes_to_rotate(entries, to_cookie=_storage_cookie)
 
 
 def assert_usable_storage_state(storage_state: Any) -> dict[str, str]:
     """驗一份已解析的 storage_state,回傳 cookie 對照表;不合用就 `ValueError`。
 
     兩個 caller 各自包裝自己的錯誤語意(CLI 的 `SystemExit` / startup 的
-    `RuntimeError`),但**接受條件只有這裡這一份**。
+    `RuntimeError`),但**接受條件只有這裡這一份**。這裡只驗必要 cookie 存在且
+    非空;上游 routability 問的是能不能 refresh,不是能不能用,所以不可 routable
+    的憑證不在這裡拒收,由 `app._lifespan` 的 rotation flock 擋住 inline heal。
     """
     try:
         cookies = extract_cookies_from_storage(storage_state)
@@ -40,11 +52,4 @@ def assert_usable_storage_state(storage_state: Any) -> dict[str, str]:
         raise ValueError(f"必要 cookie 缺少或值是空的:上游驗證失敗:{exc}") from exc
     if blank := sorted(name for name in MINIMUM_REQUIRED_COOKIES if not cookies.get(name)):
         raise ValueError(f"必要 cookie 缺少或值是空的:{blank}")
-    entries = list(_sanitized_auth_entries(storage_state))
-    if not _psidts_routes_to_rotate(entries, to_cookie=_storage_cookie):
-        raise ValueError(
-            "這份憑證會讓 SDK 在本 process 內重鑄 cookie（inline RotateCookies heal）；"
-            "重鑄值寫不回 Doppler,還會作廢其他 VM 正在使用的那份。請更新 Doppler 憑證,"
-            "並執行 scripts/sync-auth.sh。"
-        )
     return cookies

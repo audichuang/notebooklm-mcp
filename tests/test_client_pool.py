@@ -77,7 +77,7 @@ def _blank_psidts_cred() -> str:
     真實 0.8.1 的 sanitizer 會在解析階段把空值 row 整列丟掉,所以缺 key 與空值對
     `extract_cookies_from_storage` 而言都是同一種 raise。這裡仍保留本地非空值檢查作
     backstop,擋繞過 sanitizer 的呼叫端與上游未來改回放行空值的情況;真正擋住過期或
-    scope 錯 PSIDTS 觸發 heal 的承重牆是 routability gate。
+    scope 錯 PSIDTS 觸發 heal 的承重牆是 rotation flock。
     """
     return json.dumps(
         {
@@ -111,6 +111,15 @@ def _expired_psidts_cred() -> str:
     )
 
 
+def _expired_unique_psidts_cred() -> str:
+    """建立一份 PSIDTS 值可辨識的過期憑證,避免 warning 測試誤判短字串。"""
+    storage_state = json.loads(_expired_psidts_cred())
+    for cookie in storage_state["cookies"]:
+        if cookie["name"] == "__Secure-1PSIDTS":
+            cookie["value"] = "unique-secret-psidts-marker-should-not-leak"
+    return json.dumps(storage_state)
+
+
 def test_blank_value_is_rejected_even_if_upstream_stops_doing_it(monkeypatch):
     """本地非空值檢查目前零覆蓋——註解掉它,全套照樣可能全綠,因為真實 0.8.1 的
     sanitizer 已經在 `extract_cookies_from_storage` 那一關把空值攔下來。這條測試
@@ -122,9 +131,9 @@ def test_blank_value_is_rejected_even_if_upstream_stops_doing_it(monkeypatch):
     monkeypatch.setattr(
         _cookies,
         "extract_cookies_from_storage",
-        lambda _storage_state: {"SID": "x", "__Secure-1PSIDTS": ""},
+        lambda _storage_state: {"SID": "", "__Secure-1PSIDTS": "t"},
     )
-    with pytest.raises(ValueError, match="必要 cookie 缺少或值是空的"):
+    with pytest.raises(ValueError, match=r"必要 cookie 缺少或值是空的:\['SID'\]"):
         _cookies.assert_usable_storage_state({"cookies": []})
 
 
@@ -532,8 +541,10 @@ def test_precheck_agrees_with_the_sdk_strict_loader(tmp_path):
     """`good` / `blank-psidts` 兩個 case 上,預驗證與 SDK strict loader 判定一致。
 
     真實 0.8.1 的 sanitizer 會把空值 row 整列丟掉,所以缺 key 與空值對上游而言都是
-    同一種 raise;本地非空值檢查是 backstop,而 routability gate 才是擋住 heal 的承重牆。
-    這兩個 case 的等價前提仍由這條迴圈守著。
+    同一種 raise;本地非空值檢查是 backstop。現在擋住 heal 的承重牆是
+    `app._lifespan` 持有每個 pool 檔案的 rotation flock,
+    `assert_usable_storage_state` 只負責必要 cookie 的存在與非空。這兩個 case 的
+    等價前提仍由這條迴圈守著。
 
     expired-psidts 沒塞進同一個迴圈,因為 strict loader 使用 NAME_ONLY、明說 never
     fires a heal,不檢查過期;它的生產路徑差異由
@@ -549,29 +560,54 @@ def test_precheck_agrees_with_the_sdk_strict_loader(tmp_path):
         )
 
 
-def test_precheck_rejects_expired_psidts_that_would_trigger_heal(tmp_path, monkeypatch):
-    """expired-psidts：strict loader 不檢查過期,但生產路徑會因 not routable 觸發 heal。
+def test_precheck_warns_but_accepts_expired_psidts_that_would_trigger_heal(
+    tmp_path, caplog
+):
+    """routability 只代表能否 refresh,不代表這份憑證能否使用。"""
+    from notebooklm_mcp import _cookies
 
-    這條測試直接證明兩件事：(a) 我們的預驗證拒收；(b) 若繞過 gate 走生產路徑,
-    `_recover_psidts_inline` 確實會被呼叫。heal 本身不連網,只驗證它是否被觸發。
-    """
+    cred = _expired_unique_psidts_cred()
+    assert _cookies.would_trigger_inline_heal(json.loads(cred)) is True
+
+    path = tmp_path / "expired-precheck.json"
+    with caplog.at_level(logging.WARNING, logger=app.logger.name):
+        assert app._write_credential_file(cred, path, 1) == path
+
+    assert path.read_text(encoding="utf-8") == cred
+    assert "NOTEBOOKLM_AUTH_JSON" in caplog.text
+    assert "unique-secret-psidts-marker-should-not-leak" not in caplog.text
+
+
+async def test_pool_rotation_flock_blocks_inline_heal(monkeypatch, tmp_path):
+    """pool 持有 rotation flock 時,生產 loader 不應進入真正的 rotation POST。"""
     from notebooklm._auth import psidts_recovery
     from notebooklm._auth.cookies import build_httpx_cookies_from_storage
 
     cred = _expired_psidts_cred()
-    assert _strict_loader_accepts(cred, tmp_path / "expired-strict.json") is True
-    assert _precheck_accepts(cred, tmp_path / "expired-precheck.json") is False
-
-    heal_calls = []
+    rotation_calls = []
     monkeypatch.setattr(
         psidts_recovery,
-        "_recover_psidts_inline",
-        lambda path: heal_calls.append(path) or False,
+        "_attempt_rotation",
+        lambda path, entries: rotation_calls.append(path) or False,
     )
-    raw_path = tmp_path / "expired-raw.json"
-    raw_path.write_text(cred, encoding="utf-8")
-    build_httpx_cookies_from_storage(raw_path)
-    assert heal_calls == [raw_path]
+
+    unlocked_path = tmp_path / "unlocked.json"
+    unlocked_path.write_text(cred, encoding="utf-8")
+    assert build_httpx_cookies_from_storage(unlocked_path) is not None
+    assert rotation_calls == [unlocked_path]
+
+    rotation_calls.clear()
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", cred)
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", cred)
+    built = []
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage(built))
+
+    async with app._lifespan(app.mcp):
+        slot_path = built[0].path
+        assert slot_path is not None
+        assert build_httpx_cookies_from_storage(slot_path) is not None
+
+    assert rotation_calls == []
 
 
 @pytest.mark.parametrize(

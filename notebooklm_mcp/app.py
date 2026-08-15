@@ -26,9 +26,11 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from notebooklm import NotebookLMClient
+from notebooklm._auth.keepalive import _file_lock_try_exclusive
+from notebooklm._auth.psidts_recovery import _rotation_lock_path
 
 from . import runtime
-from ._cookies import assert_usable_storage_state
+from ._cookies import assert_usable_storage_state, would_trigger_inline_heal
 
 logger = logging.getLogger(__name__)
 
@@ -153,20 +155,20 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
     落檔前先驗一次憑證形狀,不只是為了早點爆:給了 path 之後,SDK 的 **L2 inline
     PSIDTS recovery**(`_auth/psidts_recovery.py` 的 `_resolve_recovery_path`:env 模式
     回 None 而拒絕、有 path 就接受)會重新武裝,而它**不受
-    `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管**,會在本 process 內發一次 RotateCookies。
+    `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管**,可能在本 process 內發一次 RotateCookies。
     0.8.1 的生產路徑即使 strict loader 使用 NAME_ONLY 而接受過期 PSIDTS,heal 自己的
-    routability predicate 仍會把它判成可觸發 RotateCookies;因此這裡要同時做本地
-    非空值 backstop 與 routability gate,兩道都通過才給 SDK path。這樣「不在本 process
-    內重鑄 cookie」的紀律維持不變,而缺憑證或不可路由的憑證都在啟動時大聲失敗 ——
-    ADR-0010 §Transparency 最怕的正是 pool 默默吸收一個快死的憑證。
+    routability predicate 仍會把它判成可觸發 RotateCookies;因此這裡保留可見 warning,
+    並由 `_lifespan` 持有 rotation flock 擋住 POST。這樣「不在本 process 內重鑄 cookie」
+    的紀律維持不變,而缺憑證仍在啟動時大聲失敗,不可 refresh 的憑證則可見但不會弄掛
+    server。
 
     **0.8.1 的實際語義是**:`extract_cookies_from_storage` 的 sanitizer 在解析階段
     就把空字串 value 的 cookie row 整列丟棄,所以缺 key 與空值對上游而言都是同一種
     `ValueError`;本地必要 cookie 非空檢查現在是 backstop,用來擋繞過 sanitizer 的
-    呼叫端與上游未來改回放行空值的情況。真正擋住 heal 的承重牆是後面的 routability
-    gate:它直接使用上游 heal 自己的 `_psidts_routes_to_rotate` 判準,拒絕已過期或
-    scope 錯的 PSIDTS,把原本靜默啟動並重鑄改成 fail-loud。憑證過期本來就該更新
-    Doppler;舊行為讓其他 VM 下次啟動才炸,而且看不出根因。
+    呼叫端與上游未來改回放行空值的情況。routability 問的是能不能 refresh,不是能不
+    能用,所以 `would_trigger_inline_heal` 只發 warning;真正擋住 heal 的承重牆是
+    `_lifespan` 的 rotation flock。憑證過期或 scope 錯本來就該更新 Doppler,warning
+    會留下根因,但不會讓一個壞槽位弄掛整台 server。
     `tests/test_client_pool.py::test_precheck_agrees_with_the_sdk_strict_loader` 現在
     只守著指定 good / blank case 的等價前提;過期情境由同檔的獨立測試守著。
 
@@ -178,7 +180,15 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
     try:
         # 判準本身在 `_cookies.assert_usable_storage_state` —— `auth_cli` 走同一支,
         # 上面那段等價論證才不會只在其中一邊被維護(見該 module 的 docstring)。
-        assert_usable_storage_state(json.loads(cred))
+        storage_state = json.loads(cred)
+        assert_usable_storage_state(storage_state)
+        if would_trigger_inline_heal(storage_state):
+            logger.warning(
+                "%s 的 __Secure-1PSIDTS 已過期或 scope 無法送到 accounts.google.com;"
+                "0.8.1 會觸發 inline RotateCookies heal,但 _lifespan 的 rotation flock "
+                "會擋住 POST。請更新 Doppler 憑證,並執行 scripts/sync-auth.sh。",
+                name,
+            )
     except Exception as exc:  # ValueError(JSON / 缺 cookie / 空值)、型別不對…一律具名重拋
         raise RuntimeError(
             f"{name} 不是可用的 storage_state:{type(exc).__name__}: {exc}"
@@ -298,14 +308,34 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 stack.callback(shutil.rmtree, cred_dir, ignore_errors=True)
                 for slot, cred in enumerate(creds, start=1):
                     path = _write_credential_file(cred, cred_dir / f"slot-{slot}.json", slot)
-                    # 0.8.1 將 L3 護欄升為建構參數；與上面刪除
+                    # 上游前提 4 把這把 lock 定義成「另一個 process 正在 rotation」;
+                    # 我們持有它是宣告這個槽位檔的 rotation 由外部 Doppler 負責。
+                    # 這不是 hack:這正是上游 heal 用來決定是否能發 POST 的協調語義,
+                    # 而且鎖會跟著 AsyncExitStack 持有到 client 關閉之後才釋放。
+                    # 它同時擋過期與 scope 錯兩種觸發原因;真實 Doppler prd 的 slot 1
+                    # 曾是 `.youtube.com`,送不到 `accounts.google.com`,只看 expires
+                    # 擋不了這種 scope 錯。
+                    lock_path = _rotation_lock_path(path)
+                    if lock_path is not None:
+                        acquired = stack.enter_context(_file_lock_try_exclusive(lock_path))
+                        if not acquired:
+                            logger.warning(
+                                "%s 的 rotation flock 無法取得;另一個 process 可能正在"
+                                "處理同一份私有憑證檔。",
+                                _slot_env_name(slot),
+                            )
+                    # 0.8.1 將 L3 護欄升為建構參數;與上面刪除
                     # `NOTEBOOKLM_HEADLESS_REAUTH` 的 env 護欄互補,兩層都保留。
                     client = await stack.enter_async_context(
                         NotebookLMClient.from_storage(path=str(path), allow_headless=False)
                     )
                     pool.append((await _account_label(client, slot), client))
             else:
-                # 顯式關閉 0.8.1 的 L3 headless re-auth；也與刪除同名 env 的護欄互補。
+                # 單帳號 inline 不需要這把 flock:`_resolve_recovery_path` 先看 path,
+                # 再看 `resolve_auth_json_env()`。這條分支不傳 path,而 inline_auth 為真
+                # 時 env 一定存在,所以 resolver 回 None,上游 heal 直接 decline。
+                # 沒有 inline_auth 時則是本機 storage_state,rotation 寫回本機檔案即可。
+                # 顯式關閉 0.8.1 的 L3 headless re-auth;也與刪除同名 env 的護欄互補。
                 client = await stack.enter_async_context(
                     NotebookLMClient.from_storage(allow_headless=False)
                 )
