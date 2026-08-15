@@ -63,6 +63,30 @@ def _handle_client(account: str | None) -> object:
     )
 
 
+def _explain_no_research(exc: BaseException, account: str | None) -> BaseException:
+    """輪詢到 `no_research` 才逾時的話,把「你可能傳錯帳號了」講出來。
+
+    **v0.9.14 真實驗收 FINDING-G。** `_handle_client` 只擋得住「account 根本不在 pool 裡」
+    (那條當場 raise 並列出可用帳號,實測完好);**傳了 pool 內、但不是發起者的帳號**
+    走的是另一條路 —— SDK 一路輪詢到 timeout,而 `timeout` 預設是 **1800 秒**,
+    也就是要等滿 30 分鐘才知道自己傳錯,訊息裡只有一句 `last status: no_research`。
+
+    諷刺的是正確的診斷文字這個檔案裡本來就有(見 `_handle_client`),只差沒有帶到這條
+    路徑上。判準用訊息裡的 `no_research` 而不是例外型別:SDK 對逾時用的是內建
+    `TimeoutError`,型別分不出「等太久」與「這個帳號根本看不到它」。
+    """
+    if "no_research" not in str(exc):
+        return exc
+    who = account or f"{runtime.active_account()!r}(未傳 account,用的是此刻作用中的帳號)"
+    return RuntimeError(
+        f"{exc}\n"
+        f"全程只輪詢到 no_research,而這次用的帳號是 {who} —— research handle **只有發起它的"
+        "那個帳號**輪詢得到(把 notebook 分享給全 pool 也沒用)。請把 `research_start` 回傳的 "
+        f"`account` 原樣傳進來重跑(這個 server 的 pool:{runtime.all_accounts()});"
+        "不要重新 research_start,那會再燒一次配額。"
+    )
+
+
 def _status_str(task) -> str:
     status = getattr(task, "status", None)
     return getattr(status, "value", None) or str(status)
@@ -156,9 +180,14 @@ async def research_wait(
         raise ValueError("max_report_chars must be an int")
     if max_report_chars < 0:
         raise ValueError("max_report_chars must be >= 0(0 = 只回字數,不回本文)")
-    task = await _handle_client(account).research.wait_for_completion(
-        notebook_id, task_id, timeout=timeout
-    )
+    # `_handle_client` 要留在 try **外面**:它自己就會對「account 不在 pool 裡」當場 raise,
+    # 而那句訊息裡也有 `no_research` 三個字 —— 包進去會被下面的判準二次包裝,把一條乾淨的
+    # ValueError 變成 RuntimeError(既有測試 test_research_refuses_an_account_that_is_not_in_this_pool 守著)。
+    client = _handle_client(account)
+    try:
+        task = await client.research.wait_for_completion(notebook_id, task_id, timeout=timeout)
+    except Exception as exc:
+        raise _explain_no_research(exc, account) from exc
     status_str = _status_str(task)
     if status_str != "completed":
         # SDK 對 FAILED 是「回傳」而非 raise;放行的話呼叫端會拿到空候選清單,

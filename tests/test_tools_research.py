@@ -347,6 +347,49 @@ async def test_research_import_uses_the_account_that_owns_the_handle(fake_client
     assert other.research.calls == []
 
 
+async def test_research_wait_explains_no_research_on_timeout(fake_client, monkeypatch):
+    """v0.9.14 FINDING-G:傳了 **pool 內、但不是發起者**的帳號時,沒有人擋得住。
+
+    `_handle_client` 只認得「account 根本不在 pool 裡」;pool 內傳錯的那條會一路輪詢到
+    timeout,而 `timeout` 預設 **1800 秒** —— 實測要等滿才看到一句 `last status: no_research`,
+    完全沒提「你可能傳錯帳號了」。而正確的診斷文字這個模組裡本來就有(`_handle_client`)。
+    """
+    other = FakeClient()
+    runtime.set_clients([("a@x", fake_client), ("b@x", other)])
+
+    async def never_finishes(*args, **kwargs):
+        raise TimeoutError(
+            "Research task res-1 in notebook nb-1 timed out after 1800.0s "
+            "(last status: no_research)"
+        )
+
+    monkeypatch.setattr(other.research, "wait_for_completion", never_finishes)
+    with pytest.raises(RuntimeError) as excinfo:
+        await r.research_wait("nb-1", task_id="res-1", account="b@x")
+    msg = str(excinfo.value)
+    assert "no_research" in msg                     # 原訊息保留,不是換掉
+    assert "b@x" in msg                             # 這次用了誰
+    assert "research_start" in msg                  # 怎麼修
+    assert "a@x" in msg                             # pool 裡還有誰
+    assert "不要重新 research_start" in msg          # 別再燒一次配額
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
+
+
+async def test_research_wait_does_not_dress_up_an_ordinary_timeout(fake_client, monkeypatch):
+    """判別力那一半:單純等太久(有在跑、只是慢)不該被說成「你傳錯帳號」。
+
+    這一輪就實際撞到過:一顆 artifact 在遠端卡了 85 分鐘,狀態全程是 in_progress。
+    """
+
+    async def slow(*args, **kwargs):
+        raise TimeoutError("Research task res-1 timed out after 60.0s (last status: in_progress)")
+
+    monkeypatch.setattr(fake_client.research, "wait_for_completion", slow)
+    with pytest.raises(TimeoutError) as excinfo:
+        await r.research_wait("nb-1", task_id="res-1")
+    assert "research_start" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize("tool", ("wait", "import"))
 async def test_research_refuses_an_account_that_is_not_in_this_pool(fake_client, tool):
     """指名了 pool 裡沒有的帳號就當場說明白 —— 讓人輪詢滿 timeout 才拿到

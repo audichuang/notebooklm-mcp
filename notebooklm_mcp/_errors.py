@@ -24,6 +24,27 @@ class NotebookAccessDenied(RuntimeError):
     """
 
 
+def raise_if_access_denied(exc: BaseException, notebook_id: str) -> None:
+    """權限被拒就翻成帶指引的 `NotebookAccessDenied`,其餘原樣放行給呼叫端重拋。
+
+    **v0.9.14 真實驗收 FINDING-F**:這段訊息原本只長在 `_sources._list_sources` 裡,
+    於是 `notebook_get` 撞到同一件事時裸拋上游的 `ClientError` —— 而上游那句講的是
+    `authuser` account-routing、指向 SDK issue #114/#294,**與 pool 情境無關且沒有任何
+    修復指引**。skill 正是引導呼叫端「生成前先 `notebook_get` 確認目標對不對」,
+    所以那是實務上最先撞到的一支。兩處共用同一段文字,不再各寫一份(同本檔頂端的紀律)。
+
+    只轉權限那一種:網路錯誤、認證過期一路吞下去只會把根因埋掉。
+    """
+    if not is_permission_denied(exc):
+        return
+    raise NotebookAccessDenied(
+        f"{exc}\n這個帳號對 notebook {notebook_id} 沒有存取權。"
+        "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— 呼叫 "
+        "notebook_share_with_pool(notebook_id=...) 補分享給其餘帳號(EDITOR)後再重試;"
+        "MCP 自建 notebook(v0.8.1 起)已自動分享,這通常是舊版建立或在網頁上手動建立的。"
+    ) from exc
+
+
 def is_permission_denied(exc: BaseException) -> bool:
     """這個例外是不是「這個帳號看不到那個 notebook」。
 

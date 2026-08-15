@@ -809,9 +809,14 @@ async def test_pool_is_torn_down_even_if_a_later_client_fails(monkeypatch):
 
     monkeypatch.setattr(app.NotebookLMClient, "from_storage", fake)
 
-    with pytest.raises(ValueError, match="boom"):
+    # v0.9.14 FINDING-B:建 client 失敗一定要講出是**哪一個槽位**(原本 SDK 的
+    # `_LoginRedirectError` 原樣穿透,9 槽 pool 裡看不出要去重登哪一個帳號),
+    # 所以這裡改成 RuntimeError + 槽位名;原因用 `from exc` 保留在 __cause__。
+    with pytest.raises(RuntimeError, match="NOTEBOOKLM_AUTH_JSON_2") as excinfo:
         async with app._lifespan(app.mcp):
             pass
+    assert "boom" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, ValueError)
     assert [c.closed for c in built] == [True]
     assert not built[0].path.parent.exists()
     # 失敗也要還原 env,別把中間狀態留給下一段程式。

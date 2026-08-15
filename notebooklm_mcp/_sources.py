@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from ._errors import NotebookAccessDenied, is_permission_denied
+from ._errors import raise_if_access_denied
 
 
 async def _list_sources(client, notebook_id: str):
@@ -25,14 +25,10 @@ async def _list_sources(client, notebook_id: str):
     try:
         return await client.sources.list(notebook_id)
     except Exception as exc:
-        if not is_permission_denied(exc):
-            raise
-        raise NotebookAccessDenied(
-            f"{exc}\n這個帳號對 notebook {notebook_id} 沒有存取權。"
-            "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— 呼叫 "
-            "notebook_share_with_pool(notebook_id=...) 補分享給其餘帳號(EDITOR)後再重試;"
-            "MCP 自建 notebook(v0.8.1 起)已自動分享,這通常是舊版建立或在網頁上手動建立的。"
-        ) from exc
+        # 訊息本體住在 `_errors.raise_if_access_denied`,與 `notebook_get` 共用一份
+        # (v0.9.14 FINDING-F:原本只有這裡有,那支裸拋上游訊息)。
+        raise_if_access_denied(exc, notebook_id)
+        raise
 
 
 def to_source_ids(value: object) -> list[str] | None:

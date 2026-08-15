@@ -5,6 +5,7 @@ import httpx
 import pytest
 from notebooklm.exceptions import (
     AuthError,
+    ClientError,
     DecodingError,
     NetworkError,
     RateLimitError,
@@ -12,11 +13,19 @@ from notebooklm.exceptions import (
     ServerError,
 )
 from notebooklm.rpc.types import AudioFormat, AudioLength, SharePermission
-from notebooklm.types import ArtifactType
+from notebooklm.types import (
+    ArtifactType,
+    BlockKind,
+    DocumentBlock,
+    StructuredDocument,
+    TextSpan,
+    utf16_len,
+)
 
 from conftest import _structured_document
 
 from notebooklm_mcp import tools_basic as t
+from notebooklm_mcp._errors import NotebookAccessDenied
 
 
 def _fake_art(id, title, kind, completed=True, source_ids=("src-1", "src-2")):
@@ -103,6 +112,32 @@ async def test_notebook_get_forwards_role_name(fake_client):
     ))
     out = await t.notebook_get("nb-7")
     assert out["role"] == "VIEWER"
+
+
+async def test_notebook_get_translates_permission_denied_with_the_repair_hint(fake_client):
+    """v0.9.14 FINDING-F:`notebook_get` 撞權限不足時原本裸拋上游的 `ClientError`。
+
+    上游那句講的是 `authuser` account-routing、指向 SDK issue #114/#294 —— **與多帳號
+    pool 情境無關,而且沒有任何修復指引**。而 skill 正是引導呼叫端「生成前先
+    `notebook_get` 確認目標對不對」,所以實務上這是最先撞到的一支
+    (`_list_sources` 早就有這層翻譯,兩處不該只有一處對)。
+    """
+    fake_client.notebooks.get = AsyncMock(
+        side_effect=ClientError("permission denied", rpc_code=7)
+    )
+    with pytest.raises(NotebookAccessDenied) as excinfo:
+        await t.notebook_get("nb-7")
+    assert "notebook_share_with_pool" in str(excinfo.value)
+    assert "nb-7" in str(excinfo.value)
+    # 繼承 RuntimeError 才會被兩個 dispatch 呼叫端當成「乾淨終態」處理。
+    assert isinstance(excinfo.value, RuntimeError)
+
+
+async def test_notebook_get_does_not_swallow_other_failures(fake_client):
+    """只轉權限那一種 —— 網路錯誤/認證過期吞下去只會把根因埋掉(同 `_list_sources` 的紀律)。"""
+    fake_client.notebooks.get = AsyncMock(side_effect=ClientError("boom", rpc_code=5))
+    with pytest.raises(ClientError, match="boom"):
+        await t.notebook_get("nb-7")
 
 
 async def test_artifact_wait_fail_closed(fake_client):
@@ -579,6 +614,102 @@ async def test_chat_ask_strip_citations_falls_back_when_document_is_whitespace_o
     fake_client.chat.answer_document = _structured_document("   \n")
     out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
     assert out["answer"] == "重點一 收尾。"
+
+
+def _doc_with_kinds(*pairs) -> StructuredDocument:
+    """`(text, BlockKind)` 序列 → 真的 StructuredDocument;text 為空表示**上游沒解出 spans**。
+
+    這正是 v0.9.14 驗收在真實回答上看到的形狀:`CODE_BLOCK` 的 spans 是空的。
+    """
+    blocks, cursor = [], 0
+    for text, kind in pairs:
+        end = cursor + utf16_len(text)
+        spans = (TextSpan(start_index=cursor, end_index=end, text=text),) if text else ()
+        blocks.append(DocumentBlock(start_index=cursor, end_index=end, spans=spans, kind=kind))
+        cursor = end
+    return StructuredDocument(blocks=tuple(blocks))
+
+
+async def test_chat_ask_strip_citations_removes_inline_bold(fake_client):
+    """v0.9.14 FINDING-D:`render()` 只拿掉 block 級標記,inline `**粗體**` 會原樣留著。
+
+    skill `tool-reference.md` 對外宣告「strip_citations=true 回的是純文字,沒有 Markdown
+    強調」,而這串字會流進公開 Apple Podcast 的 `<description>`(實測真的帶著 `**` 進 RSS)。
+    """
+    fake_client.chat.answer_document = _structured_document(
+        "這是一種**競態條件**的問題。", "解法是**檔案鎖**。"
+    )
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+    assert out["answer"] == "這是一種競態條件的問題。\n解法是檔案鎖。"
+    assert "*" not in out["answer"]
+
+
+async def test_chat_ask_strip_citations_keeps_underscores_and_bullets(fake_client):
+    """清強調不可以誤傷識別碼與條列符號 —— 這兩種形狀在真實 show notes 裡都會出現。
+
+    底線刻意**不清**:`NOTEBOOKLM_AUTH_JSON` / `source_id` 這類識別碼與 `_斜體_` 同形,
+    清掉會毀掉正文(所以 skill 那句「`_斜體_` 之類」要跟著改成精確描述)。
+    """
+    fake_client.chat.answer_document = _structured_document(
+        "設定 NOTEBOOKLM_AUTH_JSON_2 這個環境變數。", "* 條列一", "算式 2 * 3 * 4 的結果。"
+    )
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+    assert "NOTEBOOKLM_AUTH_JSON_2" in out["answer"]
+    assert "* 條列一" in out["answer"]
+    assert "2 * 3 * 4" in out["answer"]
+
+
+async def test_chat_ask_strip_citations_refuses_when_a_block_decoded_to_nothing(fake_client):
+    """v0.9.14 FINDING-E:上游解不出的 block **整段靜默消失,連 U+FFFC 都不留**。
+
+    實測形狀:回答說「以下是一段示範程式碼:」然後**直接接下一段**,呼叫端沒有任何訊號
+    能發現東西掉了(同一個 conversation 用 strip_citations=False 追問,程式碼完整回來)。
+    這串字是要進公開 RSS 的,所以在這裡 fail-loud 而不是讓人發布後才發現。
+    """
+    fake_client.chat.answer_document = _doc_with_kinds(
+        ("以下是一段示範程式碼:", BlockKind.PARAGRAPH),
+        ("", BlockKind.CODE_BLOCK),
+        ("關鍵概念說明:", BlockKind.PARAGRAPH),
+    )
+    with pytest.raises(RuntimeError, match="CODE_BLOCK") as excinfo:
+        await t.chat_ask("nb-1", "給我程式碼", strip_citations=True)
+    assert "strip_citations=False" in str(excinfo.value)
+
+
+async def test_chat_ask_strip_citations_allows_code_block_that_did_decode(fake_client):
+    """判別力那一半:判準是**有沒有解出文字**,不是 block 的 kind。
+
+    離線實測過 `CODE_BLOCK` 帶 spans 時 `render()` 照樣輸出它 —— 按 kind 擋會把
+    「程式碼有好好回來」的正常回答也擋掉。
+    """
+    fake_client.chat.answer_document = _doc_with_kinds(
+        ("前段", BlockKind.PARAGRAPH),
+        ("print(1)", BlockKind.CODE_BLOCK),
+        ("後段", BlockKind.PARAGRAPH),
+    )
+    out = await t.chat_ask("nb-1", "給我程式碼", strip_citations=True)
+    assert out["answer"] == "前段\nprint(1)\n後段"
+
+
+async def test_chat_ask_strip_citations_ignores_blocks_that_never_carry_text(fake_client):
+    """`HORIZONTAL_RULE` 本來就沒有文字,空的不代表內容掉了。"""
+    fake_client.chat.answer_document = _doc_with_kinds(
+        ("上半", BlockKind.PARAGRAPH),
+        ("", BlockKind.HORIZONTAL_RULE),
+        ("下半", BlockKind.PARAGRAPH),
+    )
+    out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
+    assert out["answer"] == "上半\n下半"
+
+
+async def test_chat_ask_default_path_is_untouched_by_both_guards(fake_client):
+    """兩道都只掛在 `strip_citations=True`;預設路徑逐字不變(既有 caller 依標記對照 references)。"""
+    fake_client.chat.answer_override = "重點**一** [1] 收尾。"
+    fake_client.chat.answer_document = _doc_with_kinds(
+        ("重點", BlockKind.PARAGRAPH), ("", BlockKind.CODE_BLOCK)
+    )
+    out = await t.chat_ask("nb-1", "重點?")
+    assert out["answer"] == "重點**一** [1] 收尾。"
 
 
 async def test_chat_ask_strip_citations_render_keeps_paragraph_breaks(fake_client):

@@ -13,14 +13,14 @@ from mcp.types import ToolAnnotations
 from notebooklm.rpc.types import SharePermission
 
 from . import runtime
-from ._errors import NotebookAccessDenied, is_permission_denied
+from ._errors import NotebookAccessDenied, is_permission_denied, raise_if_access_denied
 from ._sources import (
     assert_source_count_is_safe,
     assert_sources_exist,
     to_source_ids,
 )
 from ._status import ensure_completed, ensure_started
-from ._text import _CITATION_RE, norm as _norm
+from ._text import _CITATION_RE, norm as _norm, strip_inline_emphasis
 from .auth_probe import probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
@@ -660,6 +660,55 @@ async def artifact_retry_failed(notebook_id: str, artifact_id: str) -> dict:
     return {"task_id": task_id, "artifact_id": task_id}
 
 
+# 這些 block 本來就沒有文字,空的不代表內容掉了。
+_TEXTLESS_BLOCK_KINDS = frozenset({"HORIZONTAL_RULE"})
+
+
+def _dropped_blocks(document) -> list[str]:
+    """回傳「有 block 但一個字都沒解出來」的 block kind —— 那些內容在輸出裡是**靜默消失**的。
+
+    **v0.9.14 真實驗收 FINDING-E。** 上游文件說 `CODE_BLOCK` / `THOUGHT` 目前不解碼,
+    而 `.text` 會用 U+FFFC 填補那些位置 —— 於是 README 與我們都以為輸出裡至少看得到 `￼`。
+    **實測不是這樣**:那顆 block 的 `spans` 是空的,`render()` 與 `.text` **兩邊都不產生
+    任何佔位符**,整段就是不見了。危險在於**剩下的字讀起來完全通順**:實測回答是
+    「以下是一段示範程式碼:」後面**直接接下一段**,呼叫端沒有任何訊號可以發現東西掉了
+    (同一個 conversation 用 `strip_citations=False` 追問,程式碼完整回來 —— 判別實驗)。
+
+    所以判準是 span 文字,不是 U+FFFC,也不是 block kind:`CODE_BLOCK` **有** spans 時
+    `render()` 照樣輸出它(離線實測 `print(1)` 有出現),那種情況不該擋。
+    """
+    dropped, considered = [], 0
+    for block in getattr(document, "blocks", ()) or ():
+        kind = getattr(getattr(block, "kind", None), "name", None) or "UNKNOWN"
+        if kind in _TEXTLESS_BLOCK_KINDS:
+            continue
+        considered += 1
+        if not any((getattr(s, "text", "") or "").strip() for s in getattr(block, "spans", ()) or ()):
+            dropped.append(kind)
+    # **整份**都沒有文字 ≠ 部分丟失:那是「上游根本沒給結構化文件」,既有的
+    # `render().strip()` fallback 會退回 `_CITATION_RE` 清 `res.answer`,那條路是對的
+    # (`test_chat_ask_strip_citations_falls_back_when_document_is_whitespace_only` 守著)。
+    # 這裡要抓的是「有些 block 有字、有些沒有」——那才是靜默少一段。
+    if considered and len(dropped) == considered:
+        return []
+    return dropped
+
+
+def _assert_no_dropped_blocks(document) -> None:
+    """只在產公開文案那條路(`strip_citations=True`)擋 —— 預設路徑行為不變。"""
+    dropped = _dropped_blocks(document)
+    if not dropped:
+        return
+    raise RuntimeError(
+        f"這個回答有 {len(dropped)} 個 block 上游沒有解出任何文字({', '.join(sorted(set(dropped)))}),"
+        "它們在 strip_citations=True 的輸出裡會**靜默消失**且不留佔位符,而剩下的句子讀起來"
+        "仍然通順(實測:「以下是一段示範程式碼:」後面直接接下一段)—— 這串字會直接進"
+        "公開 RSS 的 <description>,所以這裡擋下來而不是讓你發不出去才發現。"
+        "要完整內容就用 strip_citations=False 自己處理標記;"
+        "產 show notes 的話改問一個不會引出程式碼/圖片區塊的問題。"
+    )
+
+
 @mcp.tool()
 async def chat_ask(
     notebook_id: str,
@@ -684,14 +733,26 @@ async def chat_ask(
     標記。render() 為空或全空白時才退回 server 端 `_CITATION_RE` 清標記。
     include_references=False 省掉引用清單——省 token 也免手動 regex;
     預設兩者不動(既有 caller 依標記對照 references 的行為不變)。
+
+    **v0.9.14 真實驗收補了兩道**(只作用在 `strip_citations=True` 這條路):
+
+    - `render()` 只拿掉 **block 級**標記(`###` 標題、`*` 條列),**inline 的
+      `**粗體**` 原樣留著**(實測)。這裡再過一次 `strip_inline_emphasis`。
+      **底線不清** —— `_斜體_` 與識別碼(`NOTEBOOKLM_AUTH_JSON`、`source_id`)撞得太兇。
+    - 上游沒解出文字的 block(`CODE_BLOCK` 等)會**整段靜默消失且不留 U+FFFC**,
+      而剩下的句子讀起來仍然通順 —— `_assert_no_dropped_blocks` 在這裡 fail-loud,
+      不讓它流進公開 RSS。要完整內容就用 `strip_citations=False`。
     """
     res = await runtime.get_client().chat.ask(
         notebook_id, question, source_ids=source_ids, conversation_id=conversation_id
     )
     answer = res.answer
     if strip_citations:
+        _assert_no_dropped_blocks(res.answer_document)
         rendered = res.answer_document.render()
         answer = rendered if rendered.strip() else _CITATION_RE.sub("", answer)
+        # render() 只管 block 級標記;inline 的 `**粗體**` 要另外清(FINDING-D)。
+        answer = strip_inline_emphasis(answer)
     return {
         "answer": answer,
         "conversation_id": getattr(res, "conversation_id", None),
@@ -777,7 +838,13 @@ async def notebook_get(notebook_id: str) -> dict:
     `Notebook.role: SharePermission | None`(能分辨 EDITOR/VIEWER,不只是
     「是不是 owner」),之後要更細緻的權限判斷可以改讀回傳的 `role` 欄位。
     """
-    nb = await runtime.get_client().notebooks.get(notebook_id)
+    try:
+        nb = await runtime.get_client().notebooks.get(notebook_id)
+    except Exception as exc:
+        # 權限被拒翻成帶指引的 NotebookAccessDenied(v0.9.14 FINDING-F):
+        # 上游那句講的是 authuser routing、指向 SDK issue #114/#294,對 pool 情境無用。
+        raise_if_access_denied(exc, notebook_id)
+        raise
     # SDK 0.3.4 的 get() 不一定回 None——找不到可能回帶空 id 的物件,兩種都當「找不到」。
     if nb is None or not getattr(nb, "id", None):
         raise RuntimeError(f"notebook not found: {notebook_id}")

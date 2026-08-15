@@ -338,9 +338,21 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                             )
                     # 0.8.1 將 L3 護欄升為建構參數;與上面刪除
                     # `NOTEBOOKLM_HEADLESS_REAUTH` 的 env 護欄互補,兩層都保留。
-                    client = await stack.enter_async_context(
-                        NotebookLMClient.from_storage(path=str(path), allow_headless=False)
-                    )
+                    #
+                    # 失敗一定要講出是**哪一個槽位**(v0.9.14 真實驗收 FINDING-B):
+                    # `_write_credential_file` 那條(結構不合法)本來就會指名,但這條
+                    # ——「結構合法、cookie 已死」——原本讓 SDK 的 `_LoginRedirectError`
+                    # 原樣穿透,訊息只有「Authentication expired or invalid. Run
+                    # 'notebooklm login'」。9 槽 pool 裡任何一槽過期就整台起不來,
+                    # 而人看不出要去重登哪一個帳號。實測就是這個形狀。
+                    try:
+                        client = await stack.enter_async_context(
+                            NotebookLMClient.from_storage(path=str(path), allow_headless=False)
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"{_slot_env_name(slot)} 的憑證建不出 client:{exc}"
+                        ) from exc
                     pool.append((await _account_label(client, slot), client))
             else:
                 # 單帳號 inline 不需要這把 flock:`_resolve_recovery_path` 先看 path,
