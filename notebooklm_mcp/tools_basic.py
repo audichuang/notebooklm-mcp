@@ -690,13 +690,8 @@ async def chat_ask(
     )
     answer = res.answer
     if strip_citations:
-        document = getattr(res, "answer_document", None)
-        rendered = document.render() if document is not None else ""
-        answer = (
-            rendered
-            if isinstance(rendered, str) and rendered.strip()
-            else _CITATION_RE.sub("", answer)
-        )
+        rendered = res.answer_document.render()
+        answer = rendered if rendered.strip() else _CITATION_RE.sub("", answer)
     return {
         "answer": answer,
         "conversation_id": getattr(res, "conversation_id", None),
@@ -773,13 +768,14 @@ async def notebook_get(notebook_id: str) -> dict:
 
     `is_owner` 由上游 0.8.1(#2125)重新推導:欄位來源從「有沒有共享者」
     (有共享者就恆為 False,即使呼叫的正是 owner 本人)改成真正的 userRole,
-    並保證 `is_owner == (role is SharePermission.OWNER)`
-    (`Notebook.__setattr__` 在設定 `role` 時同步維持這個不變式)。
+    當 `role` 有解出值時才成立 `is_owner == (role is SharePermission.OWNER)`
+    (`Notebook.__setattr__` 在設定 `role` 時同步維持這個不變式)。`role is None`
+    時代表該筆資料沒有講出等級,`is_owner` 停在樂觀預設 `True`,呼叫端無法分辨
+    「真的是 owner」與「role 未知」。回傳的 `role` 欄位就是用來讓呼叫端自己分辨。
     **同一支呼叫在升版前後回傳值會不同**——升版前多帳號 pool 模式下這個
     欄位實務上恆為 False,升版後才反映真實歸屬。上游同時新增了語意更完整的
     `Notebook.role: SharePermission | None`(能分辨 EDITOR/VIEWER,不只是
-    「是不是 owner」),之後要更細緻的權限判斷可以改讀那個欄位——這支工具
-    目前還沒有轉發它。
+    「是不是 owner」),之後要更細緻的權限判斷可以改讀回傳的 `role` 欄位。
     """
     nb = await runtime.get_client().notebooks.get(notebook_id)
     # SDK 0.3.4 的 get() 不一定回 None——找不到可能回帶空 id 的物件,兩種都當「找不到」。
@@ -790,5 +786,6 @@ async def notebook_get(notebook_id: str) -> dict:
         "title": nb.title,
         "sources_count": nb.sources_count,
         "is_owner": nb.is_owner,
+        "role": nb.role.name if nb.role else None,
         "created_at": nb.created_at.isoformat() if nb.created_at else None,
     }

@@ -11,8 +11,10 @@ from notebooklm.exceptions import (
     RPCError,
     ServerError,
 )
-from notebooklm.rpc.types import AudioFormat, AudioLength
+from notebooklm.rpc.types import AudioFormat, AudioLength, SharePermission
 from notebooklm.types import ArtifactType
+
+from conftest import _structured_document
 
 from notebooklm_mcp import tools_basic as t
 
@@ -85,8 +87,22 @@ async def test_source_fulltext(fake_client):
 
 
 async def test_notebook_get(fake_client):
+    fake_client.notebooks.get = AsyncMock(return_value=SimpleNamespace(
+        id="nb-7", title="Test", sources_count=2, is_owner=True,
+        created_at=None, role=None,
+    ))
     out = await t.notebook_get("nb-7")
-    assert out["notebook_id"] == "nb-7" and out["sources_count"] == 2 and out["is_owner"] is True
+    assert out["notebook_id"] == "nb-7" and out["sources_count"] == 2
+    assert out["is_owner"] is True and out["role"] is None
+
+
+async def test_notebook_get_forwards_role_name(fake_client):
+    fake_client.notebooks.get = AsyncMock(return_value=SimpleNamespace(
+        id="nb-7", title="Test", sources_count=2, is_owner=False,
+        created_at=None, role=SharePermission.VIEWER,
+    ))
+    out = await t.notebook_get("nb-7")
+    assert out["role"] == "VIEWER"
 
 
 async def test_artifact_wait_fail_closed(fake_client):
@@ -529,8 +545,6 @@ async def test_chat_ask_default_keeps_citations_and_references(fake_client):
     answer_document 刻意設成非空、內容完全不同——證明 strip_citations=False
     這條路徑完全不讀 answer_document,不會因為它非空就被污染。
     """
-    from conftest import _structured_document
-
     fake_client.chat.answer_override = "重點一 [1] 重點二 [3, 4]。"
     fake_client.chat.answer_document = _structured_document("不相關的文件內容")
     out = await t.chat_ask("nb-1", "重點?")
@@ -546,8 +560,6 @@ async def test_chat_ask_strip_citations(fake_client):
 
 
 async def test_chat_ask_strip_citations_prefers_answer_document(fake_client):
-    from conftest import _structured_document
-
     fake_client.chat.answer_override = "回答 [1-2] 會被 regex 留下不同內容"
     fake_client.chat.answer_document = _structured_document("乾淨純文字，不含引用標記")
 
@@ -563,8 +575,6 @@ async def test_chat_ask_strip_citations_falls_back_when_document_is_whitespace_o
     """render() 非空但全是空白時一樣要退回 `_CITATION_RE`——`.strip()` 判斷
     要留著,上游只保證解碼不出東西時是**空字串**,沒保證不是全空白。
     """
-    from conftest import _structured_document
-
     fake_client.chat.answer_override = "重點一 [1] 收尾。"
     fake_client.chat.answer_document = _structured_document("   \n")
     out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
@@ -576,8 +586,6 @@ async def test_chat_ask_strip_citations_render_keeps_paragraph_breaks(fake_clien
     完全不插分隔符,段落會黏在一起。這條測試是 (1) 的絆線——有人把
     `chat_ask` 改回讀 `.text` 這裡會紅。
     """
-    from conftest import _structured_document
-
     fake_client.chat.answer_document = _structured_document(
         "重點一", "重點二", "重點三"
     )
