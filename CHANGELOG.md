@@ -6,6 +6,123 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.14 — 升到 notebooklm-py 0.8.1
+
+pin 從 `>=0.8,<0.9` 收到 `>=0.8.1,<0.9`。**下界不是形式**:這一輪把好幾個 0.8.1-only 的
+符號變成硬相依(`Notebook.role`、`AskResult.answer_document`、`normalize_rpc_code`、
+以及一組 `_auth` 私有函式),而 `uv tool install git+…` 不讀 `uv.lock` ——
+解析到 0.8.0 的消費端安裝會在 `import notebooklm_mcp.app` 就 ImportError。
+
+### 0.8.1 悄悄開了一條新的 cookie 重鑄路,而我們的護欄照不到它
+
+**這是這一版最重要的一條。** 0.8.1 把 `from_storage(path=…)` 的載入路徑換成
+`HealPolicy.HEAL_THEN_NAME_ONLY`,它的 routing preflight 是舊 gate 的**超集**:
+`__Secure-1PSIDTS` 存在、值非空,但**已過期**或 **scope 打不到 `accounts.google.com`**
+時也算失敗 → 呼叫 `_recover_psidts_inline` → 在本 process 內發一次 `RotateCookies` POST。
+
+實測(0.8.0 / 0.8.1 同一份憑證,`_attempt_rotation` 換成記錄器、零網路):
+
+| PSIDTS 狀態 | 0.8.0 | 0.8.1 |
+|---|---|---|
+| 過期 | 不發 | **發** |
+| scope 錯 | 不發 | **發** |
+
+`_recover_psidts_inline` 的 docstring 說「`NOTEBOOKLM_AUTH_JSON` 設了就 decline」,
+**那個保護對 pool 不適用**:`_resolve_recovery_path` 是「明確 `path` 優先,env 根本不看」,
+而多帳號 pool 每個槽位正是 `from_storage(path=str(path))`。
+(單帳號模式走 `from_storage()` 無 path,env 分支生效,本來就 decline。)
+
+後果就是 ADR-0010 v0.9.0 amendment 描述的那個事故:3 VM 共用的 Doppler cookie 被本
+process 重鑄,新值寫進 lifespan 結束就刪掉的臨時槽位檔,Doppler 完全不知道,而伺服器端
+舊 cookie 已作廢 —— 另外兩台下次啟動就掛,**本機自己看起來是正常啟動**。
+
+**修法走了兩次彎路,兩次都被審查擋下來,值得記下來:**
+
+1. 第一版是 **fail-loud**:預驗證加 routability gate,不 routable 就拒絕落檔。
+   被推翻的理由是上游自己講死的 —— `load_with_recovery` 的 docstring:routing condition
+   「asks whether `__Secure-1PSIDTS` can be **refreshed**, not whether it can be **used**」。
+   拿它當接受條件會誤拒還能用的憑證,而 PSIDTS 過期是它的正常生命週期。
+2. 第二版是**把本機 `expires` 挪成 session cookie**(`-1`)。實測有效、零行為改變,
+   但**只擋得住「過期」,擋不住「scope 錯」**。
+3. 最終版是**持有 rotation flock**:`_recover_psidts_inline` 的第 4 個前提是「跨 process
+   rotation flock 搶得到」,`app._lifespan` 在建 client 前對每個槽位檔持有它到程序結束,
+   heal 就發不出 POST,而載入照常走完(`load_with_recovery` 在 heal 回 False 之後仍會
+   name-only retry,那條不檢查 routable)。三種情況下 jar 的 cookie 數/名稱/值/domain
+   完全一致 —— 精準只擋 POST。
+
+語義上也對:那把鎖的意思是「有別的 process 正在 rotate」,而我們正是宣告
+**「這個槽位檔的 rotation 由外部(Doppler)負責,本 process 永遠不做」**。
+
+routability 判準留下來,但**降級成 warning** —— 它指出「這個槽位該換憑證了」,不再是
+接受條件。這同時解掉一個與 `_account_label` 政策自相矛盾的地方:一個壞槽位不該讓整台
+server 起不來。
+
+**驗收時發現的真實憑證問題**:prd 槽位 1 的 `__Secure-1PSIDTS` scope 在 `.youtube.com`,
+到不了 `notebooklm.google.com` 也到不了 `accounts.google.com` —— 那個槽位一直靠 SID 等
+其他 cookie 在撐,而它正是 0.8.1 下每次啟動都會觸發 heal 的那一列。flock 擋住了重鑄,
+但那份憑證該重 mint(`dev` config 的唯一槽位同形)。
+
+### 吃下 0.8.1 的新能力
+
+- **`sharing.set_users()` 取代逐個 `add_user`**(`_share_each`)。N 次 RPC → 1 次,而且是
+  伺服器端的批次 upsert(不是覆寫;`add_user` 現在自己就是它的 wrapper),所以原本
+  「分享到一半留下孤兒」的失敗形狀消失了。錯誤訊息因此從「已分享到哪裡」改寫成
+  「請重跑 `notebook_share_with_pool` 對帳」——**取消/逾時仍可能發生在伺服器已受理之後**,
+  所以 `except (Exception, asyncio.CancelledError)` 的形狀原樣保留。
+- **`chat_ask(strip_citations=True)` 改用 `answer_document.render()`**。上游把三種 rendering
+  的分工寫死了:`.text` 是 **offset-faithful layout**「inserts no separators at all …
+  fills undecodable positions with `￼`, so blocks run together and filler shows」,
+  `render()` 才是「the only one built for reading」。第一版指名了 `.text`,實測多段落回答
+  會變成 `'重點一重點二重點三'` —— 而那串文字一路流到公開的 Apple Podcast `<description>`。
+  兩個獨立複審各自抓到同一條,那個收斂才是信號。
+  `_text._CITATION_RE` 保留:`episode_set_description` 清的是 caller 傳進來的文字,
+  根本沒有 `AskResult`,而且它是空文件時的 fallback。
+- **`_errors.is_permission_denied` 改用上游的 `normalize_rpc_code` / `GrpcStatusCode`**,
+  拿掉硬編的 `7` 與 str/int 雙比對。數字 7 的定義從此只有上游一處。
+- **`notebook_get` 誠實轉發 `role`**。0.8.1 修好了 `is_owner`(從 `meta[1]`「有沒有共享者」
+  搬到 `meta[0]` userRole),但**只在 `role` 解得出值時才同步**:`role is None` 時
+  `is_owner` 停在欄位預設 `True`。**升版前這個欄位錯的方向是「恆為 False」(保守),
+  現在 schema drift 時錯的方向變成「宣稱自己是 owner」(樂觀)** —— 所以必須同時轉發
+  `role`,呼叫端才分得出「真的是 owner」與「role 未知的樂觀預設」。
+- `artifact_list` 帶出 `Artifact.source_ids`(**純觀測面,沒當 gate**:還沒在生產資料上
+  驗收過它有沒有值)。
+- `from_storage(allow_headless=False)` 顯式傳:0.8.1 把 L3 headless re-auth 從「只看 env」
+  升級成建構參數(預設就是 False),顯式傳等於把意圖寫進 code。
+  `NOTEBOOKLM_REFRESH_CMD_MIDSESSION` 一併加進 `_INLINE_AUTH_ENV_OVERRIDES` ——
+  **這條是防禦深度不是修 bug**:`_midsession_refresh_cmd_enabled()` 要求 `NOTEBOOKLM_REFRESH_CMD`
+  也有值,而那個我們早就刪了。
+
+### 上游修掉的、我們零改動受惠的
+
+- **`import_sources_with_verification`**:FAILED_PRECONDITION 不再盲目重投同一個 task_id、
+  每次 attempt 的 read timeout 被 `max_elapsed` 夾住、baseline 改 `strict=False`
+  (一個重複 id 不再讓整個 idempotency baseline 失效)。這是 `research_import` 最脆的一段。
+- **ArtifactStatus 1/2 轉置修正**:0.8.0 的 `is_pending` / `is_processing` 互相答錯了對方的
+  問題。我們只依賴 `is_completed` / `is_failed` / `is_removed`,剛好避開,只影響
+  `status_str` 的顯示文字。
+- `NotebookNotFoundError` 現在帶 `rpc_code` / `found_ids` / `detail`,status-5 會講明
+  「可能屬於另一個登入帳號」→ pool failover 少一類誤判。
+- 上傳失敗時保留已註冊的 source;`get_or_none` not-found 契約;source status unknown 解碼。
+
+### tripwire 收緊(existence-only → 語義鎖)
+
+這一輪加的鎖第一版有好幾條只鎖「名字存在」,鎖不住語義漂移,被獨立複審逐條指出失敗情境:
+- `_psidts_routes_to_rotate` 從簽名鎖改成**六列行為斷言**(scope 錯 / session cookie /
+  重複身分這三種正是 routability 判準會誤判的形狀,原本完全沒覆蓋)。
+- `SharingAPI.set_users` 補**回傳型別**鎖 —— 回傳的 `ShareStatus` 是 `_share_each` 唯一的
+  「分享有沒有生效」後檢;上游哪天拿掉尾端的 `return await self.get_status(…)`,
+  **每一次成功分享都會 raise「呼叫成功但未生效」**。
+- `StructuredDocument` 從 `hasattr(…, "text")` 改成鎖 `render()` 的 marker-free 與
+  block 分隔(並用 `.text` 沒有分隔當對照)。
+- `Artifact.source_ids` / `Notebook.role` 補型別與行為鎖。
+- `_errors` 的 `isinstance(exc, ClientError)` guard 原本**零覆蓋**(刪掉全套 12908 條照樣綠,
+  因為那條測試用的例外根本沒有 `rpc_code` 屬性,測到的是別的分支)。
+
+### 對帳
+
+`mcp[cli]>=1.27,<2` 的上界正在生效地擋著已經上架 PyPI 的 **mcp 2.0.0**;
+lock / tool venv 目前都是 1.29.0,一致。
+
 ## v0.9.13
 
 ### 真實驗收抓到的四條(FINDINGS 全文見 `docs/acceptance-v0.9.13-findings.md`)

@@ -1,6 +1,13 @@
 # Gotchas — notebooklm-py 的 API 契約
 
-直接呼叫 SDK(而不是經過我們的工具)之前讀。**一律以實裝版本為準**,別信 `_research/` 的 HEAD clone;0.7.3 → 0.8.0 的完整升級推導在 [notebooklm-py-0.8-upgrade.md](notebooklm-py-0.8-upgrade.md)。
+直接呼叫 SDK(而不是經過我們的工具)之前讀。**一律以實裝版本為準**,別信 `_research/` 的 HEAD clone;0.7.3 → 0.8.0 的完整升級推導在 [notebooklm-py-0.8-upgrade.md](notebooklm-py-0.8-upgrade.md),0.8.0 → 0.8.1 在 [CHANGELOG](../CHANGELOG.md) v0.9.14。
+
+- **(0.8.1)`from_storage(path=…)` 的載入會在 PSIDTS 過期或 scope 不對時發 `RotateCookies`,
+  而 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管不到它。** 那是 L2 inline recovery,不是 keepalive
+  poke;`_resolve_recovery_path` 對明確 `path` 一律優先,所以 `NOTEBOOKLM_AUTH_JSON` 那道
+  decline 也擋不到。自己直接呼叫 SDK 而不是經過 `app._lifespan` 時,**沒有那道 rotation flock
+  護欄** —— 共用憑證(Doppler)在你的 process 裡被重鑄,其他機器下次啟動就掛。
+  推導與擋法見 AGENTS.md §Gotchas 的 (0.8.1) 那條。
 
 > 從 `AGENTS.md` 外移(2026-08-10):內容一字未改,只是改成**按需載入** —— 它們只在動到
 > 這個子系統時才用得到,留在永遠載入的 AGENTS.md 只會擠掉真正每次都要看的那幾條。

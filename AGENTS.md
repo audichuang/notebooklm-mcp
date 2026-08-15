@@ -75,7 +75,7 @@ claude mcp add-json notebooklm -s local \
 [docs/design-notes.md](docs/design-notes.md) = 模組設計細節;`docs/gotchas-*.md` = 按需載入的雷區(路由表見 §Gotchas 末尾);
 `docs/superpowers/` = 設計/計畫/findings。**SKILL.md 路由層 + references 不在本 repo**,在 `audi-skill/notebooklm`。
 
-## Gotchas(notebooklm-py 0.8.0,pin `>=0.8,<0.9`;與 GitHub HEAD 不同,以**實裝版本**為準)
+## Gotchas(notebooklm-py 0.8.1,pin `>=0.8.1,<0.9`;與 GitHub HEAD 不同,以**實裝版本**為準)
 
 - **`mcp[cli]` 必須有上界(`>=1.27,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端
   每次安裝都自由解析成當下最新——曾經因為寫成 `>=1.0.0` 而出現「dev venv 鎖 1.27.2、四台
@@ -102,6 +102,27 @@ claude mcp add-json notebooklm -s local \
   新的兩個是 **L3 headless re-auth**(`NOTEBOOKLM_HEADLESS_REAUTH`,`app.py` lifespan 會顯式
   刪掉這個 env)與 **master-token headless auth**(`headless` extra,**刻意不採用**)。
   理由與取捨見[升級筆記](docs/notebooklm-py-0.8-upgrade.md)的「新能力」一節。
+- **(0.8.1)L2 inline PSIDTS recovery 的觸發條件變寬了,而 env 那道保護對 pool 不適用。**
+  `from_storage(path=…)` 現在走 `HealPolicy.HEAL_THEN_NAME_ONLY`,routing preflight 是舊 gate
+  的**超集**:PSIDTS 存在、值非空,但**已過期**或 **scope 打不到 `accounts.google.com`**
+  時也算失敗 → `_recover_psidts_inline` → 本 process 內一次 `RotateCookies`。
+  `_recover_psidts_inline` 說「`NOTEBOOKLM_AUTH_JSON` 設了就 decline」**擋不到我們**:
+  `_resolve_recovery_path` 是「明確 `path` 優先,env 根本不看」,而 pool 每個槽位正是
+  `from_storage(path=str(path))`(單帳號走無 path 那條,env 分支生效,本來就 decline)。
+  **擋法是 `app._lifespan` 持有每個槽位檔的 rotation flock**(`_rotation_lock_path` +
+  `keepalive._file_lock_try_exclusive`)—— 那是 `_recover_psidts_inline` 的第 4 個前提。
+  三件反直覺、都被實測釘住的事,動這塊之前先讀:
+  ①**目標是「每個 process 都不 rotate」,不是「跨 process 協調 rotation」** ——
+  每個 process 各自持有自己 `mkdtemp` 路徑的鎖、各自擋自己的 heal;lock path 不同是設計。
+  獨立審查兩次讀成後者並判定失效,實測 `rotate_POST=0`。
+  ②`_file_lock_try_exclusive` 在 lock 不可用時 **fail-open 回 `True`**,但保護仍成立 ——
+  `storage_lock._acquire_once` 先取 per-path 的 **in-process `threading.Lock`** 並在整個
+  yield 期間持有,同 process 的 heal 因此拿到 `CONTENDED`。**這條是承重牆**,由
+  `tests/test_client_pool.py` 的 fail-open 絆線守著,紅了就要改成直接讀 `LockState`、只認 `HELD`。
+  ③routability 判準(`_cookies.would_trigger_inline_heal`)**只用來發 warning,不是接受條件** ——
+  上游講死了它問的是「能不能 refresh」不是「能不能 use」,拿它拒收會誤拒:
+  實測 prd 槽位 1 的 PSIDTS scope 在 `.youtube.com`,不 routable 卻一直在服役。
+  完整推導與被推翻的兩個修法見 [CHANGELOG](CHANGELOG.md) v0.9.14。
 - **(v0.9.0)pool 的憑證落檔,把好幾條原本靠「env 模式」早退的重鑄護欄一起降級了。**
   動 `app.py` 的憑證/lifespan 那一塊時三件事要一起看:①`_write_credential_file` 的預驗證
   **必須與 strict cookie loader 同語義**(必要 cookie 的 **value 也要非空**,不能只檢查 key
