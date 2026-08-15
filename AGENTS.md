@@ -130,6 +130,25 @@ claude mcp add-json notebooklm -s local \
   上游講死了它問的是「能不能 refresh」不是「能不能 use」,拿它拒收會誤拒:
   實測 prd 槽位 1 的 PSIDTS scope 在 `.youtube.com`,不 routable 卻一直在服役。
   完整推導與被推翻的兩個修法見 [CHANGELOG](CHANGELOG.md) v0.9.14。
+  ④**這條在 v0.9.14 真實驗收於 stg 上得證**:stg 天生 9 槽全 routable(沒有現成素材),
+  在**本機 env 層**造一個 scope 錯的槽位(`.youtube.com`,cookie 值不動)之後,
+  不持鎖的對照組 `_attempt_rotation` 被呼叫 **1 次**、持鎖的真 `_lifespan` **0 次**,
+  事後 Doppler 9 槽逐欄未變。**負向結論一定要配這個對照組** —— 沒有它,「沒看到
+  RotateCookies」與「觀測手段沒接上」長得一模一樣。
+- **(0.8.1)`answer_document.render()` 只處理 block 級標記,而且會靜默丟掉解不出的 block。**
+  v0.9.14 真實驗收兩條,兩條都直通公開 RSS `<description>`,所以 server 端各補了一道:
+  ①inline 的 `**粗體**` 它**不管**(`###` 標題、`*` 條列它會拿掉)→ `_text.strip_inline_emphasis`
+  在 `chat_ask` 與 `episode_set_description` 兩處清。**底線刻意不清**:`_斜體_` 與
+  `NOTEBOOKLM_AUTH_JSON` / `source_id` 同形。
+  ②上游解不出 spans 的 block(實測 `CODE_BLOCK`)**整段消失,連 U+FFFC 都不留**
+  —— 上游文件說 `.text` 會填 U+FFFC,**實測空 spans 時兩邊都不填**,而剩下的句子讀起來
+  完全通順(「以下是一段示範程式碼:」直接接下一段)→ `_assert_no_dropped_blocks` fail-loud。
+  判準是**有沒有解出文字**,不是 block 的 kind:`CODE_BLOCK` 帶 spans 時 `render()` 照樣輸出它。
+- **(0.8.1)`Artifact.source_ids` 在生產資料上**有值**,而且是生成當下的歷史快照。**
+  v0.9.14 驗收結案(在此之前只當觀測面、不准當 gate):11 顆 audio artifact 全部帶出非空
+  `source_ids`,值對得上生成當時 notebook 內的來源;**但其中一顆的 id 全部已不在
+  `source_list` 裡** —— 它記的是生成當下的狀態,不是即時 join。
+  所以可以拿來看「這顆是用哪些來源生的」,**不可以拿來反查現存 source**(會查到已刪除的 id)。
 - **(v0.9.0)pool 的憑證落檔,把好幾條原本靠「env 模式」早退的重鑄護欄一起降級了。**
   動 `app.py` 的憑證/lifespan 那一塊時三件事要一起看:①`_write_credential_file` 的預驗證
   **必須與 strict cookie loader 同語義**(必要 cookie 的 **value 也要非空**,不能只檢查 key

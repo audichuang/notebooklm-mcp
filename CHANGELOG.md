@@ -6,6 +6,58 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.15 — v0.9.14 真實驗收抓到的五條(全部碰 runtime code)
+
+v0.9.14 的驗收(Phase 0–10、35/35 支工具、FINDINGS 全文見
+`docs/acceptance-v0.9.14-findings.md`)抓到七條,其中**五條碰到執行路徑**,所以獨立發一版
+—— `v0.9.14` 那個 tag 指的是**沒有**這五條修正的 commit,不能讓它們搭便車。
+另外兩條是驗收腳本自身的洞(§2a 掃描寫死 `range(1, 8)` 而 stg 有 9 槽;
+§3b 要求驗 `source_add_text` 的冪等,但那支從未宣稱冪等),已就地修在驗收工作區。
+
+五條的共同形狀值得先講:**四條的症狀都是「輸出看起來完全正常」** ——
+少一段程式碼但句子通順、`**粗體**` 原樣進 RSS、等滿 30 分鐘才知道帳號傳錯、
+9 槽任一槽死掉就整台起不來卻不說是哪一槽。這正是離線測試結構上照不到的那一類。
+
+- **`chat_ask(strip_citations=True)` 沒清掉 inline 的 `**粗體**`**(FINDING-D)。
+  `answer_document.render()` 只拿掉 **block 級**標記(`###` 標題、`*` 條列),inline 的原樣留著,
+  而 skill `tool-reference.md` 明文說「不會出現」。實測含 `**` 的字串**原樣寫進 manifest**,
+  直達公開 RSS `<description>`。新增 `_text.strip_inline_emphasis`,`chat_ask` 與
+  `episode_set_description` 兩處共用(後者是進 manifest 的唯一正門,呼叫端也可能自己組 show notes)。
+  **底線刻意不清**:`_斜體_` 與 `NOTEBOOKLM_AUTH_JSON` / `source_id` / `snake_case` 同形,
+  清掉會毀掉正文 —— skill 那句「`_斜體_` 之類」跟著改成精確描述,不是反過來讓實作追文件。
+- **`render()` 把解不出 spans 的 block 整段靜默丟棄,連 U+FFFC 都不留**(FINDING-E)。
+  上游文件說 `.text` 會用 U+FFFC 填補未解碼位置,**實測 spans 為空時 `render()` 與 `.text`
+  兩邊都不填**,整段就是不見了 —— 而剩下的句子讀起來完全通順(「以下是一段示範程式碼:」
+  後面直接接下一段),呼叫端沒有任何訊號。判別實驗:同一個 conversation 用
+  `strip_citations=False` 追問,程式碼完整回來。`_assert_no_dropped_blocks` 在
+  `strip_citations=True` 這條路 fail-loud。**判準是有沒有解出文字,不是 block 的 kind** ——
+  `CODE_BLOCK` 帶 spans 時 `render()` 照樣輸出它,那種情況不該擋;而「整份都沒文字」也不擋
+  (那是 fallback 的地盤,不是部分丟失)。
+  已知取捨:`HORIZONTAL_RULE` 之外的空 block 一律擋,所以回答含**圖片**時也會 raise ——
+  圖片在純文字 show notes 裡消失是必然而非解碼失敗,訊息在那個情境下措辭不夠精確。
+  保守方向刻意選擇「寧可擋,也不要靜默少一段」。
+- **`notebook_get` 撞權限不足時裸拋上游 `ClientError`**(FINDING-F)。上游那句講的是
+  `authuser` account-routing、指向 SDK issue #114/#294,**對 pool 情境無用且沒有修復指引**,
+  而 `_list_sources` 早就有正確的那段。skill 正是引導「生成前先 `notebook_get` 確認目標對不對」,
+  所以那是實務上最先撞到的一支。訊息抽成 `_errors.raise_if_access_denied`,兩處共用一份。
+- **`research_wait` 傳「pool 內但非發起者」的帳號會等滿 timeout(預設 1800 秒)才死**
+  (FINDING-G),訊息只有 `last status: no_research`。傳 pool **外**的帳號則當場 raise 並列出
+  可用帳號(v0.9.13 的修正完好)—— 正確的診斷文字本來就寫在同一個檔案裡,只差沒帶到這條路徑上。
+  `_explain_no_research` 把它接上去。判準用訊息裡的 `no_research` 而不是例外型別:
+  SDK 對逾時用的是內建 `TimeoutError`,型別分不出「等太久」與「這個帳號根本看不到它」。
+  `_handle_client` **刻意留在 `try` 外面** —— 它自己的 `ValueError` 訊息裡也含 `no_research`,
+  包進去會被二次包裝成 `RuntimeError`(既有測試守著)。
+- **憑證結構合法但 cookie 已死時,`from_storage` 的 `_LoginRedirectError` 原樣穿透**(FINDING-B),
+  訊息只有「Authentication expired or invalid. Run 'notebooklm login'」。9 槽 pool 裡任一槽過期
+  就整台起不來,而人看不出要去重登**哪一個帳號**(`_write_credential_file` 那條結構不合法的
+  本來就會指名)。重拋時帶槽位名,原因留在 `__cause__`。
+
+新增 13 條離線測試,五條逐一突變驗證(把修正改回舊行為 → 對應測試變紅 → 還原),
+每條另配「判別力那一半」證明沒有誤傷。全套 12,938 passed。
+
+驗收期間改壞三個既有測試,**三個都是判別力發揮作用**:把 `_handle_client` 誤包進 `try`、
+把「整份空文件」誤判成部分丟失、teardown 測試斷言舊例外型別 —— 都已修正並保留原測試意圖。
+
 ## v0.9.14 — 升到 notebooklm-py 0.8.1
 
 pin 從 `>=0.8,<0.9` 收到 `>=0.8.1,<0.9`。**下界不是形式**:這一輪把好幾個 0.8.1-only 的
@@ -122,6 +174,70 @@ server 起不來。
 
 `mcp[cli]>=1.27,<2` 的上界正在生效地擋著已經上架 PyPI 的 **mcp 2.0.0**;
 lock / tool venv 目前都是 1.29.0,一致。
+
+### 真實環境驗收結果(FINDINGS 全文見 `docs/acceptance-v0.9.14-findings.md`)
+
+2026-08-15 於 `-c stg`(9 槽 pool)跑完 Phase 0–10,**35/35 支工具全部碰過**,
+`local-checks.sh` 18/18。
+
+**核心目標達成**:flock 擋 inline heal 在**真實憑證 + 真實網路**下得證。stg 天生 9 槽全
+routable(沒有現成素材),所以在**本機 env 層**造了一個 scope 錯的槽位(`.youtube.com`,
+值不動,Doppler 沒碰),把 `_attempt_rotation` 換成記錄器當安全網兼觀測點:
+**不持鎖的對照組 1 次、持鎖的真 `_lifespan` 0 次**,warning 指名槽位且不含 cookie 值,
+該槽位真 RPC 仍成功,事後 Doppler 9 槽逐欄未變。
+
+**三種帳號狀態的分流全部走對路**:認證失效 → fail-loud、零 rotate;結構不合法 → 啟動即擋
+且指名槽位;權限不足 → `observed_state="notebook_access_denied"`、`attempt_count=0`(零配額)、
+游標與 `_COOLING` 都沒動,**照著 `safe_next_action` 跑 `notebook_share_with_pool` 真的解得開**
+—— v0.9.0 唯一的功能性 FAIL 複驗通過。
+
+**抓到 7 條**(依可行動性):
+
+- **`chat_ask(strip_citations=True)` 沒有清掉 `**粗體**` / `_斜體_`**,而 skill
+  `tool-reference.md:588` 明文說「不會出現」。`render()` 只拿掉 block 級標記(`###`、`*`),
+  inline 的不管;`episode_set_description` 也只清 `[n]` —— 實測含 `**` 的字串**原樣寫進 manifest**,
+  會直達公開 RSS `<description>`。
+- **`render()` 把 CODE_BLOCK 整段靜默丟棄,連 U+FFFC 都不留**(上游只說「不解碼」,
+  `.text` 才是 U+FFFC)。判別實驗:同一個 conversation 用 `strip_citations=False` 追問,
+  程式碼完整回來。危險在**輸出讀起來完全通順**(「以下是程式碼:」後面直接接下一段)。
+- **`notebook_get` 撞權限不足時拋原生 `ClientError`**,沒翻成 `NotebookAccessDenied`、
+  沒有修復指引(`_list_sources` 有)。skill 引導「生成前先 `notebook_get` 確認」,這是最先撞到的一支。
+- **`research_wait` 傳 pool 內但非發起者的帳號 → 等滿 timeout(預設 30 分鐘)才死**,
+  訊息只有 `no_research`。傳 pool 外帳號則當場 raise 並列出可用帳號(v0.9.13 的修正完好)
+  —— 正確的診斷文字已經寫在那條路徑上,只差沒帶進 timeout 訊息。
+- **憑證結構合法但 cookie 已死時,`from_storage` 的 `_LoginRedirectError` 原樣穿透,不指名槽位**
+  (`_write_credential_file` 那條有指名)。9 槽任一槽過期就整台起不來,而人看不出是哪一槽。
+- 驗收腳本自身兩個洞:README §2a 的掃描寫死 `range(1, 8)` 但 stg 有 **9** 槽;
+  §3b 要求驗 `source_add_text` 的「idempotent」,但它**不冪等**(工具也沒宣稱過)。
+
+**從未知變成已知**:
+
+- **`Artifact.source_ids` 在生產資料上有值**,而且是**生成當下的歷史快照**(含已刪除的
+  source id)→ 可從「純觀測」升格,但**不可拿來反查現存 source**。
+- 0.8.1 的預設 host `notebook.google.com` 與既有 Doppler 憑證**通用**(原本只是推導)。
+- `Notebook.role` 在真實 notebook 上解得出來且分得出 OWNER / EDITOR。
+- `set_users` 的 **upsert 不踢人**在真實伺服器上成立 —— 第一次跑因為 `already_shared` 全命中
+  而沒有判別力,補做「先 `remove_user` 踢掉一個槽位再跑」才真的送出 `set_users`,
+  pool 外的 VIEWER 原封不動。
+- 發布路徑的 `_embed_cover` 確實把 MP4/AAC(`ftypdash`)轉成真 MP3(`ID3` v2.3.0);
+  **重新發布不下架舊產物**得證(舊 URL 仍 HTTP 206);附帶發現**換單集封面會連帶換掉
+  mp3 的 enclosure URL**(封面嵌進 ID3 → 位元組變 → content-hash 變)。
+
+**未觀測 / 未結案**(如實標記,不猜成通過):配額耗盡(9 槽全新鮮沒撞到)、
+`artifact_retry_failed`(全程沒有 failed artifact)、`podcast_attempt_adopt` 的成功路徑、
+`role is None` 時 `is_owner` 樂觀回 `true` 的分支、`generate_report` 的識別碼**引用正確性**
+(講義零識別碼,只證得了「沒編造」)。
+
+**下架比想像中難(收尾時撞到,對正式節目有實質意義)**:`uploader` 只有 `do_GET`/`do_PUT`,
+沒有 `do_DELETE`,所以下架只能上 NAS 刪檔;而 `Caddyfile` 給 mp3 的是
+`max-age=31536000, immutable`(一年)—— **刪掉 NAS 上的檔案之後,mp3 的公開 URL 仍然
+`cf-cache-status: HIT` 回 206**(feed.xml 是 `no-cache`,所以它立刻 404)。
+要真的下架一集,刪檔之外必須同時 purge Cloudflare 快取。
+
+**環境異常一則**:一顆 `slide_deck` 卡在 `in_progress` **85 分鐘**未轉終態,兩次
+`artifact_download_slides` 救援等待都 timeout;同 notebook 同帳號重送一份 **12 分鐘**完成
+(正向對照組成立 → 是那顆 artifact 在遠端卡死,不是工具/帳號/來源問題)。
+全程**沒有為了趕進度關掉 `require_slides`**。
 
 ## v0.9.13
 
