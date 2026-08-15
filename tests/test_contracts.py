@@ -83,7 +83,32 @@ def test_read_surface_signatures_and_fields():
     assert {"id", "title"} <= {f.name for f in dataclasses.fields(Source)}
     assert all(hasattr(Source, p) for p in ("kind", "is_ready"))
     assert {"source_id", "content", "char_count"} <= {f.name for f in dataclasses.fields(SourceFulltext)}
-    assert {"id", "title", "sources_count", "is_owner"} <= {f.name for f in dataclasses.fields(Notebook)}
+    # `role` 是 0.8.1 新增的,`notebook_get` 直取 `nb.role`(無 getattr 防護)——
+    # 上游改名時要在這裡紅,而不是在生產拋 AttributeError。
+    assert {"id", "title", "sources_count", "is_owner", "role"} <= {
+        f.name for f in dataclasses.fields(Notebook)
+    }
+
+
+def test_notebook_is_owner_only_tracks_role_when_role_decoded():
+    """`notebook_get` 的 docstring 對呼叫端保證的那個不變式,鎖在這裡。
+
+    0.8.1 修好了 `is_owner`(從 `meta[1]`「有沒有共享者」搬到 `meta[0]` userRole),
+    但只在 **`role` 解得出值** 時才與它同步:`role is None`(meta 缺失/太短,或
+    userRole 帶了預期外的值)時 `is_owner` 停在欄位預設 `True`。
+
+    **升版前這個欄位錯的方向是「恆為 False」(保守),0.8.1 之後 schema drift 時
+    錯的方向變成「宣稱自己是 owner」(樂觀)** —— 所以 `notebook_get` 必須同時
+    轉發 `role`,呼叫端才分得出「真的是 owner」與「role 未知的樂觀預設」。
+    這條紅了代表那個 docstring 的保證不再成立,兩處要一起改。
+    """
+    from notebooklm.rpc.types import SharePermission
+    from notebooklm.types import Notebook
+
+    assert Notebook(id="x", title="t").role is None
+    assert Notebook(id="x", title="t").is_owner is True  # 樂觀預設,不是「查到是 owner」
+    assert Notebook(id="x", title="t", role=SharePermission.VIEWER).is_owner is False
+    assert Notebook(id="x", title="t", role=SharePermission.OWNER).is_owner is True
 
 
 def test_wait_for_completion_has_task_id_and_timeout():
@@ -476,14 +501,17 @@ def test_artifact_exposes_source_ids():
 
 
 def test_psidts_recovery_and_cookie_sanitizer_private_surface():
-    """`_cookies.assert_usable_storage_state` 依賴這幾個上游私有函式判斷
+    """`_cookies.would_trigger_inline_heal` 依賴這幾個上游私有函式判斷
     「這份憑證會不會讓 0.8.1 的載入路徑觸發 inline RotateCookies」。
 
-    這是私有 API,所以更需要 tripwire:紅了就要回頭確認 heal 的觸發條件
-    有沒有換地方(F1 那個 agent 正在寫用到它們的程式碼,這裡只負責鎖)。
-    tests/test_client_pool.py 有離線測試會 monkeypatch `_recover_psidts_inline`
-    攔截 inline heal。若上游把它併入 `load_with_recovery` 或移除這個函式,
-    這條會先在 monkeypatch 階段紅,避免測試先送出真的 RotateCookies POST。
+    這是私有 API,所以更需要 tripwire:紅了就要回頭確認 heal 的觸發條件有沒有換地方。
+
+    `_recover_psidts_inline` 一併鎖在這裡,理由是**它的內部結構就是我們的防線**:
+    `app._lifespan` 靠持有 `_rotation_lock_path(…)` 的 flock 擋掉重鑄,而那把鎖是
+    `_recover_psidts_inline` 的第 4 個前提——它一定要先搶到鎖才發 POST。上游把它
+    inline 進 `load_with_recovery`、或改掉它解析 storage path 的方式,那道 flock 會
+    **靜默失效**(載入照樣成功,只是 3 VM 共用的 cookie 被重鑄)。簽名這條紅了,
+    就要回頭確認 flock 擋的還是不是同一件事。
     """
     from notebooklm._auth import cookies, psidts_recovery
 
@@ -493,12 +521,18 @@ def test_psidts_recovery_and_cookie_sanitizer_private_surface():
 
 
 def test_psidts_routes_to_rotate_gates_on_routability_not_existence():
-    """`_cookies.assert_usable_storage_state` 依賴 routability,不是 existence。
+    """`_cookies.would_trigger_inline_heal` 依賴 routability,不是 existence。
+
+    **這個判準不是接受條件**:routability 問的是「這個 PSIDTS 能不能被 *refresh*」,
+    不是「能不能被 *use*」(上游 `load_with_recovery` 的 docstring 講死的),所以拿它
+    拒收憑證會誤拒——實測 prd 槽位 1 的 PSIDTS scope 在 `.youtube.com`,不 routable
+    卻一直在服役。它現在只用來(a)發一則「這個槽位該換憑證了」的 warning,
+    (b)標示 `app._lifespan` 那把 rotation flock 擋掉的正是哪一種憑證。
 
     第二列的 notebooklm scope 到不了 accounts.google.com,所以不能誤放行。
     第四列的 session cookie 是未過期,所以不能誤拒絕。
     第五列的重複身分只要有一筆過期,保守規則就不能誤放行。
-    這條紅了要回頭確認 gate 語義是否仍是「routable 才算通過」。
+    這條紅了代表 warning 的判準漂了,要回頭確認 flock 擋的對象是否還是同一個 predicate。
     """
     from notebooklm._auth import psidts_recovery
 

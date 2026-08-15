@@ -413,8 +413,12 @@ class FakeNotebooks:
         return [type("NB", (), {"id": "nb-123", "title": "Test"})()]
 
     async def get(self, notebook_id):
+        # `role=None` 鏡射 0.8.1 的真實形狀:`Notebook.role` 在 `GET_NOTEBOOK` 的 meta
+        # 缺失/帶預期外 userRole 時就是 None,而 `is_owner` 會停在欄位預設 `True`
+        # (上游 `__setattr__` 只在 `role is not None` 時同步兩者)。少了這個屬性,
+        # 任何用預設 fake 寫的 `notebook_get` 測試會收到看不懂的 AttributeError 而不是斷言失敗。
         return type("NB", (), {"id": notebook_id, "title": "Test", "sources_count": 2,
-                               "is_owner": True, "created_at": None})()
+                               "is_owner": True, "role": None, "created_at": None})()
 
 
 def _structured_document(*paragraphs: str) -> StructuredDocument:

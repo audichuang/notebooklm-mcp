@@ -786,6 +786,11 @@ async def notebook_get(notebook_id: str) -> dict:
         "title": nb.title,
         "sources_count": nb.sources_count,
         "is_owner": nb.is_owner,
-        "role": nb.role.name if nb.role else None,
+        # `is not None` 而不是 truthiness:`SharePermission` 是 proto 衍生的 int enum,
+        # 上游哪天照 proto 慣例補一個 `UNSPECIFIED = 0`,truthiness 會把它回報成 None
+        # ——而同一份 payload 的 `is_owner` 會被上游的 `__setattr__` 設成 False
+        # (它判的是 `value is not None`),呼叫端就會拿到自相矛盾的 `is_owner=False, role=None`,
+        # 而下面那段 docstring 說 role=None 代表「is_owner 停在樂觀預設 True」。
+        "role": nb.role.name if nb.role is not None else None,
         "created_at": nb.created_at.isoformat() if nb.created_at else None,
     }
