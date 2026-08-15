@@ -148,6 +148,33 @@ v0.7.0 把配額拒絕從「回傳 failed status」改成「拋例外」。離�
 低階 `generate_audio` 有沒有 fail-loud、續跑是否就地重送同一 attempt、**以及走錯路安不安全**。
 最後一項最有價值:死鎖情境下使用者一定會亂試。
 
+### 同一個道理推廣:pool 的帳號狀態是驗收的**輸入**,不是通過條件
+
+上面那條講的是配額,但它其實是一個更一般的東西的特例,而那個一般版被漏寫了很多輪:
+
+**不要把「所有槽位都健康」當成認證那個 Phase 的過關標準。** 一個 5 槽位的 pool 裡有帳號
+處於各種狀態(PSIDTS 過期、cookie scope 不對、配額打完、被踢出某本 notebook 的共享名單)
+是**常態** —— 整個 failover 設計存在的理由就是它。健康的槽位證明不了 failover;
+**不健康的槽位才是免費的判別實驗**,而且是不用燒配額就有的那種。
+
+所以認證 Phase 要做的是:**先記錄每個槽位當下的狀態**,再拿那些狀態當素材,驗
+「系統對每一種狀態的反應是不是正確的那一種」。三種狀態走**三條不同的路**,
+混在一起就是這個 repo 反覆出事的形狀:
+
+| 狀態 | 應該走 | 絕對不該走 |
+|---|---|---|
+| **配額耗盡 / 限流** | `_REFUSED_WITHOUT_DISPATCH`(`RateLimitError` / `ArtifactFeatureUnavailableError`)→ rotate 換帳號重送 | 當成永久失敗停下來 |
+| **認證失效**(cookie 死) | `probe_auth` / `is_auth_error` → fail-loud 叫人重登 | **不該 rotate** —— 換帳號救不了「整批憑證來自同一個 Doppler snapshot」 |
+| **權限不足**(這個帳號看不到那本 notebook) | `NotebookAccessDenied` → 停下來,指引 `notebook_share_with_pool` | **不該進 `_REFUSED_WITHOUT_DISPATCH`**(AGENTS.md 明令那個集合只放配額/限流,不准長大) |
+
+**發現某個槽位不健康時,先記錄、再想能拿它測什麼,最後才考慮要不要修。**
+修掉它等於銷毀素材 —— 下一輪要再等它自然壞掉才有得測。
+
+(v0.9.14 的實例:prd 槽位 1 的 PSIDTS scope 在 `.youtube.com`,送不到
+`accounts.google.com`。那個槽位一直靠 SID 等其他 cookie 撐,而它正是 0.8.1 下每次啟動
+都會觸發 inline heal 的那一列 —— 它是「rotation flock 到底擋不擋得住」最現成的判別實驗,
+而第一版驗收計畫卻把它寫成「決定這一項是正向還是 inconclusive 的障礙」。)
+
 ---
 
 ## 交棒給新 session
