@@ -533,7 +533,12 @@ def test_notebooklm_py_lower_bound_excludes_0_8_0():
     from packaging.requirements import Requirement
     from packaging.version import Version
 
-    metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    # 用 `__file__` 定位而不是 CWD:`audiskill/` 是多專案容器,從上一層跑
+    # `pytest notebooklm-mcp/tests/...` 是合理的操作,而 CWD 相依會讓它變成
+    # `FileNotFoundError` —— 症狀看起來像「契約被違反」(tripwire 觸發),
+    # 實際上只是 harness 位置不同。tripwire 給錯訊號比不給還糟。
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    metadata = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     requirements = metadata["project"]["dependencies"] + metadata["project"][
         "optional-dependencies"
     ]["login"]
@@ -729,7 +734,10 @@ def test_sync_auth_uses_the_sdk_profile_path_resolver():
     """Default and named profiles must follow the SDK's storage migration rules."""
     from pathlib import Path
 
-    script = Path("scripts/sync-auth.sh").read_text(encoding="utf-8")
+    # 與上面 pyproject 那條同一個根因:用 `__file__` 定位,不吃 CWD
+    # (從 `audiskill/` 容器層跑 `pytest notebooklm-mcp/tests/...` 會 FileNotFoundError,
+    #  而那個症狀看起來像契約被違反)。
+    script = (Path(__file__).resolve().parents[1] / "scripts/sync-auth.sh").read_text(encoding="utf-8")
     assert "get_storage_path" in script
     assert 'NBLM_HOME=' not in script
 

@@ -16,6 +16,13 @@ uv venv --python 3.12 && uv pip install -e ".[dev]"
 uv run pytest -q
 #   註:fresh venv + uv pip install 後首次 uv run 可能撞暫時性 re-sync churn(ModuleNotFoundError),
 #   再跑一次或 rm -rf .venv 重建即收斂。
+#   ⚠️ **不要同時跑兩個 `uv run pytest`**:`uv run` 會 uninstall/reinstall 共用 venv 裡的
+#   editable 套件,並行時另一邊會撞到套件消失的瞬間,產生**與程式碼無關的假紅**
+#   (v0.9.14 那輪實際發生:三條 test_pool_sharing 失敗,序列重跑兩次都全綠)。
+#   同樣的機制也會**悄悄換掉你剛裝的版本**:`uv pip install notebooklm-py==X` 之後跑
+#   `uv run`(即使帶 `--no-sync`)可能把 venv 拉回 lock 的版本,而你以為在測 X。
+#   要對某個特定版本跑測試,開一個獨立 venv 用它自己的 `bin/python -m pytest`,
+#   別在共用 venv 上靠 `uv pip install` 臨時換版。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
 uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.13"

@@ -323,8 +323,10 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                     # `threading.Lock`,不是 OS 層協調。P1/P2 的語義由
                     # `test_pool_rotation_flock_blocks_each_slot_independently` 與
                     # `test_pool_rotation_flock_blocks_heal_even_when_os_flock_is_unavailable`
-                    # 交叉引用；若紅了,代表 in-process 鎖的語義變了,要改成直接讀
-                    # `keepalive._file_lock` 的 `LockState`,只有 `HELD` 才算數。
+                    # 交叉引用。**若紅了,先確認下面這段持鎖還在**(拿掉它兩條都會紅,
+                    # 而那是編輯這一塊的人最可能造成的原因);持鎖還在才代表 in-process
+                    # 鎖的語義變了,那時要改成直接讀 `keepalive._file_lock` 的
+                    # `LockState`,只有 `HELD` 才算數。
                     lock_path = _rotation_lock_path(path)
                     if lock_path is not None:
                         acquired = stack.enter_context(_file_lock_try_exclusive(lock_path))

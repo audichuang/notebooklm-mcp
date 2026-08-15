@@ -691,10 +691,13 @@ async def test_pool_rotation_flock_blocks_each_slot_independently(monkeypatch, t
     未鎖那份必須呼叫 `_attempt_rotation`,證明 pool 內兩次都是被各自的鎖擋下,不是
     過期 PSIDTS 根本不會觸發 heal。
 
-    這條測試紅了代表 in-process 鎖的語義變了;OS lock infra 不可用時要改成直接讀
-    `keepalive._file_lock` 的 `LockState`,只有 HELD 才算數。UNAVAILABLE 的承重牆
-    另外由 `test_pool_rotation_flock_blocks_heal_even_when_os_flock_is_unavailable`
-    守住。
+    **這條紅了不代表 in-process 鎖出事**(那句話是從上面那條測試複製過來的,實測是錯的:
+    把上游 `_inprocess_lock_for` 改成每次回新鎖之後,這條仍然綠——真 flock 在同一個
+    process 的兩個 open file description 之間照樣衝突)。它紅的三種可能是:
+    ①`_lifespan` 不再持有每個槽位的鎖;②槽位的 lock path 塌成同一個(那會讓槽位互相
+    擋到);③OS flock 不再跨 OFD 衝突。
+    UNAVAILABLE(OS lock infra 不可用時 fail-open)那條承重牆由
+    `test_pool_rotation_flock_blocks_heal_even_when_os_flock_is_unavailable` 單獨守住。
     """
     from notebooklm._auth import keepalive, psidts_recovery
     from notebooklm._auth.cookies import build_httpx_cookies_from_storage
