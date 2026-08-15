@@ -136,6 +136,7 @@ def _client_error_without_rpc_code() -> ClientError:
         del exc.rpc_code
     except AttributeError:
         pass
+    assert not hasattr(exc, "rpc_code")
     return exc
 
 
@@ -169,9 +170,10 @@ def test_is_permission_denied_normalizes_upstream_rpc_codes(rpc_code, expected):
 def test_is_permission_denied_rejects_non_client_errors_and_missing_codes(exc):
     assert _errors.is_permission_denied(exc) is False
 
-    # 建構在測試執行期，避免上游改變 rpc_code 的屬性形狀時 collection 先炸掉。
-    if isinstance(exc, RuntimeError):
-        assert _errors.is_permission_denied(_client_error_without_rpc_code()) is False
+
+def test_is_permission_denied_rejects_client_error_without_rpc_code():
+    """建構在測試執行期,避免上游改變 rpc_code 的屬性形狀時 collection 先炸掉。"""
+    assert _errors.is_permission_denied(_client_error_without_rpc_code()) is False
 
 
 def test_is_permission_denied_uses_upstream_normalizer(monkeypatch):

@@ -403,26 +403,44 @@ def test_ask_result_has_structured_answer_document():
     chat_ask 的 strip_citations 依賴 answer_document 不帶 inline [N] 標記；
     上游文件保證無法解碼時它是 empty，而不是 None。
     tools_basic.chat_ask 的 strip_citations 也依賴 render() 的可讀性(block 之間可分隔)；
+    render() 對 list_info.glyph 與 heading 的 BlockStyle 都不外洩標記；
+    這不是驗證字面上湊巧沒有 "[1]" 這個子字串。
     這條紅了代表要重新決定 chat_ask 該用 .text 還是 .render()。
     """
     import dataclasses
     from typing import get_type_hints
 
     from notebooklm import AskResult
-    from notebooklm.types import DocumentBlock, StructuredDocument, TextSpan
+    from notebooklm.types import (
+        BlockStyle,
+        DocumentBlock,
+        ListInfo,
+        ListStyle,
+        StructuredDocument,
+        TextSpan,
+    )
 
     fields = {f.name for f in dataclasses.fields(AskResult)}
     assert "answer_document" in fields
     assert get_type_hints(AskResult)["answer_document"] is StructuredDocument
     doc = StructuredDocument(
         blocks=(
-            DocumentBlock(0, 5, spans=(TextSpan(0, 5, "Hello"),)),
-            DocumentBlock(5, 10, spans=(TextSpan(5, 10, "World"),)),
+            DocumentBlock(
+                0,
+                5,
+                spans=(TextSpan(0, 5, "Hello"),),
+                list_info=ListInfo(style=ListStyle.UNORDERED, glyph="* "),
+            ),
+            DocumentBlock(
+                5,
+                10,
+                spans=(TextSpan(5, 10, "World"),),
+                style=BlockStyle.HEADING_1,
+            ),
         ),
     )
     assert doc.render() == "Hello\nWorld"
     assert "\n" not in doc.text and doc.text == "HelloWorld"
-    assert "[1]" not in doc.render()
 
 
 def test_from_storage_has_allow_headless_guard():
@@ -463,14 +481,57 @@ def test_psidts_recovery_and_cookie_sanitizer_private_surface():
 
     這是私有 API,所以更需要 tripwire:紅了就要回頭確認 heal 的觸發條件
     有沒有換地方(F1 那個 agent 正在寫用到它們的程式碼,這裡只負責鎖)。
+    tests/test_client_pool.py 有離線測試會 monkeypatch `_recover_psidts_inline`
+    攔截 inline heal。若上游把它併入 `load_with_recovery` 或移除這個函式,
+    這條會先在 monkeypatch 階段紅,避免測試先送出真的 RotateCookies POST。
     """
     from notebooklm._auth import cookies, psidts_recovery
 
-    assert _params(psidts_recovery._psidts_routes_to_rotate) == [
-        "entries", "to_cookie", "now",
-    ]
     assert _params(psidts_recovery._storage_cookie) == ["entry"]
+    assert _params(psidts_recovery._recover_psidts_inline) == ["path"]
     assert _params(cookies._sanitized_auth_entries) == ["storage_state"]
+
+
+def test_psidts_routes_to_rotate_gates_on_routability_not_existence():
+    """`_cookies.assert_usable_storage_state` 依賴 routability,不是 existence。
+
+    第二列的 notebooklm scope 到不了 accounts.google.com,所以不能誤放行。
+    第四列的 session cookie 是未過期,所以不能誤拒絕。
+    第五列的重複身分只要有一筆過期,保守規則就不能誤放行。
+    這條紅了要回頭確認 gate 語義是否仍是「routable 才算通過」。
+    """
+    from notebooklm._auth import psidts_recovery
+
+    now = 1000.0
+
+    def entry(domain=".google.com", expires=now + 3600):
+        return {
+            "name": "__Secure-1PSIDTS",
+            "value": "tok",
+            "domain": domain,
+            "path": "/",
+            "expires": expires,
+            "httpOnly": True,
+            "secure": True,
+        }
+
+    cases = [
+        ([entry()], True),
+        ([entry(".notebooklm.google.com")], False),
+        ([entry(expires=now - 3600)], False),
+        ([entry(expires=-1)], True),
+        ([entry(expires=now - 10), entry(expires=now + 10)], False),
+        ([], False),
+    ]
+    for entries, expected in cases:
+        assert (
+            psidts_recovery._psidts_routes_to_rotate(
+                entries,
+                to_cookie=psidts_recovery._storage_cookie,
+                now=now,
+            )
+            is expected
+        )
 
 
 def test_share_status_and_shared_user_fields():
