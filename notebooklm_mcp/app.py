@@ -315,6 +315,16 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                     # 它同時擋過期與 scope 錯兩種觸發原因;真實 Doppler prd 的 slot 1
                     # 曾是 `.youtube.com`,送不到 `accounts.google.com`,只看 expires
                     # 擋不了這種 scope 錯。
+                    # 這裡不是在跨 process 協調 rotation,而是讓每個 process 各自不
+                    # rotate；每個 process 只需擋住載入自己這份憑證的 heal。即使
+                    # `_file_lock_try_exclusive` 因 OS flock 不可用而 fail-open 回 True,
+                    # 承重的仍是 `storage_lock.StorageLockManager._acquire_once` 一開始
+                    # 搶下、並持有整個 `with` block 的 per-path in-process
+                    # `threading.Lock`,不是 OS 層協調。P1/P2 的語義由
+                    # `test_pool_rotation_flock_blocks_each_slot_independently` 與
+                    # `test_pool_rotation_flock_blocks_heal_even_when_os_flock_is_unavailable`
+                    # 交叉引用；若紅了,代表 in-process 鎖的語義變了,要改成直接讀
+                    # `keepalive._file_lock` 的 `LockState`,只有 `HELD` 才算數。
                     lock_path = _rotation_lock_path(path)
                     if lock_path is not None:
                         acquired = stack.enter_context(_file_lock_try_exclusive(lock_path))

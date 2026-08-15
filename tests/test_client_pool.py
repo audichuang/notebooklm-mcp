@@ -407,6 +407,36 @@ async def test_inline_auth_suppresses_the_refresh_command(monkeypatch):
     assert app.os.environ["NOTEBOOKLM_REFRESH_CMD"] == "doppler-relogin"
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV,
+        NOTEBOOKLM_HEADLESS_REAUTH_ENV,
+        NOTEBOOKLM_REFRESH_CMD_ENV,
+        NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV,
+    ],
+)
+async def test_inline_auth_overrides_are_applied_and_restored(monkeypatch, name):
+    """四個 inline override 都要真的進出 lifespan,不是只在 mapping 裡存在。"""
+    sentinel = "pre-existing-value"
+    override = app._INLINE_AUTH_ENV_OVERRIDES[name]
+    assert override != sentinel
+
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", _cred("1"))
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON_2", raising=False)
+    monkeypatch.setenv(name, sentinel)
+    built = []
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage(built))
+
+    async with app._lifespan(app.mcp):
+        if override is None:
+            assert name not in app.os.environ
+        else:
+            assert app.os.environ[name] == override
+
+    assert app.os.environ[name] == sentinel
+
+
 def test_inline_auth_suppresses_mid_session_refresh_command():
     """綁上游公開常數,避免測試只拿 app 自己的字面 key 做同義反覆。"""
     assert set(app._INLINE_AUTH_ENV_OVERRIDES) >= {
@@ -608,6 +638,100 @@ async def test_pool_rotation_flock_blocks_inline_heal(monkeypatch, tmp_path):
         assert build_httpx_cookies_from_storage(slot_path) is not None
 
     assert rotation_calls == []
+
+
+async def test_pool_rotation_flock_blocks_heal_even_when_os_flock_is_unavailable(
+    monkeypatch,
+):
+    """OS flock 回 UNAVAILABLE 時,in-process 鎖仍須擋住同 process 的 heal。
+
+    `_file_lock_try_exclusive` 對 UNAVAILABLE 刻意 fail-open,所以 True 本身不代表
+    OS 層真的持有鎖；這裡的承重牆是 `StorageLockManager._acquire_once` 一開始搶下
+    的 per-path `threading.Lock`,而且整個 `with` block 期間都持有。app 的 outer
+    context 若已持有同一 path,SDK 的 inner context 會在碰 OS 層前得到 CONTENDED,
+    `_attempt_rotation` 因而不會被呼叫。這條測試紅了代表 in-process 鎖的語義變了;
+    OS lock infra 不可用時就會漏 heal,應改成直接讀 `keepalive._file_lock` 的
+    `LockState`,只有 HELD 才算數。雙槽位版本的對照由
+    `test_pool_rotation_flock_blocks_each_slot_independently` 守住。
+    """
+    from notebooklm._auth import psidts_recovery, storage_lock
+    from notebooklm._auth.cookies import build_httpx_cookies_from_storage
+
+    monkeypatch.setattr(
+        storage_lock._PlatformLockGateway,
+        "acquire",
+        lambda self, fd, *, blocking, operation: storage_lock.LockState.UNAVAILABLE,
+    )
+    rotation_calls = []
+    monkeypatch.setattr(
+        psidts_recovery,
+        "_attempt_rotation",
+        lambda path, entries: rotation_calls.append(path) or False,
+    )
+    cred = _expired_psidts_cred()
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", cred)
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", cred)
+    built = []
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage(built))
+
+    async with app._lifespan(app.mcp):
+        slot_path = built[0].path
+        assert slot_path is not None
+        assert build_httpx_cookies_from_storage(slot_path) is not None
+
+    assert rotation_calls == []
+
+
+async def test_pool_rotation_flock_blocks_each_slot_independently(monkeypatch, tmp_path):
+    """每個槽位各自擋自己的 heal,不同 lock path 是設計而不是缺陷。
+
+    pool 的兩份憑證檔各有自己的 rotation lock,因為這裡與每個 process 的生產語義
+    一樣,目標是讓每個載入憑證的執行個體不在本 process 內 rotate,不是跨槽位或跨
+    process 協調 rotation 本身。結束 lifespan 後的對照組只鎖其中一份獨立憑證;
+    未鎖那份必須呼叫 `_attempt_rotation`,證明 pool 內兩次都是被各自的鎖擋下,不是
+    過期 PSIDTS 根本不會觸發 heal。
+
+    這條測試紅了代表 in-process 鎖的語義變了;OS lock infra 不可用時要改成直接讀
+    `keepalive._file_lock` 的 `LockState`,只有 HELD 才算數。UNAVAILABLE 的承重牆
+    另外由 `test_pool_rotation_flock_blocks_heal_even_when_os_flock_is_unavailable`
+    守住。
+    """
+    from notebooklm._auth import keepalive, psidts_recovery
+    from notebooklm._auth.cookies import build_httpx_cookies_from_storage
+
+    rotation_calls = []
+    monkeypatch.setattr(
+        psidts_recovery,
+        "_attempt_rotation",
+        lambda path, entries: rotation_calls.append(path) or False,
+    )
+    cred = _expired_psidts_cred()
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", cred)
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", cred)
+    built = []
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage(built))
+
+    async with app._lifespan(app.mcp):
+        paths = [client.path for client in built]
+        assert paths[0] is not None and paths[1] is not None
+        assert paths[0] != paths[1]
+        for path in paths:
+            assert build_httpx_cookies_from_storage(path) is not None
+        assert rotation_calls == []
+
+    rotation_calls.clear()
+    locked_path = tmp_path / "locked.json"
+    unlocked_path = tmp_path / "unlocked.json"
+    locked_path.write_text(cred, encoding="utf-8")
+    unlocked_path.write_text(cred, encoding="utf-8")
+    lock_path = psidts_recovery._rotation_lock_path(locked_path)
+    assert lock_path is not None
+    with keepalive._file_lock_try_exclusive(lock_path) as acquired:
+        assert acquired
+        for path in (locked_path, unlocked_path):
+            assert build_httpx_cookies_from_storage(path) is not None
+
+    assert rotation_calls == [unlocked_path]
 
 
 @pytest.mark.parametrize(
