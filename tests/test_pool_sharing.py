@@ -80,6 +80,31 @@ async def test_single_account_creates_without_sharing(fake_client):
     assert fake_client.sharing.calls == []
 
 
+async def test_empty_grants_would_raise_in_the_upstream_sharing_api(fake_client):
+    """`_share_each` 的空清單 guard 不能拿掉,因為上游不接受空 grants。"""
+    with pytest.raises(ValueError):
+        await fake_client.sharing.set_users("nb-old", [], notify=False)
+
+
+async def test_fake_set_users_mirrors_upstream_validation(fake_client):
+    """fake 的 set_users 驗證必須與上游同樣拒絕權限與 exact 重複。"""
+    for permission in (SharePermission.OWNER, SharePermission._REMOVE):
+        with pytest.raises(ValueError):
+            await fake_client.sharing.set_users("nb-old", [("a@x.com", permission)])
+
+    with pytest.raises(ValueError):
+        await fake_client.sharing.set_users(
+            "nb-old",
+            [("a@x.com", SharePermission.EDITOR), ("a@x.com", SharePermission.VIEWER)],
+        )
+
+    # 上游是 exact 比對;RFC 5321 local part 的大小寫不同不算重複。
+    await fake_client.sharing.set_users(
+        "nb-old",
+        [("A@x.com", SharePermission.EDITOR), ("a@x.com", SharePermission.VIEWER)],
+    )
+
+
 async def test_share_with_pool_backfills_an_existing_notebook(fake_client):
     """既有 notebook(v0.8.1 之前建的、或手動建的)的補救入口。
 

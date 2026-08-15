@@ -554,6 +554,8 @@ class FakeSharing:
        顯式參數」的回歸測不出來:呼叫端沒傳,Python 用 fake 的預設值頂上,若那個
        預設值剛好也是 `False`,`calls` 記錄的還是 `False`,既有斷言全綠。預設值
        跟真 SDK 一致,這個回歸才會讓 `calls` 記錄的變成 `True`,測試才會紅。
+    6. `set_users` 的非空、permission 白名單、exact 重複三項驗證鏡射
+       `_sharing.py:set_users`;比上游寬鬆或嚴格都是 bug。
     """
 
     def __init__(self):
@@ -603,8 +605,17 @@ class FakeSharing:
     async def set_users(self, notebook_id, grants, notify=True, welcome_message=""):
         if self.set_users_exc is not None:
             raise self.set_users_exc
-        if len({email.casefold() for email, _ in grants}) != len(grants):
-            raise ValueError("duplicate email")
+        if not grants:
+            raise ValueError("Must provide at least one user grant")
+        seen: set[str] = set()
+        for email, permission in grants:
+            if permission == SharePermission.OWNER:
+                raise ValueError("Cannot assign OWNER permission")
+            if permission == SharePermission._REMOVE:
+                raise ValueError("Use remove_user() instead")
+            if email in seen:
+                raise ValueError(f"Duplicate email in grants: {email!r}")
+            seen.add(email)
         self.calls.append((notebook_id, grants, notify))
         for email, permission in grants:
             if email not in self.silently_ignore:

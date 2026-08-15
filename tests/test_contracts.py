@@ -520,6 +520,54 @@ def test_psidts_recovery_and_cookie_sanitizer_private_surface():
     assert _params(cookies._sanitized_auth_entries) == ["storage_state"]
 
 
+def test_notebooklm_py_lower_bound_excludes_0_8_0():
+    """分發路徑不讀 lock,所以 pyproject 的版本下界是唯一實裝約束。
+
+    `uv tool install git+…` 不讀 `uv.lock`;Codex 將兩處下界改回 `>=0.8` 時,
+    117 個測試仍全綠,但 0.8.0 wheel 實際 import 會因缺少私有符號而炸掉。
+    這證明版本字串本身需要行為性契約測試,不能只依賴目前 venv 的實裝版本。
+    """
+    import tomllib
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    requirements = metadata["project"]["dependencies"] + metadata["project"][
+        "optional-dependencies"
+    ]["login"]
+    notebooklm_requirements = [
+        Requirement(spec) for spec in requirements if Requirement(spec).name == "notebooklm-py"
+    ]
+
+    assert len(notebooklm_requirements) == 2
+    for requirement in notebooklm_requirements:
+        assert Version("0.8.0") not in requirement.specifier
+        assert Version("0.8.1") in requirement.specifier
+
+
+def test_rotation_lock_and_file_lock_semantics_that_app_lifespan_depends_on(tmp_path):
+    """`app._lifespan` 的 flock 防線靠這兩條上游私有 API 的語意撐著;
+    這裡紅了代表那道防線可能已經失效。"""
+    from notebooklm._auth.keepalive import _file_lock_try_exclusive
+    from notebooklm._auth.psidts_recovery import _rotation_lock_path
+
+    path_a = tmp_path / "slot-a" / "storage_state.json"
+    path_b = tmp_path / "slot-b" / "storage_state.json"
+    assert _rotation_lock_path(path_a) == _rotation_lock_path(path_a)
+    assert _rotation_lock_path(path_a) != _rotation_lock_path(path_b)
+    assert _rotation_lock_path(None) is None
+
+    lock_path = tmp_path / "rotate.lock"
+    with _file_lock_try_exclusive(lock_path) as outer:
+        assert outer is True
+        with _file_lock_try_exclusive(lock_path) as inner:
+            assert inner is False
+    with _file_lock_try_exclusive(lock_path) as reacquired:
+        assert reacquired is True
+
+
 def test_psidts_routes_to_rotate_gates_on_routability_not_existence():
     """`_cookies.would_trigger_inline_heal` 依賴 routability,不是 existence。
 
