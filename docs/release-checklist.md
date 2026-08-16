@@ -17,9 +17,9 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 **遠端** audi-skill 來驗——skill 只同步在本機、還沒推,MCP 先推就 CI 紅(missing 新工具名)。
 反序踩到時把 audi-skill 推上去後 `gh run rerun <id>` 即綠,不用改 code。
 
-### Release Pin Sites(發 tag 時**六處**一起改)
+### Release Pin Sites(發 tag 時**五處**一起改)
 
-`uv tool install …@vX.Y.Z` 的版本號散在五個檔(加 `pyproject.toml` 共六處),
+`uv tool install …@vX.Y.Z` 的版本號散在四個檔(加 `pyproject.toml` 共五處),
 沒有單一來源可推導——曾漂成
 podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一次改完:
 
@@ -28,9 +28,10 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 3. `README.md`
 4. `docs/mcp-setup.md`
 5. `audi-skill/notebooklm/SKILL.md` §Auth
-6. `../podcast-lab/AGENTS.md` §更新 notebooklm-mcp
-   ⚠️ 那個工作樹**常有進行中的 EP 目錄與 manifest 改動**,只 commit 這一個檔
-   (`git commit AGENTS.md -m …`),別 `git add -A`。
+
+⚠️ **`../podcast-lab/AGENTS.md` 曾是第六處,現在不是,別把它加回來**:那份已改成
+「不寫版本號、安裝指令或方法清單」,pin 一律以 project-local skill 的 §Auth(= 第 5 項的
+安裝結果)為準。它現在唯一會出現的版本號在 gitignored 的快照裡,見下面那條 ⚠️。
 
 **外加一件不算 pin 但一定要做的**:在 `CHANGELOG.md` 開一節寫「改了什麼、為什麼、
 踩到什麼事故」。版本敘事只寫在那裡 —— **不要回填進本檔**。
@@ -41,11 +42,16 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 `fatal: unable to read tree` 然後**裝成舊版**(v0.8.1 實測踩到)。收工前跑
 `~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"`;
 數字不對就 `uv cache clean notebooklm-mcp` 再 `--force --reinstall`。
+**editable 裝的 tool venv 完全不受這條保護**:`uv tool install -e <repo>` 之後 metadata 版本
+與**依賴**都停在安裝當時,而 `uv tool list` 印得一切正常 —— 2026-08-16 實測本機停在
+`0.9.12` + `notebooklm-py 0.8.0`,那時 repo 已 `0.9.15`、pin 已是 `>=0.8.1`(**實裝連自己的
+pin 都不滿足**,而 editable 的 code 卻是最新的,所以症狀是「跑起來像新版、依賴卻是舊的」)。
+本機也算消費端:要跟上就重跑 pin tag 安裝,別指望 editable 自動生效。
 
 驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab ../../audi-skill | grep -v docs/superpowers`
 (`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實)。
 
-⚠️ **那個 grep 會撈到兩類「看起來像第七處 pin、其實不是」的東西,別跟著改**:
+⚠️ **那個 grep 會撈到兩類「看起來像第六處 pin、其實不是」的東西,別跟著改**:
 ① `.superpowers/sdd/task-*.md`(v0.2.0)與 `docs/acceptance-*.md` 是歷史紀錄,同
 `docs/superpowers/` 的道理;② `../podcast-lab/.agents/skills/notebooklm/SKILL.md`
 是**gitignored、可重生**的本機 docs 快照(`.claude/skills/notebooklm` 是指過去的
