@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 from mcp.types import ToolAnnotations
 
 from . import runtime
 from ._atomic import download_atomically
+from ._failover import describe_refusal, dispatch_with_failover
 from ._sources import assert_sources_exist, to_source_ids
-from ._status import ensure_completed, ensure_started
+from ._status import ensure_completed
 from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
 from .app import mcp
@@ -18,18 +20,139 @@ from .manifest_store import ManifestStore
 from .publish import notes_html
 
 
+def _episode_in(data: dict, episode_n: int, manifest_path: str) -> dict:
+    """從 snapshot 裡取出該集,取不到就 fail loud(不 setdefault 生一個空的出來)。"""
+    ep = next(
+        (
+            e for e in data.get("episodes", [])
+            if isinstance(e, dict) and e.get("episode") == episode_n
+        ),
+        None,
+    )
+    if ep is None:
+        raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
+    return ep
+
+
+#: 每個附件 kind 在 episode 記錄裡的 provenance 欄位 `(account, artifact_id)`。
+#: `revise_slide` 刻意與 `slides` 共用 —— 它產出的就是這一集的簡報,fork 出新 artifact
+#: 之後 manifest 該指向新那顆。
+_PROVENANCE_FIELDS = {
+    "slides": ("slides_account", "slides_artifact_id"),
+    "report": ("report_account", "report_artifact_id"),
+    "revise_slide": ("slides_account", "slides_artifact_id"),
+}
+
+
+def _append_attachment_event(
+    manifest_path: str,
+    episode_n: int,
+    kind: str,
+    phase: str,
+    reason: object,
+    **extra,
+) -> None:
+    """往 episode 級的 append-only `attachment_errors` 寫一筆稽核。
+
+    **為什麼是 episode 級,不是 attempt 級**:附件沒有 durable attempt(那是
+    slides/report 家族既有的架構債,ADR-0011 決定不在這一版還它)。而 ADR-0010
+    §Transparency 要的是兩個問題答得出來 —— 「這集簡報是哪個帳號生的」(provenance
+    欄位)與「哪個帳號被拒過」(這裡)—— 兩者都不需要 attempt 結構就寫得下。
+
+    **只 append,不清除**,理由與音檔的 `attempt["errors"]` 相同:重生會覆寫
+    `slides_pdf_path` 與 provenance,診斷放在會被覆寫的欄位裡等於下一次成功就把
+    「這個帳號今天被拒過」抹掉,而那正是唯一能看出「pool 有個 cookie 快死了」的訊號
+    (ADR-0010:一個靜默吸收過期憑證的 pool 會一路吸到沒帳號可用)。
+
+    **三種 phase 都走這一支**(換帳號 / 最後一腿被拒 / 受理不明)—— 各寫一個 writer
+    就是「補一半」的溫床,而這裡真的踩過:第一版只寫了換帳號那一種,於是耗盡時最後
+    一個被拒的帳號一筆都不留(單帳號 pool 則是完全沒有紀錄)。
+    """
+    reason_type, message = describe_refusal(reason)
+
+    def mutate(data: dict) -> None:
+        episode = _episode_in(data, episode_n, manifest_path)
+        episode.setdefault("attachment_errors", []).append(
+            {
+                "phase": phase,
+                "kind": kind,
+                "type": reason_type,
+                "message": message,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                **extra,
+            }
+        )
+
+    ManifestStore(manifest_path).update(mutate)
+
+
+# **provenance 只在成品真的落地時寫,而且與路徑同一次 `update`。**
+#
+# v0.9.16 的第二版試過「受理憑據」——受理成功之後、開始等生成之前就先把 account +
+# artifact_id 落盤,想擋「等待途中被砍 → 重跑多燒一顆 artifact」。**獨立複審把它連同它的
+# 配套 fence 一起打掉,而理由是對的**:那組欄位的語意是「**現在磁碟上這份**是誰、哪一顆
+# 生的」,受理時就寫等於把「在飛的」與「已交付的」塞進同一組欄位。實測(probe)後果:
+#
+#     舊成品 X 還在磁碟上,重生 Y 受理後 wait 回 failed
+#     → 檔案 = %PDF-OLD(X),manifest 卻聲稱 slides_artifact_id=Y / slides_account=B
+#
+# 而配套的 fence(下載前檢查「憑據還是不是我這一顆」)自己是 TOCTOU:檢查通過後在下載的
+# `await` 裡被接手,最終「檔案 X、manifest Y」而**兩個工具呼叫都回成功** —— 那正是 fence
+# 的 docstring 聲稱它換掉的東西(「把安靜地服務錯的 PDF 換成大聲失敗」),它其實沒做到。
+#
+# 所以退回最小且誠實的形狀:寫入時機 = 成品落地時,寫入內容 = 這一顆 artifact + 這一次
+# 實際送出的帳號(救援下載寫 `None`,那是它真的不知道)。**殘留的兩件事誠實留著,不假裝
+# 修好了**:①`download_atomically` 的 `os.replace` 與 manifest `update` 是兩個資源,兩者
+# 之間 crash 會留下「新檔配舊 provenance」(要跨資源原子得有 journal);②同一集同一 kind
+# 的並行仍是 last-writer-wins。要關掉②得把 `download_atomically` 拆成「抓到 temp + 驗證」
+# 與「持 manifest 鎖做 artifact-id CAS 後才 replace」兩段 —— 那是 ADR-0011 延後的 attachment
+# attempt 的第一步,不是一個檢查擋得住的。
+
+
+async def _dispatch_attachment(
+    dispatch,
+    *,
+    account: str | None,
+    client: object,
+    manifest_path: str,
+    episode_n: int,
+    kind: str,
+    notebook_id: str,
+) -> tuple[str, str | None, object]:
+    """附件家族的 dispatch:共用 failover 迴圈 + episode 級稽核 + 受理憑據。
+
+    三支工具(`generate_slides` / `generate_report` / `artifact_revise_slide`)共用這一支,
+    **不各自接一次線** —— 三段一樣的 wiring 就是「只補一條路徑」的溫床,而這個 repo
+    在 v0.8.0 已經因此吃過一次(failover 只補了 `_run_episode`,漏了 series 的重送分支)。
+
+    回 `(artifact_id, account, client)`:後兩個是**實際送出的**那一組,呼叫端必須拿它們
+    去做「等完成 → 下載」(推導見 `_failover.dispatch_with_failover` 的 docstring)。
+    """
+    artifact_id, account, client = await dispatch_with_failover(
+        dispatch,
+        account=account,
+        client=client,
+        notebook_id=notebook_id,
+        record_failover=lambda reason, from_account, to_account: _append_attachment_event(
+            manifest_path, episode_n, kind, "attachment_dispatch_failover", reason,
+            from_account=from_account, to_account=to_account,
+        ),
+        on_clean_refusal=lambda reason, refused: _append_attachment_event(
+            manifest_path, episode_n, kind, "attachment_dispatch_refused", reason,
+            account=refused,
+        ),
+        on_acceptance_unknown=lambda reason, used: _append_attachment_event(
+            manifest_path, episode_n, kind, "attachment_acceptance_unknown", reason,
+            account=used,
+        ),
+    )
+    return artifact_id, account, client
+
+
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
     """在 locked fresh snapshot 上合併單集欄位，避免其他 writer 的更新被覆蓋。"""
     def mutate(data):
-        ep = next(
-            (
-                e for e in data.get("episodes", [])
-                if isinstance(e, dict) and e.get("episode") == episode_n
-            ),
-            None,
-        )
-        if ep is None:
-            raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
+        ep = _episode_in(data, episode_n, manifest_path)
         if "description" in fields:
             title = (ep.get("title") or "").strip()
             if title and fields["description"] == title:
@@ -101,8 +224,10 @@ def _require_episode(manifest_path: str, episode_n: int) -> None:
 
     原本這個檢查只在 `_load_ep_and_write` —— 也就是生成/改版跑完、下載完之後才驗:
     `episode_n` 打錯就是燒完一次配額才 raise,而遠端那份 artifact 已經產生了。
-    這裡不驗 artifact ↔ episode 的 binding(manifest 目前沒存 `slides_artifact_id`),
-    只擋掉打錯集號這種可預判的錯。"""
+    這裡仍**不驗** artifact ↔ episode 的 binding:v0.9.16 起 manifest 有
+    `slides_artifact_id` / `report_artifact_id` 了,但它記的是「現在磁碟上這份是哪一顆生的」
+    —— 是 provenance,不是「這一集只准用這一顆」的白名單。拿它當 binding gate 會把合法的
+    重生擋掉。這支只擋打錯集號這種可預判的錯。"""
     data = ManifestStore(manifest_path).read()
     if not any(
         isinstance(e, dict) and e.get("episode") == episode_n
@@ -145,11 +270,19 @@ async def _finish_slides(
     episode_n: int,
     artifact_id: str,
     wait_timeout: float,
+    kind: str = "slides",
+    account: str | None = None,
 ) -> dict:
     """生成之後的共用尾段:等完成→下載→回寫 manifest。
 
     抽出來是為了讓「已經生好、但 client 端斷線／timeout 丟掉結果」的 artifact 能只走
-    這段救回來(`artifact_download_slides`),而不必重生一次燒配額。"""
+    這段救回來(`artifact_download_slides`),而不必重生一次燒配額。
+
+    `account` = **實際送出這次生成的**帳號(failover 換過就是換過之後那個)。
+    **救援下載傳 `None`,那不是偷懶而是事實**:它的存在前提是「生成那次的回應遺失了」,
+    所以它知道成品是哪一顆 artifact、但不知道是誰生的 —— 寫一個明確的 `None` 讓事後查稽核
+    的人看得出要另尋線索,比留著上一次的帳號好(那個值看起來是權威的,而它講的是別的成品)。
+    provenance 與 `slides_pdf_path` **同一次 `update`**,理由見上方那段紀律。"""
     # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
     final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
@@ -163,7 +296,11 @@ async def _finish_slides(
         ),
         _validate_pdf,
     )
-    _load_ep_and_write(manifest_path, episode_n, slides_pdf_path=out)
+    account_field, id_field = _PROVENANCE_FIELDS[kind]
+    _load_ep_and_write(
+        manifest_path, episode_n,
+        slides_pdf_path=out, **{account_field: account, id_field: artifact_id},
+    )
     return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
 
 
@@ -179,24 +316,56 @@ async def generate_slides(
     slide_length: str | None = "default",
     wait_timeout: float = 1800.0,
 ) -> dict:
-    """生成該集簡報並下載 PDF,路徑回寫 manifest 的 slides_pdf_path。"""
+    """生成該集簡報並下載 PDF,路徑回寫 manifest 的 slides_pdf_path。
+
+    配額被拒(`RateLimitError`)時會**換 pool 裡下一個帳號原地重送**,與音檔家族同一個
+    迴圈(`_failover.dispatch_with_failover`);實際生成的帳號寫進 `slides_account`,
+    每一次換帳號往 `attachment_errors` append 一筆。全部帳號都被拒才原樣拋出。"""
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 打錯集號別燒一次生成配額
-    client = runtime.get_client()
+    # 記帳與送出同源:`snapshot()` 一次取 `(label, client)`,之後任何並行的 rotate 都
+    # 影響不到這一次(ADR-0010——分兩次讀全域會讓紀錄記下 A、實際由 B 送出)。
+    account, client = runtime.snapshot()
     if selected is not None:
         # 打錯/已刪的 source_id 伺服器不擋——燒完一次生成配額才發現拿到聚焦錯誤的簡報。
+        # 用起始帳號驗就夠:failover 換過去的帳號若看不到這本 notebook,共用迴圈會把它
+        # 翻成 NotebookAccessDenied 並**停止**輪替(權限是設定問題,不是配額問題)。
         await assert_sources_exist(client, notebook_id, selected)
-    status = await client.artifacts.generate_slide_deck(
-        notebook_id,
-        source_ids=selected,
+
+    # **純本地的轉換一律在 closure 外面做。** 放進 closure 的話,`resolve_language` /
+    # `to_slide_format` 拋的 `ValueError`(打錯 language code、打錯 enum)會落進共用迴圈的
+    # 泛用 except,被記成一筆 `attachment_acceptance_unknown` —— 實測 SDK 呼叫次數是 0,
+    # 卻在 append-only 的稽核裡永久留下「遠端受理不明」。那是憑空造出來的假紀錄,而且
+    # 清不掉(獨立複審第二輪 F4)。
+    resolved = dict(
         language=resolve_language(language),
-        instructions=instructions,
         slide_format=to_slide_format(slide_format),
         slide_length=to_slide_length(slide_length),
     )
-    artifact_id = ensure_started(status)
+
+    async def _generate(active_client):
+        return await active_client.artifacts.generate_slide_deck(
+            notebook_id,
+            source_ids=selected,
+            instructions=instructions,
+            **resolved,
+        )
+
+    # 後兩個回傳值是**實際送出的**帳號與 client。下載一定要用它們 —— 風險視窗幾乎全在
+    # 後半段(dispatch 幾秒,等生成 + 下載是數十分鐘),回頭讀全域會在十幾分鐘後爆 401
+    # 而根因在遠處(推導見 `_failover.dispatch_with_failover` 的 docstring)。
+    artifact_id, account, client = await _dispatch_attachment(
+        _generate,
+        account=account,
+        client=client,
+        manifest_path=manifest_path,
+        episode_n=episode_n,
+        kind="slides",
+        notebook_id=notebook_id,
+    )
     return await _finish_slides(
-        client, notebook_id, manifest_path, episode_n, artifact_id, wait_timeout
+        client, notebook_id, manifest_path, episode_n, artifact_id, wait_timeout,
+        account=account,
     )
 
 
@@ -252,23 +421,40 @@ async def artifact_revise_slide(
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")
     artifact_id = _require_artifact_id(artifact_id)
-    client = runtime.get_client()
+    account, client = runtime.snapshot()
     # 所有可預判的錯都擋在第一個遠端副作用之前。**注意這不是 durable attempt**:
     # 外層 client 在 revise 成功之後、下載回寫之前斷線,重跑仍會再 revise 一次
     # ——那是整個 slides/report 家族共有的架構債(generate_slides 逐字同形),
-    # 要修得連同 generate 一起做成 attachment attempt,不在本工具的範圍。
+    # 要修得連同 generate 一起做成 attachment attempt,不在本工具的範圍(ADR-0011)。
     _require_episode(manifest_path, episode_n)
+    # 用起始帳號驗:pool 全員看得到同一本 notebook 是 ADR-0010 的前置條件,而 artifact
+    # 跨帳號可見已在 v0.8.0 驗收量過。換過去的帳號若看不到,`revise_slide` 會 permission
+    # denied,共用迴圈翻成 NotebookAccessDenied 並停止輪替(設定問題不靠輪替掩蓋)。
     await _require_completed_slide_deck(client, notebook_id, artifact_id)
-    status = await client.artifacts.revise_slide(
-        notebook_id, artifact_id, slide_index, prompt.strip()
+
+    async def _revise(active_client):
+        return await active_client.artifacts.revise_slide(
+            notebook_id, artifact_id, slide_index, prompt.strip()
+        )
+
+    # **改版也燒配額,也會被同步拒絕** —— 它是 generate 家族的第三支,不是唯讀救援,
+    # 所以走同一個 failover 迴圈。重送的冪等性前提一樣:伺服器拒絕時什麼都沒 fork 出來。
+    revised_id, account, client = await _dispatch_attachment(
+        _revise,
+        account=account,
+        client=client,
+        manifest_path=manifest_path,
+        episode_n=episode_n,
+        kind="revise_slide",
+        notebook_id=notebook_id,
     )
     # **以回傳值為準,不假設它是同一顆** —— 這個「不自己假設」的寫法救了這支工具:
     # v0.9.0 真實驗收證明 REVISE_SLIDE **不是**就地改版,伺服器會 fork 出一顆新的
     # `<原標題> (2)`,舊的留著。當初若照 docstring 寫死用輸入的 artifact_id,下載到的
     # 會是**沒改過的舊那份**,而且看起來完全成功。
-    revised_id = ensure_started(status)
     out = await _finish_slides(
-        client, notebook_id, manifest_path, episode_n, revised_id, wait_timeout
+        client, notebook_id, manifest_path, episode_n, revised_id, wait_timeout,
+        kind="revise_slide", account=account,
     )
     out["slide_index"] = slide_index
     # 讓呼叫端看得出 id 換了、舊的還在遠端 —— 否則它只會拿到一個「artifact_id 跟我傳的
@@ -286,8 +472,9 @@ async def _finish_report(
     artifact_id: str,
     report_format: str,
     wait_timeout: float,
+    account: str | None = None,
 ) -> dict:
-    """生成之後的共用尾段(同 `_finish_slides` 的理由)。"""
+    """生成之後的共用尾段(同 `_finish_slides`,`account` 的語意也同那裡)。"""
     # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
     final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
@@ -299,7 +486,12 @@ async def _finish_report(
         lambda dest: client.artifacts.download_report(notebook_id, dest, artifact_id=artifact_id),
         _validate_utf8_text,
     )
-    _load_ep_and_write(manifest_path, episode_n, report_md_path=out, report_format=report_format)
+    account_field, id_field = _PROVENANCE_FIELDS["report"]
+    _load_ep_and_write(
+        manifest_path, episode_n,
+        report_md_path=out, report_format=report_format,
+        **{account_field: account, id_field: artifact_id},
+    )
     return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}
 
 
@@ -350,23 +542,43 @@ async def generate_report(
 
     `report_format="custom"` + `custom_prompt` = 完全自訂講義結構(三種靜態模板
     study_guide / briefing_doc / blog_post 之外的形狀)。兩者必須成對,且 custom
-    格式不吃 `extra_instructions`——要求併進 `custom_prompt`。"""
+    格式不吃 `extra_instructions`——要求併進 `custom_prompt`。
+
+    配額 failover 與 `generate_slides` 逐字同形(共用同一個迴圈);實際生成的帳號寫進
+    `report_account`。"""
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 同上
-    client = runtime.get_client()
+    account, client = runtime.snapshot()            # 同 generate_slides:記帳與送出同源
     if selected is not None:
         # 同 generate_slides:打錯/已刪的 source_id 伺服器不擋,先唯讀對帳。
         await assert_sources_exist(client, notebook_id, selected)
-    status = await client.artifacts.generate_report(
-        notebook_id,
+
+    # 同 generate_slides:純本地轉換擋在 closure 外,否則打錯 report_format / language
+    # 會被記成假的「遠端受理不明」。
+    resolved = dict(
         report_format=to_report_format(report_format),
-        source_ids=selected,
         language=resolve_language(language),
-        custom_prompt=custom_prompt,
-        extra_instructions=extra_instructions,
     )
-    artifact_id = ensure_started(status)
+
+    async def _generate(active_client):
+        return await active_client.artifacts.generate_report(
+            notebook_id,
+            source_ids=selected,
+            custom_prompt=custom_prompt,
+            extra_instructions=extra_instructions,
+            **resolved,
+        )
+
+    artifact_id, account, client = await _dispatch_attachment(
+        _generate,
+        account=account,
+        client=client,
+        manifest_path=manifest_path,
+        episode_n=episode_n,
+        kind="report",
+        notebook_id=notebook_id,
+    )
     return await _finish_report(
         client,
         notebook_id,
@@ -375,6 +587,7 @@ async def generate_report(
         artifact_id,
         report_format,
         wait_timeout,
+        account=account,
     )
 
 

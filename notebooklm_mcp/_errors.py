@@ -24,6 +24,36 @@ class NotebookAccessDenied(RuntimeError):
     """
 
 
+def access_denied_error(
+    exc: BaseException,
+    *,
+    notebook_id: str | None = None,
+    account: str | None = None,
+) -> NotebookAccessDenied:
+    """把權限錯誤翻成**帶下一步動作**的 `NotebookAccessDenied` —— 這段文字的唯一產地。
+
+    v0.9.16 之前這段話有**兩份**:一份在這裡(`raise_if_access_denied`,指名 notebook),
+    一份在 `tools_podcast` 的 failover 迴圈裡(指名帳號)。內容一樣、結尾一句還不一樣,
+    正是本檔頂端那條紀律要擋的形狀 —— 訊息要改(例如工具改名)只會有一處被改到。
+    合成一支之後兩邊都指名得出來,而且比原來任一份都完整:`account` 講「誰被拒」,
+    `notebook_id` 講「哪一本」,failover 那條路兩個都有。
+    """
+    # 兩個都是可選的,而缺哪一個都要退回 v0.9.16 之前那兩份**逐字相同**的措辭 ——
+    # 既有測試只 match「分享」,但這段話會被寫進 manifest 當稽核紀錄、也會原樣回給
+    # 呼叫端當停點指引,無謂的措辭漂移只會讓事後比對紀錄的人以為換了條路。
+    # (合併的第一版真的漂了:少一個空格、還刪掉結尾的「既有 notebook」,
+    #  由 codex 獨立複審抓出來 —— `test_permission_denied_message_is_stable` 現在釘住它。)
+    subject = f"帳號 {account!r} " if account else "這個帳號"
+    target = f"對 notebook {notebook_id} " if notebook_id else "對這個 notebook "
+    return NotebookAccessDenied(
+        f"{exc}\n{subject}{target}沒有存取權。"
+        "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— 呼叫 "
+        "notebook_share_with_pool(notebook_id=...) 補分享給其餘帳號(EDITOR)後再重試;"
+        "MCP 自建 notebook(v0.8.1 起)已自動分享,這通常是舊版建立或在網頁上手動建立的"
+        "既有 notebook。"
+    )
+
+
 def raise_if_access_denied(exc: BaseException, notebook_id: str) -> None:
     """權限被拒就翻成帶指引的 `NotebookAccessDenied`,其餘原樣放行給呼叫端重拋。
 
@@ -37,12 +67,7 @@ def raise_if_access_denied(exc: BaseException, notebook_id: str) -> None:
     """
     if not is_permission_denied(exc):
         return
-    raise NotebookAccessDenied(
-        f"{exc}\n這個帳號對 notebook {notebook_id} 沒有存取權。"
-        "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— 呼叫 "
-        "notebook_share_with_pool(notebook_id=...) 補分享給其餘帳號(EDITOR)後再重試;"
-        "MCP 自建 notebook(v0.8.1 起)已自動分享,這通常是舊版建立或在網頁上手動建立的。"
-    ) from exc
+    raise access_denied_error(exc, notebook_id=notebook_id) from exc
 
 
 def is_permission_denied(exc: BaseException) -> bool:

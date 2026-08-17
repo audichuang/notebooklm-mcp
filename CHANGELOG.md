@@ -6,6 +6,89 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.16 — 附件家族接上配額 failover,迴圈收成一份
+
+**症狀**:pool 裝了 5 個帳號,`generate_slides` 連敲三次全部落在同一格 —— 而同一時間
+`generate_report` 兩次都成功(同一個帳號),證明那個帳號還活著,只是 slides 這項被限流。
+
+**根因不是「忘了接」,是稽核面的形狀。** failover 的入口 `_rotate_for_quota` 第一行就是
+`if store is None: return None`,而它要 `(store, episode_n, attempt_id)` 三個東西才寫得出
+`_record_dispatch_failover`。附件家族**沒有 attempt 記錄**(manifest 裡只有 `slides_pdf_path`
+一個欄位),所以即使 `generate_slides` 手上有 `manifest_path`,也沒有地方寫「A 拒絕 → 換 B」
+—— ADR-0010 §Transparency 的紅線是「沒地方記錄就不准靜默換帳號」,於是它只能
+`runtime.get_client()`。**這條在 v0.9.3 驗收就被抓出來(FINDING-4),v0.9.5 明確決定不修**,
+理由是「真要修得先有 durable dispatch receipt」。
+
+**這一版推翻的是那個理由的適用範圍,不是那條紅線。** ADR-0010 要的不是 attempt 結構,是兩個
+問題答得出來 ——「這集簡報是哪個帳號生的」「哪個帳號被拒過」。兩者都寫得進 episode 記錄。
+所以附件的稽核面是 `slides_account` / `report_account` + append-only `attachment_errors`,
+**durable attachment attempt 這筆債刻意留著**(理由見
+[ADR-0011](docs/adr/0011-attachment-failover-buys-audit-with-an-episode-field-not-an-attempt.md):
+failover 的正確性不需要 attempt,重入的正確性需要,而重入在**沒有** failover 時就已經壞了)。
+
+**比「接上去」更重要的是沒有複製一份。** 迴圈整條抽到 `_failover.py`,音檔改成 wrapper:
+
+- 五條紅線(集合不准長大、「有 id + failed」不准 rotate、權限不 rotate、終止性不靠冷卻
+  時鐘、`tried` 擋在稽核寫入之前)現在只有一個產地。每一條都是一次真實事故 —— 而這一條有
+  前例:v0.8.0 的 failover 只補了 `_run_episode`、漏了 `podcast_series` 的重送分支,pool 對
+  「重試」這條最需要它的路完全無效(驗收 F-4)。
+- 家族差異用 callback:`record_failover=None` = 沒有稽核面 = 一律不換帳號;
+  `on_clean_refusal` / `on_acceptance_unknown` 只有「有 durable attempt」的呼叫端才傳
+  (附件沒有,終態就是原樣拋 —— 遠端什麼都沒建出來,沒有東西要對帳)。
+- 順手收掉兩份重複:「拒絕原因 → `(type, message)`」的判讀(兩種形狀:0.8.0 的例外、0.7.x
+  的 status 物件)抽成 `describe_refusal`;「補分享」的指引文字原本有兩份(`_errors` 那份指名
+  notebook、音檔迴圈那份指名帳號,內容一樣連結尾都差一句),合成 `access_denied_error`
+  之後兩個都指名得出來。
+
+**沒被咬住的那一條值得記下來。** 五條紅線各做突變驗證時,「拿掉 `tried` 終止性」那一條
+**新測試全綠** —— 因為真實 `rotate_client` 的冷卻在測試的時間尺度下自己就回 `None`,
+`tried` 拿掉也看不出來。音檔那邊是靠 monkeypatch 的乒乓 `rotate_client`(從不回 None)守的,
+附件補上同一條之後才咬住(而且**兩種 rotate 形狀各驗一次** —— 共用迴圈有兩處 rotate,
+歷史上正是分開補的兩處)。**「全綠」不等於「守住了」,突變驗證是唯一分得出來的方法。**
+
+### 這一版真正的教訓:第二輪複審要只看成品
+
+離線實作之後派了 **兩輪** codex 獨立複審(`--effort max`),第二輪**刻意不給第一輪的
+findings**,只問「這裡面有什麼是新的、而且沒被任何測試守住的」。結果:**第二輪回的五條裡
+有三條長在第一輪修正新加的東西上**,而且它跑 probe 全部實測重現。
+
+那三條的共同根因是一個概念錯誤:第一輪為了回應「crash 之後稽核答不出來」而加的**受理憑據**
+(受理成功就先落 account + artifact_id)借用了 provenance 的欄位,而那組欄位的語意是
+「**現在磁碟上這份**是誰生的」。於是:
+
+- 舊成品還在磁碟上、重生受理後 `wait` 回 failed → 檔案是舊的,manifest 已聲稱是新的。
+- 為它配套的並行 fence 自己是 TOCTOU:檢查通過後在下載的 `await` 裡被接手,最終
+  「檔案 X、manifest Y」而**兩個工具呼叫都回成功** —— 那正是 fence 的 docstring 聲稱它
+  換掉的東西(「把安靜地服務錯的 PDF 換成大聲失敗」)。**加了它比沒加更糟:它讓人以為
+  競態被處理了。**
+- 救援下載同形(先讀 provenance → `await` 下載 → 盲寫回去)。
+
+**憑據與 fence 連同配套測試一起退掉了**,provenance 退回「成品落地時寫、與路徑同一次
+`update`」。殘留的兩件事誠實寫進 ADR-0011 而不假裝修好:跨資源(檔案 vs manifest)沒有
+原子性;同一集同一 kind 的並行仍是 last-writer-wins。
+
+另外兩條也是第一輪修正引入的:①`language` / enum 的純本地轉換寫在 dispatch closure 裡,
+`ValueError` 落進共用迴圈的泛用 except,被記成一筆憑空的「遠端受理不明」(實測 SDK 呼叫
+次數 0),而那張表 append-only、清不掉;②`ManifestPostCommitError` 的容忍只補在 rotation
+recorder,終態 callback 那半漏了 —— 單帳號撞配額 + parent-dir fsync EIO 時,呼叫端拿到的
+從 `RateLimitError` 變成 `ManifestPostCommitError`,直接違反「原樣重拋」的承諾。
+**又是「補一半」,而且是在修「補一半」的那一輪裡犯的。**
+
+AGENTS.md 早就記著這個病灶(v0.9.8:三個視角、每條突變驗證、全套綠,發版後外部 review
+仍抓到四條,兩條長在那一輪新加的東西上),根因是 prompt —— 審查者拿到的是「這幾條修正
+對不對」,於是對照原缺陷逐條驗證,沒有人對成品重新問一次。**這一版特意分開問,而它立刻
+兌現。以後大型修復輪一律照這個順序:實作 → 獨立複審 → 修正 → 只看成品的第二輪複審。**
+
+順帶修掉一條與附件無關的既有缺陷:`_mark_acceptance_unknown` 收到 **status 物件**
+(「有 task_id 卻 is_failed」那條分支傳的就是)時,用 `type(error).__name__` / `str(error)`
+把稽核寫成 `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"` —— 真正的原因
+整條蒸發,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個記憶體地址(實測重現)。
+簽名宣告 `BaseException` 也一直是錯的。改用同一支 `describe_refusal`。
+
+⚠️ **真實驗收未跑。** 改動碰遠端副作用路徑,而且有一條前提推導不出來:ADR-0010 的
+「零副作用拒絕 = 1.35s 同步拒絕」是對 **audio** 量的,`generate_slide_deck` 撞配額的形狀
+沒人量過。推導與驗收要看什麼寫在 ADR-0011 末段。
+
 ## v0.9.15 — v0.9.14 真實驗收抓到的五條(全部碰 runtime code)
 
 v0.9.14 的驗收(Phase 0–10、35/35 支工具、FINDINGS 全文見

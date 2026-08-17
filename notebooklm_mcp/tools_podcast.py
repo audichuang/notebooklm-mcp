@@ -14,11 +14,9 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 from mcp.types import ToolAnnotations
-from notebooklm.exceptions import (
-    ArtifactFeatureUnavailableError,
-    NetworkError,
-    RateLimitError,
-)
+# `RateLimitError` / `ArtifactFeatureUnavailableError` 的分類已隨 failover 迴圈移到
+# `_failover.py`(本檔只透過 `_REFUSED_WITHOUT_DISPATCH` 這個別名用它們)。
+from notebooklm.exceptions import NetworkError
 from notebooklm.types import ArtifactType
 
 from . import runtime
@@ -28,7 +26,7 @@ from ._sources import (
     assert_sources_exist,
     to_source_ids,
 )
-from ._status import TerminalGenerationError, ensure_completed, ensure_started
+from ._status import TerminalGenerationError, ensure_completed
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
     claimed_source_ids,
@@ -41,6 +39,12 @@ from .audio_finalize import (
     upload_dispatch_window_closed,
 )
 from ._errors import NotebookAccessDenied, is_permission_denied
+from ._failover import (
+    REFUSED_WITHOUT_DISPATCH,
+    describe_refusal,
+    dispatch_with_failover,
+    rotate_for_quota,
+)
 from .app import mcp
 from .auth_probe import _AuthProbeError, probe_auth
 from .enums import to_audio_format, to_audio_length
@@ -95,17 +99,10 @@ def _promised_reconciliation_window_seconds(dispatch: dict, wait_timeout: float)
     return promised
 
 
-# 生成 kickoff 的例外裡,**契約上保證「伺服器沒有建出任何 task」**的那幾種。
-# notebooklm-py 0.8.0(ADR-0019 / #1342)把同步拒絕從「回傳 status='failed'」改成
-# raise:`RateLimitError` 是伺服器的 USER_DISPLAYABLE_ERROR 拒絕(配額/限流),
-# `ArtifactFeatureUnavailableError` 來自 `_parse_generation_result` 的
-# 「a missing id means no task was created」。兩者都等同 0.7.x 的 not_accepted。
-#
-# **刻意不收 `RPCError` / `DecodingError` / 網路錯誤 / CancelledError**:那些都可能
-# 發生在伺服器已經受理之後,歸成 not_accepted 會讓呼叫端直接重生 → 重複 artifact +
-# 重燒配額。兩種誤判的代價不對稱——把拒絕誤判成 unknown 只是多跑一次撈不到東西的
-# 對帳(便宜),把已受理誤判成拒絕是真的損失,所以這個集合只放契約講死的那兩種。
-_REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
+# 這個集合的定義與「為什麼刻意不長大」已移到 `_failover.py`:v0.9.16 起附件家族
+# (簡報 / 講義)也走同一個 failover 迴圈,各留一份等於埋一顆「上游改了同步拒絕的
+# 例外型別、只有一處被改到」的地雷。這裡保留同名以免動到既有呼叫點與文件引用。
+_REFUSED_WITHOUT_DISPATCH = REFUSED_WITHOUT_DISPATCH
 _TRANSIENT_TRANSPORT_ERRORS = (TimeoutError, ConnectionError, NetworkError)
 
 # `NotebookAccessDenied` / `_is_permission_denied` 已移到 `_errors.py`:v0.9.0 起
@@ -1344,12 +1341,9 @@ def _record_dispatch_failover(
 
     def mutate(manifest: dict) -> None:
         _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        if isinstance(reason, BaseException):
-            message = str(reason) or type(reason).__name__
-            reason_type = type(reason).__name__
-        else:
-            message = getattr(reason, "error", None) or getattr(reason, "status", "failed")
-            reason_type = getattr(reason, "error_code", None) or "not_accepted"
+        # 兩種拒絕形狀的判讀共用 `_failover.describe_refusal`(附件家族的 recorder 也用
+        # 同一支)——各寫一份等於上游改了 status 欄位名時只有一處被改到。
+        reason_type, message = describe_refusal(reason)
         attempt["dispatch"]["account"] = to_account
         attempt["errors"].append(
             {
@@ -1365,6 +1359,29 @@ def _record_dispatch_failover(
     store.update(mutate)
 
 
+def _attempt_failover_recorder(
+    store: ManifestStore | None, episode_n: int, attempt_id: str
+):
+    """音檔家族的稽核面:把「A 拒絕 → 換 B 重送」寫進**這個 attempt** 的 `errors[]`。
+
+    回 `None` 代表「這個呼叫端沒有稽核面」——`_failover` 收到 `None` 就一律不換帳號:
+    沒有地方寫紀錄還靜默換帳號,違反 ADR-0010 自己立的「對 client 透明可以,對稽核
+    紀錄不行」(standalone 沒有 manifest 的路徑就是這一種)。
+
+    抽成一支是因為 `_rotate_for_quota` 與 `_dispatch_audio_with_failover` 都要綁同一份
+    ——各自 inline 一個 closure 等於這條「稽核往哪寫」的決定有兩個版本。
+    """
+    if store is None:
+        return None
+
+    def record(reason: object, from_account: str | None, to_account: str) -> None:
+        _record_dispatch_failover(
+            store, episode_n, attempt_id, reason, from_account, to_account
+        )
+
+    return record
+
+
 def _rotate_for_quota(
     store: ManifestStore | None,
     episode_n: int,
@@ -1373,49 +1390,19 @@ def _rotate_for_quota(
     from_account: str | None,
     tried: set[str],
 ) -> tuple[str | None, object] | None:
-    """還有沒試過的帳號就換過去,回**換過去那一個**的 `(label, client)`;沒有就回 None。
+    """音檔家族的 rotate = 共用輪替 + 這個 attempt 的稽核面。
 
-    `store is None`(standalone、沒有 manifest)一律不換:沒有地方寫稽核紀錄,
-    靜默換帳號違反 ADR-0010 自己立的「對紀錄不透明」。
-
-    **回 (label, client) 而不是 bool**:呼叫端要拿著這一份往下送,不能回頭再讀一次
-    全域(`rotate_client()` 與下一次 `get_client()` 之間有 await,並行的另一次
-    rotate 會落在那個縫裡)。`from_account` 也由呼叫端傳進來、不在這裡重讀,理由同上
-    ——`_record_dispatch_failover` 記的「從哪個帳號換到哪個」必須是**這次 dispatch
-    實際用過的**那一個,不是「此刻剛好輪到誰」。**現在也把它原樣轉給
-    `runtime.rotate_client(refused=...)`**:冷卻要進的是真正被拒的那個槽位,不是
-    游標此刻剛好指到的那個——兩者在並行 dispatch 下可能不是同一個(P1)。
-
-    **`tried` 這道門必須擋在 `_record_dispatch_failover` 之前,不能留給呼叫端事後丟棄
-    回傳值。** `runtime.rotate_client(refused=...)` 與 `_record_dispatch_failover` 都是
-    副作用(前者推進冷卻/全域游標,後者把 `dispatch.account` 改寫成 to_account、
-    往 append-only 的 `errors[]` 多寫一筆)——只在呼叫端判斷「這個 to_account 已經
-    tried 過,不繼續送」時才丟棄回傳值,冷卻確實該進(帳號真的被拒過),但
-    manifest 那筆「換成 to_account」的紀錄從未真正生效(呼叫端沒有真的拿它去送),
-    留著就是一筆假的稽核紀錄,而且會覆寫掉上一輪才寫下的、真正生效的 `dispatch.account`。
-
-    **`tried` 現在同時是「排除清單」也是「事後防線」(P1 修復)。** 排除主動傳給
-    `runtime.rotate_client(skip=...)`,讓掃描本身跳過已試過的槽位、繼續往後找 ——
-    而不是像 v0.9.8 之前那樣只回「游標後方第一個不在冷卻中的槽位」,回傳之後才發現
-    它已經 tried 過就整批放棄(游標後面可能還有完全沒試過、也沒在冷卻中的帳號)。
-    下面的 `to_account in tried` 判斷保留成第二道防線 —— `runtime.rotate_client`
-    不保證每個呼叫端(含測試用的 monkeypatch 假件)都真的遵守 `skip`,這裡仍是
-    `_record_dispatch_failover` 前唯一擋得住假稽核紀錄的地方。
+    **輪替本身的紀律(`tried` 要擋在稽核寫入之前、`skip=` 要進掃描、`refused=` 要用
+    呼叫端實際持有的 label)住在 `_failover.rotate_for_quota`,不在這裡** —— v0.9.16
+    附件家族也接上 failover 時抽出去的:那三條每一條都是一次真實事故,各寫一份等於
+    下一次修正只有一處被改到。這支只剩「稽核往哪寫」這一件家族專屬的事。
     """
-    if store is None:
-        return None
-    # `refused` 必須是**這次 dispatch 實際用過的**帳號,不是「此刻游標指到誰」——
-    # rotate 只該把真正被拒的那個槽位送進冷卻,反查不到時 `runtime.rotate_client`
-    # 自己會保守退回冷卻當前 `_ACTIVE`(舊行為)。冷卻副作用永遠要做,所以這一步
-    # 不能被 `tried` 擋掉。
-    to_account = runtime.rotate_client(refused=from_account, skip=frozenset(tried))
-    if to_account is None or to_account in tried:
-        return None
-    _record_dispatch_failover(
-        store, episode_n, attempt_id, reason, from_account, to_account
+    return rotate_for_quota(
+        _attempt_failover_recorder(store, episode_n, attempt_id),
+        reason,
+        from_account,
+        tried,
     )
-    # rotate_client() 與 snapshot() 之間沒有 await,所以取到的必然是剛換過去那個槽位。
-    return runtime.snapshot()
 
 
 async def _dispatch_audio_with_failover(
@@ -1426,17 +1413,25 @@ async def _dispatch_audio_with_failover(
     *,
     account: str | None,
     client: object,
+    notebook_id: str | None = None,
 ) -> tuple[str, str | None, object]:
     """送出音檔生成並回傳 artifact_id;配額拒絕就換帳號**原地重送同一個 attempt**。
 
-    兩條路徑收在同一個函式裡是刻意的:同一個「伺服器拒絕、沒建出 task」語意有兩種
-    形狀進來(0.8.0 起 raise,0.7.x 回 `task_id=""` 由 `ensure_started` 判定),分兩處
-    各補一次 failover 正是本 repo 反覆出事的「補一半」。**兩個呼叫端也共用它**:
-    `_run_episode`(全新一集)與 `podcast_series` 的重送/supersede 分支
-    (v0.8.0 只補了前者,於是 pool 對「重試」這條最需要它的路完全無效 —— 驗收 F-4)。
+    **迴圈本身已抽到 `_failover.dispatch_with_failover`** —— v0.9.16 附件家族(簡報 /
+    講義 / 改版單頁)也接上 failover 時抽的。那個檔案的模組 docstring 列著五條紅線
+    (集合不准長大、有 id + failed 不准 rotate、權限不 rotate、終止性不靠時鐘、
+    `tried` 擋在稽核寫入之前),每一條都是一次真實事故 —— **改那五條要去那裡改,
+    不要在這裡加分支**,各寫一份正是本 repo 反覆出事的「補一半」。
 
-    **除了那兩種,一律不換帳號**:其餘失敗都可能發生在伺服器已經受理之後,重送會變成
-    重複 artifact + 重燒配額(`_REFUSED_WITHOUT_DISPATCH` 刻意不長大的同一個理由)。
+    這支只剩音檔家族專屬的三件事:①稽核與終態標記寫進**這個 attempt**
+    (`_rotate_for_quota` / `_mark_not_accepted` / `_mark_acceptance_unknown`);
+    ②`store is None`(standalone)時退化成不換帳號;③維持既有的 positional 呼叫形狀。
+
+    **重送是同一個 attempt** —— 同一個 `attempt_id`、不 supersede、不新建 manifest 紀錄。
+    這刻意**不是**「用另一個帳號重新生成這一集」。
+
+    **兩個呼叫端共用它**:`_run_episode`(全新一集)與 `podcast_series` 的重送/supersede
+    分支(v0.8.0 只補了前者,於是 pool 對「重試」這條最需要它的路完全無效 —— 驗收 F-4)。
 
     **續跑指引由呼叫端各自加在例外訊息上**,不在這裡:`podcast_episode` 的續跑動作是
     原樣重呼自己,`podcast_series` 是重呼整季 —— 而 `_mark_not_accepted` 會把
@@ -1444,121 +1439,65 @@ async def _dispatch_audio_with_failover(
     落進 manifest,事後查錯的人會照著跑錯的東西。
 
     **`account` / `client` 由呼叫端用 `runtime.snapshot()` 一次取好傳進來**,函式內
-    不再自己讀全域。MCP 是並行的(每則 message 一個 task),而記帳點
-    `_claim_prepared_dispatch(..., account=…)` 與這裡真正的 `generate(client)` 之間
-    隔著至少一次 await —— 分兩次讀全域時,另一個工具呼叫在那個縫裡撞到配額並 rotate,
-    manifest 就會記下 A、實際卻由 B 送出。ADR-0010 §Transparency 說 manifest 是
-    **唯一**的稽核憑據,記錯帳等於憑據失真,而且事後無法發現(兩個帳號都成功,只是
-    掛在錯的名下)。failover 換帳號時 `account`/`client` 一起換,兩者永遠同源。
-
-    **回 `(artifact_id, account, client)`,呼叫端必須接住後兩個往下用。** 只回 artifact_id
-    的話,呼叫端要做 finalize 只能回頭 `runtime.get_client()` —— 又變成「此刻游標指到誰」
-    而不是「這次是誰送的」,而且**風險視窗幾乎全落在那一半**:dispatch 只有幾秒,
-    finalize(等生成 → 下載 → 回錄上傳 → rename)是數十分鐘。分享不完整時症狀是十幾分鐘後
-    在 finalize 爆 401、根因在遠處(正是 ADR-0010 以為已經退休掉的那個);分享完整時退化成
-    稽核失真:manifest 記 A 生成、實際下載與回錄上傳的是 B,而 finalize 身分不寫進任何欄位,
-    事後查不出來。
-
-    **F7:終止性不能依賴時鐘。** v0.9.7 之前 `_ACTIVE` 只增不減,繞一圈必定回到起點,
-    終止性無條件成立;加了冷卻後 `rotate_client()` 改成「冷卻過期就重新可用」——若每一腿
-    被拒都耗時夠久(SDK backoff、伺服器慢回 429),繞回來時第一格冷卻可能已經過期,
-    `rotate_client()` 就會**永遠**回得出帳號,這個 `while True` 便失去終止性。用
-    `tried` 自己記這次 dispatch 已經試過誰:rotate 回來的 label 若已在 `tried` 裡,
-    當作沒有帳號可換,走原本 `None` 的那條路——終止性回到「一輪之內最多試 len(pool)
-    次」,不再靠冷卻是否過期。
+    不再自己讀全域;**回 `(artifact_id, account, client)`,呼叫端必須接住後兩個往下用**
+    (finalize 的身分必須是「這次是誰送的」而不是「此刻游標指到誰」)。兩條的完整推導在
+    `_failover.dispatch_with_failover` 的 docstring。
     """
-    tried: set[str] = {account} if account else set()
-    while True:
-        try:
-            status = await generate(client)
-        except _REFUSED_WITHOUT_DISPATCH as exc:
-            # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
-            # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」——標成
-            # not_accepted 讓呼叫端可以直接重試,不必先跑一次註定撈不到東西的對帳。
-            rotated = _rotate_for_quota(store, episode_n, attempt_id, exc, account, tried)
-            if rotated is not None:
-                account, client = rotated
-                tried.add(account)
-                continue
-            if store is not None:
-                _mark_not_accepted(store, episode_n, attempt_id, exc)
-            raise
-        except (Exception, asyncio.CancelledError) as exc:
-            if _is_permission_denied(exc):
-                # 這個帳號看不到那個 notebook —— 伺服器沒建出任何 task,所以是
-                # **乾淨的終態**而不是「受理不明」。走泛用分支會把它標成
-                # acceptance_unknown,把呼叫端叫去跑一次註定撈不到東西的 reconcile。
-                # **不 rotate**:權限是設定問題不是暫時性問題,一個一個帳號試過去
-                # 只會掩蓋根因,還每次多燒一輪 RPC。
-                denied = NotebookAccessDenied(
-                    # 用這次 dispatch 實際持有的 account,不重讀全域:並行 rotate 會
-                    # 讓訊息指認錯的帳號,而這條訊息會被寫進 manifest 當稽核紀錄。
-                    f"{exc}\n帳號 {account!r} 對這個 notebook 沒有存取權。"
-                    "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— 呼叫 "
-                    "notebook_share_with_pool(notebook_id=...) 補分享給其餘帳號"
-                    "(EDITOR)後再重試;MCP 自建 notebook(v0.8.1 起)已自動分享,"
-                    "這通常是舊版建立或在網頁上手動建立的既有 notebook。"
-                )
-                # 先建好帶指引的例外、再標 manifest —— manifest 的 remote.error／
-                # errors[] 記下的要是**這份帶著下一步動作**的訊息,不是上游原始的
-                # "permission denied"。呼叫端事後只看得到 manifest 時(例如
-                # podcast_series 的結構化 partial 只回訊息不回原始例外),指引才不會
-                # 整條蒸發。
-                if store is not None:
-                    _mark_not_accepted(store, episode_n, attempt_id, denied)
-                raise denied from exc
-            if store is not None:
-                _mark_acceptance_unknown(store, episode_n, attempt_id, exc)
-            raise
-
-        # task_id IS the artifact_id — notebooklm-py _types/artifacts.py:421 states
-        # "task_id and artifact_id are the same identifier"; GenerationStatus has NO
-        # artifact_id field, so we must use task_id for the download/rename targeting
-        # (otherwise download falls back to "latest" and rename targets None).
-        # ensure_started guards the failed/empty-task_id case (rate limit / quota / refusal).
-        try:
-            return ensure_started(status), account, client
-        except RuntimeError:
-            if getattr(status, "task_id", None):
-                # 有 id 卻 is_failed=True:這**不是**零副作用拒絕。SDK
-                # `_artifact/generation.py:586-590` 明寫「有 artifact_id 就回
-                # GenerationStatus(task_id=artifact_id, status=...)」,而
-                # `_ARTIFACT_STATUS_MAP` 含 FAILED → "failed",所以「有 id + failed」
-                # 這個形狀在上游可達。rotate 重送在這個形狀下會產生第二個 artifact:
-                # A 已經建出 task,manifest 卻只綁得到 B 那個,第一個不在
-                # artifact_ids_before 基線裡,日後 reconcile 會撞成
-                # reconciliation_ambiguous、還多燒一次配額——正是 ADR-0010 紀律②要擋
-                # 的「把已受理誤判成拒絕」。標成 acceptance_unknown(不是
-                # not_accepted)讓呼叫端先對帳,而不是盲目重試。
-                if store is not None:
-                    _mark_acceptance_unknown(store, episode_n, attempt_id, status)
-                raise
-            rotated = _rotate_for_quota(store, episode_n, attempt_id, status, account, tried)
-            if rotated is not None:
-                account, client = rotated
-                tried.add(account)
-                continue
-            if store is not None:
-                _mark_not_accepted(store, episode_n, attempt_id, status)
-            raise
+    return await dispatch_with_failover(
+        generate,
+        account=account,
+        client=client,
+        notebook_id=notebook_id,
+        # `store is None` 時這裡是 `None`,共用迴圈就一律不換帳號(沒地方寫稽核紀錄,
+        # ADR-0010)。`_rotate_for_quota` 綁的是同一支,不再各寫一份。
+        record_failover=_attempt_failover_recorder(store, episode_n, attempt_id),
+        # `account` 用不到 —— attempt 的 `dispatch.account` 已經記著這次是誰送的,
+        # 而那個欄位在 failover 換帳號時就被 `_record_dispatch_failover` 更新過了。
+        on_clean_refusal=(
+            None
+            if store is None
+            else lambda reason, account: _mark_not_accepted(
+                store, episode_n, attempt_id, reason
+            )
+        ),
+        on_acceptance_unknown=(
+            None
+            if store is None
+            else lambda reason, account: _mark_acceptance_unknown(
+                store, episode_n, attempt_id, reason
+            )
+        ),
+    )
 
 
 def _mark_acceptance_unknown(
     store: ManifestStore,
     episode_n: int,
     attempt_id: str,
-    error: BaseException,
+    error: object,
 ) -> None:
+    """標成「受理不明」並留診斷。
+
+    **`error` 不一定是例外。** 「有 `task_id` 卻 `is_failed`」那條分支傳進來的是
+    **status 物件**(`_failover.dispatch_with_failover` 的 `on_acceptance_unknown(status)`),
+    而舊版本用 `type(error).__name__` / `str(error)` 直接處理 —— 實測落盤的是
+    `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"`,**真正的原因
+    (`status.error`)整條蒸發**,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個
+    記憶體地址。簽名原本宣告 `BaseException` 也是錯的(從來就有非例外的呼叫端)。
+    改用 `_failover.describe_refusal`,與 `_record_dispatch_failover` / 附件家族同源。
+    """
+
     def mutate(manifest: dict) -> None:
         _, attempt = _attempt_record(manifest, episode_n, attempt_id)
         if attempt["dispatch"]["status"] != "dispatching":
             return
+        error_type, message = describe_refusal(error)
         attempt["dispatch"]["status"] = "acceptance_unknown"
         attempt["errors"].append(
             {
                 "phase": "dispatch",
-                "type": type(error).__name__,
-                "message": str(error),
+                "type": error_type,
+                "message": message,
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -2700,6 +2639,7 @@ async def _run_episode(
             _generate,
             account=dispatch_account,
             client=dispatch_client,
+            notebook_id=notebook_id,
         )
     except _REFUSED_WITHOUT_DISPATCH as exc:
         # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經被
@@ -4911,6 +4851,7 @@ async def podcast_series(
                             _generate_resend,
                             account=dispatch_account,
                             client=dispatch_client,
+                            notebook_id=notebook_id,
                         )
                         account = dispatch_account
                     except asyncio.CancelledError:

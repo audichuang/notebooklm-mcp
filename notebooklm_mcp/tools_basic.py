@@ -519,9 +519,14 @@ async def generate_audio(
     這裡就是繞過它的公開後門。
 
     ⚠️ **這支沒有配額 failover**:它用 ``runtime.get_client()``(此刻作用中的那一個),
-    撞到配額就直接 raise,不會像 podcast 家族那樣換帳號重送——failover 掛在
-    ``_dispatch_audio_with_failover`` 上,而那條路要有 manifest 才寫得了稽核紀錄
-    (ADR-0010:沒地方記錄就不准靜默換帳號)。多帳號 pool 裝了幾個帳號都一樣。
+    撞到配額就直接 raise,不會換帳號重送。多帳號 pool 裝了幾個帳號都一樣。
+    根因是它**連 `manifest_path` 參數都沒有** —— 共用迴圈 (`_failover`) 收到
+    ``record_failover=None`` 就一律不換,因為沒地方寫「A 拒絕 → 換 B」的稽核紀錄
+    (ADR-0010:對 client 透明可以,對紀錄不行)。
+    **v0.9.16 起 `generate_slides` / `generate_report` / `artifact_revise_slide` 都接上了**
+    ——它們吃 `manifest_path` + `episode_n`,稽核寫進 episode 的
+    ``slides_account`` / ``report_account`` 與 append-only ``attachment_errors``(ADR-0011)。
+    這支要跟上得先有地方落帳,那等於把它升成 manifest-backed 能力,不在本工具範圍。
     所以拿這支當 ``acceptance_unknown`` 的備援出路時,配額拒絕要由呼叫端自己處理。"""
     selected = to_source_ids(source_ids)
     client = runtime.get_client()

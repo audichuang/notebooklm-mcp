@@ -191,3 +191,82 @@ def test_is_permission_denied_uses_upstream_normalizer(monkeypatch):
 
 def test_notebook_access_denied_remains_runtime_error():
     assert issubclass(_errors.NotebookAccessDenied, RuntimeError)
+
+
+def test_permission_denied_message_is_stable_and_names_both():
+    """這段話會進 manifest 當稽核紀錄、也會原樣當停點指引回給呼叫端 —— 措辭要釘住。
+
+    v0.9.16 把原本**兩份**逐字相同的文字(`raise_if_access_denied` 指名 notebook、
+    `tools_podcast` 的 failover 迴圈指名帳號)合成一支。合併的第一版真的漂了:
+    少一個空格、還刪掉結尾的「既有 notebook」,而當時沒有任何測試看得出來
+    (既有的只 match「分享」與工具名),由 codex 獨立複審抓出來。
+    """
+    from notebooklm_mcp._errors import access_denied_error
+
+    exc = Exception("permission denied")
+    tail = (
+        "多帳號 pool 模式要求 notebook 對 pool 全員可存取 —— 呼叫 "
+        "notebook_share_with_pool(notebook_id=...) 補分享給其餘帳號(EDITOR)後再重試;"
+        "MCP 自建 notebook(v0.8.1 起)已自動分享,這通常是舊版建立或在網頁上手動建立的"
+        "既有 notebook。"
+    )
+    # 只有帳號(音檔 failover 在沒傳 notebook_id 時的退化形狀)
+    assert str(access_denied_error(exc, account="a@x")) == (
+        f"permission denied\n帳號 'a@x' 對這個 notebook 沒有存取權。{tail}"
+    )
+    # 只有 notebook(`raise_if_access_denied` —— notebook_get / _list_sources 走這條)
+    assert str(access_denied_error(exc, notebook_id="nb-1")) == (
+        f"permission denied\n這個帳號對 notebook nb-1 沒有存取權。{tail}"
+    )
+    # 兩個都有:合併之後才做得到,比原來任一份都完整
+    assert str(access_denied_error(exc, notebook_id="nb-1", account="a@x")) == (
+        f"permission denied\n帳號 'a@x' 對 notebook nb-1 沒有存取權。{tail}"
+    )
+
+
+async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(
+    fake_client, tmp_path
+):
+    """「有 task_id 卻 is_failed」傳給 `_mark_acceptance_unknown` 的是 **status 物件**。
+
+    舊版本用 `type(error).__name__` / `str(error)` 直接處理,落盤成
+    `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"` —— 真正的原因整條
+    蒸發,而 `dispatch.status` 卻正確地標成 `acceptance_unknown`。卡在這個狀態的人打開
+    manifest 只看到一個記憶體地址。**這條路此前沒有任何測試碰過那兩個欄位。**
+    """
+    import json
+
+    from notebooklm_mcp import runtime
+    from notebooklm_mcp import tools_podcast as p
+
+    class _AcceptedThenFailed:
+        task_id = "art-123"
+        is_failed = True
+        status = "failed"
+        error = "伺服器端生成失敗:配額不足"
+        error_code = "RateLimitError"
+
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store, notebook_id="nb-1", episode_n=1, title="t", brief="b",
+        language="en", audio_format=None, audio_length=None,
+    )
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+    runtime.set_clients([("a@x", fake_client)])
+
+    async def accepted_then_failed(client):
+        return _AcceptedThenFailed()
+
+    with pytest.raises(RuntimeError):
+        await p._dispatch_audio_with_failover(
+            store, 1, attempt_id, accepted_then_failed,
+            account="a@x", client=fake_client,
+        )
+
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
+    assert attempt["dispatch"]["status"] == "acceptance_unknown"
+    recorded = attempt["errors"][-1]
+    assert recorded["type"] == "RateLimitError"
+    assert recorded["message"] == "伺服器端生成失敗:配額不足"
+    assert "object at 0x" not in recorded["message"]

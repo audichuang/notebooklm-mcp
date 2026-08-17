@@ -7,6 +7,36 @@
 
 ---
 
+- **(v0.9.16)附件三支生成有配額 failover 了,而稽核面是 episode 級、不是 attempt。**
+  `generate_slides` / `generate_report` / `artifact_revise_slide` 現在與音檔共用
+  `_failover.dispatch_with_failover`:配額被拒就換 pool 下一個帳號原地重送,全部被拒才原樣拋。
+  **改這一塊之前先讀 [ADR-0011](adr/0011-attachment-failover-buys-audit-with-an-episode-field-not-an-attempt.md)。**
+  三件事動之前要知道:
+  ① **provenance 只在成品落地時寫,而且與路徑同一次 `update`。** `slides_account` +
+    `slides_artifact_id`(report 同形)講的是「**現在磁碟上這份**是誰、哪一顆生的」。
+    救援下載(`artifact_download_slides`)寫 `account: None` —— 它真的不知道。
+    ⚠️ **不要「優化」成受理時就先落憑據** —— 那個版本寫過又退掉了:失敗的生成會留下
+    「檔案舊、manifest 新」的錯配(實測),而配套的並行 fence 自己是 TOCTOU、在下載的
+    `await` 裡被接手時**兩個呼叫都回成功**,比沒有 fence 更糟(它讓人以為競態處理過了)。
+    推導與正確做法(獨立的 pending 欄位 + 提交時 CAS)寫在 ADR-0011。
+  ② **`attachment_errors` 只 append,永不清除,而且三種 phase 都要寫**
+    (`attachment_dispatch_failover` / `..._refused` / `..._acceptance_unknown`)。
+    只寫換帳號那一種的話,**帳號耗盡時最後一腿一筆都不留**(單帳號 pool 則完全沒紀錄)
+    ——「沒有狀態要標」不等於「沒有紀錄要留」。
+  ③ **只有真的碰過遠端才准寫這張表。** `resolve_language` / `to_slide_format` 這類純本地
+    轉換一律擋在 dispatch closure **外面** —— 放進去的話它們拋的 `ValueError` 會落進共用
+    迴圈的泛用 except,被記成一筆「遠端受理不明」(實測 SDK 呼叫次數 0),而 append-only
+    的表清不掉,事後查配額的人會被帶去查一個從未發生的遠端狀態。
+  ④ **同一集同一 kind 的並行是 last-writer-wins,沒有修。** 輸出檔名固定、manifest 回寫是
+    blind update,慢的那個最後落地會蓋掉快的。這在 v0.9.16 之前就是這樣,沒有被放大也沒被
+    修掉。要關掉得把 `download_atomically` 拆成「抓 temp + 驗證」與「持鎖 CAS 後 replace」。
+  ⑤ **生成前的 `assert_sources_exist` / `_require_completed_slide_deck` 用的是起始帳號**,
+    failover 換過去之後不重驗。notebook 層級是安全的(換過去看不到就 `NotebookAccessDenied`
+    並**停止**輪替);**但 source 層級的論證不完整** —— B 看得到 notebook、而某個 `source_id`
+    在 A 驗過之後被刪掉的話,B 的生成會拿到聚焦錯誤的成品而不報錯。要在 dispatch 的幾秒內
+    被刪才會撞到,所以留著沒修,但別把它當成已證明安全。
+  ⚠️ **`generate_slide_deck` 撞配額的實際形狀還沒量過**(ADR-0010 的 1.35s 同步拒絕是對
+    **audio** 量的)。推導在 ADR-0011,真實驗收未跑。
 - **發布用的 HTML guard 是標籤/屬性允許清單,不是關鍵字黑名單**(`publish/notes_html.py`):
   黑名單會把「設定 online=1」「JavaScript:動態語言的起點」這種普通中文散文誤殺(誤判成本 =
   整季 publish raise),又漏掉 `<svg><image href>`、`<input type=image>` 等。允許清單走

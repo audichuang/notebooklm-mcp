@@ -32,7 +32,12 @@ async def test_generate_slides_downloads_and_writes_manifest(fake_client, tmp_pa
     data = json.loads(open(m, encoding="utf-8").read())
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
     assert data["schema_version"] == 2
+    # 一次成功生成 = **一次** manifest 寫入:路徑與 provenance 同一次 `update`。
+    # (v0.9.16 中途試過「受理時先落憑據」,那讓失敗的生成留下「檔案舊、manifest 新」的
+    #  錯配,已退掉 —— provenance 的語意是「現在磁碟上這份是誰生的」。)
     assert data["revision"] == 1
+    assert data["episodes"][0]["slides_artifact_id"] == res["artifact_id"]
+    assert data["episodes"][0]["slides_account"] == "#1"
 
 
 async def test_generate_slides_unknown_episode_errors(fake_client, tmp_path):
