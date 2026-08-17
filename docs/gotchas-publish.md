@@ -56,6 +56,40 @@
   gate,不是 await barrier**(分不出「manifest 有舊路徑、新版正在重生」),也**不保證零 orphan
   blob**(網路/ffmpeg/uploader 階段失敗仍會留未引用的 immutable blob,那是 media-first 發布
   的已知代價)。
+- **(v0.9.18)`publication_state: "deferred"` 是 host↔`publish_series` 的契約:那一集留在
+  manifest 當 audit、但不進 feed。** 這不是假想功能 —— `podcast-lab/output/series_manifest.json`
+  的 EP46 就是這個狀態(音檔五次 semantic QA 拒收、全部 attempt 已撤回、`mp3_path: null`、
+  沒有 `artifact_id`)。少了這道過濾,**50 集的整季 republish 會在 `tools_publish.py` 的
+  `_ensure_local_mp3` resolve 迴圈整批 raise**(`episode 46: mp3_path missing and no
+  artifact_id to re-download`)—— 不是只掉那一集,是換封面重發之類的事完全做不了。
+  四件動之前要知道的事:
+  ⓿ **寫入的唯一正門是 `episode_set_publication_state`**(`tools_artifacts.py`),白名單正本在
+    [`publish/state.py`](../notebooklm_mcp/publish/state.py)。**常數不能放回 `tools_publish`**:
+    那條路在「先 import `tools_publish`」時炸循環 import(`tools_publish` → `app` → 註冊
+    `tools_artifacts` → `tools_publish` 只初始化到一半),實測被 `test_publish_tools.py` 的
+    module-level import 抓到。第一版**只做了讀取端**,而 manifest 只由工具寫入的紀律
+    不允許手改 JSON —— 於是「解除」在受支持的路徑上是死路(EP46 之後生出可用音檔也解不開)。
+    ⚠️ 「沒變更就不寫盤」必須在 mutator 內用 `_NoChange` 中止(`ManifestStore.update` 的
+    revision 無條件 +1,無效寫盤會撞掉別人的 CAS);**不能先 `read()` 再決定要不要 `update()`**
+    —— 兩次呼叫之間別的 writer 插進來,判斷就過期了。
+  ① **只管發布層,不代表禁止重生。** `podcast_series`、attempt/artifact/cleanup 掃描
+    (`_claimed_artifact_ids`、`_unresolved_attempt_ids`、`_settle_cleanup_state`)**刻意不看
+    這個欄位** —— deferred 的理由正是「待有受支持的生成入口後再修復」,拿它擋重生會把
+    暫緩變成永久除名;而 attempt 級掃描要看全 manifest 才算得出正確的清理義務與 artifact 歸屬。
+  ② **判準是「欄位在不在」,而且值只認明列的那幾個 —— 其餘一律 raise。** 拼錯(`defered`)、
+    空字串、**顯式 `null`**、未來新增的狀態,任何一個靜默公開都是在這個欄位該生效的時候
+    失效,而 **feed host 永不刪檔,送出去的 mp3 收不回來**。所以「缺席」才是照發,
+    `.get() is None` 不行(`null` 與缺席同形,而 `null` 的意圖無從得知);unhashable 值
+    (list/dict)也要先驗型別,不然 `in frozenset` 會漏 `TypeError` 出去。
+    要加狀態就改 `publish/state.py` 的 `WITHHELD_PUBLICATION_STATES`,並同步這一條。
+  ③ **deferred 集整集跳過 preflight,不是只跳過 mp3 那一項。** 理由是它不進 feed,驗它的
+    檔案沒有意義。⚠️ **別把「剛好缺哪個檔」寫進過濾條件** —— 生產上的 EP46 其實
+    description / cover / 簡報 / 講義**全部齊全且檔案存在**,只缺 `mp3_path` 與 `artifact_id`;
+    順手多看一個欄位(`… and not ep.get("cover_path")`)對極簡 fixture 全綠,對真的 EP46
+    卻會再次擋掉整季。兩種形狀各有一條測試(`_deferred_ep_production_shape` 那條就是為此存在)。
+  ④ **被扣下的集號一定要回報**(`deferred_episodes`):50 集的 manifest 回 `episode_count=49`
+    卻不說是哪一集不見了,讀起來就是「發布漏集」。全季都被扣下時 raise,不發空 feed
+    (那會把既有 show.json 的集數整批清掉)。
 - **附加簡報/講義**:`generate_slides`/`generate_report` 只吃**傳入的 `source_ids`**才聚焦原文;
   不傳則 SDK 用全部來源(v1 不自動排除音檔來源)。附件缺檔時 `publish_series` **fail-fast**。
   **順序鐵律**:uploader 白名單放寬 `.pdf`/`.html` 後**要先重部署 NAS**,再跑帶附件的發布,否則附件 PUT 404。

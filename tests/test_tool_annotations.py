@@ -37,6 +37,9 @@ EXPECTED_DESTRUCTIVE = {
 EXPECTED_IDEMPOTENT = {
     "source_delete",
     "podcast_attempt_retract",
+    # v0.9.18:同一組 (state, reason) 重呼是真正的 no-op —— 連 revision 都不 +1
+    # (`_NoChange` 從 mutator 拋出去 = 零寫入離場)。遺失 response 後重放是預期操作。
+    "episode_set_publication_state",
 }
 
 # 這份清單是「核准紀錄」而非語意判定:openWorldHint 缺省時 client 本就假設 True,
@@ -53,6 +56,14 @@ EXPECTED_OPEN_WORLD = {
     "research_start",
     "research_wait",
     "research_import",
+}
+
+
+# **顯式 False 也要被鎖住。** 其他四份清單都只收集 `is True`,所以
+# `openWorldHint=False` 被刪掉時沒有任何測試會紅 —— 而它不是預設值:MCP client 在缺省時
+# 假設 True,標 False 是在明講「這支不碰外部世界」。純本機 manifest 寫入的工具才准進這裡。
+EXPECTED_NOT_OPEN_WORLD = {
+    "episode_set_publication_state",
 }
 
 
@@ -86,6 +97,16 @@ async def test_idempotent_hint_matches_approved_list():
 async def test_open_world_hint_matches_approved_list():
     annotations = await _annotations_by_name()
     assert _names_with(annotations, "openWorldHint") == EXPECTED_OPEN_WORLD
+
+
+async def test_explicit_not_open_world_matches_approved_list():
+    """顯式 `openWorldHint=False` 的那幾支 —— 刪掉標註要會紅(見清單上方註解)。"""
+    annotations = await _annotations_by_name()
+    explicit_false = {
+        name for name, ann in annotations.items()
+        if ann is not None and getattr(ann, "openWorldHint", None) is False
+    }
+    assert explicit_false == EXPECTED_NOT_OPEN_WORLD
 
 
 async def test_destructive_and_idempotent_hints_only_on_non_read_only_tools():

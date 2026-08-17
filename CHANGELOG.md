@@ -6,6 +6,115 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.18 — deferred 集擋掉整季 republish + 補上它缺的寫入端
+
+**症狀**:`podcast-lab/output/series_manifest.json` 有 50 集,跑一次整季 republish
+(例如只想換封面重發)在**任何 PUT 之前**整批 raise:
+
+```
+episode 46: mp3_path missing and no artifact_id to re-download
+```
+
+不是只掉 EP46,是**整季發不出去**。
+
+**根因是 manifest 有一個發布層沒實作的狀態。** EP46 的音檔經五次 semantic QA 拒收、
+全部 attempt 已撤回,host 依稽核紀律把它標成 `publication_state: "deferred"`
+(附 `publication_state_reason` / `publication_state_at`),`mp3_path: null`、沒有
+`artifact_id` —— 集數留在 manifest 才保得住完整 audit。但 `publish_series` 不認識這個
+欄位,於是那一集照樣進 preflight 的「每集 mp3 一律 resolve 成真正存在的本機檔」迴圈
+(v0.3.3 刻意提前的那一段),而它本來就沒有檔可以 resolve。**preflight 的 fail-fast 在這裡
+反過來咬人**:它做對了自己的事(任何 upload 之前失敗),但判斷依據少了一格。
+
+**修法是在 preflight 之前分流,不是放寬 preflight。** deferred 集完全不進那個迴圈 ——
+封面/描述/附件/mp3 一項都不驗。**理由是它不進 feed,驗它的檔沒有意義,不是「它一定沒有
+那些檔」**(真 EP46 的 description / cover / 簡報 / 講義都在,只缺音檔 —— 見下面驗收那段)。
+三個一起補的決定:
+
+- **未知 `publication_state` 值 fail-loud,不 fall through 成照發**
+  (白名單正本在 `publish/state.py`)。第一版寫成 `!= "deferred"`,那是 fail-open:
+  拼錯 `defered` 或未來新增一個狀態,就在這個欄位**該生效的時候**靜默公開,
+  而 **feed host 永不刪檔,送出去的 mp3 收不回來**。獨立複審又抓到同一個洞的第二個形狀:
+  判準若寫成 `.get() is None`,**顯式 `null`** 與「欄位不存在」同形而照發 —— 改成看
+  **欄位在不在**,值只認明列的那幾個(空字串、`null`、unhashable 的 list/dict 都 raise;
+  後者要先驗型別,否則 `in frozenset` 會漏 `TypeError` 出去)。
+- **被扣下的集號回在 `deferred_episodes`。** 50 集的 manifest 回 `episode_count=49`
+  而不說是哪一集不見了,讀起來就是「發布漏集」—— 這是本 repo 反覆出現的
+  「不准靜默截斷」的同一條。
+- **全季都被扣下 → raise**,不發空 feed:空 `show.json` 會把既有 feed 的集數整批清掉。
+
+**新工具 `episode_set_publication_state`,因為第一版只做了讀取端。** 獨立複審指出:
+`publish_series` 讀這個欄位,卻沒有任何工具寫得動它 —— 而 `series_manifest.json`
+只由工具寫入的紀律不允許 host 手改 JSON,於是「解除」在受支持的路徑上是**死路**
+(EP46 之後生出可用音檔也解不開)。這支是唯一正門:三個稽核欄位一起寫、一起清,
+可設的值 = publish 端會扣下的值(同一份白名單)。兩件實作紀律:
+- **白名單搬到 `publish/state.py`。** 放在 `tools_publish` 讓 `tools_artifacts` 去 import,
+  會在「先 import `tools_publish`」的路徑上炸循環 import(`tools_publish` → `app` →
+  註冊 `tools_artifacts` → `tools_publish` 只初始化到一半)。**實測被
+  `test_publish_tools.py` 的 module-level import 抓到**,不是預防性重構。
+- **「沒變更就不寫盤」用 `_NoChange` 從 mutator 中止。** `ManifestStore.update` 的 revision
+  無條件 +1,冪等重放平白 +1 會撞掉別的 writer 的 `expected_revision` CAS;而**不能**先
+  `read()` 再決定要不要 `update()` —— 兩次呼叫之間別的 writer 插進來,判斷就過期了。
+- **不自動解除**:生成完成不等於 QA 通過,放行必須是顯式的第二次呼叫。
+
+**刻意沒做的**:`podcast_series` 與 attempt / artifact / 清理義務掃描
+(`_claimed_artifact_ids`、`_unresolved_attempt_ids`、`_settle_cleanup_state`)**一律不看
+這個欄位**。deferred 的語意是「待有受支持的生成入口後再修復」,拿它擋重生會把暫緩變成
+永久除名;而 attempt 級掃描要看**全** manifest 才算得出正確的清理義務與 artifact 歸屬。
+契約寫進 [gotchas-publish](docs/gotchas-publish.md)、skill 的 `tool-reference.md`
+**與每次載入的 `SKILL.md`**(host 是寫入方,只活在一行註解裡等於沒有契約),
+`publication_state` / `deferred_episodes` 也進了 `check_skill_sync.py` 的硬檢查 ——
+只補 references 的話,主路由層的「每集音檔全綠才可發布」交付清單會讓 agent 停在清單那一步,
+**根本走不到已經會正確跳過它的 publisher**(這是 v0.9.12 那個洞的同一個形狀)。
+
+**第二輪複審(只看成品、問「什麼是新的且沒被測試守住」)抓到的,最嚴重兩條都長在
+上面那支新工具上** —— 正是 v0.9.8 的同一個形狀,所以那個問法值得每次修正輪之後都跑一次:
+- **`_NoChange` 的回傳原本在鎖外重讀 manifest。** 那會拼出一份不屬於任何 snapshot 的
+  response:「在 revision R 判斷沒變更」+「在 R+2 讀到的欄位」。改成整份 outcome 從
+  mutator 裡帶出來。**序列跑的測試看不到這件事**(沒人插進那個縫),所以絆線直接鎖不變式
+  —— 把 `ManifestStore.read` 換成會爆的版本,no-op 路徑仍必須成功。
+- **`has_output` 欄位整個刪掉,因為它會說謊。** 它只看 `mp3_path`/`artifact_id` 的
+  truthiness,卻在文件裡宣稱能回答「扣下是否等於下架」:已生成未發布的回 `True`
+  (沒東西可下架)、已上線但 output 欄位被 retract 清掉的回 `False`(其實會下架)、
+  路徑指向不存在的檔也回 `True`。真的要答準得讀 ADR-0003 的 deployment snapshot,
+  不是 episode projection 推導得出來的 —— **寧可不給,也不留一個好看的近似值**。
+- **「沒變更」的判準要求三欄齊全。** legacy 資料(有 state + reason、沒有
+  `publication_state_at`)只比對 state+reason 的話會直接 `_NoChange`,那個缺欄從此永遠
+  補不上 —— 而「重呼一次修好它」正是呼叫端唯一能做的補救。
+- **deferred 測試原本證明不了「整集跳過 preflight」**:`_publish` helper 顯式關掉
+  `require_slides`/`require_report`,而 production 預設是 True。補一條走
+  `_publish_with_defaults`、live 集帶齊附件、deferred 集刻意不帶。
+- 另外三個假綠:`return_episodes` 若把 `deferred_episodes` 也拿去取交集(滾動加集的常見
+  呼叫就永遠回空);兩邊同時把 `"deferred"` 寫死、共用常數沒人用(identity 測試照樣綠 →
+  改用 sentinel 狀態跑真往返);`openWorldHint=False` 被刪掉沒有任何測試會紅
+  (其他四份 annotation 清單都只收集 `is True`)。
+- 四處文件互相矛盾一併修掉:tool-reference 還寫著「host 寫入、MCP 只讀」(新工具出現後就
+  不對了)、兩處還在說 deferred 集「本來就沒有那些檔」、gotchas 指向改名前的常數。
+
+**第三輪(告知「上一輪之後改了什麼」再打)只剩一條 blocker,而它又是同一個形狀** ——
+**刪掉 `has_output` 時漏了 skill 的 `tool-reference.md`**:runtime 改乾淨了,文件還留著範例
+與「照它判斷是否下架」的說明,照文件寫 `result["has_output"]` 直接 `KeyError`,而 CI 全綠。
+根因是 `check_skill_sync.py` 只驗「必要詞存在」、**從不驗「已移除的契約不存在」**,所以補了
+`REMOVED_CONTRACT_TERMS` 這道 forbidden-term 檢查(刻意只做字串黑名單:真正的失敗模式是
+「忘了刪文件」,不是「文件寫錯型別」)。同輪順手把「三欄齊全」收緊成**時間戳解析得動且
+是 UTC** —— `"publication_state_at": null` 是 key 存在的,而它承載的稽核脈絡是零,
+當成合法就等於讓那個壞欄永遠補不上。
+
+**刻意留著沒做的**:與既有 writer 的「互不碰欄位」只有 targeted-update 的實作保證與一條
+attempt/output 不變測試,沒有 set→publish→promote→clear 的全欄位整合測試(複審點出
+「在 attempt promotion 裡自動 pop 掉 publication_state,所有測試仍綠」)。那是一條真的缺口,
+但它要跨 audio finalize 那一整條路,規模不對稱 —— 記在這裡,不假裝守住了。
+
+**驗收**:離線測試 + 既有實測前提推導結案,沒開 acceptance workspace ——
+改動**只減少**遠端寫入(過濾掉一集,不新增任何 RPC/PUT 路徑;新工具純本機 manifest 寫入),
+`publish/` 是純邏輯,而「EP46 這個形狀會讓 resolve 迴圈 raise」是拿生產 manifest 直接驗到的。
+突變驗證做了兩輪:自查三道(未知值改成照發、拿掉 `deferred_episodes`、deferred 不過濾),
+複審又點出四道會存活的(過濾條件順手多看 `cover_path`、缺席判斷改回 truthiness、
+全季守衛綁 `len(all_eps)==1`、`withheld` 覆寫成單元素)—— 七道現在全部會紅。
+其中「順手多看 `cover_path`」那道也修正了一個**事實錯誤**:真 EP46 的 description /
+cover / 簡報 / 講義**全部齊全**,只缺 `mp3_path` 與 `artifact_id`;第一版的測試與文件
+都寫成「它本來就沒有那些檔」,於是極簡 fixture 對那個假綠毫無防護
+(`_deferred_ep_production_shape` 就是為此存在)。
+
 ## v0.9.16 — 附件家族接上配額 failover,迴圈收成一份
 
 **症狀**:pool 裝了 5 個帳號,`generate_slides` 連敲三次全部落在同一格 —— 而同一時間

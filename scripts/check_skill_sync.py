@@ -63,6 +63,11 @@ REQUIRED_CONTRACT_TERMS = (
     "account",                # research_start 回傳、wait/import 要原樣帶回:research
                               # session 綁發起帳號,pool 換人只會拿到 no_research —— 而
                               # 那個失敗形狀是「輪詢滿 timeout」,不寫進文件沒人查得動
+    "publication_state",      # v0.9.18:host 寫在 manifest 集層的「刻意不公開」。工具名與
+                              # 參數都沒變,純粹是 manifest 欄位契約 —— 正好是本 checker
+                              # 最容易漏的那一類。缺席=照發、未知值 raise 都要寫進文件
+    "deferred_episodes",      # 同上的回傳側:episode_count 會少掉被扣下的集數,不寫進
+                              # 文件呼叫端只會看到「發布漏集」
 )
 
 
@@ -82,12 +87,32 @@ SKILL_MD_REQUIRED_TERMS = (
     "next_step",
     "abandon_in_flight",
     "auth_expired",
+    # v0.9.18:§Publish 的交付清單要求「每集音檔全綠才可發布」,deferred 集永遠不會全綠
+    # —— 只補 tool-reference 的話,agent 會照主路由層停在清單那一步,根本走不到已經
+    # 會正確跳過它的 publisher。這正是上面那個 v0.9.12 教訓的同一個洞。
+    "publication_state",
 )
 
 
 def _missing_terms(path: Path, terms: tuple[str, ...]) -> list[str]:
     text = path.read_text(encoding="utf-8")
     return [term for term in terms if f"`{term}`" not in text]
+
+
+#: **移除**一個參數/回傳欄位時,把它的名字放進來。上面兩張表只驗「必要詞存在」,從不驗
+#: 「已刪掉的契約不存在」—— 於是 v0.9.18 真的踩到:`has_output` 回傳欄位在複審後被刪掉
+#: (它會說謊),runtime 改乾淨了,skill 的 tool-reference 卻還留著範例與「照它判斷是否
+#: 下架」的說明。照文件寫 `result["has_output"]` 直接 KeyError,而 CI 全綠。
+#: 這裡刻意只做字串黑名單、不做 schema parser:被刪掉的欄位名是有限且已知的清單,
+#: 而真正的失敗模式是「忘了刪文件」,不是「文件寫錯型別」。
+REMOVED_CONTRACT_TERMS = (
+    "has_output",
+)
+
+
+def _stale_terms(path: Path, terms: tuple[str, ...]) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    return [term for term in terms if term in text]
 
 
 async def main() -> int:
@@ -112,6 +137,13 @@ async def main() -> int:
         if missing_terms:
             failures.append(
                 f"{path}: missing contract term(s) {', '.join(missing_terms)}"
+            )
+
+    for path in (SKILL_MD, TOOL_REFERENCE):
+        stale = _stale_terms(path, REMOVED_CONTRACT_TERMS)
+        if stale:
+            failures.append(
+                f"{path}: still documents removed contract term(s) {', '.join(stale)}"
             )
 
     if failures:

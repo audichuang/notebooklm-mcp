@@ -32,6 +32,7 @@ from .publish import feed as feed_mod
 from .publish import identity
 from .publish.layout import attachment_filename, cover_filename, media_filename
 from .publish import notes_html
+from .publish.state import WITHHELD_PUBLICATION_STATES
 
 _TZ = timezone(timedelta(hours=8))          # Asia/Taipei, RFC-2822 +0800
 _TIMEOUT = 600.0                            # a season of mp3 PUTs can take a while
@@ -309,6 +310,12 @@ async def publish_series(
     preflight gate,**不是 await barrier**(分不出「舊路徑 + 新版正在重生」)。使用者
     明講整季不做某一項時才關掉對應那個。
 
+    集層 ``publication_state: "deferred"`` = **稽核上刻意不公開**(例如音檔經 QA 拒收、
+    attempt 全撤回):那一集留在 manifest 保住完整 audit,但不進 feed、也不做任何檔案
+    preflight,集號回在 ``deferred_episodes``。**它只管發布層,不代表禁止重生** ——
+    ``podcast_series`` / attempt 掃描刻意不看這個欄位。未知的 ``publication_state``
+    值直接 raise(不會 fall through 成照發)。
+
     完整參數/回傳/preflight 涵蓋範圍見 skill ``references/tool-reference.md``。"""
     base_url = _require_url_env("PODCAST_PUBLIC_BASE_URL")
     # return_episodes 只是回傳過濾器,但舊版拖到所有 PUT + manifest 回寫都完成後才
@@ -398,9 +405,41 @@ async def publish_series(
 
     token = identity.make_token(show_id, salt)
 
-    manifest_eps = manifest.get("episodes", [])
-    if not manifest_eps:
+    # deferred = 稽核上刻意不公開(例如 QA 五次拒收、attempt 全撤回)。必須留在 manifest
+    # 當 audit,但不能擋整季重發、也不能被 leftover 本機 mp3 偷偷送上 feed
+    # (`_ensure_local_mp3` 缺 mp3_path 時會拿 artifact_id 重抓,那正是被拒收的那顆)。
+    # **未知值 fail-loud,不 fall through 成照發**:這個欄位由 host 寫,唯一用途就是
+    # 「別公開這一集」,拼錯(`defered`)、空字串、`null` 或新增狀態時靜默發布,正好在它
+    # 該生效的時候失效 —— 要加狀態就在 `WITHHELD_PUBLICATION_STATES` 明講。
+    # ⚠️ deferred 集**整集跳過 preflight**,不是只跳過 mp3 那一項:它不進 feed,驗它的
+    # 檔案沒有意義,而 deferred 也不保證那些檔存在(生產上的 EP46 只缺 mp3、其餘齊全,
+    # 但那是巧合 —— 攤在 QA 撤回之後的任何一步都可能是別的形狀)。
+    all_eps = manifest.get("episodes", [])
+    if not all_eps:
         raise ValueError(f"manifest has no episodes: {manifest_path}")
+    manifest_eps: list[dict] = []
+    withheld: list[object] = []
+    for ep in all_eps:
+        # 判準是**欄位在不在**,不是 `.get()` 的值:`{"publication_state": null}` 用
+        # `.get() is None` 會與「根本沒這個欄位」同形而照發,而 `null` 的意圖無從得知
+        # ——這是唯一一道「不得公開」的閘,而 feed host 永不刪檔。缺席才是照發。
+        if "publication_state" not in ep:
+            manifest_eps.append(ep)
+            continue
+        state = ep["publication_state"]
+        # 先驗型別:unhashable(list/dict)直接 `in frozenset` 會漏一個 TypeError 出去,
+        # 而這是 manifest 這個信任邊界上的輸入,要回可讀的 ValueError。
+        if isinstance(state, str) and state in WITHHELD_PUBLICATION_STATES:
+            withheld.append(ep.get("episode"))
+        else:
+            raise ValueError(
+                f"episode {ep.get('episode')}: unknown publication_state {state!r} "
+                f"(扣下的狀態只有 {sorted(WITHHELD_PUBLICATION_STATES)};要照發就別設這個欄位)"
+            )
+    if not manifest_eps:
+        raise ValueError(
+            f"manifest has no publishable episodes (all withheld): {manifest_path}"
+        )
     # Preflight the WHOLE manifest before any upload, so bad data fails fast
     # instead of after some media already landed. EP\d{2} on the wire caps a feed
     # at 99 episodes; enforce that + integer + uniqueness + non-empty title here.
@@ -634,7 +673,8 @@ async def publish_series(
 
     episodes_out = sorted(published, key=lambda e: e["n"])
     if return_episodes is not None:
-        # 只縮回傳、不縮發布:feed 仍是整季;episode_count 維持全季數,別誤讀成「只發了這些」。
+        # 只縮回傳、不縮發布:feed 仍是整季;episode_count 維持這次發布的全部集數,
+        # 別誤讀成「只發了這些」(被扣下的集數另見 `deferred_episodes`)。
         want = set(return_episodes)
         episodes_out = [e for e in episodes_out if e["n"] in want]
     return {
@@ -642,6 +682,9 @@ async def publish_series(
         "show_page_url": f"{base_url.rstrip('/')}/feeds/{token}/index.html",
         "token": token,
         "episode_count": len(new_eps),
+        # 被 publication_state 扣下的集數。**一定要回報** —— 50 集的 manifest 回
+        # episode_count=49 而不說是哪一集不見了,看起來就像發布漏集。
+        "deferred_episodes": withheld,
         "episodes": episodes_out,
     }
 

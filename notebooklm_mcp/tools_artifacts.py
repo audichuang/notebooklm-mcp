@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mcp.types import ToolAnnotations
 
@@ -18,6 +18,8 @@ from .app import mcp
 from ._text import _CITATION_RE, strip_inline_emphasis
 from .manifest_store import ManifestStore
 from .publish import notes_html
+# 白名單的正本在 publish/state.py(那個模組的 docstring 解釋為什麼不能放 tools_publish)。
+from .publish.state import WITHHELD_PUBLICATION_STATES
 
 
 def _episode_in(data: dict, episode_n: int, manifest_path: str) -> dict:
@@ -191,6 +193,127 @@ async def episode_set_description(
     notes_html.render_episode_notes_html(desc, [])
     _load_ep_and_write(manifest_path, episode_n, description=desc)
     return {"episode": episode_n, "description": desc, "stripped": strip_citations}
+
+
+class _NoChange(Exception):
+    """mutator 內用的中止訊號:什麼都沒變就**不要寫盤**。
+
+    `ManifestStore.update` 的 revision 是無條件 +1,而 `_write` 在 mutator **之後**才跑,
+    所以從 mutator 拋出去就是「零寫入」離場。不能改成先 `read()` 再決定要不要 `update()`
+    —— 那兩次呼叫之間別的 writer 插進來,判斷就過期了。"""
+
+
+_PUBLICATION_STATE_FIELDS = (
+    "publication_state",
+    "publication_state_reason",
+    "publication_state_at",
+)
+
+
+def _is_utc_stamp(value: object) -> bool:
+    """稽核時間戳是不是「解析得動、而且真的是 UTC」。
+
+    判準不能只看 key 在不在:`null`、空字串、`"garbage+00:00"` 都是 key 存在但稽核脈絡為零,
+    而 no-op 判斷一旦把它們當合法,那個壞欄就永遠補不上了。"""
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.fromisoformat(value).utcoffset() == timedelta(0)
+    except ValueError:
+        return False
+
+
+@mcp.tool(annotations=ToolAnnotations(idempotentHint=True, openWorldHint=False))
+async def episode_set_publication_state(
+    manifest_path: str,
+    episode_n: int,
+    state: str | None,
+    reason: str | None = None,
+) -> dict:
+    """標記或解除某一集「稽核上刻意不公開」(`publication_state`)。
+
+    `state="deferred"` = 那一集**留在 manifest 保住完整 audit,但 `publish_series` 完全
+    跳過它**(不驗它的檔、不上傳、不進 feed,集號回在 `deferred_episodes`)。用在音檔被 QA
+    拒收、attempt 全部撤回、暫時沒有可公開成品的時候 —— 少了這個狀態,整季 republish 會
+    因為那一集缺 mp3 而整批 raise。`state=None` = 解除,三個欄位一起移除。
+
+    **這支存在的理由是 lifecycle,不是方便**:v0.9.18 之前 `publish_series` 讀這個欄位,
+    卻沒有任何工具寫得動它 —— 而 `series_manifest.json` 只由工具寫入的紀律不允許 host 手改
+    JSON,於是「解除」在受支持的路徑上是死路(EP46 之後生出可用音檔也解不開)。
+
+    ⚠️ **它只管發布層,不代表禁止重生**:`podcast_series`、attempt / artifact / 清理義務掃描
+    一律不看這個欄位。標記一集**不會**動它的 attempt、artifact 或本機檔案。
+    ⚠️ **扣下一集已經在線上的節目,下次 `publish_series` 會讓它從 feed 消失**(show.json
+    重建時就沒有它了)。既有 enclosure URL 仍然通 —— feed host 永不刪檔 —— 只是不再被列出。
+    **本工具刻意不回報「這一集是否在線上」**:第一版有個 `has_output` 欄位想回答它,但它只
+    看 `mp3_path`/`artifact_id` 的 truthiness,而那四種情形全都會說謊 —— 已生成未發布的回
+    `True`(沒東西可下架)、已上線但 output 欄位被 retract 清掉的回 `False`(其實會下架)、
+    路徑指向不存在的檔也回 `True`。真的要答得準必須讀 ADR-0003 的 deployment snapshot,
+    不是 episode projection 推導得出來的,所以那個欄位整個刪掉,不留一個好看的近似值。
+    ⚠️ **不會自動解除。** 生成完成不等於 QA 通過,所以沒有任何路徑會替你清掉這個狀態;
+    要放行必須顯式再呼叫一次 `state=None`。"""
+    if state is not None:
+        if state not in WITHHELD_PUBLICATION_STATES:
+            raise ValueError(
+                f"unknown publication_state {state!r} "
+                f"(可設的只有 {sorted(WITHHELD_PUBLICATION_STATES)};要解除傳 state=None)"
+            )
+        if not (reason or "").strip():
+            raise ValueError(
+                "reason is required when withholding an episode"
+                "(稽核脈絡是這個狀態的重點;沒有理由的扣下事後查不動)"
+            )
+    elif reason is not None:
+        # 解除時傳 reason 是呼叫端搞錯了語意(以為要記「為什麼解除」)。靜默丟掉會讓它
+        # 以為那句話留在 manifest 裡了。
+        raise ValueError("reason is only meaningful when setting a state, not clearing it")
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    def mutate(data: dict) -> dict:
+        ep = _episode_in(data, episode_n, manifest_path)
+        previous = ep.get("publication_state")
+        if state is None:
+            if not any(field in ep for field in _PUBLICATION_STATE_FIELDS):
+                raise _NoChange({"previous_state": previous})
+            for field in _PUBLICATION_STATE_FIELDS:
+                ep.pop(field, None)
+        else:
+            # 三欄**齊全且時間戳解析得動**才算沒變更。少了這個條件,legacy 資料
+            # (有 state + reason、`publication_state_at` 缺失/為 null/是垃圾字串)重呼會
+            # 直接 `_NoChange`,那個壞欄從此永遠補不上 —— 而「重呼一次把它修好」正是呼叫端
+            # 唯一能做的補救。**只看 key 在不在不夠**:`"publication_state_at": null` 是
+            # key 存在的,而它承載的稽核脈絡是零。
+            complete = all(field in ep for field in _PUBLICATION_STATE_FIELDS) and _is_utc_stamp(
+                ep.get("publication_state_at")
+            )
+            same = previous == state and (ep.get("publication_state_reason") or "") == reason.strip()
+            if complete and same:
+                raise _NoChange({"previous_state": previous})
+            ep["publication_state"] = state
+            ep["publication_state_reason"] = reason.strip()
+            ep["publication_state_at"] = now
+        return {"previous_state": previous}
+
+    try:
+        _, outcome = ManifestStore(manifest_path).update(mutate)
+        changed = True
+    except _NoChange as unchanged:
+        # 冪等重放(遺失 response 後重呼)不是錯誤,但也不准平白 +1 revision ——
+        # 那會撞掉別的 writer 的 expected_revision CAS。
+        # **outcome 整份從 mutator 裡帶出來,不在鎖外重讀。** 重讀會混到別人的 revision:
+        # 「在 R 上判斷沒變更」+「在 R+2 上讀出的欄位」拼成一份不屬於任何 snapshot 的回傳。
+        outcome = unchanged.args[0]
+        changed = False
+
+    return {
+        "episode": episode_n,
+        "publication_state": state,
+        "previous_state": outcome["previous_state"],
+        "reason": reason.strip() if state is not None else None,
+        "changed": changed,
+        "withheld_from_publish": state is not None,
+    }
 
 
 def _validate_pdf(path: str) -> None:

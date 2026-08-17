@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from conftest import FakeClient
@@ -312,6 +313,213 @@ async def test_episode_set_description_rejects_unsafe_notes_at_write_time(tmp_pa
     # 正常的中文技術散文不可誤殺(guard 誤判的代價是整季發不出去)
     ok = await a.episode_set_description(m, 1, "• 我們談 JavaScript:動態語言的起點\n• 設定 online=1")
     assert "JavaScript" in ok["description"]
+
+
+# ---- v0.9.18:episode_set_publication_state(deferred 的 set/clear lifecycle）------
+# 這支的存在理由是 lifecycle:publish_series 讀 publication_state,但在這一版之前沒有任何
+# 工具寫得動它,而 manifest 只由工具寫入的紀律不允許 host 手改 JSON —— 於是「解除」在受
+# 支持的路徑上是死路。
+
+
+def _revision_of(path):
+    return json.loads(open(path, encoding="utf-8").read()).get("revision")
+
+
+async def test_set_publication_state_writes_all_three_audit_fields(tmp_path):
+    """扣下一集要連稽核脈絡一起落地 —— 只有狀態、沒有理由/時間,事後查不動。
+
+    回傳**整份比對**:逐欄 assert 會漏掉「某個欄位在這條路徑上說謊」那一類突變
+    (`episode` 回 0、`reason` 回 None 都能全綠)。"""
+    m = _manifest(tmp_path, [{"episode": 46, "title": "EP46"}])
+    res = await a.episode_set_publication_state(m, 46, "deferred", reason="  五次 QA 拒收  ")
+    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    assert ep["publication_state"] == "deferred"
+    assert ep["publication_state_reason"] == "五次 QA 拒收"          # strip 過
+    # 真的解析得動、真的是 UTC —— 只檢查 endswith("+00:00") 對 "garbage+00:00" 也會綠
+    stamped = datetime.fromisoformat(ep["publication_state_at"])
+    assert stamped.utcoffset() == timedelta(0)
+    assert res == {
+        "episode": 46,
+        "publication_state": "deferred",
+        "previous_state": None,
+        "reason": "五次 QA 拒收",
+        "changed": True,
+        "withheld_from_publish": True,
+    }
+
+
+async def test_clearing_publication_state_removes_the_whole_audit_triple(tmp_path):
+    """解除要把三個欄位一起移除。留下 reason/at 會讓下一個讀 manifest 的人以為還扣著。"""
+    m = _manifest(tmp_path, [{"episode": 46, "title": "EP46"}])
+    await a.episode_set_publication_state(m, 46, "deferred", reason="五次 QA 拒收")
+    res = await a.episode_set_publication_state(m, 46, None)
+    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    assert "publication_state" not in ep
+    assert "publication_state_reason" not in ep
+    assert "publication_state_at" not in ep
+    assert res == {
+        "episode": 46,
+        "publication_state": None,
+        "previous_state": "deferred",
+        "reason": None,
+        "changed": True,
+        "withheld_from_publish": False,
+    }
+
+
+async def test_replaying_the_same_call_does_not_bump_revision(tmp_path):
+    """冪等重放不是錯誤,但**不准平白 +1 revision** —— 那會撞掉別的 writer 的 CAS。
+
+    `ManifestStore.update` 的 revision 是無條件 +1,所以「沒變更就不寫盤」必須在
+    mutator 內決定(先 read 再決定要不要 update,兩次呼叫之間判斷就過期了)。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    first = await a.episode_set_publication_state(m, 1, "deferred", reason="QA 拒收")
+    rev = _revision_of(m)
+    again = await a.episode_set_publication_state(m, 1, "deferred", reason="QA 拒收")
+    assert first["changed"] is True and again["changed"] is False
+    assert again["previous_state"] == "deferred"
+    assert _revision_of(m) == rev                       # 一次寫盤都沒發生
+    # 解除一個本來就沒扣的集數同理:冪等、不寫盤
+    await a.episode_set_publication_state(m, 1, None)
+    rev_after_clear = _revision_of(m)
+    noop = await a.episode_set_publication_state(m, 1, None)
+    assert noop["changed"] is False and _revision_of(m) == rev_after_clear
+    # 但**換了理由**是真的變更,要寫進去
+    changed = await a.episode_set_publication_state(m, 1, "deferred", reason="改用新素材重錄")
+    assert changed["changed"] is True
+    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    assert ep["publication_state_reason"] == "改用新素材重錄"
+
+
+async def test_noop_path_never_reads_the_manifest_outside_the_lock(tmp_path, monkeypatch):
+    """`_NoChange` 的回傳要整份從 mutator 帶出來,**不准在鎖外再讀一次**。
+
+    鎖外重讀會拼出一份不屬於任何 snapshot 的回傳:「在 revision R 上判斷沒變更」+
+    「在 R+2 上讀到的欄位」。序列跑的測試看不到這件事(沒有人插進那個縫),所以這裡直接
+    鎖住不變式本身 —— 把 `ManifestStore.read` 換成會爆的版本,no-op 路徑仍必須成功。
+    (`update` 走的是內部 `_load`,不受影響;真正在鎖外的那次讀取才會踩到。)"""
+    from notebooklm_mcp import manifest_store
+
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    await a.episode_set_publication_state(m, 1, "deferred", reason="QA 拒收")
+
+    reads = []
+
+    def exploding_read(self):
+        reads.append(self.path)
+        raise AssertionError("no-op 路徑在鎖外重讀了 manifest")
+
+    monkeypatch.setattr(manifest_store.ManifestStore, "read", exploding_read)
+    res = await a.episode_set_publication_state(m, 1, "deferred", reason="QA 拒收")
+    assert res["changed"] is False and res["previous_state"] == "deferred"
+    assert reads == []
+
+
+async def test_replay_repairs_a_legacy_incomplete_audit_triple(tmp_path):
+    """三欄**齊全**才算沒變更 —— 否則殘缺的 legacy 資料永遠補不上那一欄。
+
+    形狀:有 `publication_state` + `reason`、沒有 `publication_state_at`(某個舊腳本或
+    手改留下的)。若 no-op 只比對 state+reason,重呼會直接 `_NoChange`,而「重呼一次把它
+    修好」正是呼叫端唯一能做的補救 —— 那個缺欄從此永遠是缺的。"""
+    m = _manifest(tmp_path, [{
+        "episode": 46, "title": "EP46",
+        "publication_state": "deferred",
+        "publication_state_reason": "QA 拒收",
+    }])
+    res = await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
+    assert res["changed"] is True                      # 同一組 state+reason,但仍要寫
+    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    assert datetime.fromisoformat(ep["publication_state_at"]).utcoffset() == timedelta(0)
+    # 補完之後才變成真正的 no-op
+    assert (await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收"))["changed"] is False
+
+
+@pytest.mark.parametrize(
+    "stamp", [None, "", "garbage+00:00", "2026-08-14T00:05:36", 1755000000],
+    ids=["null", "empty", "garbage", "naive_no_tz", "epoch_int"],
+)
+async def test_replay_repairs_a_present_but_invalid_timestamp(tmp_path, stamp):
+    """「齊全」不能只看 key 在不在 —— `publication_state_at: null` 是 key 存在的。
+
+    這幾種值都是 key 存在但稽核脈絡為零(含 naive 的無時區字串:那筆記錄事後對不上時區)。
+    若把它們當合法,no-op 會讓那個壞欄永遠補不上。"""
+    m = _manifest(tmp_path, [{
+        "episode": 46, "title": "EP46",
+        "publication_state": "deferred",
+        "publication_state_reason": "QA 拒收",
+        "publication_state_at": stamp,
+    }])
+    res = await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
+    assert res["changed"] is True
+    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    assert datetime.fromisoformat(ep["publication_state_at"]).utcoffset() == timedelta(0)
+
+
+async def test_set_publication_state_validates(tmp_path):
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    # 只認 publish 端白名單裡的狀態 —— 設得進去卻不被發布認,比擋下來更糟
+    with pytest.raises(ValueError, match="unknown publication_state"):
+        await a.episode_set_publication_state(m, 1, "defered", reason="拼錯")
+    with pytest.raises(ValueError, match="unknown publication_state"):
+        await a.episode_set_publication_state(m, 1, "", reason="空字串")
+    # 稽核脈絡是這個狀態的重點
+    with pytest.raises(ValueError, match="reason is required"):
+        await a.episode_set_publication_state(m, 1, "deferred")
+    with pytest.raises(ValueError, match="reason is required"):
+        await a.episode_set_publication_state(m, 1, "deferred", reason="   ")
+    # 解除時傳 reason = 呼叫端搞錯語意,靜默丟掉會讓它以為那句話留在 manifest 裡
+    with pytest.raises(ValueError, match="only meaningful when setting"):
+        await a.episode_set_publication_state(m, 1, None, reason="因為修好了")
+    with pytest.raises(ValueError, match="episode 9 not found"):
+        await a.episode_set_publication_state(m, 9, "deferred", reason="不存在的集")
+    # 全程一個字都不准落地
+    assert "publication_state" not in open(m, encoding="utf-8").read()
+
+
+async def test_set_publication_state_never_touches_attempts_or_output(tmp_path):
+    """它只管發布層:不動 attempt、artifact、本機檔案 —— deferred 不代表禁止重生。"""
+    m = _manifest(tmp_path, [{
+        "episode": 46, "title": "EP46",
+        "attempts": [{"attempt_id": "att-1", "remote": {"artifact_id": "art-1"}}],
+        "artifact_id": "art-1", "mp3_path": "/tmp/ep46.mp3",
+        "retracted_attempt_ids": ["att-0"],
+    }])
+    await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
+    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    assert ep["attempts"] == [{"attempt_id": "att-1", "remote": {"artifact_id": "art-1"}}]
+    assert ep["artifact_id"] == "art-1" and ep["mp3_path"] == "/tmp/ep46.mp3"
+    assert ep["retracted_attempt_ids"] == ["att-0"]
+
+
+def test_importing_tools_publish_first_does_not_deadlock_on_the_whitelist():
+    """把白名單搬回 `tools_publish` 會炸循環 import —— 而且只在特定順序下。
+
+    `tools_publish` → `app` → 註冊 `tools_artifacts` → 回頭 import `tools_publish`,
+    那時它只初始化到 `from .app import mcp` 那一行,常數還不存在。全套測試跑起來看不到
+    (別的 test module 先把 `app` import 進來了),所以這條開**乾淨的 interpreter**
+    直接以 `tools_publish` 為第一個 import。正本因此放在 `publish/state.py`。"""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import notebooklm_mcp.tools_publish as t; "
+                              "assert t.WITHHELD_PUBLICATION_STATES"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+async def test_state_whitelist_is_shared_with_publish_not_duplicated(tmp_path):
+    """可以設的狀態 = 會被扣下的狀態,同一份白名單。
+
+    各寫一份的話兩邊會漂:設得進去、發布卻不認(那一集照樣公開),或反過來。"""
+    from notebooklm_mcp import tools_artifacts, tools_publish
+    from notebooklm_mcp.publish import state
+    assert (
+        tools_artifacts.WITHHELD_PUBLICATION_STATES
+        is tools_publish.WITHHELD_PUBLICATION_STATES
+        is state.WITHHELD_PUBLICATION_STATES
+    )
 
 
 # ---- v0.3.3:簡報/講義原子換檔(torn write regression)---------------------------

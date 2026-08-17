@@ -424,6 +424,260 @@ async def test_missing_description_fails_fast(env, tmp_path, artwork_png, monkey
     assert captured == []
 
 
+def _live_ep(tmp_path, n=1):
+    return {
+        "episode": n,
+        "title": f"第{n}集",
+        "description": f"第{n}集 show notes:本集重點整理。",
+        "mp3_path": _write_mp3(tmp_path, f"live{n}.mp3", f"audio-live{n}".encode()),
+        "cover_path": _valid_cover(tmp_path, f"live{n}-cover.png"),
+    }
+
+
+def _deferred_ep_production_shape(tmp_path, n=2):
+    """**生產上真實的 deferred 形狀**(`podcast-lab` 的 EP46):description / cover /
+    簡報 / 講義**全部齊全且檔案存在**,只缺 `mp3_path` 與 `artifact_id`。
+
+    這個 fixture 存在的理由是一個具體的假綠:把過濾條件收窄成
+    `state in _WITHHELD... and not ep.get("cover_path")` 之類「順手多看一個欄位」的寫法,
+    對「只有 title + 稽核欄位」的極簡 fixture 仍然全綠,對真的 EP46 卻會再次擋掉整季。
+    判準只能是 `publication_state` 本身。"""
+    return {
+        "episode": n,
+        "title": f"第{n}集",
+        "description": f"第{n}集 show notes:本集尚未公開,但簡介早就寫好了。",
+        "cover_path": _valid_cover(tmp_path, f"deferred{n}-cover.png"),
+        "slides_pdf_path": _slides(tmp_path, f"deferred{n}"),
+        "report_md_path": _report(tmp_path, f"deferred{n}"),
+        "publication_state": "deferred",
+        "publication_state_reason": "音檔經五次 semantic QA 拒收且全部 attempt 已撤回",
+        "publication_state_at": "2026-08-14T00:05:36.139052+00:00",
+    }
+
+
+async def test_deferred_episode_is_withheld_and_never_preflighted(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """QA 撤回的 deferred 集留在 manifest 當 audit,不能擋整季重發,也不能進 feed。
+
+    刻意用**最小形狀**(只有 title + 稽核欄位):它缺 description / cover,只要有進
+    preflight 迴圈就會 raise,所以這條同時鎖住「整集跳過 preflight」與「一個 byte
+    都不上傳」,不只是「不進 show.json」。生產形狀由
+    `test_production_shaped_deferred_episode_is_still_withheld` 守。"""
+    captured = _install_mock(monkeypatch)
+    deferred = {
+        "episode": 2,
+        "title": "第2集",
+        "publication_state": "deferred",
+        "publication_state_reason": "音檔經五次 semantic QA 拒收且全部 attempt 已撤回",
+    }
+    manifest = _manifest(tmp_path, [_live_ep(tmp_path), deferred], "with_deferred.json")
+    res = await _publish(manifest, artwork_png)
+    assert res["episode_count"] == 1
+    assert [ep["n"] for ep in res["episodes"]] == [1]
+    # 被扣下的集號一定要回報:episode_count 少一集卻不說是哪一集,看起來像發布漏集。
+    assert res["deferred_episodes"] == [2]
+    show = json.loads(next(c["content"] for c in captured if c["name"] == "show.json"))
+    assert set(show["episodes"]) == {"1"}
+    assert not any(c["name"].startswith("EP02") for c in captured)
+
+
+async def test_production_shaped_deferred_episode_is_still_withheld(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """判準是 `publication_state` 本身,不是「剛好缺哪個檔」——見 fixture docstring。
+
+    真 EP46 的附件都在,所以這條也順帶鎖住「deferred 集的簡報/講義不會被 host 上去」:
+    `require_slides` / `require_report` 對它完全不適用(它不進 feed)。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path,
+        [_live_ep(tmp_path), _deferred_ep_production_shape(tmp_path)],
+        "prod_deferred.json",
+    )
+    res = await _publish(manifest, artwork_png)
+    assert res["episode_count"] == 1
+    assert res["deferred_episodes"] == [2]
+    assert not any(c["name"].startswith("EP02") for c in captured)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "defered",              # 拼錯
+        "",                     # 空字串
+        None,                   # 顯式 null:與「欄位不存在」同形,但意圖無從得知
+        "published",            # 未來可能新增、但這一版沒有語意的狀態
+        ["deferred"],           # unhashable:不能漏 TypeError 出去
+    ],
+    ids=["typo", "empty", "explicit_null", "unsupported", "unhashable"],
+)
+async def test_unknown_publication_state_fails_before_any_put(
+    env, tmp_path, artwork_png, monkeypatch, state
+):
+    """未知 publication_state 一律 raise,不 fall through 成照發。
+
+    這個欄位唯一的用途就是「別公開這一集」,任何值靜默公開都是在它該生效的時候失效
+    —— 而 **feed host 永不刪檔**,送出去的 mp3 收不回來。所以「缺席」才是照發,
+    欄位一旦出現就只認明列的值。"""
+    captured = _install_mock(monkeypatch)
+    bad = {**_live_ep(tmp_path, 2), "publication_state": state}
+    manifest = _manifest(tmp_path, [_live_ep(tmp_path), bad], "bad_state.json")
+    with pytest.raises(ValueError, match="unknown publication_state"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_all_episodes_deferred_fails_instead_of_publishing_empty_feed(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """全季都被扣下 → raise。空 feed 會把既有 show.json 的集數整批清掉。
+
+    **兩集**都 deferred(不是一集):`len(all_eps) == 1` 之類綁在集數上的守衛,對單集
+    fixture 會假綠。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path,
+        [
+            {"episode": 1, "title": "第1集", "publication_state": "deferred"},
+            _deferred_ep_production_shape(tmp_path),
+        ],
+        "all_deferred.json",
+    )
+    with pytest.raises(ValueError, match="no publishable episodes"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_writer_tool_round_trips_with_the_publisher(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """`episode_set_publication_state` 寫進去的狀態,`publish_series` 真的要扣下 —— 而且
+    解除之後真的要放行。
+
+    兩邊共用同一份白名單常數有另一條測試守,但**欄位名**是各自寫死的字面值:writer 改成
+    `publicationState` 之類的話,那條測試仍會綠,而扣下從此完全無效(那一集直接公開)。
+    這條把 lifecycle 的兩端接起來。"""
+    from notebooklm_mcp import tools_artifacts
+
+    captured = _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path, [_live_ep(tmp_path, 1), _live_ep(tmp_path, 2)], "round_trip.json"
+    )
+    await tools_artifacts.episode_set_publication_state(
+        manifest, 2, "deferred", reason="音檔 QA 拒收"
+    )
+    withheld_run = await _publish(manifest, artwork_png)
+    assert withheld_run["deferred_episodes"] == [2]
+    assert [ep["n"] for ep in withheld_run["episodes"]] == [1]
+
+    await tools_artifacts.episode_set_publication_state(manifest, 2, None)
+    released = await _publish(manifest, artwork_png)
+    assert released["deferred_episodes"] == []
+    assert [ep["n"] for ep in released["episodes"]] == [1, 2]
+    show = json.loads(
+        [c["content"] for c in captured if c["name"] == "show.json"][-1]
+    )
+    assert set(show["episodes"]) == {"1", "2"}
+
+
+async def test_deferred_episode_skips_the_attachment_gate_under_production_defaults(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """「整集跳過 preflight」要在**沒關掉** require_slides/require_report 的情況下成立。
+
+    `_publish` helper 顯式把兩個旗標關掉,所以其他 deferred 測試證明不了這件事:把
+    deferred 分支寫成「先檢查 required 附件再跳過」的話,那些測試與既有附件測試**全都
+    不會紅**,而生產上的預設呼叫正好會撞到 —— live 集帶齊附件、deferred 集刻意不帶,
+    這樣附件 gate 只可能因為 deferred 那一集而 raise。"""
+    captured = _install_mock(monkeypatch)
+    live = {
+        **_live_ep(tmp_path, 1),
+        "slides_pdf_path": _slides(tmp_path, "live1"),
+        "report_md_path": _report(tmp_path, "live1"),
+    }
+    bare_deferred = {"episode": 2, "title": "第2集", "publication_state": "deferred"}
+    manifest = _manifest(tmp_path, [live, bare_deferred], "defaults_deferred.json")
+    res = await _publish_with_defaults(manifest, artwork_png)
+    assert res["deferred_episodes"] == [2]
+    assert res["episode_count"] == 1
+    assert not any(c["name"].startswith("EP02") for c in captured)
+
+
+async def test_return_episodes_does_not_shrink_the_withheld_report(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """`return_episodes` 只縮 `episodes`,**不縮 `deferred_episodes`**。
+
+    把 withheld 清單也拿去跟 return_episodes 取交集的話,滾動加集的常見呼叫
+    (`return_episodes=[新集]`)就永遠回空的 withheld —— 呼叫端看到 episode_count
+    少一集卻沒有任何解釋,正好是這個欄位存在要防的「看起來像漏集」。"""
+    _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path,
+        [_live_ep(tmp_path, 1), _deferred_ep_production_shape(tmp_path, 2)],
+        "return_filter_deferred.json",
+    )
+    res = await _publish(manifest, artwork_png, return_episodes=[1])
+    assert [ep["n"] for ep in res["episodes"]] == [1]
+    assert res["deferred_episodes"] == [2]
+
+
+async def test_both_sides_read_the_shared_whitelist_not_a_hardcoded_string(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """writer 與 publisher 都必須真的**用**那份共用白名單,不是各自寫死 `"deferred"`。
+
+    identity 測試只證明常數是同一個物件 —— 兩邊同時改成硬編碼字面值、常數留著沒人用,
+    它照樣綠。這裡塞一個不存在的 sentinel 狀態進兩邊的名稱(`from … import` 讓各模組
+    持有自己的參照,所以要各 patch 一次;那個「各 patch 一次」本身就是在驗各自都在用它),
+    然後跑一次完整的 writer → publisher 往返。"""
+    from notebooklm_mcp import tools_artifacts
+
+    sentinel = frozenset({"embargoed"})
+    monkeypatch.setattr(tools_artifacts, "WITHHELD_PUBLICATION_STATES", sentinel)
+    monkeypatch.setattr(tools_publish, "WITHHELD_PUBLICATION_STATES", sentinel)
+
+    _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path, [_live_ep(tmp_path, 1), _live_ep(tmp_path, 2)], "sentinel_state.json"
+    )
+    # writer 認 sentinel、不認原本的 "deferred"
+    with pytest.raises(ValueError, match="unknown publication_state"):
+        await tools_artifacts.episode_set_publication_state(
+            manifest, 2, "deferred", reason="原本的值現在不在白名單裡"
+        )
+    await tools_artifacts.episode_set_publication_state(
+        manifest, 2, "embargoed", reason="sentinel 狀態"
+    )
+    # publisher 也認 sentinel
+    res = await _publish(manifest, artwork_png)
+    assert res["deferred_episodes"] == [2]
+    assert [ep["n"] for ep in res["episodes"]] == [1]
+
+
+async def test_every_withheld_episode_is_reported_not_just_the_last(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """`deferred_episodes` 要列**全部**被扣下的集號。
+
+    只回報最後一筆(單元素覆寫)在單一 deferred 集的測試裡看不出來,而整季 republish
+    正是多集 deferred 的場合 —— 少報就是「發布漏集」重新長回來。"""
+    _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path,
+        [
+            _deferred_ep_production_shape(tmp_path, 1),
+            _live_ep(tmp_path, 2),
+            {"episode": 3, "title": "第3集", "publication_state": "deferred"},
+        ],
+        "multi_deferred.json",
+    )
+    res = await _publish(manifest, artwork_png)
+    assert res["deferred_episodes"] == [1, 3]
+    assert res["episode_count"] == 1
+
+
 async def test_forbidden_xml_character_fails_before_any_put(
     env, tmp_path, artwork_png, monkeypatch
 ):

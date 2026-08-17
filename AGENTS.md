@@ -25,7 +25,7 @@ uv run pytest -q
 #   別在共用 venv 上靠 `uv pip install` 臨時換版。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.17"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.18"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
@@ -64,10 +64,10 @@ claude mcp add-json notebooklm -s local \
 | `server.py` | thin launcher(可當 `__main__` 跑) | — |
 | `tools_basic.py` | notebook / source / artifact / `chat_ask` 的薄包 + 讀取觀測面 | — |
 | `tools_podcast.py` | manifest-backed audio attempt:durable generate / reconcile / adopt / finalize / retract | **先讀 [ADR-0009](docs/adr/0009-retracted-attempts-are-tombstones.md)** —— 四個不變式各自被真實事故驗證過,而踩過的坑是**只補一條路徑**(attempt 建立有兩個分支、清理義務有三個入口)。**寫任何狀態相關的指引訊息前先讀 [gotchas-attempt.md](docs/gotchas-attempt.md) 的紅線**——一律由 `_attempt_capabilities()` / `_attempt_next_step()` 產生,不准手寫 if/else,這個根因已現形七次 |
-| `tools_artifacts.py` | 簡報 PDF / 研讀 Markdown 按需生,路徑回寫 manifest;三支生成都走共用配額 failover | [gotchas-publish](docs/gotchas-publish.md);稽核面是 episode 級不是 attempt,見 [ADR-0011](docs/adr/0011-attachment-failover-buys-audit-with-an-episode-field-not-an-attempt.md) |
+| `tools_artifacts.py` | 簡報 PDF / 研讀 Markdown 按需生,路徑回寫 manifest;三支生成都走共用配額 failover。也放兩支 episode 級 manifest writer(`episode_set_description` / `episode_set_publication_state`) | [gotchas-publish](docs/gotchas-publish.md);稽核面是 episode 級不是 attempt,見 [ADR-0011](docs/adr/0011-attachment-failover-buys-audit-with-an-episode-field-not-an-attempt.md) |
 | `_failover.py` | 配額 failover 的**唯一**迴圈(音檔與附件共用) | 五條紅線在它的模組 docstring,各是一次事故 —— 改分類/終止性要在那裡改,別在呼叫端加分支 |
 | `tools_research.py` | Web / Deep Research 的薄包,**三支分開**(start / wait / import) | [gotchas-research](docs/gotchas-research.md);分開是為了對齊 ADR-0001 的 attempt/resume 紀律,不是為了彈性 |
-| `tools_publish.py` + `publish/` | 整季發布成 Apple 合規 RSS;`publish/` 是純邏輯(離線可測) | [gotchas-publish](docs/gotchas-publish.md) |
+| `tools_publish.py` + `publish/` | 整季發布成 Apple 合規 RSS;`publish/` 是純邏輯(離線可測)。`publish/state.py` = `publication_state` 白名單的正本(讀它的 publish 與寫它的 artifacts 共用) | [gotchas-publish](docs/gotchas-publish.md);**白名單別搬回 `tools_publish`** —— 會炸循環 import,實測踩過 |
 | `generation_input.py` | frozen generation-input bundle + `attempt-binding.json` sidecar | 驗證與綁定都在**第一個遠端副作用之前**(ADR-0001) |
 | `_sources.py` | caller 指名的 `source_ids` 驗證與對帳 | **重生某一集不指名,後面各集的回錄會洩進那一集**;選哪幾筆的政策留 host(ADR-0007) |
 | `_errors.py` | `NotebookAccessDenied` / `is_permission_denied`(`tools_basic` 與 `tools_podcast` 共用) | 各寫一份 = 上游改 `rpc_code` 時只有一處被改到 |
