@@ -200,6 +200,54 @@ v0.7.0 把配額拒絕從「回傳 failed status」改成「拋例外」。離�
   這一版存在的理由)、②**憑證落檔**的生命週期與 L2 PSIDTS recovery。另含一條離線
   證不了、必須這輪收掉的前提(`get_share_status` 到底列不列 owner)。
 
+## `local-checks.sh` 的兩個陷阱:檢查看起來綠,但它沒在看該看的東西
+
+兩條都是 v0.9.16 那輪**實際踩到**的,而且兩條的症狀都是「PASS」。它們與版本無關,
+所以寫在這裡而不是某一版的劇本裡 —— 工作區是拋棄式的,腳本每輪重寫,這兩條會一直有效。
+
+### ① 所有 `python` 呼叫都要 `-P`,否則 §0 那道硬關卡會自己破功
+
+`local-checks.sh` 的第一節在驗「實裝版本」,而它的整個前提是**後面每一條都在檢查實裝副本**。
+少了 `-P`(`PYTHONSAFEPATH`),從 repo 目錄跑這支時 cwd 會在 `sys.path` 上,
+`import notebooklm_mcp` 解析到 **working tree** —— 於是 §1 之後的每一條 grep 都在檢查
+**未安裝的程式碼**,而且全部 PASS。
+
+```bash
+TOOL_PY="/home/user/.local/share/uv/tools/notebooklm-mcp/bin/python -P"
+SITE=$($TOOL_PY -c 'import notebooklm_mcp,os;print(os.path.dirname(notebooklm_mcp.__file__))')
+case "$SITE" in
+  */uv/tools/notebooklm-mcp/*) ok "sitepackages 在 tool venv" ;;
+  *) bad "sitepackages = $SITE —— 這不是實裝副本,下面每一條都會驗錯東西" ;;
+esac
+```
+
+**那個 `case` 斷言要留著**:它把「破功」從隱形變成一條紅字。光加 `-P` 不夠 —— 下一個人
+複製腳本時很容易漏掉,而漏掉沒有任何症狀。
+
+### ② 驗 skill 快照時**不要過濾 `diff` 的輸出**
+
+複製失敗的症狀正好是 `Only in <上游>: SKILL.md`,所以
+
+```bash
+diff -rq "$SRC" "$SNAP" | grep -v "^Only in"      # ❌ 把唯一抓得到失敗的那行丟掉
+```
+
+等於一道空檢查。v0.9.16 那輪就是這樣「驗過」快照的(實際上有複製成功,但檢查本身證明不了)。
+正確做法是不過濾、並把它做成硬斷言 —— 順帶連 pin 一起驗,因為 release-checklist 的第 5 處
+(`SKILL.md` §Auth 的 `@vX.Y.Z`)正好住在快照裡:
+
+```bash
+D=$(diff -rq "$SKILL_SRC" "$SNAP" 2>&1)
+[ -z "$D" ] && ok "快照逐字等於上游" || { bad "快照與上游不同 —— 先重新複製再開 session"; echo "$D"; }
+SNAP_PIN=$(grep -o 'notebooklm-mcp.git@v[0-9.]*' "$SNAP/SKILL.md" | head -1 | sed 's/.*@//')
+[ "$SNAP_PIN" = "v$V" ] && ok "快照 pin = 實裝版本" || bad "快照 pin $SNAP_PIN ≠ 實裝 v$V"
+```
+
+> 同一個根因的第三個實例(這次在程式碼裡,不在腳本裡):驗「不再自己拼 type/message」時
+> 用 `grep -q 'type(error).__name__'`,結果撈到**解釋舊行為的 docstring** 而假紅。
+> 判斷「程式碼有沒有呼叫某個東西」要用 AST,不要 grep 字串 —— 這個 repo 的註解量大到
+> grep 幾乎一定會撈到敘述。
+
 ## 每個 release 要更新什麼
 
 1. `local-checks.sh` 的版本 pin(`0. 實裝版本` 那節)
