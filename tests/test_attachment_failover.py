@@ -15,7 +15,7 @@ v0.9.16 之前只有音檔會換帳號:`_rotate_for_quota` 只長在 `tools_podc
 import json
 
 import pytest
-from conftest import FakeClient
+from conftest import FakeClient, bouncing_rotate_client, refuse_first
 
 from notebooklm_mcp import runtime
 from notebooklm_mcp import tools_artifacts as a
@@ -47,25 +47,6 @@ def _failovers(manifest_path, episode_n=1):
     ]
 
 
-def _refuse_first(client, method_name, calls, fail_first_n, exc=None):
-    """讓前 N 次某個 generate 以配額拒絕收場,其餘照常。
-
-    每次呼叫記下**當下作用中的帳號**——這是「第二次真的換了帳號發出去」的直接證據,
-    比檢查 manifest 欄位更難造假(欄位可能是回寫時才算出來的)。
-    """
-    from notebooklm.exceptions import RateLimitError
-
-    original = getattr(client.artifacts, method_name)
-
-    async def flaky(*args, **kwargs):
-        calls.append(runtime.active_account())
-        if len(calls) <= fail_first_n:
-            raise exc or RateLimitError("每日配額已用盡")
-        return await original(*args, **kwargs)
-
-    setattr(client.artifacts, method_name, flaky)
-
-
 # ---- 三支工具都要換帳號(不補一半)------------------------------------------------
 
 
@@ -73,12 +54,12 @@ async def test_slides_quota_refusal_rotates_and_records_who_generated(fake_clien
     """帳號 A 被拒 → 換 B 重送 → 成功,而且「這集簡報是誰生的」答得出來。
 
     稽核是 ADR-0010 §Transparency 的硬要求,也是這條路徑此前不准換帳號的**唯一**原因
-    (`_rotate_for_quota` 的 `store is None` 那道門):對 client 透明可以,對紀錄不行。
+    (共用迴圈的 `audit is None` 那道門):對 client 透明可以,對紀錄不行。
     """
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    _refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=1)
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=1)
 
     res = await a.generate_slides("nb-1", manifest_path, 1)
 
@@ -101,7 +82,7 @@ async def test_report_quota_refusal_rotates(fake_client, tmp_path):
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    _refuse_first(fake_client, "generate_report", calls, fail_first_n=1)
+    refuse_first(fake_client, "generate_report", calls, fail_first_n=1)
 
     await a.generate_report("nb-1", manifest_path, 1)
 
@@ -115,34 +96,18 @@ async def test_revise_slide_quota_refusal_rotates(fake_client, tmp_path):
     """改版單頁也燒配額,也會被同步拒絕 —— 它是 generate 家族的第三支,不是唯讀救援。"""
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
-    fake_client.artifacts.seed_artifacts(
-        _completed_slide_deck("deck-1"),
-    )
+    # conftest 的 seed_artifact 帶齊 `get_or_none` preflight 靠的四個欄位
+    # (kind / is_completed / is_failed / status_str)—— 手捏 stub 會漏掉其中幾個,
+    # 之後給 `_require_completed_slide_deck` 加第四道檢查時這裡就悄悄不涵蓋了。
+    fake_client.artifacts.seed_artifact("deck-1")
     calls: list = []
-    _refuse_first(fake_client, "revise_slide", calls, fail_first_n=1)
+    refuse_first(fake_client, "revise_slide", calls, fail_first_n=1)
 
     await a.artifact_revise_slide("nb-1", manifest_path, 1, "deck-1", 0, "把第一頁改短")
 
     assert calls == ["a@x", "b@x"]
     assert [f["kind"] for f in _failovers(manifest_path)] == ["revise_slide"]
     assert _episode(manifest_path)["slides_account"] == "b@x"
-
-
-def _completed_slide_deck(artifact_id):
-    """`_require_completed_slide_deck` 認得的最小 artifact 替身。"""
-    from notebooklm.types import ArtifactType
-
-    return type(
-        "Art",
-        (),
-        {
-            "id": artifact_id,
-            "kind": ArtifactType.SLIDE_DECK,
-            "is_completed": True,
-            "status_str": "completed",
-            "title": "EP01 題目",
-        },
-    )()
 
 
 # ---- 終止性(紅線④)-------------------------------------------------------------
@@ -159,7 +124,7 @@ async def test_all_accounts_exhausted_raises_after_trying_each_once(fake_client,
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client), ("c@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    _refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99)
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99)
 
     with pytest.raises(RateLimitError, match="每日配額已用盡"):
         await a.generate_slides("nb-1", manifest_path, 1)
@@ -168,7 +133,7 @@ async def test_all_accounts_exhausted_raises_after_trying_each_once(fake_client,
     assert "slides_pdf_path" not in _episode(manifest_path)
     assert len(_failovers(manifest_path)) == 2, "兩腿換帳號,兩筆稽核"
 
-    # **最後那一腿也要有 durable 紀錄**(codex 獨立複審 Review B #5):`record_failover`
+    # **最後那一腿也要有 durable 紀錄**(codex 獨立複審 Review B #5):`PHASE_FAILOVER`
     # 只在**找得到下一個帳號**時才寫,所以 A→B、B→C 兩筆之後,C 被拒這件事只存在於
     # 往外拋的例外裡。response 一遺失,「哪個帳號被拒過」就答不出來 —— 而那正是
     # ADR-0010/0011 拿來justify「可以換帳號」的兩個問題之一。
@@ -185,14 +150,14 @@ async def test_single_account_pool_still_records_the_refusal(fake_client, tmp_pa
     """**單帳號 pool 是最刻薄的那一格**:一次 rotate 都沒發生,所以第一版一筆紀錄都不留。
 
     這正是 ADR-0011 聲稱「哪個帳號被拒過答得出來」最容易破功的情況 —— 開發機、單帳號
-    部署都是這一格,而它偏偏是 `record_failover` 永遠不會被呼叫到的那一格。
+    部署都是這一格,而它偏偏是 `PHASE_FAILOVER` 永遠不會被寫到的那一格。
     """
     from notebooklm.exceptions import RateLimitError
 
     runtime.set_clients([("only@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    _refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99)
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99)
 
     with pytest.raises(RateLimitError):
         await a.generate_slides("nb-1", manifest_path, 1)
@@ -230,24 +195,6 @@ async def test_acceptance_unknown_leaves_a_breadcrumb(fake_client, tmp_path):
     )
 
 
-def _bouncing_rotate_client(pool, state):
-    """冷卻永遠已過期的假 `runtime.rotate_client`:在 `pool` 裡無限乒乓,從不回 None。
-
-    用呼叫次數當保險絲(**不是牆上時鐘**):`tried` guard 一旦失效,`while True` 會不斷
-    跟這支要下一個帳號,次數一過就直接指名根因,而不是讓測試在真實秒數上偶發逾時。
-    """
-
-    def fake_rotate_client(*, refused=None, skip=frozenset()):
-        state["n"] += 1
-        if state["n"] > len(pool) + 1:
-            raise AssertionError("rotate 被無限呼叫 —— tried guard 失效")
-        idx = pool.index(state["active"])
-        state["active"] = pool[(idx + 1) % len(pool)]
-        return state["active"]
-
-    return fake_rotate_client
-
-
 @pytest.mark.parametrize("shape", ["raise", "empty_task_id"])
 async def test_terminates_even_if_rotate_never_reports_exhaustion(
     fake_client, tmp_path, monkeypatch, shape
@@ -278,7 +225,7 @@ async def test_terminates_even_if_rotate_never_reports_exhaustion(
     state = {"active": "a@x", "n": 0}
     runtime.set_clients([(label, fake_client) for label in pool])
     fake_client.artifacts.generate_slide_deck = always_refuse
-    monkeypatch.setattr(runtime, "rotate_client", _bouncing_rotate_client(pool, state))
+    monkeypatch.setattr(runtime, "rotate_client", bouncing_rotate_client(pool, state))
     monkeypatch.setattr(runtime, "snapshot", lambda: (state["active"], fake_client))
 
     # 兩條路徑的終態例外**型別不同**:0.8.0 的同步拒絕原樣重拋 SDK 的 `RateLimitError`
@@ -307,7 +254,7 @@ async def test_generic_failure_never_rotates(fake_client, tmp_path):
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    _refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
                   exc=RPCError("伺服器 500"))
 
     with pytest.raises(RPCError):
@@ -383,7 +330,7 @@ async def test_permission_denied_never_rotates_and_names_the_fix(fake_client, tm
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    _refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
                   exc=ClientError("permission denied", rpc_code=7))
 
     with pytest.raises(NotebookAccessDenied, match="分享") as excinfo:
@@ -397,18 +344,60 @@ async def test_permission_denied_never_rotates_and_names_the_fix(fake_client, tm
     assert _failovers(manifest_path) == []
 
 
+async def test_permission_denied_is_a_clean_refusal_not_acceptance_unknown(
+    fake_client, tmp_path
+):
+    """權限被拒要走**乾淨終態**(`refused`),不是「受理不明」——上面那條鎖不到這件事。
+
+    `_failovers(...) == []` 在**兩種**終態下都成立,所以權限那條 except 若被搬到泛用分支
+    之後,上面那條照樣全綠(實測)。差別是真的:`acceptance_unknown` 的語意是「遠端可能
+    已經受理」,ADR-0009 會據此把呼叫端導去對帳,而權限被拒時遠端一個 task 都沒建 ——
+    那趟對帳註定撈不到東西,而根因(沒分享)在訊息裡被埋掉。
+
+    形狀來自 v0.9.16 真實驗收(stg,槽位 1 直建一本不分享的 notebook、pool 換成兩個
+    看不到它的槽位):**pool 尚有候選帳號仍然不 rotate**,而稽核只留一筆
+    `attachment_dispatch_refused` / `NotebookAccessDenied` / 被拒那個帳號。
+
+    順序也一起鎖:稽核要在 `access_denied_error` **之後**才寫,紀錄裡才帶著補分享指引。
+    拿原始例外去寫的話,事後只看得到上游那句 "permission denied",而呼叫端很可能
+    **只看得到紀錄**(`podcast_series` 的結構化 partial 只回訊息、不回原始例外)。
+    """
+    from notebooklm.exceptions import ClientError
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    refuse_first(fake_client, "generate_slide_deck", [], fail_first_n=99,
+                 exc=ClientError("permission denied", rpc_code=7))
+
+    with pytest.raises(NotebookAccessDenied):
+        await a.generate_slides("nb-1", manifest_path, 1)
+
+    events = _episode(manifest_path)["attachment_errors"]
+    assert [(e["phase"], e["type"], e["account"]) for e in events] == [
+        ("attachment_dispatch_refused", "NotebookAccessDenied", "a@x")
+    ], "權限被拒是乾淨終態,而且記的是被拒的那個帳號"
+    assert "notebook_share_with_pool" in events[0]["message"], (
+        "紀錄要帶著下一步動作 —— 稽核寫在 access_denied_error 之後才有這段"
+    )
+    assert "slides_account" not in _episode(manifest_path), (
+        "什麼都沒生出來,provenance 一個字都不該寫"
+    )
+
+
 # ---- 身分要一路釘到下載(ADR-0010 的 download identity)---------------------------
 
 
-async def test_download_uses_the_account_that_dispatched_after_failover(tmp_path):
-    """換過帳號之後,**等完成與下載必須用換過去那個 client**。
+@pytest.mark.parametrize("kind", ["slides", "report", "revise_slide"])
+async def test_download_uses_the_account_that_dispatched_after_failover(tmp_path, kind):
+    """換過帳號之後,**等完成與下載必須用換過去那個 client**,三支都要驗。
 
-    ADR-0010 講得很清楚:風險視窗幾乎全落在後半段(dispatch 幾秒,等生成 + 下載是
-    數十分鐘)。回頭讀 `runtime.get_client()` 的話,分享不完整時會在十幾分鐘後爆 401
-    而根因在遠處;分享完整時退化成稽核失真(紀錄說 B 生成,實際下載的是別人)。
+    ADR-0010 講得很清楚:風險視窗幾乎全落在後半段(dispatch 幾秒,等生成 + 下載是數十
+    分鐘)。回頭讀 `runtime.get_client()` 的話,分享不完整時會在十幾分鐘後爆 401 而根因
+    在遠處;分享完整時退化成稽核失真(紀錄說 B 生成,實際下載的是別人)。
 
-    用**兩個不同的 fake client** 才驗得出來 —— 同一個 client 放兩格的話,不管釘不釘
-    身分,呼叫都落在同一顆假件上。
+    用**兩個不同的 fake client** 才驗得出來 —— 同一個 client 放兩格的話,不管釘不釘身分,
+    呼叫都落在同一顆假件上。既有的 `test_generation_pins_client_through_download` 只涵蓋
+    **沒有 failover** 的情況(它讓 generate 成功之後才 rotate)。
     """
     from notebooklm.exceptions import RateLimitError
 
@@ -419,42 +408,17 @@ async def test_download_uses_the_account_that_dispatched_after_failover(tmp_path
     async def always_refuse(*args, **kwargs):
         raise RateLimitError("每日配額已用盡")
 
-    first.artifacts.generate_slide_deck = always_refuse
-
-    await a.generate_slides("nb-1", manifest_path, 1)
-
-    downloads = [c for c in second.artifacts.calls if c[0] == "download_slide_deck"]
-    assert downloads, "下載要落在實際送出生成的那個 client 上"
-    assert [c for c in first.artifacts.calls if c[0] == "download_slide_deck"] == [], (
-        "被拒的那個帳號不該碰下載"
-    )
-    assert _episode(manifest_path)["slides_account"] == "b@x"
-
-
-@pytest.mark.parametrize("kind", ["report", "revise_slide"])
-async def test_download_identity_holds_for_report_and_revise_too(tmp_path, kind):
-    """**不補一半**:三支的 wiring 是分開的三段,只驗 slides 等於只驗三分之一。
-
-    既有的 `test_generation_pins_client_through_download` 只涵蓋**沒有 failover** 的情況
-    (它讓 generate 成功之後才 rotate),所以「換過帳號之後下載用誰」在 report 與
-    revise_slide 上此前完全沒有測試。
-    """
-    from notebooklm.exceptions import RateLimitError
-
-    first, second = FakeClient(), FakeClient()
-    runtime.set_clients([("a@x", first), ("b@x", second)])
-    manifest_path = _manifest(tmp_path)
-
-    async def always_refuse(*args, **kwargs):
-        raise RateLimitError("每日配額已用盡")
-
-    if kind == "report":
+    if kind == "slides":
+        first.artifacts.generate_slide_deck = always_refuse
+        await a.generate_slides("nb-1", manifest_path, 1)
+        download, account_field = "download_slide_deck", "slides_account"
+    elif kind == "report":
         first.artifacts.generate_report = always_refuse
         await a.generate_report("nb-1", manifest_path, 1)
         download, account_field = "download_report", "report_account"
     else:
         for client in (first, second):
-            client.artifacts.seed_artifacts(_completed_slide_deck("deck-1"))
+            client.artifacts.seed_artifact("deck-1")
         first.artifacts.revise_slide = always_refuse
         await a.artifact_revise_slide("nb-1", manifest_path, 1, "deck-1", 0, "改短")
         download, account_field = "download_slide_deck", "slides_account"
@@ -601,7 +565,7 @@ async def test_audit_write_post_commit_failure_does_not_mask_the_quota_error(
 
     runtime.set_clients([("only@x", fake_client)])
     manifest_path = _manifest(tmp_path)
-    _refuse_first(fake_client, "generate_slide_deck", [], fail_first_n=99)
+    refuse_first(fake_client, "generate_slide_deck", [], fail_first_n=99)
 
     def fsync_eio(_path):
         raise manifest_store.ManifestPostCommitError("fsync EIO")
@@ -614,3 +578,107 @@ async def test_audit_write_post_commit_failure_does_not_mask_the_quota_error(
     assert [e["phase"] for e in _episode(manifest_path)["attachment_errors"]] == [
         "attachment_dispatch_refused"
     ], "紀錄本身是 commit 過的,所以要看得到"
+
+
+async def test_series_resend_closure_does_not_hold_local_conversions(fake_client, tmp_path):
+    """**系統裡第三個 dispatch closure** 也不准在 closure 內做純本地轉換。
+
+    v0.9.16 把 `generate_slides` / `generate_report` 的 `resolve_language` / enum 轉換移到
+    closure 外(否則 `ValueError` 會被寫成一筆假的「遠端受理不明」),但漏了
+    `podcast_series` 的 `_generate_resend` —— 而音檔那條的後果比附件嚴重:不是多一行假
+    log,是**一個 durable attempt 被推進 `acceptance_unknown` 而遠端一次都沒被碰到**,
+    而 ADR-0009 會把呼叫端從那個狀態導去 reconcile,那裡什麼都撈不到。
+
+    這是 AST 檢查而不是行為測試,理由是那條路目前**碰不到** —— `_assert_series_owns_attempt`
+    拿原始設定字串比對 manifest,無效值更早就被擋掉了。也就是說它靠的是別的模組四道 guard
+    的副作用,沒有一道知道自己在保護這個 closure。所以要守的是**結構**:三個 closure 都不
+    准把本地轉換關進去。
+    """
+    import ast
+    import inspect
+
+    from notebooklm_mcp import tools_artifacts, tools_podcast
+
+    LOCAL_CONVERSIONS = {
+        "resolve_language", "to_slide_format", "to_slide_length",
+        "to_report_format", "to_audio_format", "to_audio_length",
+    }
+    offenders = []
+    for module in (tools_podcast, tools_artifacts):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            # dispatch closure = 傳給共用迴圈的那個 `async def`,一律叫 _generate* / _revise*
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if not (node.name.startswith("_generate") or node.name.startswith("_revise")):
+                continue
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id in LOCAL_CONVERSIONS
+                ):
+                    offenders.append(f"{module.__name__}.{node.name} -> {call.func.id}()")
+
+    assert offenders == [], (
+        "dispatch closure 內做純本地轉換 —— 它拋的 ValueError 會落進共用迴圈的泛用 "
+        f"except,被記成從未發生的遠端事件:{offenders}"
+    )
+
+
+async def test_repeated_identical_events_are_merged_with_a_count(fake_client, tmp_path):
+    """`attachment_errors` 是 append-only 且永不清除 —— 連續同一件事只留一筆 + 次數。
+
+    最大的產生者是**確定性重複**的:權限被拒是設定問題(不 rotate),呼叫端每次重試都會
+    寫一筆逐字相同的紀錄,而那一筆帶著整段補分享指引(量過約 590 bytes)。代價不只在這一集
+    —— `ManifestStore` 每次操作都整份 parse + 驗證兩次 + deepcopy 兩次 + 重新序列化,而且
+    全在獨占 flock 內,所以脹大的表會拖慢**每一個**碰 manifest 的工具。
+
+    **合併而不是跳過**:診斷價值在「發生過、而且反覆發生」,次數不能丟。
+    """
+    from notebooklm.exceptions import ClientError
+
+    runtime.set_clients([("a@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    calls: list = []
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
+                 exc=ClientError("permission denied", rpc_code=7))
+
+    for _ in range(4):
+        with pytest.raises(NotebookAccessDenied):
+            await a.generate_slides("nb-1", manifest_path, 1)
+
+    events = _episode(manifest_path)["attachment_errors"]
+    assert len(events) == 1, f"四次一模一樣的拒絕應該併成一筆,實得 {len(events)}"
+    assert events[0]["repeated"] == 4
+    assert events[0]["last_recorded_at"] >= events[0]["recorded_at"]
+
+
+async def test_a_different_event_still_appends(fake_client, tmp_path):
+    """反向鎖:合併只針對**連續且完全相同**的事件,不同的事件照樣 append。
+
+    少了這條,「跳過重複」很容易寫成「跳過任何後續事件」,而那會把真正的診斷吃掉 ——
+    負向檢查(『沒有暴增』)在合併過頭時會自動成立。
+    """
+    from notebooklm.exceptions import ClientError, RateLimitError
+
+    runtime.set_clients([("a@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+
+    async def denied(*args, **kwargs):
+        raise ClientError("permission denied", rpc_code=7)
+
+    fake_client.artifacts.generate_slide_deck = denied
+    with pytest.raises(NotebookAccessDenied):
+        await a.generate_slides("nb-1", manifest_path, 1)
+
+    async def refused(*args, **kwargs):
+        raise RateLimitError("每日配額已用盡")
+
+    fake_client.artifacts.generate_slide_deck = refused
+    with pytest.raises(RateLimitError):
+        await a.generate_slides("nb-1", manifest_path, 1)
+
+    events = _episode(manifest_path)["attachment_errors"]
+    assert [e["type"] for e in events] == ["NotebookAccessDenied", "RateLimitError"]
+    assert "repeated" not in events[0] and "repeated" not in events[1]

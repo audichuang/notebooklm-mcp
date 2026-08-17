@@ -53,6 +53,28 @@ v0.9.0 / v0.9.7 amendment);本檔是**動 code 時的紅線與測試鎖**。
   另外兩台下次啟動就掛,而本機正常啟動只有 debug 訊息。
   推導與取捨見 [ADR-0010](adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md) 的 v0.9.0 amendment。
 
+## 三之〇、配額不是一個布林值,是 **per-kind**(v0.9.16 實測)
+
+**這條直接影響整季怎麼排,而它此前沒有寫在任何地方** —— ADR-0010 的容量模型讀起來像
+「一個帳號用完就換下一個」,實際不是:
+
+| 桶 | RPC | v0.9.16 實測 |
+|---|---|---|
+| 簡報 / 講義 / 音檔生成 | `CREATE_ARTIFACT` | **免費帳號 slide_deck 每日 3 次**(2 個槽位一致) |
+| 改版單頁 | `REVISE_SLIDE` | 生成桶耗盡後仍連過 9 次,**上限未知** |
+| 音檔 | 同 `CREATE_ARTIFACT` 但**與 slides 分開計** | slides 被拒的**同一帳號、同一 process、相隔 2 分鐘**,audio dispatch 被受理 |
+
+那個「同一帳號 slides 被拒 / audio 受理」是最硬的一條:**「這個帳號今天用完了」不是一個
+布林值**,至少是 per-kind 的,所以「9 槽 × 3 = 每日 27 份簡報」這種算法才成立,而 audio
+與 revise 各自另計。
+
+⚠️ **兩個誠實的邊界,不要當成已證明的常數**:
+- 「每日 3 次」是 **n=2 個槽位、同一天**量到的,一致但樣本小;也**沒有**驗過它是
+  UTC 日界重置還是滑動視窗。要按它排整季之前先自己再量一次。
+- 「拒絕不消耗配額」是**推論不是觀測**:耗盡後又送了 12 次 kickoff,拒絕依然是拒絕、
+  artifact 差集全空 —— 這與「拒絕不計數」一致,但觀測不到計數器,分不出「沒被計」與
+  「計了但早就在上限」。
+
 ## 三、dispatch 與 failover:四條實作紀律
 
 - **多帳號 pool 動 dispatch/認證前必讀 [ADR-0010](adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md)**

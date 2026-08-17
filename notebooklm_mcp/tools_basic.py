@@ -521,7 +521,7 @@ async def generate_audio(
     ⚠️ **這支沒有配額 failover**:它用 ``runtime.get_client()``(此刻作用中的那一個),
     撞到配額就直接 raise,不會換帳號重送。多帳號 pool 裝了幾個帳號都一樣。
     根因是它**連 `manifest_path` 參數都沒有** —— 共用迴圈 (`_failover`) 收到
-    ``record_failover=None`` 就一律不換,因為沒地方寫「A 拒絕 → 換 B」的稽核紀錄
+    ``audit=None`` 就一律不換,因為沒地方寫「A 拒絕 → 換 B」的稽核紀錄
     (ADR-0010:對 client 透明可以,對紀錄不行)。
     **v0.9.16 起 `generate_slides` / `generate_report` / `artifact_revise_slide` 都接上了**
     ——它們吃 `manifest_path` + `episode_n`,稽核寫進 episode 的

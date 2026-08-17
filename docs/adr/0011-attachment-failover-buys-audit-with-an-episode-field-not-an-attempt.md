@@ -117,25 +117,40 @@ attempt」再次隱形(research namespace 曾因為砍掉 scope 沒留 ADR 而�
 `_errors.raise_if_access_denied` 指名 notebook、一份在音檔 failover 迴圈裡指名帳號),
 內容一樣連結尾都差一句。合併後兩個都指名得出來。
 
-## 這一版沒有做真實驗收
+## 真實驗收:v0.9.16 已跑,主要未知已結案(2026-08-17,stg)
 
-改動碰到遠端副作用路徑(`generate_slide_deck` / `generate_report` / `revise_slide` 的
-dispatch),按 AGENTS.md 的紀律要開 `acceptance-workspace`。**還沒跑。** 而且有一條前提
-是這一版**推導不出來、只能量**:
+原文寫的是「還沒跑,而且有一條前提推導不出來、只能量」。**量過了**,完整紀錄在
+[acceptance-v0.9.16-findings.md](../acceptance-v0.9.16-findings.md)。
 
-> ADR-0010 的「零副作用拒絕」是對 **audio** 量的 —— 1.35s / 1.43s 同步拒絕、
-> `dispatch.status=not_accepted`、`remote.artifact_id=null`。
-> **`generate_slide_deck` / `generate_report` / `revise_slide` 撞配額是什麼形狀,沒人量過。**
+> ⭐ **「零副作用拒絕」在 slides 上成立。** 同步 `raise RateLimitError`(**不是**回
+> `task_id=""` 的 status)、**0.63s / 0.75s**(SDK 自報 `RPC CREATE_ARTIFACT failed after
+> 0.677s`)—— 與 ADR-0010 在 audio 上量到的 1.35 / 1.43s 同一量級;而最關鍵的那一項,
+> **`artifact_list(kind="slide_deck")` 的拒絕前後差集三次量測全部為空**。
+> 所以 failover 掛在 `REFUSED_WITHOUT_DISPATCH` 這條分支上是對的,重送是冪等的。
 
-推導的部分:三支都走 SDK 同一套 `_parse_generation_result`,同步拒絕的例外型別因此相同
-(`tests/test_contracts.py` 釘著這個契約);而共用迴圈只在 `REFUSED_WITHOUT_DISPATCH` 與
-「空 task_id」兩種形狀下重送,兩者都是「解不出 artifact id」。所以**若**上游對三支 artifact
-kind 的拒絕路徑一致,結論就成立。
+同一輪一併得證(都不必再重測):耗盡終態原樣拋 + `refused` 記最後一腿 + 零假 failover 紀錄;
+權限被拒走乾淨終態、pool 尚有候選仍不 rotate、指引訊息落地;兩個稽核面在**真實並行**下
+零交叉污染;身分跟著 client 走到 finalize(兩腿 failover 後 16.4MB / 17 頁 PDF 下載成功,
+沒有 v0.9.0 那個「十幾分鐘後爆 401」)。
 
-沒推導出來的:配額在 slides 上會不會走另一條路(例如先受理再標 failed —— 那是紅線②守的
-形狀,守得住但代價是不 rotate)。驗收要看的就這一點:**故意把一個帳號的配額燒乾,對它跑
-`generate_slides`,確認拒絕是同步的、`attachment_errors` 記到那一腿、而遠端沒有多出一顆
-半死的 slide deck。**
+### 但風險模型錯了一處:`REVISE_SLIDE` 是**另一個配額桶**
+
+本 ADR 與 `tools_artifacts` 的註解都把 revise 當「generate 家族的第三支,也會被同步拒絕」。
+**前半句對(它確實建 artifact),後半句量不到**:在 slide_deck 生成配額**已完全耗盡**的槽位上
+連送 **9 次** `revise_slide`,**9 次全部受理**且 fork 都真的 `completed`。根因是兩支走不同
+RPC method(`REVISE_SLIDE` vs 生成的 `CREATE_ARTIFACT`),伺服器按 RPC 分桶。
+
+**所以 revise 那條 failover 分支,對「限流」沒有已知觸發條件** —— 它仍然可能由
+`REFUSED_WITHOUT_DISPATCH` 的另一個成員 `ArtifactFeatureUnavailableError`(SDK 解不出
+artifact id 時自己拋)觸發,那條沒被排除。**Q3(被拒時會不會 fork)維持「待確認」**:
+9 次沒打到不等於打不到,更不等於「被拒也不會 fork」。不要因為這一輪沒出事就把 revise 的
+重送當成已證明冪等。
+
+### 三個 phase 只驗到兩個
+
+`attachment_acceptance_unknown` 這一輪**完全沒有自然觸發**(它要「非
+`REFUSED_WITHOUT_DISPATCH` 的例外」或「有 id + failed」)。不值得為它燒真配額,但這代表
+**那條分支只有離線測試背書**,所以它的測試要一直維持突變驗證。
 
 ## 這一輪的審查分工(三輪,值得完整記下來)
 

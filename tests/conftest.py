@@ -649,6 +649,64 @@ class FakeClient:
         self.sharing = FakeSharing()
 
 
+
+# ---- 配額 failover 用的共用假件 ------------------------------------------------------
+# v0.9.16 把 failover 迴圈收成一份(`_failover.dispatch_with_failover`)之後,音檔與附件的
+# 測試驗的是**同一個迴圈**,所以這兩個假件不能再各檔一份 —— 它們一漂,其中一邊就會對著
+# 已經不存在的契約長綠。(實際發生過:附件那份複製時漏掉 `_pristine_generate` 的
+# 可重入守門,而音檔那邊有一條測試依賴它。)
+
+
+def refuse_first(client, method_name, calls, fail_first_n, exc=None):
+    """讓前 N 次某個 generate 以配額拒絕收場,其餘照常。
+
+    每次呼叫記下**當下作用中的帳號** —— 這是「第二次真的換了帳號發出去」的直接證據,
+    比檢查 manifest 欄位更難造假(欄位可能是回寫時才算出來的)。
+
+    **可重入**:同一個 fake 上套第二次不會層層包住前一個 wrapper(靠
+    `_pristine_<method>` 記住原始那支)。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    pristine_attr = f"_pristine_{method_name}"
+    original = getattr(client.artifacts, pristine_attr, None)
+    if original is None:
+        original = getattr(client.artifacts, method_name)
+        setattr(client.artifacts, pristine_attr, original)
+
+    async def flaky(*args, **kwargs):
+        calls.append(runtime.active_account())
+        if len(calls) <= fail_first_n:
+            raise exc or RateLimitError("每日配額已用盡")
+        return await original(*args, **kwargs)
+
+    setattr(client.artifacts, method_name, flaky)
+
+
+def bouncing_rotate_client(pool, state):
+    """冷卻永遠已過期的假 `runtime.rotate_client`:在 `pool` 裡無限乒乓,從不回 None。
+
+    用呼叫次數當保險絲(**不是牆上時鐘**):`tried` guard 一旦失效,共用迴圈的 `while True`
+    會不斷跟這支要下一個帳號,次數一過就直接指名根因,而不是讓測試在真實秒數上偶發逾時
+    (F7:單跑 0.3~0.4 秒的原子寫入撞上 2 秒的 `asyncio.wait_for` 只有 ~5 倍餘裕,機器一忙
+    就穿;而且『tried 失效』與『機器慢』紅的都是同一種 TimeoutError,看紅字分不出是
+    regression 還是雜訊)。
+
+    `state` 要有 `active`(起始帳號);`n`(呼叫計數)沒給的話這裡補上。
+    """
+    state.setdefault("n", 0)
+
+    def fake_rotate_client(*, refused=None, skip=frozenset()):
+        state["n"] += 1
+        if state["n"] > len(pool) + 1:
+            raise AssertionError("rotate 被無限呼叫 —— tried guard 失效")
+        idx = pool.index(state["active"])
+        state["active"] = pool[(idx + 1) % len(pool)]
+        return state["active"]
+
+    return fake_rotate_client
+
+
 @pytest.fixture
 def fake_client():
     client = FakeClient()

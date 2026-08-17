@@ -38,12 +38,15 @@ from .audio_finalize import (
     unresolved_upload_descriptor,
     upload_dispatch_window_closed,
 )
-from ._errors import NotebookAccessDenied, is_permission_denied
+from ._errors import NotebookAccessDenied
 from ._failover import (
-    REFUSED_WITHOUT_DISPATCH,
+    PHASE_ACCEPTANCE_UNKNOWN,
+    PHASE_FAILOVER,
+    PHASE_REFUSED,
+    REFUSED_WITHOUT_DISPATCH as _REFUSED_WITHOUT_DISPATCH,
     describe_refusal,
     dispatch_with_failover,
-    rotate_for_quota,
+    refusal_fields,
 )
 from .app import mcp
 from .auth_probe import _AuthProbeError, probe_auth
@@ -99,16 +102,15 @@ def _promised_reconciliation_window_seconds(dispatch: dict, wait_timeout: float)
     return promised
 
 
-# 這個集合的定義與「為什麼刻意不長大」已移到 `_failover.py`:v0.9.16 起附件家族
-# (簡報 / 講義)也走同一個 failover 迴圈,各留一份等於埋一顆「上游改了同步拒絕的
-# 例外型別、只有一處被改到」的地雷。這裡保留同名以免動到既有呼叫點與文件引用。
-_REFUSED_WITHOUT_DISPATCH = REFUSED_WITHOUT_DISPATCH
+# 集合的定義與「為什麼刻意不長大」在 `_failover.py`(附件家族也走同一個迴圈,各留一份
+# 等於埋一顆「上游改了同步拒絕的例外型別、只有一處被改到」的地雷)。這裡只是 import 時
+# 改名成既有呼叫點與文件引用用的私有名,不再另外賦值一行。
 _TRANSIENT_TRANSPORT_ERRORS = (TimeoutError, ConnectionError, NetworkError)
 
-# `NotebookAccessDenied` / `_is_permission_denied` 已移到 `_errors.py`:v0.9.0 起
-# `tools_basic.notebook_share_with_pool` 也要判同一件事,各寫一份等於埋一顆「上游改了
-# rpc_code 只會有一處被改到」的地雷。這裡保留同名以免動到既有呼叫點。
-_is_permission_denied = is_permission_denied
+# `NotebookAccessDenied` / `is_permission_denied` 住在 `_errors.py`(v0.9.0 起
+# `tools_basic.notebook_share_with_pool` 也要判同一件事)。權限分類本身已經由
+# `_failover.dispatch_with_failover` 統一處理,本檔不再有呼叫點,所以 v0.9.16 起
+# 不再保留 `_is_permission_denied` 別名。
 
 ACTION_ADOPT = "podcast_attempt_adopt"
 ACTION_EPISODE = "podcast_episode"
@@ -1359,50 +1361,38 @@ def _record_dispatch_failover(
     store.update(mutate)
 
 
-def _attempt_failover_recorder(
-    store: ManifestStore | None, episode_n: int, attempt_id: str
-):
-    """音檔家族的稽核面:把「A 拒絕 → 換 B 重送」寫進**這個 attempt** 的 `errors[]`。
+def _attempt_audit(store: ManifestStore | None, episode_n: int, attempt_id: str):
+    """音檔家族的稽核面:三種 dispatch 事件各寫進**這個 attempt** 的對應位置。
 
-    回 `None` 代表「這個呼叫端沒有稽核面」——`_failover` 收到 `None` 就一律不換帳號:
-    沒有地方寫紀錄還靜默換帳號,違反 ADR-0010 自己立的「對 client 透明可以,對稽核
-    紀錄不行」(standalone 沒有 manifest 的路徑就是這一種)。
+    回 `None` 代表「這個呼叫端沒有稽核面」——`_failover` 收到 `None` 就一律不換帳號、
+    也不寫終態:沒有地方寫紀錄還靜默換帳號,違反 ADR-0010 自己立的「對 client 透明可以,
+    對稽核紀錄不行」(standalone 沒有 manifest 的路徑就是這一種)。
 
-    抽成一支是因為 `_rotate_for_quota` 與 `_dispatch_audio_with_failover` 都要綁同一份
-    ——各自 inline 一個 closure 等於這條「稽核往哪寫」的決定有兩個版本。
+    **`store is None` 的判斷只有這一處。** v0.9.16 的第一版讓三個 callback 各自判一次
+    (一個判在 recorder 內部、兩個 inline `None if store is None else lambda`),那是同一條
+    政策的兩種寫法;收成單一 audit 之後,「沒有稽核面」與「半接線」都只剩一個開關。
+
+    三個 phase 落在**不同的**地方,這是音檔家族與附件的真正差異(附件全部進同一個
+    append-only 清單):`PHASE_FAILOVER` 改寫 `dispatch.account` 並 append 診斷;
+    另兩個是 attempt 的終態標記,呼叫端靠它們決定要不要先對帳。
     """
     if store is None:
         return None
 
-    def record(reason: object, from_account: str | None, to_account: str) -> None:
-        _record_dispatch_failover(
-            store, episode_n, attempt_id, reason, from_account, to_account
-        )
+    def audit(phase: str, reason: object, **fields) -> None:
+        if phase == PHASE_FAILOVER:
+            _record_dispatch_failover(
+                store, episode_n, attempt_id, reason,
+                fields["from_account"], fields["to_account"],
+            )
+        elif phase == PHASE_REFUSED:
+            _mark_not_accepted(store, episode_n, attempt_id, reason)
+        elif phase == PHASE_ACCEPTANCE_UNKNOWN:
+            _mark_acceptance_unknown(store, episode_n, attempt_id, reason)
+        else:  # pragma: no cover —— 共用迴圈加了新 phase 而這裡沒跟上,要吵不要靜默
+            raise AssertionError(f"unhandled dispatch audit phase: {phase!r}")
 
-    return record
-
-
-def _rotate_for_quota(
-    store: ManifestStore | None,
-    episode_n: int,
-    attempt_id: str,
-    reason: object,
-    from_account: str | None,
-    tried: set[str],
-) -> tuple[str | None, object] | None:
-    """音檔家族的 rotate = 共用輪替 + 這個 attempt 的稽核面。
-
-    **輪替本身的紀律(`tried` 要擋在稽核寫入之前、`skip=` 要進掃描、`refused=` 要用
-    呼叫端實際持有的 label)住在 `_failover.rotate_for_quota`,不在這裡** —— v0.9.16
-    附件家族也接上 failover 時抽出去的:那三條每一條都是一次真實事故,各寫一份等於
-    下一次修正只有一處被改到。這支只剩「稽核往哪寫」這一件家族專屬的事。
-    """
-    return rotate_for_quota(
-        _attempt_failover_recorder(store, episode_n, attempt_id),
-        reason,
-        from_account,
-        tried,
-    )
+    return audit
 
 
 async def _dispatch_audio_with_failover(
@@ -1423,9 +1413,8 @@ async def _dispatch_audio_with_failover(
     `tried` 擋在稽核寫入之前),每一條都是一次真實事故 —— **改那五條要去那裡改,
     不要在這裡加分支**,各寫一份正是本 repo 反覆出事的「補一半」。
 
-    這支只剩音檔家族專屬的三件事:①稽核與終態標記寫進**這個 attempt**
-    (`_rotate_for_quota` / `_mark_not_accepted` / `_mark_acceptance_unknown`);
-    ②`store is None`(standalone)時退化成不換帳號;③維持既有的 positional 呼叫形狀。
+    這支只剩音檔家族專屬的兩件事:①把三種 dispatch 事件導到 attempt 的對應位置
+    (`_attempt_audit`,含 `store is None` 的退化);②維持既有的 positional 呼叫形狀。
 
     **重送是同一個 attempt** —— 同一個 `attempt_id`、不 supersede、不新建 manifest 紀錄。
     這刻意**不是**「用另一個帳號重新生成這一集」。
@@ -1448,25 +1437,11 @@ async def _dispatch_audio_with_failover(
         account=account,
         client=client,
         notebook_id=notebook_id,
-        # `store is None` 時這裡是 `None`,共用迴圈就一律不換帳號(沒地方寫稽核紀錄,
-        # ADR-0010)。`_rotate_for_quota` 綁的是同一支,不再各寫一份。
-        record_failover=_attempt_failover_recorder(store, episode_n, attempt_id),
-        # `account` 用不到 —— attempt 的 `dispatch.account` 已經記著這次是誰送的,
-        # 而那個欄位在 failover 換帳號時就被 `_record_dispatch_failover` 更新過了。
-        on_clean_refusal=(
-            None
-            if store is None
-            else lambda reason, account: _mark_not_accepted(
-                store, episode_n, attempt_id, reason
-            )
-        ),
-        on_acceptance_unknown=(
-            None
-            if store is None
-            else lambda reason, account: _mark_acceptance_unknown(
-                store, episode_n, attempt_id, reason
-            )
-        ),
+        # `store is None` 時這裡是 `None`,共用迴圈就一律不換帳號、也不寫終態
+        # (沒地方寫稽核紀錄,ADR-0010)。判斷只在 `_attempt_audit` 一處。
+        # 終態不需要 `fields["account"]`:attempt 的 `dispatch.account` 已經記著這次是誰
+        # 送的,而 failover 換帳號時 `_record_dispatch_failover` 已經把它更新過。
+        audit=_attempt_audit(store, episode_n, attempt_id),
     )
 
 
@@ -1479,7 +1454,7 @@ def _mark_acceptance_unknown(
     """標成「受理不明」並留診斷。
 
     **`error` 不一定是例外。** 「有 `task_id` 卻 `is_failed`」那條分支傳進來的是
-    **status 物件**(`_failover.dispatch_with_failover` 的 `on_acceptance_unknown(status)`),
+    **status 物件**(共用迴圈的 `audit(PHASE_ACCEPTANCE_UNKNOWN, status, …)`),
     而舊版本用 `type(error).__name__` / `str(error)` 直接處理 —— 實測落盤的是
     `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"`,**真正的原因
     (`status.error`)整條蒸發**,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個
@@ -1525,14 +1500,11 @@ def _mark_not_accepted(
         if attempt["dispatch"]["status"] != "dispatching":
             return
         now = datetime.now(timezone.utc).isoformat()
-        if isinstance(status, BaseException):
-            # 例外沒有 .error/.error_code;不轉換的話 manifest 會留下一條只寫著
-            # "failed" 的紀錄,把「為什麼被拒」這個唯一有用的資訊丟掉。
-            error = str(status) or type(status).__name__
-            error_code = type(status).__name__
-        else:
-            error = getattr(status, "error", None)
-            error_code = getattr(status, "error_code", None)
+        # 兩種形狀的判讀走 `_failover.refusal_fields` —— **整個 repo 唯一讀
+        # `.error` / `.error_code` 這兩個上游欄位名的地方**。這裡刻意用 raw 版而不是
+        # `describe_refusal`:`remote` 要存的是原值(含 `None`),預設值只屬於
+        # `errors[].message` 那一行。v0.9.16 收了另兩處卻漏掉這裡,是同一件事的第三份。
+        error_code, error = refusal_fields(status)
         attempt["dispatch"]["status"] = "not_accepted"
         attempt["remote"].update(
             {
@@ -4824,13 +4796,22 @@ async def podcast_series(
                             latest_attempt["dispatch"]["status"],
                             ACTION_SERIES,
                         )
+                    # **純本地轉換擋在 closure 外。** 放進去的話,打錯 enum 的
+                    # `ValueError` 會落進共用迴圈的泛用 except,把一個 durable attempt
+                    # 推進 `acceptance_unknown` 而遠端一次都沒被碰到 —— ADR-0009 會把
+                    # 呼叫端從那個狀態導去 reconcile,而那裡什麼都撈不到。`_run_episode`
+                    # 一直是在 closure 外轉的(見它的 `resolved_audio_*`),這條 resend
+                    # 分支是系統裡第三個 dispatch closure,v0.9.16 只補了附件那兩個。
+                    resend_audio_format = to_audio_format(audio_format)
+                    resend_audio_length = to_audio_length(audio_length)
+
                     async def _generate_resend(dispatch_client: object):
                         return await dispatch_client.artifacts.generate_audio(
                             notebook_id,
                             language=series_settings["language"],
                             instructions=plan["brief"],
-                            audio_format=to_audio_format(audio_format),
-                            audio_length=to_audio_length(audio_length),
+                            audio_format=resend_audio_format,
+                            audio_length=resend_audio_length,
                         )
 
                     # 與 `_run_episode` 共用同一個 dispatch helper —— 它負責配額

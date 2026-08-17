@@ -11,32 +11,21 @@ import json
 
 import pytest
 
+from conftest import bouncing_rotate_client, refuse_first
+
+from notebooklm_mcp import _failover
 from notebooklm_mcp import runtime
 from notebooklm_mcp import tools_podcast as p
 
 
 def _flaky_generate(fake_client, calls, fail_first_n):
-    """讓前 N 次 generate_audio 以配額拒絕收場,其餘照常。
+    """`conftest.refuse_first` 綁在 `generate_audio` 上的薄包(維持既有呼叫形狀)。
 
-    每次呼叫記下**當下作用中的帳號**——這是「第二次真的換了帳號發出去」的直接證據,
-    比檢查 manifest 欄位更難造假。
-
-    可重入(同一個 fake 上套第二次不會層層包住前一個 wrapper)。
+    假件本體搬進 conftest 了:v0.9.16 之後音檔與附件驗的是**同一個** failover 迴圈,
+    兩檔各留一份會漂 —— 附件那份複製時就漏掉了 `_pristine_*` 的可重入守門,而
+    `test_source_ids_are_reused_verbatim_on_the_second_attempt` 依賴它。
     """
-    from notebooklm.exceptions import RateLimitError
-
-    original = getattr(fake_client.artifacts, "_pristine_generate", None)
-    if original is None:
-        original = fake_client.artifacts.generate_audio
-        fake_client.artifacts._pristine_generate = original
-
-    async def flaky(*args, **kwargs):
-        calls.append(runtime.active_account())
-        if len(calls) <= fail_first_n:
-            raise RateLimitError("每日配額已用盡")
-        return await original(*args, **kwargs)
-
-    fake_client.artifacts.generate_audio = flaky
+    refuse_first(fake_client, "generate_audio", calls, fail_first_n)
 
 
 def _attempts(manifest_path):
@@ -463,12 +452,13 @@ async def test_single_account_records_the_account_without_any_failover(
 async def test_rotate_for_quota_tells_runtime_which_account_was_actually_refused(
     tmp_path, monkeypatch
 ):
-    """**P1**:`_rotate_for_quota` 手上的 `from_account` 是這次 dispatch 實際用過的
+    """**P1**:`rotate_for_quota` 手上的 `from_account` 是這次 dispatch 實際用過的
     那一個——它自己的 docstring 逐字這樣寫,卻只拿去記帳(`_record_dispatch_failover`),
     沒轉給 `runtime.rotate_client`。冷卻要進的是**真正被拒**的那個槽位,不是「此刻游標
     指到誰」——兩者在並行 dispatch 下可能不是同一個。
 
-    這裡直接單測 `_rotate_for_quota`,不依賴 `runtime.rotate_client` 的實際冷卻邏輯
+    這裡直接單測共用的 `_failover.rotate_for_quota`(v0.9.16 起音檔那層 shim 已刪,
+    稽核面由 `p._attempt_audit` 綁),不依賴 `runtime.rotate_client` 的實際冷卻邏輯
     (那由另一個修正同步改動 —— 見跨檔案契約),用 monkeypatch 斷言呼叫端**傳了什麼**。
     """
     manifest_path = tmp_path / "series_manifest.json"
@@ -494,7 +484,9 @@ async def test_rotate_for_quota_tells_runtime_which_account_was_actually_refused
     monkeypatch.setattr(runtime, "rotate_client", fake_rotate_client)
     monkeypatch.setattr(runtime, "snapshot", lambda: ("b@x", object()))
 
-    p._rotate_for_quota(store, 1, attempt_id, RuntimeError("quota"), "a@x", {"a@x"})
+    _failover.rotate_for_quota(
+        p._attempt_audit(store, 1, attempt_id), RuntimeError("quota"), "a@x", {"a@x"}
+    )
 
     assert captured.get("refused") == "a@x", (
         "必須是這次 dispatch 實際用過的帳號(呼叫端傳進來的 from_account),"
@@ -506,14 +498,14 @@ async def test_rotate_for_quota_does_not_give_up_when_the_first_scanned_slot_was
     fake_client, tmp_path, monkeypatch
 ):
     """**P1**:`runtime.rotate_client` 只回「游標後方第一個不在冷卻中的槽位」,
-    它不知道呼叫端的 `tried` 集合——如果那個槽位剛好試過,`_rotate_for_quota`
+    它不知道呼叫端的 `tried` 集合——如果那個槽位剛好試過,`rotate_for_quota`
     舊版就直接放棄,但游標後面可能還有完全沒試過、也沒在冷卻中的帳號。
 
     劇本(主迴圈實跑復現的形狀):pool a/b/c/d,這批 failover 已經試過 a、b
     (tried={a,b}),游標因為另一個並行 request 已經被推到 d,而 a 的冷卻剛好過期。
     不傳 `skip` 的話,`runtime.rotate_client` 從 d 往後掃到的第一個「不在冷卻中」
     候選就是 a——已經試過的那個;c 從沒被拒絕過也沒進冷卻表,卻因為排除只擋在
-    回傳值上(而不是掃描裡)被漏試,`_rotate_for_quota` 因此白白回 None。
+    回傳值上(而不是掃描裡)被漏試,`rotate_for_quota` 因此白白回 None。
 
     ``fake_client`` 只為了借它的 fixture 收尾(`runtime.set_client(None)`)——這裡
     直接改寫 pool/`_ACTIVE`/`_COOLING`,沒有這個收尾會漏到同一個 session 後面的測試。
@@ -541,8 +533,8 @@ async def test_rotate_for_quota_does_not_give_up_when_the_first_scanned_slot_was
     runtime._ACTIVE = 3  # 模擬「並行 request 已經把游標推到 d」
     now["t"] += runtime._COOLDOWN_SECONDS + 1  # a 的冷卻剛好到期
 
-    result = p._rotate_for_quota(
-        store, 1, attempt_id, RuntimeError("quota"), "b@x", {"a@x", "b@x"}
+    result = _failover.rotate_for_quota(
+        p._attempt_audit(store, 1, attempt_id), RuntimeError("quota"), "b@x", {"a@x", "b@x"}
     )
 
     assert result is not None, (
@@ -551,28 +543,6 @@ async def test_rotate_for_quota_does_not_give_up_when_the_first_scanned_slot_was
     )
     account, _client = result
     assert account == "c@x"
-
-
-def _bouncing_rotate_client(pool, state):
-    """冷卻永遠已過期的假 `runtime.rotate_client`:在 `pool` 裡的帳號間無限乒乓,
-    從不回 None。用呼叫次數當保險絲(**不是牆上時鐘**)——`tried` guard 一旦失效,
-    `_dispatch_audio_with_failover` 的 `while True` 會不斷跟這支要下一個帳號,
-    次數一過 `len(pool) + 1` 就直接指名根因,而不是讓測試在真實秒數上偶發逾時
-    (F7:單跑 0.3~0.4 秒的原子寫入撞上 2 秒的 `asyncio.wait_for` 只有 ~5 倍餘裕,
-    機器一忙就穿;而且『tried 失效』與『機器慢』紅的都是同一種 TimeoutError,
-    看紅字分不出是 regression 還是雜訊)。
-    """
-    calls = {"n": 0}
-
-    def fake_rotate_client(*, refused=None, skip=frozenset()):
-        calls["n"] += 1
-        if calls["n"] > len(pool) + 1:
-            raise AssertionError("rotate 被無限呼叫 —— tried guard 失效")
-        idx = pool.index(state["active"])
-        state["active"] = pool[(idx + 1) % len(pool)]
-        return state["active"]
-
-    return fake_rotate_client
 
 
 async def test_dispatch_failover_terminates_even_if_rotate_never_reports_exhaustion(
@@ -612,7 +582,7 @@ async def test_dispatch_failover_terminates_even_if_rotate_never_reports_exhaust
 
     pool = ["a@x", "b@x"]
     state = {"active": "a@x"}
-    monkeypatch.setattr(runtime, "rotate_client", _bouncing_rotate_client(pool, state))
+    monkeypatch.setattr(runtime, "rotate_client", bouncing_rotate_client(pool, state))
     monkeypatch.setattr(runtime, "snapshot", lambda: (state["active"], fake_client))
 
     with pytest.raises(RateLimitError):
@@ -635,7 +605,7 @@ async def test_dispatch_failover_terminates_via_the_ensure_started_path_too(
     """**F7 的孿生測試**:上面那條只走得到 `_REFUSED_WITHOUT_DISPATCH`(raise)分支,
     `_dispatch_audio_with_failover` 還有第二條路——0.7.x 風格的『不 raise,回
     `task_id="", is_failed=True` 由 `ensure_started` 判定』——兩條各自呼叫一次
-    `_rotate_for_quota`,是分開補的兩處(AGENTS.md 點名的『補一半』形狀,這次
+    `rotate_for_quota`,是分開補的兩處(AGENTS.md 點名的『補一半』形狀,這次
     輪到測試層:曾經只把其中一處的 tried guard 修好,全套照樣全綠)。
     """
     manifest_path = tmp_path / "series_manifest.json"
@@ -667,7 +637,7 @@ async def test_dispatch_failover_terminates_via_the_ensure_started_path_too(
 
     pool = ["a@x", "b@x"]
     state = {"active": "a@x"}
-    monkeypatch.setattr(runtime, "rotate_client", _bouncing_rotate_client(pool, state))
+    monkeypatch.setattr(runtime, "rotate_client", bouncing_rotate_client(pool, state))
     monkeypatch.setattr(runtime, "snapshot", lambda: (state["active"], fake_client))
 
     with pytest.raises(RuntimeError, match="每日配額已用盡"):
@@ -687,7 +657,7 @@ async def test_dispatch_failover_terminates_via_the_ensure_started_path_too(
 async def test_tried_guard_does_not_leave_a_phantom_failover_record(
     fake_client, tmp_path, monkeypatch
 ):
-    """**P1**:`tried` 命中前,`_rotate_for_quota` 已經做完兩個副作用——
+    """**P1**:`tried` 命中前,`rotate_for_quota` 已經做完兩個副作用——
     `runtime.rotate_client(refused=...)`(冷卻)與 `_record_dispatch_failover`
     (把 `dispatch.account` 改寫成 to_account、往 append-only 的 `errors[]` 多寫
     一筆)。若 `tried` 這道門放在呼叫端、事後才丟棄回傳值,冷卻確實該進沒錯,但
@@ -723,7 +693,7 @@ async def test_tried_guard_does_not_leave_a_phantom_failover_record(
 
     pool = ["a@x", "b@x"]
     state = {"active": "a@x"}
-    monkeypatch.setattr(runtime, "rotate_client", _bouncing_rotate_client(pool, state))
+    monkeypatch.setattr(runtime, "rotate_client", bouncing_rotate_client(pool, state))
     monkeypatch.setattr(runtime, "snapshot", lambda: (state["active"], fake_client))
 
     with pytest.raises(RateLimitError):

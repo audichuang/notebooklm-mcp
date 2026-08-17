@@ -34,14 +34,12 @@ def _episode_in(data: dict, episode_n: int, manifest_path: str) -> dict:
     return ep
 
 
-#: 每個附件 kind 在 episode 記錄裡的 provenance 欄位 `(account, artifact_id)`。
-#: `revise_slide` 刻意與 `slides` 共用 —— 它產出的就是這一集的簡報,fork 出新 artifact
-#: 之後 manifest 該指向新那顆。
-_PROVENANCE_FIELDS = {
-    "slides": ("slides_account", "slides_artifact_id"),
-    "report": ("report_account", "report_artifact_id"),
-    "revise_slide": ("slides_account", "slides_artifact_id"),
-}
+# provenance 欄位名**直接寫在寫入點**(`_finish_slides` 的 `slides_account` /
+# `slides_artifact_id`、`_finish_report` 的 `report_*`),不走 kind→欄位對照表:
+# 那張表只有兩個消費端而兩邊都解析成常數(`_finish_report` 查字面 `"report"`;
+# `_finish_slides` 的 `slides` 與 `revise_slide` 映到**同一組**欄位),等於用一層動態
+# kwargs 把欄位名從 grep 藏起來,還誘導未來的人以為多加一個 kind 就會自動有 provenance。
+# `kind` 只留在真正需要它的地方 —— `_dispatch_attachment`,那裡它區分三種稽核事件。
 
 
 def _append_attachment_event(
@@ -72,16 +70,31 @@ def _append_attachment_event(
 
     def mutate(data: dict) -> None:
         episode = _episode_in(data, episode_n, manifest_path)
-        episode.setdefault("attachment_errors", []).append(
-            {
-                "phase": phase,
-                "kind": kind,
-                "type": reason_type,
-                "message": message,
-                "recorded_at": datetime.now(timezone.utc).isoformat(),
-                **extra,
-            }
-        )
+        events = episode.setdefault("attachment_errors", [])
+        entry = {
+            "phase": phase,
+            "kind": kind,
+            "type": reason_type,
+            "message": message,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        }
+        # **連續的同一件事只留一筆,用 `repeated` 記次數。** 這張表 append-only 且永不清除,
+        # 而它最大的產生者是**確定性重複**的:權限被拒是設定問題(不 rotate),呼叫端每次
+        # 重試都會寫一筆逐字相同的紀錄,而那一筆帶著整段補分享指引 —— 量過約 590 bytes。
+        # 代價不只在這一集:`ManifestStore` 每次操作都整份 parse + 驗證兩次 + deepcopy 兩次
+        # + 重新序列化,而且全在獨占 flock 內,所以脹大的表會拖慢**每一個**碰 manifest 的
+        # 工具(量過:500 筆 → `read` 2.6ms、`update` 6.7ms,各是空表的 4.5× / 2.7×)。
+        # 用「合併 + 計數」而不是「跳過」:診斷價值在「發生過、而且反覆發生」,次數不能丟。
+        # 比對刻意不含 `recorded_at`(每次必然不同),只看事件身分。
+        previous = events[-1] if events else None
+        if previous is not None and all(
+            previous.get(k) == v for k, v in entry.items() if k != "recorded_at"
+        ):
+            previous["repeated"] = previous.get("repeated", 1) + 1
+            previous["last_recorded_at"] = entry["recorded_at"]
+            return
+        events.append(entry)
 
     ManifestStore(manifest_path).update(mutate)
 
@@ -119,7 +132,7 @@ async def _dispatch_attachment(
     kind: str,
     notebook_id: str,
 ) -> tuple[str, str | None, object]:
-    """附件家族的 dispatch:共用 failover 迴圈 + episode 級稽核 + 受理憑據。
+    """附件家族的 dispatch:共用 failover 迴圈 + episode 級稽核。
 
     三支工具(`generate_slides` / `generate_report` / `artifact_revise_slide`)共用這一支,
     **不各自接一次線** —— 三段一樣的 wiring 就是「只補一條路徑」的溫床,而這個 repo
@@ -128,25 +141,22 @@ async def _dispatch_attachment(
     回 `(artifact_id, account, client)`:後兩個是**實際送出的**那一組,呼叫端必須拿它們
     去做「等完成 → 下載」(推導見 `_failover.dispatch_with_failover` 的 docstring)。
     """
-    artifact_id, account, client = await dispatch_with_failover(
+    def audit(phase: str, reason: object, **fields) -> None:
+        # 三種 phase 全部進同一個 append-only 清單(這正是與音檔家族的差異 —— 音檔的三種
+        # 落在 attempt 的三個不同位置)。所以這裡只需要把 phase 冠上 `attachment_` 前綴,
+        # 不必分支;`manifest_path` / `episode_n` / `kind` 也只綁一次,不是三個 lambda
+        # 各抄一遍那組參數。
+        _append_attachment_event(
+            manifest_path, episode_n, kind, f"attachment_{phase}", reason, **fields
+        )
+
+    return await dispatch_with_failover(
         dispatch,
         account=account,
         client=client,
         notebook_id=notebook_id,
-        record_failover=lambda reason, from_account, to_account: _append_attachment_event(
-            manifest_path, episode_n, kind, "attachment_dispatch_failover", reason,
-            from_account=from_account, to_account=to_account,
-        ),
-        on_clean_refusal=lambda reason, refused: _append_attachment_event(
-            manifest_path, episode_n, kind, "attachment_dispatch_refused", reason,
-            account=refused,
-        ),
-        on_acceptance_unknown=lambda reason, used: _append_attachment_event(
-            manifest_path, episode_n, kind, "attachment_acceptance_unknown", reason,
-            account=used,
-        ),
+        audit=audit,
     )
-    return artifact_id, account, client
 
 
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
@@ -228,12 +238,10 @@ def _require_episode(manifest_path: str, episode_n: int) -> None:
     `slides_artifact_id` / `report_artifact_id` 了,但它記的是「現在磁碟上這份是哪一顆生的」
     —— 是 provenance,不是「這一集只准用這一顆」的白名單。拿它當 binding gate 會把合法的
     重生擋掉。這支只擋打錯集號這種可預判的錯。"""
-    data = ManifestStore(manifest_path).read()
-    if not any(
-        isinstance(e, dict) and e.get("episode") == episode_n
-        for e in data.get("episodes", [])
-    ):
-        raise ValueError(f"episode {episode_n} not found in manifest {manifest_path}")
+    # 走 `_episode_in` 而不是自己 inline 一次:那句 `episode N not found in manifest …`
+    # 是被測試 match 的字串(`test_generate_slides_unknown_episode_errors`),各寫一份等於
+    # 生成前的守門與回寫時的守門有兩份可以各自漂的訊息。
+    _episode_in(ManifestStore(manifest_path).read(), episode_n, manifest_path)
 
 
 async def _require_completed_slide_deck(client: object, notebook_id: str, artifact_id: str):
@@ -270,7 +278,6 @@ async def _finish_slides(
     episode_n: int,
     artifact_id: str,
     wait_timeout: float,
-    kind: str = "slides",
     account: str | None = None,
 ) -> dict:
     """生成之後的共用尾段:等完成→下載→回寫 manifest。
@@ -296,10 +303,9 @@ async def _finish_slides(
         ),
         _validate_pdf,
     )
-    account_field, id_field = _PROVENANCE_FIELDS[kind]
     _load_ep_and_write(
         manifest_path, episode_n,
-        slides_pdf_path=out, **{account_field: account, id_field: artifact_id},
+        slides_pdf_path=out, slides_account=account, slides_artifact_id=artifact_id,
     )
     return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
 
@@ -337,18 +343,18 @@ async def generate_slides(
     # 泛用 except,被記成一筆 `attachment_acceptance_unknown` —— 實測 SDK 呼叫次數是 0,
     # 卻在 append-only 的稽核裡永久留下「遠端受理不明」。那是憑空造出來的假紀錄,而且
     # 清不掉(獨立複審第二輪 F4)。
-    resolved = dict(
-        language=resolve_language(language),
-        slide_format=to_slide_format(slide_format),
-        slide_length=to_slide_length(slide_length),
-    )
+    resolved_language = resolve_language(language)
+    resolved_slide_format = to_slide_format(slide_format)
+    resolved_slide_length = to_slide_length(slide_length)
 
     async def _generate(active_client):
         return await active_client.artifacts.generate_slide_deck(
             notebook_id,
             source_ids=selected,
             instructions=instructions,
-            **resolved,
+            language=resolved_language,
+            slide_format=resolved_slide_format,
+            slide_length=resolved_slide_length,
         )
 
     # 後兩個回傳值是**實際送出的**帳號與 client。下載一定要用它們 —— 風險視窗幾乎全在
@@ -437,8 +443,14 @@ async def artifact_revise_slide(
             notebook_id, artifact_id, slide_index, prompt.strip()
         )
 
-    # **改版也燒配額,也會被同步拒絕** —— 它是 generate 家族的第三支,不是唯讀救援,
-    # 所以走同一個 failover 迴圈。重送的冪等性前提一樣:伺服器拒絕時什麼都沒 fork 出來。
+    # **改版也建 artifact,所以走同一個 failover 迴圈** —— 它不是唯讀救援。
+    # ⚠️ 但「也會被同步拒絕」這半句**沒有實測支持**:v0.9.16 驗收在 slide_deck 生成配額
+    # 已完全耗盡的槽位上連送 9 次 revise,9 次全部受理且 fork 都真的完成 ——
+    # `REVISE_SLIDE` 與生成用的 `CREATE_ARTIFACT` 是**不同 RPC、不同配額桶**。
+    # 所以這條路的 failover 對「限流」沒有已知觸發條件(仍可能由
+    # `ArtifactFeatureUnavailableError` 觸發,那條沒被排除),而「被拒時會不會 fork 出
+    # 一顆孤兒 `(2)`」也就一直是**待確認**(ADR-0011)。接著它是為了不留缺口,不是因為
+    # 已經證明過它冪等。
     revised_id, account, client = await _dispatch_attachment(
         _revise,
         account=account,
@@ -454,7 +466,7 @@ async def artifact_revise_slide(
     # 會是**沒改過的舊那份**,而且看起來完全成功。
     out = await _finish_slides(
         client, notebook_id, manifest_path, episode_n, revised_id, wait_timeout,
-        kind="revise_slide", account=account,
+        account=account,
     )
     out["slide_index"] = slide_index
     # 讓呼叫端看得出 id 換了、舊的還在遠端 —— 否則它只會拿到一個「artifact_id 跟我傳的
@@ -486,11 +498,10 @@ async def _finish_report(
         lambda dest: client.artifacts.download_report(notebook_id, dest, artifact_id=artifact_id),
         _validate_utf8_text,
     )
-    account_field, id_field = _PROVENANCE_FIELDS["report"]
     _load_ep_and_write(
         manifest_path, episode_n,
         report_md_path=out, report_format=report_format,
-        **{account_field: account, id_field: artifact_id},
+        report_account=account, report_artifact_id=artifact_id,
     )
     return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}
 
@@ -556,10 +567,8 @@ async def generate_report(
 
     # 同 generate_slides:純本地轉換擋在 closure 外,否則打錯 report_format / language
     # 會被記成假的「遠端受理不明」。
-    resolved = dict(
-        report_format=to_report_format(report_format),
-        language=resolve_language(language),
-    )
+    resolved_report_format = to_report_format(report_format)
+    resolved_language = resolve_language(language)
 
     async def _generate(active_client):
         return await active_client.artifacts.generate_report(
@@ -567,7 +576,8 @@ async def generate_report(
             source_ids=selected,
             custom_prompt=custom_prompt,
             extra_instructions=extra_instructions,
-            **resolved,
+            report_format=resolved_report_format,
+            language=resolved_language,
         )
 
     artifact_id, account, client = await _dispatch_attachment(

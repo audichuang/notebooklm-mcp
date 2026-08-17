@@ -85,9 +85,37 @@ AGENTS.md 早就記著這個病灶(v0.9.8:三個視角、每條突變驗證、�
 整條蒸發,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個記憶體地址(實測重現)。
 簽名宣告 `BaseException` 也一直是錯的。改用同一支 `describe_refusal`。
 
-⚠️ **真實驗收未跑。** 改動碰遠端副作用路徑,而且有一條前提推導不出來:ADR-0010 的
-「零副作用拒絕 = 1.35s 同步拒絕」是對 **audio** 量的,`generate_slide_deck` 撞配額的形狀
-沒人量過。推導與驗收要看什麼寫在 ADR-0011 末段。
+### 真實驗收(2026-08-17,stg):主要未知結案,風險模型錯一處
+
+完整紀錄在 `docs/acceptance-v0.9.16-findings.md`。**核心那條成立**:`generate_slide_deck`
+撞配額是**同步 `raise RateLimitError`**、0.63 / 0.75 秒(audio 是 1.35 / 1.43,同量級),
+而最關鍵的 `artifact_list` 拒絕前後差集**三次量測全空** —— 零副作用拒絕在 slides 上成立,
+failover 掛在對的分支。耗盡終態、權限不 rotate、真實並行下兩個稽核面零交叉、身分跟著
+client 走到下載(兩腿 failover 後 16.4MB / 17 頁 PDF)全部得證。
+
+**但抓到兩件文件說錯的事**:
+
+1. **`REVISE_SLIDE` 是另一個配額桶。** 本版註解寫「改版也燒配額,**也會被同步拒絕**」——
+   後半句量不到:在 slide_deck 配額已完全耗盡的槽位上連送 9 次 revise,9 次全部受理且
+   fork 都真的完成(兩支走不同 RPC,伺服器按 RPC 分桶)。所以 revise 的 failover 對限流
+   **沒有已知觸發條件**,而「被拒時會不會 fork 出孤兒 `(2)`」維持**待確認** —— 9 次沒打到
+   不等於打不到。註解與 ADR-0011 都已更正。
+2. **配額不是一個布林值,是 per-kind**,而且此前沒寫在任何地方(ADR-0010 讀起來像
+   「一個帳號用完就換下一個」)。最硬的證據:slides 被拒的**同一帳號、同一 process、相隔
+   2 分鐘**,audio dispatch 被受理。免費帳號 slide_deck 實測每日 3 次(n=2 槽)。
+   已寫進 `docs/gotchas-pool.md` §三之〇,連同兩個誠實邊界(樣本小、未驗重置週期;
+   「拒絕不消耗配額」是推論不是觀測)。
+
+**還有一條沒被觸發**:`attachment_acceptance_unknown` 這一輪完全沒有自然發生,所以那條分支
+**只有離線測試背書** —— 它的測試要一直維持突變驗證。
+
+驗收自己也修正了一次過度樂觀:原本列了四條「該補成離線測試」的候選,逐條比對既有測試後
+**只有一條是真缺口** —— 權限被拒走 `refused` 還是 `acceptance_unknown` 從來沒有斷言過
+(既有那條只看 `_failovers == []`,而那在**兩種**終態下都成立)。補了
+`test_permission_denied_is_a_clean_refusal_not_acceptance_unknown`,兩個突變點各驗過:
+改成 `PHASE_ACCEPTANCE_UNKNOWN` → 新測試紅而**舊測試照樣綠**(缺口的直接證據);
+改拿原始 `exc` 寫稽核 → 紅(順帶鎖住「稽核要寫在 `access_denied_error` 之後」的順序)。
+其餘三條已被既有測試完整涵蓋,誠實記下來免得下一輪又「補」一次已經存在的鎖。
 
 ## v0.9.15 — v0.9.14 真實驗收抓到的五條(全部碰 runtime code)
 
