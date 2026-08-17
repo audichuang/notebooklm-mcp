@@ -70,31 +70,16 @@ def _append_attachment_event(
 
     def mutate(data: dict) -> None:
         episode = _episode_in(data, episode_n, manifest_path)
-        events = episode.setdefault("attachment_errors", [])
-        entry = {
-            "phase": phase,
-            "kind": kind,
-            "type": reason_type,
-            "message": message,
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-            **extra,
-        }
-        # **連續的同一件事只留一筆,用 `repeated` 記次數。** 這張表 append-only 且永不清除,
-        # 而它最大的產生者是**確定性重複**的:權限被拒是設定問題(不 rotate),呼叫端每次
-        # 重試都會寫一筆逐字相同的紀錄,而那一筆帶著整段補分享指引 —— 量過約 590 bytes。
-        # 代價不只在這一集:`ManifestStore` 每次操作都整份 parse + 驗證兩次 + deepcopy 兩次
-        # + 重新序列化,而且全在獨占 flock 內,所以脹大的表會拖慢**每一個**碰 manifest 的
-        # 工具(量過:500 筆 → `read` 2.6ms、`update` 6.7ms,各是空表的 4.5× / 2.7×)。
-        # 用「合併 + 計數」而不是「跳過」:診斷價值在「發生過、而且反覆發生」,次數不能丟。
-        # 比對刻意不含 `recorded_at`(每次必然不同),只看事件身分。
-        previous = events[-1] if events else None
-        if previous is not None and all(
-            previous.get(k) == v for k, v in entry.items() if k != "recorded_at"
-        ):
-            previous["repeated"] = previous.get("repeated", 1) + 1
-            previous["last_recorded_at"] = entry["recorded_at"]
-            return
-        events.append(entry)
+        episode.setdefault("attachment_errors", []).append(
+            {
+                "phase": phase,
+                "kind": kind,
+                "type": reason_type,
+                "message": message,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                **extra,
+            }
+        )
 
     ManifestStore(manifest_path).update(mutate)
 
@@ -141,22 +126,25 @@ async def _dispatch_attachment(
     回 `(artifact_id, account, client)`:後兩個是**實際送出的**那一組,呼叫端必須拿它們
     去做「等完成 → 下載」(推導見 `_failover.dispatch_with_failover` 的 docstring)。
     """
-    def audit(phase: str, reason: object, **fields) -> None:
-        # 三種 phase 全部進同一個 append-only 清單(這正是與音檔家族的差異 —— 音檔的三種
-        # 落在 attempt 的三個不同位置)。所以這裡只需要把 phase 冠上 `attachment_` 前綴,
-        # 不必分支;`manifest_path` / `episode_n` / `kind` 也只綁一次,不是三個 lambda
-        # 各抄一遍那組參數。
-        _append_attachment_event(
-            manifest_path, episode_n, kind, f"attachment_{phase}", reason, **fields
-        )
-
-    return await dispatch_with_failover(
+    artifact_id, account, client = await dispatch_with_failover(
         dispatch,
         account=account,
         client=client,
         notebook_id=notebook_id,
-        audit=audit,
+        record_failover=lambda reason, from_account, to_account: _append_attachment_event(
+            manifest_path, episode_n, kind, "attachment_dispatch_failover", reason,
+            from_account=from_account, to_account=to_account,
+        ),
+        on_clean_refusal=lambda reason, refused: _append_attachment_event(
+            manifest_path, episode_n, kind, "attachment_dispatch_refused", reason,
+            account=refused,
+        ),
+        on_acceptance_unknown=lambda reason, used: _append_attachment_event(
+            manifest_path, episode_n, kind, "attachment_acceptance_unknown", reason,
+            account=used,
+        ),
     )
+    return artifact_id, account, client
 
 
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:

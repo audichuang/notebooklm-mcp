@@ -25,7 +25,7 @@ uv run pytest -q
 #   別在共用 venv 上靠 `uv pip install` 臨時換版。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.16"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.17"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
@@ -170,6 +170,9 @@ claude mcp add-json notebooklm -s local \
   用 callback 表達:`record_failover=None` = 沒有稽核面 = 一律不換帳號(低階
   `tools_basic.generate_audio` 就是這一種,它連 `manifest_path` 都沒有);
   `on_clean_refusal` / `on_acceptance_unknown` 只有「有 durable attempt」的呼叫端才傳。
+  ⚠️ **不要為了「防半接線」把這三個參數併成一個** —— v0.9.17 做過又退掉了:併成一個
+  並不保證三個 phase 都被處理(傳一個只認其中一個 phase 的合法 callable 就破功),
+  換不到那個保證,卻動到有三輪事故史的核心迴圈。理由與正確做法見 ADR-0011 末段。
 
 ### 按需載入的 gotchas(只在動到那一塊時讀)
 

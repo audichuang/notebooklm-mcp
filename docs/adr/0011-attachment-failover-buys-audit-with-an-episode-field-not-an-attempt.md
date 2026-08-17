@@ -176,5 +176,25 @@ F3 的同一區、以及「report / revise_slide 的下載身分沒測試」。�
 **status 物件**時把稽核寫成 `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"`,
 真正的原因整條蒸發(實測)。改用同一支 `describe_refusal`。
 
-Status: implemented, offline-verified(23 條附件測試 + 稽核/訊息測試;三輪共十一條修正
-各做過突變驗證,全套 12963 passed),**真實驗收未跑**。
+### 事後的一次結構整理:做了,複審之後退掉
+
+驗收之後跑了一輪四角度的品質複審(`/simplify`),它提了幾項結構整理,其中最大的一項是
+**把 `dispatch_with_failover` 的三個各自可為 `None` 的 callback 收成單一
+`audit(phase, reason, **fields)`**,理由是「三個之中只有一個在把關准不准 rotate,所以
+『rotation 稽核接了、終態沒接』是簽名允許的合法狀態,而第一版正好落在那裡」。
+
+**做完之後由 codex 獨立複審,而它把那個理由推翻了**:收成一個參數並沒有讓半接線變不可能
+—— 傳一個「只處理 `PHASE_FAILOVER`、其他 phase 直接 return」的合法 callable,同樣會在
+帳號耗盡時漏掉終態紀錄(它用 probe 證明 dispatcher 接受這種 callback)。理由不成立,
+那項就只剩「比較整齊」,而它動的是有 v0.9.0 / v0.9.7 / v0.9.8 三輪事故史的核心迴圈、
+**在真實驗收已經對舊形狀跑完之後**。連同它依附的兩項(post-commit 容忍收成一份、
+`refusal_fields` 抽成唯一的上游欄位讀取點 —— 後者的收益也不成立,`_status.py` 仍直接讀
+那兩個欄位)一起退掉。
+
+**留下的教訓寫在這裡而不只是 commit 訊息裡**:`_failover` 的三個 callback 之所以危險,
+不是因為它們是三個參數,而是因為**沒有任何機制保證三個 phase 都被處理**。要真的關掉那個
+形狀,得驗證 callback 的完整性(例如註冊三個具名 handler、缺一個就啟動時拋),不是把三個
+參數併成一個。**不要再重做參數合併** —— 那條路走過了,換不到那個保證。
+
+Status: implemented, offline-verified,**真實驗收已跑**(2026-08-17,stg —— 見上方
+「真實驗收」一節與 [findings](../acceptance-v0.9.16-findings.md))。

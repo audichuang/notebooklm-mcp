@@ -589,10 +589,11 @@ async def test_series_resend_closure_does_not_hold_local_conversions(fake_client
     log,是**一個 durable attempt 被推進 `acceptance_unknown` 而遠端一次都沒被碰到**,
     而 ADR-0009 會把呼叫端從那個狀態導去 reconcile,那裡什麼都撈不到。
 
-    這是 AST 檢查而不是行為測試,理由是那條路目前**碰不到** —— `_assert_series_owns_attempt`
-    拿原始設定字串比對 manifest,無效值更早就被擋掉了。也就是說它靠的是別的模組四道 guard
-    的副作用,沒有一道知道自己在保護這個 closure。所以要守的是**結構**:三個 closure 都不
-    准把本地轉換關進去。
+    ⚠️ **那條路是可達的** —— 本測試第一版的 docstring 寫「目前碰不到,靠 `_assert_series_owns_attempt`
+    擋著」,獨立複審用 probe 證明是錯的:`_audio_settings` 只保存**原始字串**,所以 prepared
+    attempt 與本次呼叫帶同一個「目前 mapper 不認得的舊值」時,ownership 等值檢查會通過。
+    行為面由 `test_series_resend_converts_before_the_durable_claim` 守;這條是**結構鎖**,
+    守住三個 closure 都不准把本地轉換關進去(AST 看得到而行為測試看不到的那一半)。
     """
     import ast
     import inspect
@@ -626,22 +627,71 @@ async def test_series_resend_closure_does_not_hold_local_conversions(fake_client
     )
 
 
-async def test_repeated_identical_events_are_merged_with_a_count(fake_client, tmp_path):
-    """`attachment_errors` 是 append-only 且永不清除 —— 連續同一件事只留一筆 + 次數。
+async def test_series_resend_closure_does_not_hold_local_conversions(fake_client, tmp_path):
+    """**系統裡第三個 dispatch closure** 也不准在 closure 內做純本地轉換。
 
-    最大的產生者是**確定性重複**的:權限被拒是設定問題(不 rotate),呼叫端每次重試都會
-    寫一筆逐字相同的紀錄,而那一筆帶著整段補分享指引(量過約 590 bytes)。代價不只在這一集
-    —— `ManifestStore` 每次操作都整份 parse + 驗證兩次 + deepcopy 兩次 + 重新序列化,而且
-    全在獨占 flock 內,所以脹大的表會拖慢**每一個**碰 manifest 的工具。
+    v0.9.16 把 `generate_slides` / `generate_report` 的 `resolve_language` / enum 轉換移到
+    closure 外(否則 `ValueError` 會被寫成一筆假的「遠端受理不明」),但漏了
+    `podcast_series` 的 `_generate_resend` —— 而音檔那條的後果比附件嚴重:不是多一行假
+    log,是**一個 durable attempt 被推進 `acceptance_unknown` 而遠端一次都沒被碰到**,
+    而 ADR-0009 會把呼叫端從那個狀態導去 reconcile,那裡什麼都撈不到。
 
-    **合併而不是跳過**:診斷價值在「發生過、而且反覆發生」,次數不能丟。
+    ⚠️ **那條路是可達的** —— 本測試第一版的 docstring 寫「目前碰不到,靠 `_assert_series_owns_attempt`
+    擋著」,獨立複審用 probe 證明是錯的:`_audio_settings` 只保存**原始字串**,所以 prepared
+    attempt 與本次呼叫帶同一個「目前 mapper 不認得的舊值」時,ownership 等值檢查會通過。
+    行為面由 `test_series_resend_converts_before_the_durable_claim` 守;這條是**結構鎖**,
+    守住三個 closure 都不准把本地轉換關進去(AST 看得到而行為測試看不到的那一半)。
+    """
+    import ast
+    import inspect
+
+    from notebooklm_mcp import tools_artifacts, tools_podcast
+
+    LOCAL_CONVERSIONS = {
+        "resolve_language", "to_slide_format", "to_slide_length",
+        "to_report_format", "to_audio_format", "to_audio_length",
+    }
+    offenders = []
+    for module in (tools_podcast, tools_artifacts):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            # dispatch closure = 傳給共用迴圈的那個 `async def`,一律叫 _generate* / _revise*
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if not (node.name.startswith("_generate") or node.name.startswith("_revise")):
+                continue
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id in LOCAL_CONVERSIONS
+                ):
+                    offenders.append(f"{module.__name__}.{node.name} -> {call.func.id}()")
+
+    assert offenders == [], (
+        "dispatch closure 內做純本地轉換 —— 它拋的 ValueError 會落進共用迴圈的泛用 "
+        f"except,被記成從未發生的遠端事件:{offenders}"
+    )
+
+
+async def test_identical_refusals_stay_as_separate_entries(fake_client, tmp_path):
+    """`attachment_errors` 是**逐筆原始事件**,不是壓縮摘要 —— 四次一樣的拒絕留四筆。
+
+    ADR-0011 把「append-only、永不清除」列為承重的稽核契約:重生會覆寫
+    `slides_pdf_path` 與 provenance,診斷放在會被覆寫的欄位裡等於下一次成功就抹掉
+    「這個帳號今天被拒過」。**逐筆**還多守一件事:每一次的時間與事件邊界都可還原。
+
+    這條是**正向鎖**,因為 v0.9.16 真的往反方向做過一次:為了省 manifest 空間,把連續
+    相同的事件合併成一筆 + `repeated` 計數。演算法沒寫錯(獨立複審驗過不會合併過頭),
+    但它把契約從「原始事件」換成「摘要」,而換到的只是 500 筆才出現的毫秒級成本 ——
+    在沒有真實驗收背書的情況下不值得,已退掉。**要再做壓縮,先改 ADR-0011,不要只改
+    這條測試。**
     """
     from notebooklm.exceptions import ClientError
 
     runtime.set_clients([("a@x", fake_client)])
     manifest_path = _manifest(tmp_path)
-    calls: list = []
-    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
+    refuse_first(fake_client, "generate_slide_deck", [], fail_first_n=99,
                  exc=ClientError("permission denied", rpc_code=7))
 
     for _ in range(4):
@@ -649,16 +699,19 @@ async def test_repeated_identical_events_are_merged_with_a_count(fake_client, tm
             await a.generate_slides("nb-1", manifest_path, 1)
 
     events = _episode(manifest_path)["attachment_errors"]
-    assert len(events) == 1, f"四次一模一樣的拒絕應該併成一筆,實得 {len(events)}"
-    assert events[0]["repeated"] == 4
-    assert events[0]["last_recorded_at"] >= events[0]["recorded_at"]
+    assert len(events) == 4, f"四次拒絕要留四筆原始事件,實得 {len(events)}"
+    assert all(e["phase"] == "attachment_dispatch_refused" for e in events)
+    assert len({e["recorded_at"] for e in events}) == 4, "每一筆的時間都要可還原"
+    assert not any("repeated" in e for e in events), (
+        "不准把逐筆事件換成摘要 —— 要做先改 ADR-0011"
+    )
 
 
-async def test_a_different_event_still_appends(fake_client, tmp_path):
-    """反向鎖:合併只針對**連續且完全相同**的事件,不同的事件照樣 append。
+async def test_two_different_terminal_states_each_leave_an_entry(fake_client, tmp_path):
+    """權限被拒與配額被拒各留一筆,不互相覆蓋。
 
-    少了這條,「跳過重複」很容易寫成「跳過任何後續事件」,而那會把真正的診斷吃掉 ——
-    負向檢查(『沒有暴增』)在合併過頭時會自動成立。
+    負向檢查(『紀錄沒有暴增』)在「任何後續事件都被吃掉」時會自動成立,所以要有一條
+    正面確認不同事件都看得見的。
     """
     from notebooklm.exceptions import ClientError, RateLimitError
 
@@ -681,4 +734,58 @@ async def test_a_different_event_still_appends(fake_client, tmp_path):
 
     events = _episode(manifest_path)["attachment_errors"]
     assert [e["type"] for e in events] == ["NotebookAccessDenied", "RateLimitError"]
-    assert "repeated" not in events[0] and "repeated" not in events[1]
+
+
+async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_path):
+    """本地轉換失敗時,manifest **一個字都不該被動** —— 走真正的 series resend 分支。
+
+    這條鎖的是 AST 測試看不到的那一半:把轉換搬出 closure 只解決一半。搬到
+    `_claim_prepared_dispatch` **之後**的話,`ValueError` 仍會留下
+    `dispatch.status="dispatching"` —— 一個「正在送」的 durable 狀態,而遠端一次都沒被碰到,
+    比原本的 `acceptance_unknown` 沒有好到哪裡去。獨立複審用 probe 抓到 v0.9.16 的第一版
+    修正就落在那個位置。
+
+    可達性不是理論的:`_audio_settings` 只保存**原始字串**,所以既有 attempt 與本次呼叫帶
+    同一個「mapper 不認得的舊值」時,`_assert_series_owns_attempt` 的等值檢查會放行 ——
+    轉換才是第一個爆點。劇本沿用 `test_series_failover` 既有的 resend 佈置
+    (attempt 先 claim 再 `not_accepted`,podcast_series 會 re-arm 它並重送)。
+    """
+    from notebooklm_mcp import tools_podcast as p
+    from notebooklm.exceptions import RateLimitError
+
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    runtime.set_clients([("a@x", fake_client)])
+
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="1",
+        language=p.resolve_language(None),
+        # 三個設定都要與下面那次呼叫**逐字一致**,ownership 守門才會放行 ——
+        # 這就是可達性的前提:`_audio_settings` 只存原始字串,不存轉換後的 enum。
+        audio_format="no-such-format",
+        audio_length="long",
+    )
+    assert p._claim_prepared_dispatch(
+        store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0
+    )
+    p._mark_not_accepted(store, 1, attempt_id, RateLimitError("每日配額已用盡"))
+
+    with pytest.raises(ValueError, match="no-such-format"):
+        await p.podcast_series(
+            "nb-1",
+            episodes=[{"title": "心法篇", "brief": "1"}],
+            output_dir=str(tmp_path),   # manifest 由 output_dir 推導
+            audio_format="no-such-format",
+        )
+
+    _, attempt = p._attempt_record(store.read(), 1, attempt_id)
+    assert attempt["dispatch"]["status"] != "dispatching", (
+        "本地轉換失敗不得留下『正在送』的 durable 狀態 —— 遠端一次都沒被碰到"
+    )
+    assert [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"] == [], (
+        "零生成 RPC"
+    )
