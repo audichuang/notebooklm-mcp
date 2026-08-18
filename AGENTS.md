@@ -25,7 +25,7 @@ uv run pytest -q
 #   別在共用 venv 上靠 `uv pip install` 臨時換版。
 
 # 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.18"
+uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.19"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
@@ -74,7 +74,7 @@ claude mcp add-json notebooklm -s local \
 | `_status.py` `_atomic.py` `_text.py` `runtime.py` `languages.py` `enums.py` | generation-status 防護 / 原子寫入 / 文字正規化 / client holder / 白名單 / enum 映射 | `_atomic` 見 [gotchas-files](docs/gotchas-files.md) |
 | `auth_probe.py` `auth_cli.py` `cover_cli.py` `assets/` | 認證預檢 / headless 建檔備援 / 封面 CLI + 凍結的 HTML template | 封面見 [gotchas-publish](docs/gotchas-publish.md) |
 | `tests/test_contracts.py` | 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API 的離線 tripwire | 對**實裝版本**跑,別信 `_research/` 的 HEAD clone |
-| `scripts/` | `check_skill_sync.py`(CI 硬檢查)/ `sync-auth.sh` / `setup-test-config.sh` / `backfill_published_at.py` | — |
+| `scripts/` | `check_skill_sync.py`(CI 硬檢查)/ `sync-auth.sh` / `setup-test-config.sh` / `backfill_published_at.py` / `reorder_published_at.py` | 後兩支都是 `published_at` 的一次性修復(dry-run 預設、走 `ManifestStore`):backfill = 重生漂移,reorder = 亂序生成造成的集序錯位 |
 
 **判斷只在「大綱」前置點**(Opus 規劃每集 brief,人核可);大綱定稿後是確定性腳本,迴圈內無 LLM。
 

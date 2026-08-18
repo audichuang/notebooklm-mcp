@@ -90,6 +90,50 @@
   ④ **被扣下的集號一定要回報**(`deferred_episodes`):50 集的 manifest 回 `episode_count=49`
     卻不說是哪一集不見了,讀起來就是「發布漏集」。全季都被扣下時 raise,不發空 feed
     (那會把既有 show.json 的集數整批清掉)。
+- **(v0.9.19)`published_at` 必須隨集號嚴格遞增,preflight 會擋在第一個 PUT 之前。**
+  `published_at` 存的是**生成完成時間**,而整季幾乎都是亂序生成的 —— EP01 最後才補
+  (21:33,比 EP12 的 21:15 還晚),於是訂閱者的 App 裡 EP01 變成「最新一集」卡在第一個。
+  ⚠️ **`itunes:type=serial` 救不了**:Apple 文件說 serial 用 `itunes:episode` 排,**實測多數
+  播放器(含 Apple 自己的列表視圖)仍以 pubDate 為準**;`build_feed_xml` 的 `lastBuildDate`
+  也取 `eps[-1]`(集號最大那集),非單調時它不是真正最新的時間。
+  - **這條前提早就寫在 `tools_podcast._first_published_at` 的註解裡,但註解不是檢查。**
+    同一條前提已經以兩種形狀出事(v0.6.0 重生漂移、v0.9.19 亂序生成),兩次都是**發布出去
+    以後才在 App 上看到**。要驗的東西寫成註解,就等於沒驗。
+  - **不綁 `itunes_type`,兩種型別都擋。** episodic 的「最新在前」與 serial 的「依序收聽」
+    建立在同一個前提上,只擋 serial 就是只補一半。**相等也擋**:同一秒的兩集順序不定。
+  - **訊息列出所有違反的相鄰對**,不只第一對 —— 只報第一對的話,12 集的季度要跑十幾輪
+    publish 才知道要改哪些,而真實那次要動 11 集。
+  - **修法是 `scripts/reorder_published_at.py`**(dry-run 預設,走 `ManifestStore`):把**現有**
+    時間戳排序後依集號重新配對,**不發明新時間**。deferred 集不參與(與 preflight 同語義);
+    缺 `published_at` 的混合狀態、池子裡有重複時間戳,兩種都報錯不猜 —— 那需要有人決定
+    一個新時間戳。落地後重跑 `publish_series`:GUID 與媒體 content-hash 都不變 → Apple 視為
+    同集更新,不會產生孤兒連結。
+  - **`_effective_pub_date` 是 preflight 與渲染的共用入口**:各算一次的話,擋下的與發出去的
+    可以是不同的值(把渲染端改成永遠用 fallback,排序 gate 仍正確執行、合法 manifest 卻輸出
+    2020 的日期 —— 所以測試直接鎖 `show.json` 的投影值,不只驗 `episode_count`)。
+  - ⚠️ **缺時區 offset 一律拒絕,不要「就地當成 +0800」。** 那只修好「比較」那一半:渲染端
+    送出的仍是原字串,於是 preflight 與播放器看到的是不同的時刻 —— EP01 `10:00`(無 offset)、
+    EP02 `03:00 +0000` 會被判成遞增而放行,播放器按 UTC 讀卻是 `10:00Z > 03:00Z`。
+    RFC-2822 的 `-0000` 語意是「時區未知」,Python 也 parse 成 naive,同樣拒絕。
+  - **判準是「欄位在不在」,不是 `or` 的 truthiness**(與 `publication_state` 同一條):
+    `published_at` 填成 `false` / `0` / `[]` / `""` 時,`or` 會讓它與缺席同形而靜默退到 2020 的
+    fallback;而 truthy 的非字串(`123` / `[1]` / dict)會讓 `parsedate_to_datetime` 漏一個
+    沒被接住的 `AttributeError` 出去。缺席是唯一該 fallback 的情形。
+  - ⚠️ **reorder 與 `backfill_published_at.py` 會互相打架 —— 而這個洞在 reorder 之前就在了。**
+    reorder 只改 episode 頂層,但重生過的集在 `retraction.retracted_output.published_at` 另有
+    一份首發時間(`_first_published_at` 讀它),backfill 會照它把頂層**改回去**。實測
+    podcast-lab 那份 50 集:6 集有這種歷史,EP42/EP43 的歷史值(07:18:43 / 07:17:36)
+    **本身就是亂序的** —— backfill 現在跑下去就會讓整季發不出去。
+    **修法不是加一個 `rss_published_at` 正本欄位**(要動 promote / backfill / 渲染 / 文件四處,
+    只買到「少跑一次 reorder」):①backfill 回填前先模擬「回填後還遞增嗎」,不遞增就拒絕並
+    指向 reorder;②reorder 對這種集印警告。**最終防線是 preflight** —— 任何路徑(含未來重生
+    把頂層 pop 掉再 promote)造成亂序都會在上傳前被擋下,而修法可以重複跑。
+  - **`--apply` 的判斷要在鎖內。** 鎖外 snapshot 兩個方向都錯:A 讀到已排序、B 隨即寫成亂序
+    → A 回「不需重排」而 manifest 留在亂序;反向序列是零變更仍 `revision + 1`,平白撞掉別的
+    writer 的 `expected_revision` CAS。零變更用 `_NoChange` 從 mutator 中止。
+  - **「哪些集進 feed」的判準收在 `publish/state.is_withheld`**,preflight 與兩支腳本共用:
+    漂掉的兩個方向都會出事 —— 發布端扣下、腳本卻把它算進排序(live 集拿到不屬於自己的
+    時間),或反過來讓該扣下的集參與發布。
 - **附加簡報/講義**:`generate_slides`/`generate_report` 只吃**傳入的 `source_ids`**才聚焦原文;
   不傳則 SDK 用全部來源(v1 不自動排除音檔來源)。附件缺檔時 `publish_series` **fail-fast**。
   **順序鐵律**:uploader 白名單放寬 `.pdf`/`.html` 後**要先重部署 NAS**,再跑帶附件的發布,否則附件 PUT 404。

@@ -6,6 +6,96 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.19 — pubDate 隨集號遞增變成 preflight,不再只是一句註解
+
+**症狀**:整季發布成功、GUID 與 URL 都對,但訂閱者的 App 裡集數是亂序的 —— EP01 顯示成
+「最新一集」卡在列表第一個,EP04/EP05 互換。feed.xml 本身合法,`publish_series` 也沒有
+任何錯誤。
+
+**根因是一個從來沒被驗過的前提。** `published_at` 存的是**生成完成時間**,而整季幾乎都是
+亂序生成的(EP01 最後才補:21:33,比 EP12 的 21:15 還晚)。播放器 —— 包含 Apple 自己的
+列表視圖 —— 照 `pubDate` 排,於是集號順序與顯示順序脫鉤。`itunes:type=serial` 救不了:
+Apple 文件說 serial 用 `itunes:episode` 排,**實測多數 App 仍以 pubDate 為準**;而
+`build_feed_xml` 的 `lastBuildDate` 取 `eps[-1]`(集號最大那集)，非單調時它也不是真正
+最新的時間。
+
+「RSS 排序假設 pubDate 隨集號遞增」這句話**早就寫在 `tools_podcast._first_published_at`
+的註解裡**(v0.6.0 修重生漂移時寫的),但它只在「一集一集依序生成」時自動成立,而
+**沒有任何 preflight 驗過它**。註解不是檢查:同一條前提已經以兩種不同形狀出事(v0.6.0
+的重生漂移、這次的亂序生成),兩次都是發布出去以後才在 App 上看到。
+
+**修法:`publish_series` 的 preflight 多一道「嚴格遞增」**(`_assert_pub_dates_ascend`),
+擋在第一個 PUT 之前。四個決定:
+
+- **不綁 `itunes_type`。** 兩種型別都壞:episodic 的「最新在前」與 serial 的「依序收聽」
+  都建立在同一個前提上。給 serial 一條分支就是只補一半 —— 而 episodic 節目照樣會亂序。
+- **相等也擋。** 同一秒的兩集在播放器裡順序不定,而「不定」不是可接受的發布結果。
+- **列出所有違反的相鄰對,不只第一對。** 只報第一對的話,12 集的季度要跑十幾輪 publish
+  才知道要改哪些,而每一輪都是一次「以為修好了」。真實那次要動 11 集。
+- **順手 fail-loud 掉解不出的 `published_at`。** 它原本**原樣**進 `<pubDate>`(壞字串會讓
+  播放器自己編一個時間、或整條 item 掉),而單調性檢查本來就得 parse 才比得出大小 ——
+  同一段程式碼涵蓋,不多花一分錢。`_effective_pub_date` 抽成一顆共用 helper,preflight
+  與渲染看同一個值:各算一次的話,擋下的與發出去的可以是不同的東西。
+
+**擋下之後要有受支持的修法,否則等於死路**(v0.9.18 學到的同一條:只做讀取端不算做完)。
+`scripts/reorder_published_at.py` 把**現有**時間戳排序後依集號重新配對 —— **不發明新時間**,
+只換配對,所以「這一季是什麼時候做的」這個稽核事實不變。走 `ManifestStore.update`
+(ADR-0009 禁止手改 JSON),dry-run 預設,冪等。三件刻意不做的:
+- **只重排會進 feed 的集**,`publication_state` 被扣下的(deferred)完全不碰 —— 與 preflight
+  的檢查範圍同語義。把它丟進池子會讓 live 集拿到不屬於自己的時間,還改掉那一格的稽核時間。
+- **缺 `published_at` 的混合狀態直接報錯不猜**:缺值的集在 feed 裡走 2020 的 fallback,
+  「重排現有值」修不好順序,那需要**發明**一個時間戳,不在這支的授權範圍內。
+- **池子裡有重複時間戳也報錯**:嚴格遞增靠換配對修不了。
+
+**驗收**:離線測試 + 真實 manifest 推導結案,沒開 acceptance workspace —— 改動**只減少**
+遠端寫入(preflight 多擋一種 manifest,不新增任何 RPC/PUT 路徑;腳本純本機 manifest 寫入)。
+突變驗證九道全部轉紅(拿掉 preflight 呼叫、相等放行、只報第一對、preflight 改看全 manifest
+含 withheld、吞掉解不出的時間、缺值就擋成誤殺 fallback 混合、腳本重排 withheld、腳本不擋
+缺值、腳本不排序池子)。
+
+**獨立複審(codex,只看成品、問「什麼是新的且沒被測試守住」)抓到七條,全部採納。**
+最嚴重兩條都長在這一輪新加的東西上 —— 又是 v0.9.8 的同一個形狀,所以那個問法值得每次
+修正輪之後都跑一次：
+
+- **`published_at` 缺時區 offset 時,我原本「就地當成 +0800」是錯的。** 它只修好「比較」
+  那一半:渲染端送出的仍是**原字串**,於是 preflight 與播放器看到的是不同的時刻 ——
+  EP01 `10:00`(無 offset)、EP02 `03:00 +0000` 會被判成遞增而放行,播放器按 UTC 讀卻是
+  `10:00Z > 03:00Z`,亂序照樣出去。改成**拒絕**(RFC-2822 的 `-0000` = 時區未知,同樣拒)。
+  寬容製造了語意分歧,而本 repo 寫入一律帶 `+0800`,拒絕不會誤殺真實資料。
+- **`ep.get("published_at") or fallback` 的 truthiness 判準有兩個漏網方向。**
+  falsy 的值(`false` / `0` / `[]` / `""`)與「根本沒這個欄位」同形 → 靜默發布 2020 的
+  fallback;truthy 的非字串(`123` / `[1]` / dict)讓 `parsedate_to_datetime` 漏一個沒被接住的
+  `AttributeError` 出去。改成看**欄位在不在**(與 `publication_state` 同一條紀律),
+  存在就必須是非空字串。
+- **修法與 `backfill_published_at.py` 會互相打架,而且真實資料正好命中。** reorder 只改
+  episode 頂層,但重生過的集在 `retraction.retracted_output.published_at` 另有一份首發時間
+  (`_first_published_at` 讀它),backfill 會照它把頂層**改回去**。實測 podcast-lab 那份 50 集:
+  6 集有這種歷史,而 EP42/EP43 的歷史值(07:18:43 / 07:17:36)**本身就是亂序的** —— 也就是說
+  backfill 現在跑下去就會讓整季發不出去,這個洞在 reorder 出現之前就在了。
+  **修法刻意不是 Codex 建議的新欄位**(`rss_published_at`):那要動 promote / backfill / 渲染 /
+  文件四處,而它買到的只是「少跑一次 reorder」。改成①backfill 回填前先模擬「回填後還遞增嗎」,
+  不遞增就拒絕並指向 reorder;②reorder 對這種集印警告。**最終防線是 preflight** ——
+  任何路徑(含未來重生)造成亂序都會在上傳前被擋下,而修法可以重複跑,迴圈閉合。
+- **`--apply` 要不要寫盤原本用鎖外 snapshot 判斷。** 兩個方向都錯:A 讀到已排序、B 隨即寫成
+  亂序 → A 回「不需重排」而 manifest 留在亂序;反向序列則是零變更仍 `revision + 1`,平白撞掉
+  別的 writer 的 `expected_revision` CAS。改成計畫與判斷全部在 `update` 的鎖內 snapshot 上算,
+  零變更用 `_NoChange` 從 mutator 中止(v0.9.18 建的機制,這輪該用沒用)。
+- **三條假綠**:①「preflight 與渲染看同一顆值」沒有測試守住(混合測試只斷言
+  `episode_count`,把渲染端改成永遠 fallback 照樣綠)→ 改成直接鎖 `show.json` 的投影值;
+  ②「列出所有違規對」只斷言 `EP01`/`EP02`/`EP03` 三個字串出現,誤報成 `EP01 >= EP03`
+  (漏掉真正的第二對)也綠 → 改成斷言兩對完整的「左 >= 右」含時間戳;③腳本的重複時間戳
+  拒絕分支完全沒測試。
+
+順帶收掉的:「哪些集進 feed」的判準(含未知值 fail-loud)原本 inline 在 `publish_series`
+的迴圈裡,而兩支腳本各自需要同一條 —— 收成 `publish/state.is_withheld`,三處共用。
+漂掉的兩個方向都會出事:發布端扣下、腳本卻把它算進排序(live 集拿到不屬於自己的時間),
+或反過來讓該扣下的集參與發布。`tools_publish` 那個迴圈同時短了 12 行。
+
+**真實資料上當場抓到一筆還沒被發現的錯位**:`podcast-lab` 那份 50 集的 manifest(49 live +
+EP46 deferred)EP42/EP43 的 `published_at` 顛倒(相差 49 秒)—— 上一季手動修掉的是另一份
+12 集的,這份還壞著而沒人知道。preflight 指名了那一對,腳本 dry-run 給出兩行對調;另外
+兩份 manifest 回「已遞增,不需要重排」(冪等路徑也一起驗到)。
+
 ## v0.9.18 — deferred 集擋掉整季 republish + 補上它缺的寫入端
 
 **症狀**:`podcast-lab/output/series_manifest.json` 有 50 集,跑一次整季 republish

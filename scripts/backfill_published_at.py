@@ -19,11 +19,14 @@ EP05/EP09)。修好的 code 只影響**之後**的 promote;既有 manifest 要�
 """
 from __future__ import annotations
 
+import copy
 import os
 import sys
 
 from notebooklm_mcp.manifest_store import ManifestStore
+from notebooklm_mcp.publish import state as state_mod
 from notebooklm_mcp.tools_podcast import _first_published_at
+from notebooklm_mcp.tools_publish import _assert_pub_dates_ascend
 
 
 def _plan(manifest: dict) -> list[tuple[int, str, str]]:
@@ -36,6 +39,29 @@ def _plan(manifest: dict) -> list[tuple[int, str, str]]:
         if first and current != first:
             planned.append((episode.get("episode"), current, first))
     return planned
+
+
+def _breaks_ordering(manifest: dict, planned: list[tuple[int, str, str]]) -> str | None:
+    """這次回填會不會讓 pubDate 變成**非單調**(於是整季發不出去)?會就回傳原因。
+
+    這支腳本的用途是「重生不要讓 pubDate 漂」,而它取的正本是 attempt 首發歷史。但亂序
+    生成的季度用 `reorder_published_at.py` 重新配對過頂層之後,那份歷史記著的仍是原本
+    (同樣亂序的)時間 —— 照著回填就會把修好的排序再拆掉,而 v0.9.19 起
+    `publish_series` 會在任何上傳之前擋下整季。兩支腳本互相打架,所以後跑的這一支要
+    自己看得出來。**實際踩到**:podcast-lab 那份 50 集的 EP42/EP43,頂層修好之後歷史值
+    仍是 07:18:43 / 07:17:36(EP42 晚於 EP43)。
+    """
+    simulated = copy.deepcopy(manifest)          # 只模擬,不動真 manifest
+    by_n = {int(ep["episode"]): ep for ep in simulated.get("episodes", []) if "episode" in ep}
+    for n, _current, first in planned:
+        if n in by_n:
+            by_n[n]["published_at"] = first
+    feed_eps = [ep for ep in simulated.get("episodes", []) if not state_mod.is_withheld(ep)]
+    try:
+        _assert_pub_dates_ascend(feed_eps)
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 
 def main() -> int:
@@ -61,6 +87,19 @@ def main() -> int:
     print(f"{'將回填' if apply else '[dry-run] 會回填'}以下集數的 published_at:")
     for n, current, first in planned:
         print(f"  EP{n:02d}: {current!r}  →  {first!r}")
+
+    # 回填前先問「回填完還發得出去嗎」:亂序生成的季度被 reorder 修過頂層之後,照歷史
+    # 回填會把排序再拆掉,而那要等到下次 publish 才會發現(preflight 擋下整季)。
+    broken = _breaks_ordering(store.read(), planned)
+    if broken:
+        sys.stdout.flush()          # 讓上面那份清單先落地,拒絕訊息才不會插到它前面
+        print("\n拒絕回填:這樣會讓 pubDate 不再隨集號遞增,整季會被 publish_series 擋下。\n"
+              f"{broken}\n"
+              "這通常代表頂層 published_at 已經被 scripts/reorder_published_at.py 重新配對過,"
+              "而 attempt 首發歷史記著的是原本(也是亂序的)那組值 —— 那就不要回填。\n"
+              "真的需要回填時,先決定要放棄哪一個不變式:重生不漂移,還是集序正確。",
+              file=sys.stderr)
+        return 2
 
     if not apply:
         print("\n這是 dry-run。確認無誤後加 --apply 落地。")

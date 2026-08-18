@@ -629,14 +629,16 @@ async def test_both_sides_read_the_shared_whitelist_not_a_hardcoded_string(
     """writer 與 publisher 都必須真的**用**那份共用白名單,不是各自寫死 `"deferred"`。
 
     identity 測試只證明常數是同一個物件 —— 兩邊同時改成硬編碼字面值、常數留著沒人用,
-    它照樣綠。這裡塞一個不存在的 sentinel 狀態進兩邊的名稱(`from … import` 讓各模組
-    持有自己的參照,所以要各 patch 一次;那個「各 patch 一次」本身就是在驗各自都在用它),
-    然後跑一次完整的 writer → publisher 往返。"""
+    它照樣綠。這裡塞一個不存在的 sentinel 狀態進**兩個參照點**,然後跑一次完整的
+    writer → publisher 往返:writer 用它自己 `from … import` 進來的那份;publisher(以及
+    兩支修 `published_at` 的腳本)走 `publish/state.is_withheld`,它在執行時查 state 模組的
+    全域。任一邊改成寫死 `"deferred"`,對應那個 patch 就不生效 → 紅。"""
     from notebooklm_mcp import tools_artifacts
+    from notebooklm_mcp.publish import state as state_mod
 
     sentinel = frozenset({"embargoed"})
     monkeypatch.setattr(tools_artifacts, "WITHHELD_PUBLICATION_STATES", sentinel)
-    monkeypatch.setattr(tools_publish, "WITHHELD_PUBLICATION_STATES", sentinel)
+    monkeypatch.setattr(state_mod, "WITHHELD_PUBLICATION_STATES", sentinel)
 
     _install_mock(monkeypatch)
     manifest = _manifest(
@@ -1602,3 +1604,410 @@ async def test_bad_itunes_type_persisted_in_the_manifest_still_blocks_every_put(
     with pytest.raises(ValueError, match="itunes_type"):
         await tools_publish.publish_series(manifest_path=manifest)
     assert captured == []
+
+
+# ---------------------------------------------------------------- pubDate 排序
+# `published_at` 存的是**生成完成時間**,亂序生成的季度會讓播放器(照 pubDate 排)把
+# 集數顯示成亂序 —— 真實事故:EP01 最後才補,於是它在 App 裡變成「最新一集」。
+# 這一區鎖住 preflight 擋在**任何 PUT 之前**,以及 scripts/reorder_published_at.py 的修法。
+
+def _dated_live_ep(tmp_path, n, published_at=None):
+    ep = _live_ep(tmp_path, n)
+    if published_at is not None:
+        ep["published_at"] = published_at
+    return ep
+
+
+async def test_out_of_order_pub_dates_block_every_put(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """EP01 的 published_at 晚於 EP02(亂序生成的真實形狀)→ 一個 byte 都不准上傳。
+
+    擋在渲染邊界是不夠的:feed host 永不刪檔,亂序的 feed.xml 一旦 PUT 出去,訂閱者的
+    App 就已經拿到錯的順序了。
+    """
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path, published_at={
+        1: "Sat, 16 Aug 2026 21:33:00 +0800",       # 最後才補的 EP01
+        2: "Sat, 16 Aug 2026 21:15:00 +0800",
+    })
+    with pytest.raises(ValueError, match="published_at 必須隨集號遞增"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_identical_pub_dates_are_rejected(env, tmp_path, artwork_png, monkeypatch):
+    """相等也要擋:同一秒的兩集在播放器裡順序不定,而「不定」不是可接受的發布結果。"""
+    captured = _install_mock(monkeypatch)
+    same = "Sat, 16 Aug 2026 21:15:00 +0800"
+    manifest = _two_episode_manifest(tmp_path, published_at={1: same, 2: same})
+    with pytest.raises(ValueError, match="published_at 必須隨集號遞增"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_every_offending_pair_is_named_not_just_the_first(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """訊息要列出**所有**違規的相鄰對。
+
+    只報第一對的話,12 集的季度得跑十幾輪 publish 才知道要改哪些 —— 而每一輪都是一次
+    「以為修好了」。真實那次要動 11 集。
+    """
+    _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1, "Sat, 16 Aug 2026 23:00:00 +0800"),   # 比 EP02 晚
+            _dated_live_ep(tmp_path, 2, "Sat, 16 Aug 2026 21:00:00 +0800"),
+            _dated_live_ep(tmp_path, 3, "Sat, 16 Aug 2026 20:00:00 +0800"),   # 又比 EP02 早
+        ],
+        "multi_bad.json",
+    )
+    with pytest.raises(ValueError) as exc:
+        await _publish(manifest, artwork_png)
+    msg = str(exc.value)
+    # 斷言**兩對完整的**「左 >= 右」。只檢查 EP01/EP02/EP03 三個字串出現的話,把第二對
+    # 誤報成 `EP01 >= EP03`(漏掉真正的 `EP02 >= EP03`)照樣綠 —— 而那正好會讓人改錯集。
+    assert "EP01 Sat, 16 Aug 2026 23:00:00 +0800 >= EP02" in msg
+    assert "EP02 Sat, 16 Aug 2026 21:00:00 +0800 >= EP03" in msg
+
+
+async def test_fallback_and_real_pub_dates_mixed_still_publish(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """缺 published_at 的舊集走 2020 的 fallback,新集帶真實時間 —— 只要集號小的在前就
+    仍然遞增,不能被這道檢查誤殺(滾動加集的常見形狀)。"""
+    _install_mock(monkeypatch)
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1),                                      # 無 published_at
+            _dated_live_ep(tmp_path, 2, "Sat, 16 Aug 2026 21:00:00 +0800"),
+        ],
+        "mixed_ok.json",
+    )
+    res = await _publish(manifest, artwork_png)
+    assert res["episode_count"] == 2
+
+
+async def test_unparseable_published_at_blocks_every_put(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """壞掉的 published_at 原本會**原樣**進 `<pubDate>`(播放器解不出就自己編一個時間,
+    或整條 item 掉)。單調性檢查本來就得 parse,所以順手在 PUT 之前 fail-loud。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path, published_at={
+        1: "2026-08-16T21:15:00+08:00",              # ISO-8601,不是 RFC-2822
+        2: "Sat, 16 Aug 2026 21:33:00 +0800",
+    })
+    with pytest.raises(ValueError, match="episode 1: published_at"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_withheld_episode_pub_date_never_gates_the_season(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """deferred 集不進 feed → 它的時間戳不參與排序。
+
+    三集的形狀是刻意的:兩集的話 withheld 掉一集就只剩單集,「有沒有排除它」測不出來。
+    這裡 deferred EP02 的時間戳若被納入,EP02(23:00) >= EP03(11:00) 就會擋掉整季。
+    """
+    _install_mock(monkeypatch)
+    deferred = _deferred_ep_production_shape(tmp_path, 2)
+    deferred["published_at"] = "Sat, 16 Aug 2026 23:00:00 +0800"
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1, "Sat, 16 Aug 2026 10:00:00 +0800"),
+            deferred,
+            _dated_live_ep(tmp_path, 3, "Sat, 16 Aug 2026 11:00:00 +0800"),
+        ],
+        "deferred_dates.json",
+    )
+    res = await _publish(manifest, artwork_png)
+    assert res["episode_count"] == 2 and res["deferred_episodes"] == [2]
+
+
+def _reorder_script():
+    """從路徑載入 scripts/reorder_published_at.py(它不是 package 的一部分)。"""
+    import importlib.util
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "reorder_published_at.py",
+    )
+    spec = importlib.util.spec_from_file_location("reorder_published_at", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _run_reorder(monkeypatch, manifest_path, *args):
+    import sys as _sys
+
+    mod = _reorder_script()
+    monkeypatch.setattr(_sys, "argv", ["reorder_published_at.py", manifest_path, *args])
+    return mod.main()
+
+
+def test_reorder_script_repairs_the_order_without_inventing_timestamps(monkeypatch, tmp_path):
+    """重排 = 把**現有**時間戳依集號重新配對。集合不變(稽核上「這季何時做的」不變),
+    順序變對。dry-run 不落地,--apply 才寫。"""
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1, "Sat, 16 Aug 2026 21:33:00 +0800"),
+            _dated_live_ep(tmp_path, 2, "Sat, 16 Aug 2026 21:15:00 +0800"),
+            _dated_live_ep(tmp_path, 3, "Sat, 16 Aug 2026 21:20:00 +0800"),
+        ],
+        "reorder.json",
+    )
+    before = json.loads(open(manifest, encoding="utf-8").read())
+    original = sorted(ep["published_at"] for ep in before["episodes"])
+
+    assert _run_reorder(monkeypatch, manifest) == 0                     # dry-run
+    assert json.loads(open(manifest, encoding="utf-8").read()) == before
+
+    assert _run_reorder(monkeypatch, manifest, "--apply") == 0
+    after = json.loads(open(manifest, encoding="utf-8").read())["episodes"]
+    dates = [parsedate_to_datetime(ep["published_at"]) for ep in after]
+    assert dates == sorted(dates)                                       # 依集號遞增
+    assert sorted(ep["published_at"] for ep in after) == original       # 沒發明新時間
+
+    # 冪等:已經對了就不再改(revision 也不該再跳)。
+    settled = json.loads(open(manifest, encoding="utf-8").read())
+    assert _run_reorder(monkeypatch, manifest, "--apply") == 0
+    assert json.loads(open(manifest, encoding="utf-8").read()) == settled
+
+
+def test_reorder_script_refuses_a_manifest_with_a_missing_timestamp(monkeypatch, tmp_path):
+    """缺 published_at 的集在 feed 裡走 2020 的 fallback,與真實時間混在一起時「重排現有
+    值」修不了順序 —— 那要**發明**一個時間戳,不在這支的授權範圍內,所以報錯不猜。"""
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1, "Sat, 16 Aug 2026 21:33:00 +0800"),
+            _dated_live_ep(tmp_path, 2),                                # 沒有 published_at
+        ],
+        "reorder_missing.json",
+    )
+    with pytest.raises(SystemExit, match="沒有 published_at"):
+        _run_reorder(monkeypatch, manifest, "--apply")
+
+
+def test_reorder_script_leaves_withheld_episodes_alone(monkeypatch, tmp_path):
+    """deferred 集不進 feed → 不參與重排,它的時間戳原封不動。
+
+    若把它也丟進池子,live 集會拿到不屬於自己的時間,而 deferred 那格的稽核時間被改掉。
+    """
+    deferred = _deferred_ep_production_shape(tmp_path, 2)
+    deferred["published_at"] = "Sat, 16 Aug 2026 23:00:00 +0800"
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1, "Sat, 16 Aug 2026 12:00:00 +0800"),
+            deferred,
+            _dated_live_ep(tmp_path, 3, "Sat, 16 Aug 2026 11:00:00 +0800"),
+        ],
+        "reorder_deferred.json",
+    )
+    assert _run_reorder(monkeypatch, manifest, "--apply") == 0
+    eps = {ep["episode"]: ep["published_at"]
+           for ep in json.loads(open(manifest, encoding="utf-8").read())["episodes"]}
+    assert eps[2] == "Sat, 16 Aug 2026 23:00:00 +0800"                  # 未被動到
+    assert parsedate_to_datetime(eps[1]) < parsedate_to_datetime(eps[3])
+
+
+# --- codex 獨立複審(v0.9.19)抓到的漏網:輸入驗證、值一致性、腳本的鎖語意 --------
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Sat, 16 Aug 2026 21:00:00",          # 完全沒有 offset
+        "Sat, 16 Aug 2026 21:00:00 -0000",    # RFC-2822 的「時區未知」,Python parse 成 naive
+    ],
+    ids=["no_offset", "minus_0000"],
+)
+async def test_published_at_without_a_real_offset_is_rejected(
+    env, tmp_path, artwork_png, monkeypatch, raw
+):
+    """缺 offset 不能就地假設一個。
+
+    補 `+0800` 只修好「比較」那一半:渲染端送出的仍是原字串,於是 preflight 與播放器
+    看到的是不同的時刻 —— 真的亂序的 feed 會被判成遞增而放行。具體形狀:
+    EP01 `10:00`(無 offset)、EP02 `03:00 +0000` —— 當成 +0800 是 02:00Z < 03:00Z 放行,
+    播放器按 UTC 讀卻是 10:00Z > 03:00Z,亂序照樣出去。
+    """
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path, published_at={
+        1: raw, 2: "Sun, 17 Aug 2026 03:00:00 +0000",
+    })
+    with pytest.raises(ValueError, match="缺時區 offset"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [False, 0, [], {}, "", "   ", 123, [1], {"x": 1}],
+    ids=["false", "zero", "empty_list", "empty_dict", "empty_str", "blank_str",
+         "int", "list", "dict"],
+)
+async def test_non_string_published_at_never_falls_back_silently(
+    env, tmp_path, artwork_png, monkeypatch, raw
+):
+    """欄位**存在**就必須是能解析的字串;缺席才是唯一該走 fallback 的情形。
+
+    兩種漏網各有一半:falsy 的值(`false` / `0` / `[]` / `""`)被 `or` 當成缺值 → 靜默發布
+    2020 的 fallback(那一集的 pubDate 被偷偷改掉);truthy 的非字串(`123` / `[1]` / dict)
+    讓 `parsedate_to_datetime` 漏一個沒被接住的 `AttributeError` 出去。
+    """
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path, published_at={
+        1: raw, 2: "Sun, 17 Aug 2026 03:00:00 +0800",
+    })
+    with pytest.raises(ValueError, match="episode 1: published_at"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_rendered_pub_date_is_the_same_value_the_preflight_checked(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """preflight 與渲染必須看**同一顆值**。
+
+    這條的存在理由是一個具體的假綠:把渲染端改成永遠 `_fallback_pub_date(n)`,新的排序
+    gate 仍然正確執行(它看的是 manifest),但合法 manifest 會輸出 2020 的日期 —— 而原本
+    那條混合測試只斷言 `episode_count`,完全抓不到。這裡直接鎖 `show.json` 的投影值。
+    """
+    captured = _install_mock(monkeypatch)
+    explicit = "Sun, 16 Aug 2026 21:00:00 +0800"
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1),                    # 無 published_at → fallback
+            _dated_live_ep(tmp_path, 2, explicit),          # 顯式值
+        ],
+        "same_value.json",
+    )
+    await _publish(manifest, artwork_png)
+    eps = [json.loads(c["content"]) for c in captured if c["name"] == "show.json"][0]["episodes"]
+    assert eps["1"]["pub_date"] == tools_publish._fallback_pub_date(1)
+    assert eps["2"]["pub_date"] == explicit                 # 逐字,不是「解析後相等」
+    feed = _feed_of(captured)
+    assert f"<pubDate>{explicit}</pubDate>" in feed
+
+
+def test_reorder_script_refuses_duplicate_timestamps(monkeypatch, tmp_path):
+    """池子裡有重複時間戳 → 嚴格遞增靠換配對修不了,報錯不猜。
+
+    這個分支沒測試會紅的話,刪掉它會讓腳本回「不需重排」,而 `publish_series` 仍永久
+    擋著 —— 呼叫端會卡在「腳本說沒事、發布說不行」的死循環。
+    """
+    same = "Sat, 16 Aug 2026 21:00:00 +0800"
+    manifest = _manifest(
+        tmp_path,
+        [_dated_live_ep(tmp_path, 1, same), _dated_live_ep(tmp_path, 2, same)],
+        "reorder_dupe.json",
+    )
+    with pytest.raises(SystemExit, match="重複值"):
+        _run_reorder(monkeypatch, manifest, "--apply")
+
+
+def test_reorder_script_does_not_bump_revision_when_nothing_changes(monkeypatch, tmp_path):
+    """冪等重放不准平白 +1 revision —— 那會撞掉別的 writer 的 `expected_revision` CAS。
+
+    而且「要不要寫」必須在**鎖內**的 snapshot 上判斷:先 `read()` 再決定 `update()` 的話,
+    兩次呼叫之間別的 writer 插進來,判斷就過期了。這裡用 revision 當觀測面。
+    """
+    manifest = _manifest(
+        tmp_path,
+        [
+            _dated_live_ep(tmp_path, 1, "Sat, 16 Aug 2026 21:00:00 +0800"),
+            _dated_live_ep(tmp_path, 2, "Sat, 16 Aug 2026 22:00:00 +0800"),
+        ],
+        "reorder_noop.json",
+    )
+    from notebooklm_mcp.manifest_store import ManifestStore
+
+    store = ManifestStore(manifest)
+    store.update(lambda data: None)                          # revision 1，模擬既有寫入
+    before = store.read()["revision"]
+    assert _run_reorder(monkeypatch, manifest, "--apply") == 0
+    assert store.read()["revision"] == before                # 沒變更 → 一個 byte 都不寫
+
+
+def _backfill_script():
+    import importlib.util
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "backfill_published_at.py",
+    )
+    spec = importlib.util.spec_from_file_location("backfill_published_at", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _retracted_ep(tmp_path, n, top, first):
+    """重生過的集:頂層 pubDate 是 `top`,而首發時間的另一份記錄在撤回快照裡(`first`)。
+    `_first_published_at` 讀的是後者,`backfill_published_at.py` 會照它回填。"""
+    ep = _dated_live_ep(tmp_path, n, top)
+    ep["attempts"] = [{
+        "attempt_id": f"att-{n}",
+        "retraction": {"retracted_output": {"published_at": first}},
+    }]
+    return ep
+
+
+def test_backfill_refuses_a_reorder_breaking_backfill(monkeypatch, tmp_path, capsys):
+    """backfill 與 reorder 會互相打架,所以後跑的那支要看得出來。
+
+    真實形狀(podcast-lab 那份 50 集的 EP42/EP43):頂層被 reorder 修成遞增,但 attempt
+    首發歷史記著的仍是原本(同樣亂序的)那組值 —— 照著回填就把排序再拆掉,而那要等到
+    下次發布才會發現(preflight 擋下**整季**)。拒絕時一個 byte 都不能寫。
+    """
+    manifest = _manifest(
+        tmp_path,
+        [
+            _retracted_ep(tmp_path, 1, "Fri, 31 Jul 2026 07:41:43 +0800",
+                          "Fri, 31 Jul 2026 07:18:43 +0800"),
+            _retracted_ep(tmp_path, 2, "Fri, 31 Jul 2026 07:42:32 +0800",
+                          "Fri, 31 Jul 2026 07:17:36 +0800"),   # 歷史值比 EP01 的還早
+        ],
+        "backfill_conflict.json",
+    )
+    before = open(manifest, encoding="utf-8").read()
+
+    import sys as _sys
+
+    mod = _backfill_script()
+    monkeypatch.setattr(_sys, "argv", ["backfill_published_at.py", manifest, "--apply"])
+    assert mod.main() == 2
+    assert "拒絕回填" in capsys.readouterr().err
+    assert open(manifest, encoding="utf-8").read() == before      # 零寫入
+
+
+def test_backfill_still_repairs_a_season_it_does_not_break(monkeypatch, tmp_path):
+    """守衛不能誤殺 backfill 原本的用途:回填後仍然遞增就照回填(EP01 早於 EP02)。"""
+    manifest = _manifest(
+        tmp_path,
+        [
+            _retracted_ep(tmp_path, 1, "Fri, 31 Jul 2026 09:00:00 +0800",
+                          "Fri, 31 Jul 2026 07:00:00 +0800"),
+            _dated_live_ep(tmp_path, 2, "Fri, 31 Jul 2026 08:00:00 +0800"),
+        ],
+        "backfill_ok.json",
+    )
+    import sys as _sys
+
+    mod = _backfill_script()
+    monkeypatch.setattr(_sys, "argv", ["backfill_published_at.py", manifest, "--apply"])
+    assert mod.main() == 0
+    eps = {ep["episode"]: ep["published_at"]
+           for ep in json.loads(open(manifest, encoding="utf-8").read())["episodes"]}
+    assert eps[1] == "Fri, 31 Jul 2026 07:00:00 +0800"            # 回填成首發時間
+    assert eps[2] == "Fri, 31 Jul 2026 08:00:00 +0800"

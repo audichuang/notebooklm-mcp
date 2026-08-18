@@ -503,7 +503,7 @@ def test_importing_tools_publish_first_does_not_deadlock_on_the_whitelist():
 
     proc = subprocess.run(
         [sys.executable, "-c", "import notebooklm_mcp.tools_publish as t; "
-                              "assert t.WITHHELD_PUBLICATION_STATES"],
+                              "assert t.state_mod.WITHHELD_PUBLICATION_STATES"],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stderr
@@ -512,14 +512,17 @@ def test_importing_tools_publish_first_does_not_deadlock_on_the_whitelist():
 async def test_state_whitelist_is_shared_with_publish_not_duplicated(tmp_path):
     """可以設的狀態 = 會被扣下的狀態,同一份白名單。
 
-    各寫一份的話兩邊會漂:設得進去、發布卻不認(那一集照樣公開),或反過來。"""
+    各寫一份的話兩邊會漂:設得進去、發布卻不認(那一集照樣公開),或反過來。
+
+    v0.9.19 起 publisher **不再持有自己的參照**:「哪些集進 feed」的判準(含未知值
+    fail-loud)收成 `state.is_withheld`,兩支修 `published_at` 的腳本也照同一份 —— 所以
+    這裡驗的是 writer 用同一個 frozenset、而 publisher 用同一個 state 模組。"""
     from notebooklm_mcp import tools_artifacts, tools_publish
     from notebooklm_mcp.publish import state
     assert (
-        tools_artifacts.WITHHELD_PUBLICATION_STATES
-        is tools_publish.WITHHELD_PUBLICATION_STATES
-        is state.WITHHELD_PUBLICATION_STATES
+        tools_artifacts.WITHHELD_PUBLICATION_STATES is state.WITHHELD_PUBLICATION_STATES
     )
+    assert tools_publish.state_mod is state
 
 
 # ---- v0.3.3:簡報/講義原子換檔(torn write regression)---------------------------

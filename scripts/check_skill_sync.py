@@ -68,6 +68,11 @@ REQUIRED_CONTRACT_TERMS = (
                               # 最容易漏的那一類。缺席=照發、未知值 raise 都要寫進文件
     "deferred_episodes",      # 同上的回傳側:episode_count 會少掉被扣下的集數,不寫進
                               # 文件呼叫端只會看到「發布漏集」
+    "reorder_published_at.py",  # v0.9.19:preflight 會擋下 pubDate 非單調的 manifest,而
+                              # **擋下之後的修法只存在文件裡**(它是 repo 裡的腳本,不是
+                              # 工具)。少了這一句,呼叫端撞牆後最可能去手改 JSON
+                              # (ADR-0009 禁止)或把 published_at 改成 now() —— 那會毀掉
+                              # 首發時間的稽核
 )
 
 
@@ -91,6 +96,10 @@ SKILL_MD_REQUIRED_TERMS = (
     # —— 只補 tool-reference 的話,agent 會照主路由層停在清單那一步,根本走不到已經
     # 會正確跳過它的 publisher。這正是上面那個 v0.9.12 教訓的同一個洞。
     "publication_state",
+    # v0.9.19:交付清單是 host 每次發布前逐集核對的地方,而「pubDate 隨集號遞增」是
+    # **生成階段**就該守住的事(亂序生成之後才發現,已經要重排 11 集)。只補 tool-reference
+    # 的話,清單全綠 → 發布 → 被 preflight 擋下,那一輪的生成順序已經無從補救。
+    "published_at",
 )
 
 

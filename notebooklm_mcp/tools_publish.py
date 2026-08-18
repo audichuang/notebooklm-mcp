@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -32,7 +32,7 @@ from .publish import feed as feed_mod
 from .publish import identity
 from .publish.layout import attachment_filename, cover_filename, media_filename
 from .publish import notes_html
-from .publish.state import WITHHELD_PUBLICATION_STATES
+from .publish import state as state_mod
 
 _TZ = timezone(timedelta(hours=8))          # Asia/Taipei, RFC-2822 +0800
 _TIMEOUT = 600.0                            # a season of mp3 PUTs can take a while
@@ -75,6 +75,87 @@ def _require_media_binaries() -> None:
 
 def _fallback_pub_date(n: int) -> str:
     return format_datetime(_FALLBACK_BASE + timedelta(days=n - 1))
+
+
+def _effective_pub_date(ep: dict, n: int) -> str:
+    """該集真正會投影進 `<pubDate>` 的字串。**preflight 與渲染必須看同一顆值** ——
+    各自算一次的話,擋下的與發出去的可以是不同的東西。
+
+    判準是**欄位在不在**,不是 `or` 的 truthiness(與 `publication_state` 同一條紀律):
+    `published_at` 填成 `false` / `0` / `[]` 時,`or` 會讓它與「根本沒這個欄位」同形而
+    靜默退到 2020 的 fallback —— 那正好在這個欄位該生效的時候失效,而 feed host 永不刪檔。
+    缺席是唯一該走 fallback 的情形;填了就必須是能解析的字串。"""
+    if "published_at" not in ep:
+        return _fallback_pub_date(n)
+    raw = ep["published_at"]
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(
+            f"episode {n}: published_at 必須是 RFC-2822 時間字串,得到 {raw!r}"
+            " —— 要走預設時間就把整個欄位移除,不要填空值/null/非字串"
+        )
+    return raw
+
+
+def _parse_pub_date(raw: object, n: int) -> datetime:
+    """把 pubDate 字串 parse 成可比較的 datetime;解不出就 fail-loud。
+
+    順手補掉一個既有的洞:`published_at` 現在**原樣**進 `<pubDate>`,壞字串(或非
+    字串)會讓播放器解不出時間、自己編一個或整條 item 掉,而 feed host 永不刪檔。
+    單調性檢查本來就得 parse 才比得出大小,所以判準放這裡不多花一分錢。"""
+    try:
+        dt = parsedate_to_datetime(raw)                     # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"episode {n}: published_at 不是可解析的 RFC-2822 時間({raw!r}):{exc}"
+        ) from exc
+    # **缺 offset 一律拒絕,不就地假設一個。** 補 `+0800` 只修好「比較」這一半:渲染端送出
+    # 的仍是原字串,於是 preflight 與播放器看到的是不同的時刻 —— 真的亂序的 feed 會被判成
+    # 遞增而放行(播放器多半按 UTC 解讀無 offset 的時間)。RFC-2822 的 `-0000` 語意是
+    # 「時區未知」,Python 也 parse 成 naive,同樣拒絕。本 repo 寫入時一律帶 +0800,
+    # 所以擋下的只會是手改或跨工具帶進來的資料。
+    if dt.tzinfo is None:
+        raise ValueError(
+            f"episode {n}: published_at 缺時區 offset({raw!r})。RFC-2822 的 -0000"
+            "(時區未知)也算 —— 補上真正的 offset(本 repo 一律 +0800)再發布"
+        )
+    return dt
+
+
+def _assert_pub_dates_ascend(eps: list[dict]) -> None:
+    """pubDate 必須隨集號**嚴格**遞增,不然擋在任何 PUT 之前。
+
+    真實事故(saa-* 12 集):`published_at` 存的是**生成完成時間**,而整季幾乎都是
+    亂序生成的 —— EP01 最後才補(21:33,比 EP12 的 21:15 還晚),於是 App 裡 EP01
+    變成「最新一集」卡在列表第一個,EP04/EP05 也因生成順序顛倒而互換。
+    `itunes:type=serial` 救不了:Apple 文件說 serial 照 `itunes:episode` 排,實測多數
+    播放器(含 Apple 自己的列表視圖)仍以 pubDate 為準;而 `build_feed_xml` 的
+    `lastBuildDate` 取 `eps[-1]`(集號最大的那集),非單調時它也不是真正最新的時間。
+
+    這條「RSS 排序假設 pubDate 隨集號遞增」的前提一直只寫在
+    `tools_podcast._first_published_at` 的註解裡,**沒有任何 preflight 驗過它** ——
+    它在「一集一集依序生成」時才自動成立。相等也擋:同一秒的兩集在播放器裡順序不定。
+
+    修法不是放寬這道檢查,而是把時間戳依集號重新配對(不發明新時間):
+    `scripts/reorder_published_at.py`。GUID 不變 → Apple 視為同集更新,媒體 URL 不動。
+    """
+    ordered = sorted(eps, key=lambda ep: int(ep["episode"]))
+    bad: list[str] = []
+    prev: tuple[int, datetime, str] | None = None
+    for ep in ordered:
+        n = int(ep["episode"])
+        raw = _effective_pub_date(ep, n)
+        cur = _parse_pub_date(raw, n)
+        if prev is not None and cur <= prev[1]:
+            bad.append(f"EP{prev[0]:02d} {prev[2]} >= EP{n:02d} {raw}")
+        prev = (n, cur, str(raw))
+    if bad:
+        raise ValueError(
+            "published_at 必須隨集號遞增,否則 Apple 與多數播放器(照 pubDate 排序)會把"
+            "集數顯示成亂序;以下相鄰對違反:\n  " + "\n  ".join(bad)
+            + "\n修法:uv run python scripts/reorder_published_at.py <manifest>"
+            "(dry-run 預設,走 ManifestStore 不手改 JSON),再重跑 publish_series"
+            " —— GUID 不變,Apple 視為同集更新,媒體 URL 也不動。"
+        )
 
 
 def _make_client() -> httpx.AsyncClient:
@@ -420,22 +501,12 @@ async def publish_series(
     manifest_eps: list[dict] = []
     withheld: list[object] = []
     for ep in all_eps:
-        # 判準是**欄位在不在**,不是 `.get()` 的值:`{"publication_state": null}` 用
-        # `.get() is None` 會與「根本沒這個欄位」同形而照發,而 `null` 的意圖無從得知
-        # ——這是唯一一道「不得公開」的閘,而 feed host 永不刪檔。缺席才是照發。
-        if "publication_state" not in ep:
-            manifest_eps.append(ep)
-            continue
-        state = ep["publication_state"]
-        # 先驗型別:unhashable(list/dict)直接 `in frozenset` 會漏一個 TypeError 出去,
-        # 而這是 manifest 這個信任邊界上的輸入,要回可讀的 ValueError。
-        if isinstance(state, str) and state in WITHHELD_PUBLICATION_STATES:
+        # 判準(含未知值 fail-loud)在 `publish/state.is_withheld`:兩支修 `published_at` 的
+        # 腳本也要照同一條算「哪些集進 feed」,各寫一份就會漂。
+        if state_mod.is_withheld(ep):
             withheld.append(ep.get("episode"))
         else:
-            raise ValueError(
-                f"episode {ep.get('episode')}: unknown publication_state {state!r} "
-                f"(扣下的狀態只有 {sorted(WITHHELD_PUBLICATION_STATES)};要照發就別設這個欄位)"
-            )
+            manifest_eps.append(ep)
     if not manifest_eps:
         raise ValueError(
             f"manifest has no publishable episodes (all withheld): {manifest_path}"
@@ -493,6 +564,11 @@ async def publish_series(
                 )
             if path and not (os.path.exists(path) and os.path.getsize(path) > 0):
                 raise ValueError(f"episode {n}: {key} missing file: {path}")
+
+    # pubDate 隨集號遞增是整份 feed 的排序前提(`live_episodes` 依集號排、播放器依
+    # pubDate 排),而 `published_at` 存的是生成完成時間 —— 亂序生成就會違反它。
+    # 擋在這裡,不是渲染時:非單調的 feed 一旦 PUT 上去,訂閱者的 App 就已經拿到亂序了。
+    _assert_pub_dates_ascend(manifest_eps)
 
     # **只驗真的會投影進 feed.xml 的欄位**,而且在第一個 PUT 之前:manifest 內部欄位
     # (brief、錯誤訊息、本機路徑)刻意不管 —— 那些不會進 XML,拿它們擋發布是誤殺。
@@ -626,7 +702,7 @@ async def publish_series(
                     "description": desc,
                     "description_html": desc_html,
                     "guid": identity.episode_guid(show_id, n),
-                    "pub_date": ep.get("published_at") or _fallback_pub_date(n),
+                    "pub_date": _effective_pub_date(ep, n),
                     "media_file": mfile,
                     "length": mp3_len,   # 內嵌封面後的大小(mp3_bytes 已 del)
                 }
