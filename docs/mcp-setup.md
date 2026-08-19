@@ -3,8 +3,8 @@
 Install the tagged MCP package on each machine first:
 
 ```bash
-git ls-remote https://github.com/audichuang/notebooklm-mcp.git refs/tags/v0.9.19
-uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.19"
+git ls-remote https://github.com/audichuang/notebooklm-mcp.git refs/tags/v0.9.20
+uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.20"
 ```
 
 Register the MCP server with Claude Code using stdio transport and Doppler auth injection.
