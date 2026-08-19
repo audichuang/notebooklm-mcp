@@ -17,9 +17,9 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 **遠端** audi-skill 來驗——skill 只同步在本機、還沒推,MCP 先推就 CI 紅(missing 新工具名)。
 反序踩到時把 audi-skill 推上去後 `gh run rerun <id>` 即綠,不用改 code。
 
-### Release Pin Sites(發 tag 時**五處**一起改)
+### Release Pin Sites(發 tag 時**四處**一起改)
 
-`uv tool install …@vX.Y.Z` 的版本號散在四個檔(加 `pyproject.toml` 共五處),
+`uv tool install …@vX.Y.Z` 的版本號散在三個檔(加 `pyproject.toml` 共四處),
 沒有單一來源可推導——曾漂成
 podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一次改完:
 
@@ -27,11 +27,14 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 2. `AGENTS.md` §Commands 的安裝指令(拆檔時 §Commands 留在 AGENTS.md,沒跟著搬進本檔)
 3. `README.md`
 4. `docs/mcp-setup.md`
-5. `audi-skill/notebooklm/SKILL.md` §Auth
+
+**skill 不再是 pin 點。** `audi-skill/notebooklm` 的安裝指令在 `references/setup.md`,
+它教「查最新 tag 再裝」,不寫死 `v0.9.x`——每發一版改 skill 只是把同一件事說第五次,
+而漏改 skill 又會讓消費端永遠停在舊 pin。打 tag 之後消費端重跑 setup 那段即跟上。
 
 ⚠️ **`../podcast-lab/AGENTS.md` 曾是第六處,現在不是,別把它加回來**:那份已改成
-「不寫版本號、安裝指令或方法清單」,pin 一律以 project-local skill 的 §Auth(= 第 5 項的
-安裝結果)為準。它現在唯一會出現的版本號在 gitignored 的快照裡,見下面那條 ⚠️。
+「不寫版本號、安裝指令或方法清單」。它現在唯一會出現的版本號在 gitignored 的快照裡,
+見下面那條 ⚠️。
 
 **外加一件不算 pin 但一定要做的**:在 `CHANGELOG.md` 開一節寫「改了什麼、為什麼、
 踩到什麼事故」。版本敘事只寫在那裡 —— **不要回填進本檔**。
@@ -48,14 +51,13 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 pin 都不滿足**,而 editable 的 code 卻是最新的,所以症狀是「跑起來像新版、依賴卻是舊的」)。
 本機也算消費端:要跟上就重跑 pin tag 安裝,別指望 editable 自動生效。
 
-驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab ../../audi-skill | grep -v docs/superpowers`
-(`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實)。
+驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab | grep -v docs/superpowers`
+(`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實;`audi-skill` 的 setup.md
+刻意不寫死版本,不要把它加回這條 grep)。
 
-⚠️ **那個 grep 會撈到兩類「看起來像第六處 pin、其實不是」的東西,別跟著改**:
-① `.superpowers/sdd/task-*.md`(v0.2.0)與 `docs/acceptance-*.md` 是歷史紀錄,同
-`docs/superpowers/` 的道理;② `../podcast-lab/.agents/skills/notebooklm/SKILL.md`
-是**gitignored、可重生**的本機 docs 快照(`.claude/skills/notebooklm` 是指過去的
-symlink),正本在 `audi-skill/notebooklm/SKILL.md`,也就是清單第 5 項。它的 pin 會
-一直停在快照當時的版本(2026-08-11 實際看到 v0.4.0),那**不是漏改**——要更新是
-重生快照,不是編輯它。改了也不會進版控,下次重生就沒了。
+⚠️ **那個 grep 會撈到「看起來像第五處 pin、其實不是」的東西,別跟著改**:
+`.superpowers/sdd/task-*.md`(v0.2.0)與 `docs/acceptance-*.md` 是歷史紀錄,同
+`docs/superpowers/` 的道理。`../podcast-lab/.agents/skills/notebooklm/` 是
+**gitignored、可重生**的本機 docs 快照,正本在 `audi-skill/notebooklm/`;
+它現在也不寫死版本(見 `references/setup.md`)。要更新是重生快照,不是編輯它。
 
