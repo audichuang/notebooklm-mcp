@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -524,6 +525,20 @@ async def publish_series(
         seen_n.add(n)
         if not isinstance(ep.get("title"), str) or not ep["title"].strip():
             raise ValueError(f"episode {n}: title is required and must be non-empty")
+        # 連載節目的標題必須自己帶集號。`<itunes:episode>` 已經在 feed 裡,但**多數播放器
+        # 不顯示它** —— 訂閱者在清單上看到的只有標題,而連載節目的價值就是順序。
+        # **擋在這裡而不是靠人記**:同一個 feed 半數有前綴半數沒有,只有訂閱者看得見,
+        # host 這邊完全無感。前綴的集號要**等於**該集集號:複製上一集 brief 留下的
+        # `EP07. ` 會讓標題與 `<itunes:episode>` 各說各話,那比沒有集號更糟。
+        # 射程只到 `serial`:`episodic` 是時事型、由新到舊聽,集號沒有意義(Audicast
+        # 五十集都沒有前綴)。
+        if itunes_type == "serial" and not re.match(rf"^EP{n:02d}\. ", ep["title"]):
+            raise ValueError(
+                f"episode {n}: serial 節目的標題必須以 'EP{n:02d}. ' 開頭"
+                f"(現在是 {ep['title']!r})—— itunes:episode 多數播放器不顯示,"
+                "集號要進標題才是給人看的。title 生成時就鎖死、沒有 episode_set_title,"
+                "缺前綴補不回去;整個節目不編號請把 itunes_type 設成 episodic"
+            )
         # 單集封面每集必做(程式對齊 skill 政策):缺 cover_path 直接 fail,不再靜默
         # fallback 節目封面——否則漏生封面的集數會「發布成功」卻掛錯圖(EP03 就這樣漏掉)。
         # 這裡就驗(存在 + Apple 規格),讓缺檔/不合規在**任何 PUT 之前**就 fail,不留 orphan media。

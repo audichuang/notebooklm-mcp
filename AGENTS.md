@@ -64,6 +64,7 @@ claude mcp add-json notebooklm -s local \
 | `server.py` | thin launcher(可當 `__main__` 跑) | — |
 | `tools_basic.py` | notebook / source / artifact / `chat_ask` 的薄包 + 讀取觀測面 | — |
 | `tools_podcast.py` | manifest-backed audio attempt:durable generate / reconcile / adopt / finalize / retract | **先讀 [ADR-0009](docs/adr/0009-retracted-attempts-are-tombstones.md)** —— 四個不變式各自被真實事故驗證過,而踩過的坑是**只補一條路徑**(attempt 建立有兩個分支、清理義務有三個入口)。**寫任何狀態相關的指引訊息前先讀 [gotchas-attempt.md](docs/gotchas-attempt.md) 的紅線**——一律由 `_attempt_capabilities()` / `_attempt_next_step()` 產生,不准手寫 if/else,這個根因已現形七次 |
+| `naming.py` | Studio / 回錄鐵律 vs serial RSS 標題:剝掉匹配的 `EP{NN}. `/`EP{NN} ` 再套 `EP{NN} 正文` | 改命名只動這裡;cover `__TITLE__` 與 finalize label 都走它 |
 | `tools_artifacts.py` | 簡報 PDF / 研讀 Markdown 按需生,路徑回寫 manifest;三支生成都走共用配額 failover。也放兩支 episode 級 manifest writer(`episode_set_description` / `episode_set_publication_state`) | [gotchas-publish](docs/gotchas-publish.md);稽核面是 episode 級不是 attempt,見 [ADR-0011](docs/adr/0011-attachment-failover-buys-audit-with-an-episode-field-not-an-attempt.md) |
 | `_failover.py` | 配額 failover 的**唯一**迴圈(音檔與附件共用) | 五條紅線在它的模組 docstring,各是一次事故 —— 改分類/終止性要在那裡改,別在呼叫端加分支 |
 | `tools_research.py` | Web / Deep Research 的薄包,**三支分開**(start / wait / import) | [gotchas-research](docs/gotchas-research.md);分開是為了對齊 ADR-0001 的 attempt/resume 紀律,不是為了彈性 |
@@ -142,8 +143,10 @@ claude mcp add-json notebooklm -s local \
   與 `source_list` 同走 `GET_NOTEBOOK`。所以 ADR-0009 的清理義務有效。推導的三個前提由
   `tests/test_contracts.py::test_generation_takes_its_source_list_from_the_notebook_not_the_server`
   釘住(**它紅就代表推導失效、清理義務要重新論證**),完整論證在該測試的 docstring。
-- 命名鐵律(每集 mp3 回錄 + 工作室 artifact **完全同名** `EP{n:02d} 標題`)的正本在 skill
-  §Episodic;**實作上唯一要記的是命名邏輯集中在 `_episode_label()`**,改流程時對照那裡,別各處自己拼字串。
+- 命名鐵律(每集 mp3 回錄 + 工作室 artifact **完全同名** `EP{n:02d} 標題正文`)的正本在 skill
+  §Episodic;**實作上唯一要記的是 `naming.episode_label`**(tools_podcast 的 `_episode_label`
+  是別名)。它會剝掉匹配的 `EP{NN}. ` / `EP{NN} ` 再套鐵律 —— serial 的 RSS 標題帶集號,
+  工作室名不能跟著疊。改流程時對照那裡,別各處自己拼字串。
 - `get_fulltext` 會在 CJK 字元間插空格;關鍵字比對前先 `"".join(text.split())`
   (`_text.norm` 已封裝)。
 - **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`)。工具已內建

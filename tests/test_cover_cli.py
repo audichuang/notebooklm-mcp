@@ -77,6 +77,36 @@ def test_batch_writes_cover_path(tmp_path, monkeypatch):
         assert ep["cover_path"].endswith(f"EP{ep['episode']:02d}.jpg")
         assert os.path.getsize(ep["cover_path"]) > 0
 
+def test_batch_strips_serial_prefix_from_cover_title(tmp_path, monkeypatch):
+    """封面徽章已經是 EPISODE NN,標題再帶 `EP01. ` 會印兩次。"""
+    man = tmp_path / "m.json"
+    man.write_text(
+        json.dumps({
+            "episodes": [{"episode": 1, "title": "EP01. 心法篇"}],
+        }),
+        encoding="utf-8",
+    )
+    captured: list[str] = []
+
+    def fake_render(_template, subs, output, _chrome):
+        captured.append(subs["__TITLE__"])
+        with open(output, "wb") as image_file:
+            image_file.write(b"fake-cover")
+        return {"width": 3000, "height": 3000, "format": "JPEG"}
+
+    monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
+    monkeypatch.setattr(cover_cli, "_render", fake_render)
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover",
+        "--manifest", str(man),
+        "--show-name", "Audicast",
+        "--output-dir", str(tmp_path),
+    ])
+
+    cover_cli.main()
+    assert captured == ["心法篇"]
+
+
 def test_batch_manifest_update_uses_manifest_store(tmp_path, monkeypatch):
     man = tmp_path / "m.json"
     man.write_text(

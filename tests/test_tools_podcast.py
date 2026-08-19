@@ -3,6 +3,22 @@ import pytest
 from notebooklm_mcp import tools_podcast as p
 
 
+async def test_series_serial_rss_title_does_not_double_the_studio_name(
+    fake_client, tmp_path
+):
+    """連載大綱寫 `EP01. 心法篇`(publish 硬契約)時,工作室/回錄仍是 `EP01 心法篇`。
+
+    疊成 `EP01 EP01. 心法篇` 會讓 continuity 對帳、retract 重生、source_list 比對
+    全部對不上既有鐵律。
+    """
+    eps = [{"title": "EP01. 心法篇", "brief": "1"}]
+    await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=1)
+    artifact_renames = [c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename"]
+    source_renames = [c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename"]
+    assert artifact_renames == ["EP01 心法篇"]
+    assert source_renames == ["EP01 心法篇"]
+
+
 async def test_series_names_artifact_and_source_with_title(fake_client, tmp_path):
     # The outline gives every episode a title; both the Studio artifact and the
     # self-uploaded source must be renamed to "EP{n:02d} {title}" — the SAME

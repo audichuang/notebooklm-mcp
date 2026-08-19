@@ -6,6 +6,40 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.20 — serial 節目的標題必須自己帶集號
+
+**症狀**:三個連載節目上架後,訂閱者在播放器的清單上看不出集序。feed 完全合法 ——
+`<itunes:episode>` 1–12 連續、`<itunes:type>serial</itunes:type>` 也在,`readback.py`
+全綠。問題是**那個欄位多數播放器不顯示**:Apple 只在部分視圖秀,Spotify / 清單視圖
+根本不顯示,聽眾看到的就只有標題。
+
+**根因**:集號一直只存在於機器讀得到的地方(`itunes:episode`、manifest 的 `label`、
+檔名),從來沒進過人看得到的地方(`<item><title>`)。三個節目 35 集都是這樣上線的。
+
+**修法**:`publish_series` 的 preflight 多一道 —— `itunes_type == "serial"` 時,每集標題
+必須以 `EP{NN}. ` 開頭,且**前綴的集號等於該集集號**。擋在第一個 PUT 之前。
+
+四個決定:
+
+1. **射程只到 `serial`。** `episodic` 是時事型、由新到舊聽,集號沒有意義 —— Audicast
+   五十集都沒有前綴,把閘門套上去等於讓那個 feed 從此發不出去。不另加旗標:節目型態
+   已經是季級設定,再開一個 `require_episode_number` 只是把同一件事說兩次。
+2. **集號要比對,不是只驗 `EP` 開頭。** 複製上一集 brief 時留下的 `EP07. ` 會讓標題與
+   `<itunes:episode>` 各說各話,那比沒有集號更糟(聽眾會相信標題)。
+3. **只驗,不改寫。** 自動補前綴會讓 manifest 與 feed 說不同的話,而 manifest 才是
+   canonical state;要改標題就走 `ManifestStore`。
+4. **擋在 publish 而不是靠人記。** 同一個 feed 半數有前綴半數沒有,**只有訂閱者看得見**
+   —— host 這邊發布成功、read-back 全綠、feed 合法,沒有任何一處會亮紅。
+
+**生成端配套**(skill 才能叫 host 從大綱就寫 `EP01. 心法篇`):`naming.episode_label`
+剝掉**匹配該集**的 `EP{NN}. ` / `EP{NN} ` 再套鐵律,工作室 artifact 與回錄仍是
+`EP01 心法篇`。封面 `__TITLE__` 走同一道(徽章已經是 EPISODE NN)。publish **仍然
+不改寫** feed 標題。
+
+**已知的相鄰瑕疵(未修)**:`build_index_html` 自己會加 `EP{NN} — ` 前綴,標題帶集號後
+那張 `<link>` 落地頁會顯示成 `EP01 — EP01. 標題`。只影響那張頁面,RSS item 不受影響;
+修它要讓三個已完結的季各重發一次(約 1.3 GB),所以先留著。
+
 ## v0.9.19 — pubDate 隨集號遞增變成 preflight,不再只是一句註解
 
 **症狀**:整季發布成功、GUID 與 URL 都對,但訂閱者的 App 裡集數是亂序的 —— EP01 顯示成

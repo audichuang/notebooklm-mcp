@@ -42,6 +42,7 @@ from PIL import Image
 from notebooklm_mcp._atomic import prepared_replacement
 from notebooklm_mcp.publish.artwork import validate_artwork
 from notebooklm_mcp.manifest_store import ManifestStore
+from notebooklm_mcp.naming import bare_episode_title
 
 _ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 _CHROME_CANDIDATES = ["google-chrome", "google-chrome-stable", "chromium",
@@ -198,7 +199,7 @@ def main() -> None:
             info = _render(tpl, {
                 "__SHOW__": show_name,
                 "__EPNUM__": f"{n:02d}",
-                "__TITLE__": ep["title"],
+                "__TITLE__": bare_episode_title(n, ep["title"]),
                 "__BYLINE__": args.byline,
                 "__HUE__": hue,
             }, cover_path, _find_chrome(args.chrome))
@@ -249,7 +250,7 @@ def main() -> None:
     info = _render(_load_template("cover_episode.html"), {
         "__SHOW__": args.show_name,
         "__EPNUM__": f"{n:02d}",
-        "__TITLE__": args.title,
+        "__TITLE__": bare_episode_title(n, args.title),
         "__BYLINE__": args.byline,
         "__HUE__": hue,
     }, args.output, _find_chrome(args.chrome))

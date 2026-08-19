@@ -60,6 +60,7 @@ from .manifest_store import (
     ManifestPostCommitError,
     ManifestStore,
 )
+from .naming import episode_label as _episode_label
 
 _TZ = timezone(timedelta(hours=8))
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=1)
@@ -819,14 +820,6 @@ def _artifact_created_at_utc(value: object) -> datetime | None:
     if not isinstance(value, datetime):
         return None
     return value.astimezone(timezone.utc)
-
-
-def _episode_label(episode_n: int, title: str) -> str:
-    """Unified name for BOTH the Studio artifact and the self-uploaded source:
-    ``EP{n:02d} {title}`` (e.g. ``EP01 心法篇``). The EP prefix keeps ordering /
-    resume / reconciliation addressable; the title makes it human-legible.
-    Both sides use this identical string (the unified-naming iron rule)."""
-    return f"EP{episode_n:02d} {title.strip()}"
 
 
 def _attempt_record(
@@ -2789,7 +2782,9 @@ async def podcast_episode(
 ) -> dict:
     """生成、命名、下載並回錄一集 podcast。
 
-    Studio artifact 與回錄 source 都命名為 ``EP{n:02d} {title}``。
+    Studio artifact 與回錄 source 都命名為 ``EP{n:02d} 正文``(``naming.episode_label``
+    會剝掉匹配的 ``EP{n:02d}. `` / ``EP{n:02d} `` 前綴,所以 serial RSS 標題
+    ``EP01. 心法篇`` 的工作室名仍是 ``EP01 心法篇``)。
 
     傳 ``manifest_path`` 時，attempt 會在任何遠端 generation 副作用前持久化；
     若另傳 ``input_bundle_path``（相對 workspace 的路徑），``brief`` 必須為 ``None``，

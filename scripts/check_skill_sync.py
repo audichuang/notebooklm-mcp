@@ -73,6 +73,8 @@ REQUIRED_CONTRACT_TERMS = (
                               # 工具)。少了這一句,呼叫端撞牆後最可能去手改 JSON
                               # (ADR-0009 禁止)或把 published_at 改成 now() —— 那會毀掉
                               # 首發時間的稽核
+    "EP{n:02d}.",             # v0.9.20:serial 標題必須自己帶集號。字串含句點,才
+                              # 跟命名鐵律的 `EP{n:02d} {title}`(空格、沒句點)分得開
 )
 
 
@@ -100,6 +102,9 @@ SKILL_MD_REQUIRED_TERMS = (
     # **生成階段**就該守住的事(亂序生成之後才發現,已經要重排 11 集)。只補 tool-reference
     # 的話,清單全綠 → 發布 → 被 preflight 擋下,那一輪的生成順序已經無從補救。
     "published_at",
+    # v0.9.20:title 生成時鎖死,缺前綴不能事後補。只補 tool-reference 的話,host 照
+    # §Episodic 用裸標題生完整季,發布才被擋,整季 title 全部改不了。
+    "EP{NN}.",
 )
 
 

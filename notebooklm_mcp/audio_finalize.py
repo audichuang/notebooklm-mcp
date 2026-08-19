@@ -21,6 +21,7 @@ from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE
 from ._atomic import fsync_parent as _fsync_parent
 from ._status import TerminalGenerationError, ensure_completed
 from .manifest_store import ManifestStore
+from .naming import episode_label
 
 _SOURCE_CLOCK_SKEW = timedelta(minutes=1)
 _SOURCE_DISPATCH_WINDOW = timedelta(minutes=11)
@@ -229,7 +230,7 @@ def _completed_output(
     return {
         "episode": episode_n,
         "title": attempt["title"],
-        "label": f"EP{episode_n:02d} {attempt['title'].strip()}",
+        "label": episode_label(episode_n, attempt["title"]),
         "task_id": artifact_id,
         "artifact_id": artifact_id,
         "mp3_path": path,
@@ -477,7 +478,7 @@ async def finalize_attempt(
     title = attempt.get("title")
     if not isinstance(title, str) or not title.strip():
         raise ValueError("attempt title is missing")
-    label = f"EP{episode_n:02d} {title.strip()}"
+    label = episode_label(episode_n, title)
 
     completed = _completed_output(episode, attempt, episode_n, attempt_id)
     if completed is not None:

@@ -127,6 +127,20 @@ def _two_episode_manifest(tmp_path, *, published_at=None, contents=None, filenam
     return _manifest(tmp_path, episodes, filename)
 
 
+def _numbered_manifest(tmp_path, **kw):
+    """`_two_episode_manifest` 的連載版:標題帶 `EP{NN}. ` 前綴。
+
+    serial 節目的標題前綴是 publish 的硬契約(見 §serial 節目的標題必須帶集號),
+    所以每個傳 `itunes_type="serial"` 的測試都得用這一份,不能用裸的那個。
+    """
+    manifest = _two_episode_manifest(tmp_path, **kw)
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    for ep in stored["episodes"]:
+        ep["title"] = f"EP{ep['episode']:02d}. {ep['title']}"
+    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    return manifest
+
+
 def _show_kwargs(manifest_path, artwork_png):
     return dict(
         show_id="ai-news", notebook_id="nb1", manifest_path=manifest_path,
@@ -1521,7 +1535,7 @@ async def test_serial_is_declared_and_persisted_as_a_season_setting(
 ):
     """傳一次就存進 manifest['show'],之後只傳 manifest_path 也沿用(同 show 七欄)。"""
     captured = _install_mock(monkeypatch)
-    manifest = _two_episode_manifest(tmp_path)
+    manifest = _numbered_manifest(tmp_path)
     await _publish(manifest, artwork_png, itunes_type="serial")
     assert "<itunes:type>serial</itunes:type>" in _feed_of(captured)
 
@@ -1539,7 +1553,7 @@ async def test_serial_does_not_change_episode_order_or_guids(
 ):
     """**只補宣告,不動排序與身分。** 重跑不需要重生音檔,Apple 視為同一節目更新。"""
     captured = _install_mock(monkeypatch)
-    manifest = _two_episode_manifest(tmp_path)
+    manifest = _numbered_manifest(tmp_path)
     before = await _publish(manifest, artwork_png)
     episodic_feed = _feed_of(captured)
 
@@ -1573,7 +1587,7 @@ async def test_explicit_itunes_type_overrides_the_persisted_one(
     """**反向 precedence 也要鎖。** 只驗「顯式 → 之後沿用」的話,把解析改壞成 saved 永遠
     優先(改回連載節目就再也切不回 episodic)照樣全綠。顯式參數永遠優先並回寫。"""
     captured = _install_mock(monkeypatch)
-    manifest = _two_episode_manifest(tmp_path)
+    manifest = _numbered_manifest(tmp_path)
     await _publish(manifest, artwork_png, itunes_type="serial")
     assert json.loads(open(manifest, encoding="utf-8").read())["show"]["itunes_type"] == "serial"
 
@@ -1604,6 +1618,65 @@ async def test_bad_itunes_type_persisted_in_the_manifest_still_blocks_every_put(
     with pytest.raises(ValueError, match="itunes_type"):
         await tools_publish.publish_series(manifest_path=manifest)
     assert captured == []
+
+
+# ------------------------------------------------- serial 節目的標題必須帶集號
+# `<itunes:episode>` 已經在 feed 裡,但**多數播放器不顯示它** —— 訂閱者在清單上看到的
+# 只有標題。連載節目的價值就是順序,所以集號要進標題才是給人看的。擋在 publish 而不是
+# 靠人記:同一個 feed 半數有前綴半數沒有,只有訂閱者看得見,host 這邊完全無感。
+
+async def test_serial_refuses_a_title_without_its_episode_number(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """連載節目缺前綴 → 在**任何 PUT 之前** raise。
+
+    拖到渲染才擋沒有意義:feed.xml 是最後一個 PUT,那時候整季 mp3 已經上傳完了。
+    """
+    captured = _install_mock(monkeypatch)
+    with pytest.raises(ValueError, match="EP01"):
+        await _publish(_two_episode_manifest(tmp_path), artwork_png, itunes_type="serial")
+    assert captured == []
+
+
+async def test_serial_refuses_a_prefix_that_names_another_episode(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """前綴的集號必須**等於**該集集號。
+
+    只驗「有沒有 EP 開頭」的話,複製上一集 brief 時留下的 `EP07. ` 會原封不動上線,
+    而 feed 裡 `<itunes:episode>8</itunes:episode>` 與標題各說各話 —— 那比沒有集號更糟。
+    """
+    captured = _install_mock(monkeypatch)
+    manifest = _numbered_manifest(tmp_path)
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored["episodes"][1]["title"] = "EP07. 你在介面上看到的每個字"     # 這是第 2 集
+    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+
+    with pytest.raises(ValueError, match="EP02"):
+        await _publish(manifest, artwork_png, itunes_type="serial")
+    assert captured == []
+
+
+async def test_episodic_titles_are_never_touched_by_the_number_gate(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """**射程只到 `serial`。** `episodic` 是時事型、由新到舊聽,集號沒有意義 ——
+    Audicast 五十集都沒有前綴,把閘門套上去等於讓那個 feed 從此發不出去。
+    """
+    captured = _install_mock(monkeypatch)
+    await _publish(_two_episode_manifest(tmp_path), artwork_png, itunes_type="episodic")
+    assert "<title>第1集</title>" in _feed_of(captured)
+
+
+async def test_serial_accepts_the_numbered_titles_verbatim(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """通過閘門的標題原樣進 feed —— 閘門只驗,不改寫(改寫會讓 manifest 與 feed 不一致)。"""
+    captured = _install_mock(monkeypatch)
+    await _publish(_numbered_manifest(tmp_path), artwork_png, itunes_type="serial")
+    feed = _feed_of(captured)
+    assert "<title>EP01. 第1集</title>" in feed
+    assert "<title>EP02. 第2集</title>" in feed
 
 
 # ---------------------------------------------------------------- pubDate 排序
