@@ -19,8 +19,12 @@ uv run pytest -q
 ## Tool install
 
 ```bash
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.20"
+uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
 ```
+
+`latest` is a moving pointer to the newest `vMAJOR.MINOR.PATCH` release (CI
+updates it when a version tag is pushed). Roll back with an immutable
+`@vX.Y.Z`. Do not install `@master`.
 
 The install exposes `nblm-mcp` and `notebooklm-cover` on PATH.
 

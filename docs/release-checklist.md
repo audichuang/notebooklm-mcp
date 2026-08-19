@@ -17,22 +17,21 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 **遠端** audi-skill 來驗——skill 只同步在本機、還沒推,MCP 先推就 CI 紅(missing 新工具名)。
 反序踩到時把 audi-skill 推上去後 `gh run rerun <id>` 即綠,不用改 code。
 
-### Release Pin Sites(發 tag 時**四處**一起改)
+### Release Pin Sites(發 tag 時只改**一處**版本號)
 
-`uv tool install …@vX.Y.Z` 的版本號散在三個檔(加 `pyproject.toml` 共四處),
-沒有單一來源可推導——曾漂成
-podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一次改完:
+消費端裝 `@latest`,文件不再寫死 `v0.9.x`。發版要改的版本號只剩:
 
 1. `pyproject.toml` 的 `version`(正本)
-2. `AGENTS.md` §Commands 的安裝指令(拆檔時 §Commands 留在 AGENTS.md,沒跟著搬進本檔)
-3. `README.md`
-4. `docs/mcp-setup.md`
 
-**skill 不再是 pin 點。** `audi-skill/notebooklm` 的安裝指令在 `references/setup.md`,
-它教「查最新 tag 再裝」,不寫死 `v0.9.x`——每發一版改 skill 只是把同一件事說第五次,
-而漏改 skill 又會讓消費端永遠停在舊 pin。打 tag 之後消費端重跑 setup 那段即跟上。
+`vMAJOR.MINOR.PATCH` tag 是不可變錨點;`latest` 是 CI 維護的移動指針。
+推上 `vX.Y.Z` 之後 `.github/workflows/retag-latest.yml` 跑
+`scripts/retag-latest.sh`,把 `latest` 指到**最高**的 semver 發版(不是剛推的那個,
+所以誤推舊 tag 不會把指針往回拉)。預發版 `v0.9.20-rc1` 不算。
 
-⚠️ **`../podcast-lab/AGENTS.md` 曾是第六處,現在不是,別把它加回來**:那份已改成
+**skill 不是 pin 點。** `audi-skill/notebooklm` 的安裝指令在 `references/setup.md`,
+寫的是 `@latest`。打 tag、等 CI 移動指針之後,消費端重跑 setup 那段即跟上。
+
+⚠️ **`../podcast-lab/AGENTS.md` 曾是 pin 點,現在不是,別把它加回來**:那份已改成
 「不寫版本號、安裝指令或方法清單」。它現在唯一會出現的版本號在 gitignored 的快照裡,
 見下面那條 ⚠️。
 
@@ -40,22 +39,35 @@ podcast-lab v0.2.9 / README v0.2.4 / 實裝 v0.3.3 三套並存。發版時一�
 踩到什麼事故」。版本敘事只寫在那裡 —— **不要回填進本檔**。
 
 **tag 之前**:CI 綠(它含 wheel 的 `uv tool install` + `--help` 冒煙),
-**tag 之後**:照 pin 用 tag 真的裝一次再收工 —— v0.7.0 的撞名就是這一步才發現的。
-**「裝完」要驗版本號,不能只看它印 `Installed 2 executables`**:uv 的 git cache 壞掉時會
-`fatal: unable to read tree` 然後**裝成舊版**(v0.8.1 實測踩到)。收工前跑
-`~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"`;
-數字不對就 `uv cache clean notebooklm-mcp` 再 `--force --reinstall`。
+**tag 之後**:
+
+1. 等 `retag-latest` workflow 綠。`git ls-remote origin refs/tags/latest` 的 SHA
+   必須等於 `git rev-parse vX.Y.Z^{}`。沒動就 `gh workflow run retag-latest.yml`,
+   或本機 `bash scripts/retag-latest.sh --push`。
+2. 用 `@latest` 真的裝一次再收工 —— v0.7.0 的撞名就是這一步才發現的。
+   **「裝完」要驗版本號,不能只看它印 `Installed 2 executables`**:uv 的 git cache
+   對移動 tag 不敏感,`--force` 也可能裝成舊 SHA(v0.8.1 實測是 cache 壞掉裝成舊版)。
+   收工前跑
+   `~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"`;
+   數字不對就 `uv cache clean notebooklm-mcp` 再 `--force --reinstall`。
+
 **editable 裝的 tool venv 完全不受這條保護**:`uv tool install -e <repo>` 之後 metadata 版本
 與**依賴**都停在安裝當時,而 `uv tool list` 印得一切正常 —— 2026-08-16 實測本機停在
 `0.9.12` + `notebooklm-py 0.8.0`,那時 repo 已 `0.9.15`、pin 已是 `>=0.8.1`(**實裝連自己的
 pin 都不滿足**,而 editable 的 code 卻是最新的,所以症狀是「跑起來像新版、依賴卻是舊的」)。
-本機也算消費端:要跟上就重跑 pin tag 安裝,別指望 editable 自動生效。
+本機也算消費端:要跟上就重跑 `@latest` 安裝,別指望 editable 自動生效。
 
-驗證:`grep -rn "notebooklm-mcp.git@v" --include="*.md" . ../podcast-lab | grep -v docs/superpowers`
-(`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實;`audi-skill` 的 setup.md
-刻意不寫死版本,不要把它加回這條 grep)。
+活文件不准再寫死 `git+…@v0.`。驗證:
 
-⚠️ **那個 grep 會撈到「看起來像第五處 pin、其實不是」的東西,別跟著改**:
+```
+grep -rEn "notebooklm-mcp\.git@v[0-9]" --include="*.md" . ../podcast-lab \
+  | grep -vE 'docs/superpowers|\.superpowers|CHANGELOG.md|docs/acceptance-|docs/notebooklm-py'
+```
+
+(`docs/superpowers/` 的歷史計畫書刻意不改——那是當時的事實;CHANGELOG / acceptance
+是版本敘事,本來就會出現舊 pin)。
+
+⚠️ **那個 grep 會撈到「看起來像 pin、其實不是」的東西,別跟著改**:
 `.superpowers/sdd/task-*.md`(v0.2.0)與 `docs/acceptance-*.md` 是歷史紀錄,同
 `docs/superpowers/` 的道理。`../podcast-lab/.agents/skills/notebooklm/` 是
 **gitignored、可重生**的本機 docs 快照,正本在 `audi-skill/notebooklm/`;

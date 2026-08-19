@@ -1,0 +1,38 @@
+name: retag-latest
+
+# Moving pointer for consumers (`uv tool install …@latest`).
+# Triggered by a release tag; also runnable by hand to repair a stale pointer.
+# The job always retargets the *highest* vMAJOR.MINOR.PATCH tag, not the tag
+# that fired the workflow, so pushing an older v* cannot walk latest backwards.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: retag-latest
+  cancel-in-progress: false
+
+# Repo default token is read-only; this job must move a tag.
+permissions:
+  contents: write
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Point latest at the newest release tag
+        run: bash scripts/retag-latest.sh --push

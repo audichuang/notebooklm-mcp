@@ -24,8 +24,8 @@ uv run pytest -q
 #   要對某個特定版本跑測試,開一個獨立 venv 用它自己的 `bin/python -m pytest`,
 #   別在共用 venv 上靠 `uv pip install` 臨時換版。
 
-# 消費端安裝（3 VM / podcast-lab 各裝一次；pin tag,不追 master；換成最新 tag）
-uv tool install --python 3.12 "git+https://github.com/audichuang/notebooklm-mcp.git@v0.9.20"
+# 消費端安裝（3 VM / podcast-lab 各裝一次；@latest = 最新發版,不追 master）
+uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
 
 # 跑 MCP server（裝好後零路徑命令；認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON）
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio

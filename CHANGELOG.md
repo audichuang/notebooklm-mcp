@@ -6,6 +6,17 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## Unreleased
+
+### 安裝：`latest` 是 CI 維護的移動指針
+
+消費端改裝 `@latest`,不再在 README / AGENTS / mcp-setup 寫死 `v0.9.x`。
+`vMAJOR.MINOR.PATCH` 仍是不可變的發版錨點;推上去之後
+`.github/workflows/retag-latest.yml` 跑 `scripts/retag-latest.sh`,把 `latest`
+指到**最高**的 semver 發版(不是剛推上去的那個,誤推舊 tag 不會把指針往回拉)。
+回滾仍用 `@vX.Y.Z`。uv 的 git cache 對移動 tag 不敏感,metadata 對不上就
+`uv cache clean notebooklm-mcp` 再 `--force` 重裝。
+
 ## v0.9.20 — serial 節目的標題必須自己帶集號
 
 **症狀**:三個連載節目上架後,訂閱者在播放器的清單上看不出集序。feed 完全合法 ——
