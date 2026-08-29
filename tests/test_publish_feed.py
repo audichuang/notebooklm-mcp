@@ -190,3 +190,22 @@ def test_itunes_type_allowlist_is_exactly_two_values():
     for rejected in ("", "Serial", "SERIAL", "trailer", "bonus", 1, True, ["serial"]):
         with pytest.raises(ValueError, match="itunes_type"):
             feed.normalize_itunes_type(rejected)
+
+
+def test_index_html_strips_serial_ep_prefix_from_title_display_only():
+    """serial 節目 title 帶「EP{NN}. 」命名前綴;index.html 自己又加一次 EP{NN} —,
+    修法只在顯示層剝前綴。RSS item title 不經過這裡,必須原封不動。"""
+    show = {**SHOW, "episodes": {
+        "1": {**SHOW["episodes"]["1"], "title": "EP01. 心法篇"},
+        "2": {**SHOW["episodes"]["2"], "title": "EP02 實戰篇"},
+    }}
+    html = feed.build_index_html(show, BASE)
+    assert "EP01 — 心法篇" in html
+    assert "EP02 — 實戰篇" in html
+    assert "EP01 — EP01" not in html
+    # 別集的集號、或不帶前綴的 title 都不剝
+    plain = feed.build_index_html(SHOW, BASE)
+    assert "EP01 — 心法篇" in plain
+    # RSS 不受影響:item title 仍是完整命名
+    xml = feed.build_feed_xml(show, BASE)
+    assert "EP01. 心法篇" in xml

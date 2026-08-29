@@ -266,3 +266,47 @@ def test_skip_existing_does_not_need_chrome_when_every_cover_is_valid(
 
     stored = json.loads(manifest.read_text(encoding="utf-8"))
     assert stored["episodes"][0]["cover_path"].endswith("EP01.jpg")
+
+
+def test_guard_refuses_non_audicast_show(monkeypatch, tmp_path):
+    """模板含寫死的 Audicast 品牌;非 Audicast 節目預設 fail-loud,不需要 Chrome 就該擋。"""
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--show", "--output", str(tmp_path / "cover.jpg"),
+        "--show-name", "Spring 深入淺出"])
+    with pytest.raises(SystemExit) as exc:
+        cover_cli.main()
+    msg = str(exc.value)
+    assert "Audicast 品牌" in msg and "--allow-audicast-branding" in msg
+
+
+def test_guard_opt_in_flag_allows_other_show(monkeypatch, tmp_path):
+    monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
+    rendered = {}
+
+    def fake_render(_tpl, subs, output, _chrome):
+        rendered.update(subs)
+        with open(output, "wb") as f:
+            f.write(b"fake")
+        return {"width": 3000, "height": 3000, "format": "JPEG"}
+
+    monkeypatch.setattr(cover_cli, "_render", fake_render)
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--show", "--output", str(tmp_path / "cover.jpg"),
+        "--show-name", "Spring 深入淺出", "--allow-audicast-branding"])
+    cover_cli.main()
+    assert rendered["__SHOW__"] == "Spring 深入淺出"
+
+
+def test_guard_batch_checks_manifest_show_title(monkeypatch, tmp_path):
+    """批次模式沒給 --show-name 時 wordmark 會填預設 Audicast,但 manifest 身分是別的節目
+    → 一樣拒絕(schema v2 的身分在 show.show_title)。"""
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps({
+        "show": {"show_title": "資料結構拆解室"},
+        "episodes": [{"episode": 1, "title": "EP01. 甲集"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--manifest", str(man), "--output-dir", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        cover_cli.main()
+    assert "Audicast 品牌" in str(exc.value)

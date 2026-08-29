@@ -17,6 +17,37 @@
 回滾仍用 `@vX.Y.Z`。uv 的 git cache 對移動 tag 不敏感,metadata 對不上就
 `uv cache clean notebooklm-mcp` 再 `--force` 重裝。
 
+## v0.9.21 — 封面模板的 Audicast 品牌變成 fail-closed 閘
+
+**症狀**:《Spring 拆解室》整季封面上印著 `AI AGENTIC ENGINEERING`、
+`audicast-agent-core.ts`、`import { AudicastAgent } from "@audicast/core"`,單集封面右上角
+還有 `REF_ID: AUDICAST_SR2`。**全部上了公網**,而且發布全程零警告。
+
+**根因是整條鏈沒有一環在看封面內容。** `cover_show.html` / `cover_episode.html` 是為
+Audicast 寫死的——副標、裝飾用的 TypeScript 程式碼區塊、REF_ID 都是字面值,不是參數;
+`--show-name` 只換 wordmark。而下游 `validate_artwork` 只驗尺寸與色彩空間,`readback.py`
+也只驗這兩樣:**封面上寫了什麼,沒有任何一環看得到**。唯一的攔截點是人眼,那次沒有人打開圖。
+
+**修法是擋,不是改模板。** `_guard_audicast_branding` 在 `_find_chrome` / render 之前跑,
+節目名不是 Audicast 就 `SystemExit`,訊息直接說明模板寫死了什麼、以及要沿用 Audicast 視覺
+請加 `--allow-audicast-branding`。三個路徑都擋:批次(含 manifest 的 show title)、
+`--show`、單集 one-off。
+
+**為什麼不把模板參數化**:`_render` 對 `__HUE__` 以外的值全跑 `html.escape`,而那行 import
+含語法高亮的 `<span>` 標記。escape 一個帶標記的預設值會改變 render 出來的位元組(破壞
+content-hash 決定性),不 escape 則開出 raw-HTML 注入面。閘擋住了事故,參數化留給真的要
+做多節目視覺時再處理。
+
+**驗證**:同參數加 `--allow-audicast-branding` 的輸出與修正前 baseline **sha256 逐位元組
+相同** —— 這是純加法,既有 Audicast 產物不會漂移。
+
+### 同版另一項:`build_index_html` 的雙前綴
+
+v0.9.20 之後 serial 的 title 本身一定帶 `EP{NN}. `,而節目頁的 `<li>` 自己又加一次
+`EP{NN} —`,顯示成 `EP01 — EP01. 標題`。只在顯示層剝**該集自己的**集號前綴;錯配前綴
+(第 2 集帶 `EP07.`)、半匹配(`EP1.`、`EP03.5`)與裸標題都不動,RSS `<item><title>`
+完全不經過這裡。純觀感修正,不影響任何 URL 或 GUID。
+
 ## v0.9.20 — serial 節目的標題必須自己帶集號
 
 **症狀**:三個連載節目上架後,訂閱者在播放器的清單上看不出集序。feed 完全合法 ——

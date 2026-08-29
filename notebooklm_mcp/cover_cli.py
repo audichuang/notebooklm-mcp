@@ -112,6 +112,26 @@ def _render(template: str, subs: dict, output: str, chrome: str) -> dict:
     return info
 
 
+def _guard_audicast_branding(names: list, allow: bool) -> None:
+    """模板不是通用的:cover_show.html / cover_episode.html 內含**寫死的 Audicast 品牌**
+    (副標「AI AGENTIC ENGINEERING」、audicast@dev-env / TypeScript 裝飾程式碼區塊),
+    只有 __SHOW__ 等佔位符會被換掉。實際踩過:Spring 節目用它產封面,那些字全印上封面
+    發佈到公網,而 artwork 驗證只看尺寸/色彩空間、驗不到圖上寫了什麼。
+    非 Audicast 一律 fail-loud;確定要沿用這套視覺才加 --allow-audicast-branding。"""
+    if allow:
+        return
+    for name in names:
+        if name and name.strip().lower() != "audicast":
+            raise SystemExit(
+                f"拒絕產封面:節目 {name!r} 不是 Audicast。cover_show.html / "
+                "cover_episode.html 這兩個模板含寫死的 Audicast 品牌內容(副標"
+                "「AI AGENTIC ENGINEERING」與裝飾用的 audicast@dev-env / TypeScript "
+                "程式碼區塊),不適用於其他節目——照產會把 Audicast 品牌印上你的封面,"
+                "而發布端驗證只驗尺寸與色彩空間,擋不住。確定要沿用 Audicast 視覺請加 "
+                "--allow-audicast-branding。"
+            )
+
+
 def _preflight_episodes(episodes: list) -> None:
     """批次模式前先驗整份 episodes,壞資料 fail-fast(而非靜默 continue 漏集、
     或 string episode 撞上 `:02d` 崩潰)。契約對齊 publish_series:episode 為 int 1..99、
@@ -152,6 +172,9 @@ def main() -> None:
                     help="覆寫色相 0-360(預設:單集用集號決定、節目用品牌色)")
     ap.add_argument("--chrome", default=None,
                     help="Chrome binary(否則自動找 / 用 NOTEBOOKLM_COVER_CHROME)")
+    ap.add_argument("--allow-audicast-branding", action="store_true",
+                    help="明確同意沿用模板內寫死的 Audicast 品牌(副標/裝飾程式碼區塊);"
+                         "非 Audicast 節目沒有這個旗標一律拒絕")
     args = ap.parse_args()
 
     # 1) 批次:整季單集封面
@@ -175,6 +198,9 @@ def main() -> None:
             ap.error(str(e))
 
         show_name = args.show_name or manifest.get("title") or "Audicast"
+        manifest_show_title = (manifest.get("show") or {}).get("show_title")
+        _guard_audicast_branding([show_name, manifest_show_title],
+                                 args.allow_audicast_branding)
         out_dir = args.output_dir or os.path.dirname(os.path.abspath(args.manifest))
         os.makedirs(out_dir, exist_ok=True)
         tpl = _load_template("cover_episode.html")
@@ -229,6 +255,7 @@ def main() -> None:
     if args.show:
         if not args.output:
             ap.error("--show 模式需要 --output")
+        _guard_audicast_branding([args.show_name], args.allow_audicast_branding)
         hue = args.hue if args.hue is not None else _SHOW_HUE
         info = _render(_load_template("cover_show.html"), {
             "__SHOW__": args.show_name,
@@ -242,6 +269,7 @@ def main() -> None:
     # 3) 單集一次性
     if not (args.output and args.episode and args.title):
         ap.error("單集模式需要 --output --episode --title(或改用 --manifest / --show)")
+    _guard_audicast_branding([args.show_name], args.allow_audicast_branding)
     import re
 
     m = re.search(r"\d+", args.episode)
