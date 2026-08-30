@@ -34,6 +34,14 @@ v0.9.0 / v0.9.7 amendment);本檔是**動 code 時的紅線與測試鎖**。
   上游講死了它問的是「能不能 refresh」不是「能不能 use」,拿它拒收會誤拒:
   實測 prd 槽位 1 的 PSIDTS scope 在 `.youtube.com`,不 routable 卻一直在服役。
   完整推導與被推翻的兩個修法見 [CHANGELOG](../CHANGELOG.md) v0.9.14。
+  **`describe_inline_heal_reason` / `heal_warning_detail` 也在這條紅線之內**:它們把失敗
+  拆成 `wrong_scope` / `expired` / `missing`,但**只換措辭,不換判準** —— 決策出口仍然只有
+  `would_trigger_inline_heal` 一個。理由是那則 warning 把兩個原因寫在同一個「或」裡,曾被
+  讀成「登入要死了」並引出一次不必要的重登建議(對過 Doppler 與真 RPC 後不成立);
+  拆開是為了讓人分得出「refresh 做不到」與「不能用」。
+  **要看「能不能用」一律走 `auth_check`(真 RPC),不要拿 routability 當健康度** ——
+  而且預設模式只量作用中那一槽,涵蓋整個 pool 要 `auth_check(all_slots=True)`。
+  `test_heal_reason_is_message_only_and_never_gates` 紅了就代表分類器被接到 gate 上了。
   ④**這條在 v0.9.14 真實驗收於 stg 上得證**:stg 天生 9 槽全 routable(沒有現成素材),
   在**本機 env 層**造一個 scope 錯的槽位(`.youtube.com`,cookie 值不動)之後,
   不持鎖的對照組 `_attempt_rotation` 被呼叫 **1 次**、持鎖的真 `_lifespan` **0 次**,

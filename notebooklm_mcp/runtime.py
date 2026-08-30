@@ -34,14 +34,37 @@ _ACTIVE: int = 0
 _COOLING: dict[int, float] = {}
 _COOLDOWN_SECONDS: float = 600.0
 
+# 槽位 index → 啟動時算出來的**非機密**診斷(env 名稱、refreshable 與否、PSIDTS domain)。
+#
+# **這不是 v0.9.0 移除的那個第三元素。** 那個移除的是**憑證**——身分改由 client 自己
+# 帶著(`from_storage(path=…)`),不再有第二份副本。這裡放的是啟動時就已經算完、而且
+# 印在 log 裡的描述性資料,**不含 cookie 值**,單純因為 `auth_check` 事後問不到:
+# routability 是從 storage_state 算的,而 pool 只留 `(label, client)`。
+# pool 的 `(label, client)` 形狀刻意不動 —— 46 個呼叫點對此無感,是那個決定的重點。
+_SLOT_DIAGNOSTICS: list[dict[str, Any]] = []
+
 
 def set_clients(entries: list[tuple[str, Any]]) -> None:
     """裝入整個 pool 並把作用中的位置重設回第一個。entry 是 `(label, client)`。"""
-    global _POOL, _ACTIVE, _COOLING
+    global _POOL, _ACTIVE, _COOLING, _SLOT_DIAGNOSTICS
     _POOL = [(label, client) for label, client in entries]
     _ACTIVE = 0
     # 重新裝 pool = 新的一輪(server 重啟走的就是這條),冷卻紀錄一起清掉。
     _COOLING = {}
+    # 診斷跟著 pool 走:清掉才不會讓上一輪的 refreshable 留在新 pool 上冒充現況。
+    # lifespan 會在 `set_clients` **之後**再塞進來。
+    _SLOT_DIAGNOSTICS = []
+
+
+def set_slot_diagnostics(rows: list[dict[str, Any]]) -> None:
+    """記下每個槽位的非機密啟動診斷;**一定要在 `set_clients` 之後呼叫**(它會清空)。"""
+    global _SLOT_DIAGNOSTICS
+    _SLOT_DIAGNOSTICS = [dict(row) for row in rows]
+
+
+def slot_diagnostics() -> list[dict[str, Any]]:
+    """啟動診斷,依槽位順序;沒記錄過就是空 list(單帳號路徑、測試的 fake client)。"""
+    return [dict(row) for row in _SLOT_DIAGNOSTICS]
 
 
 def set_client(client: Any) -> None:

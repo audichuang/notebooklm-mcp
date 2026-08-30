@@ -30,7 +30,13 @@ from notebooklm._auth.keepalive import _file_lock_try_exclusive
 from notebooklm._auth.psidts_recovery import _rotation_lock_path
 
 from . import runtime
-from ._cookies import assert_usable_storage_state, would_trigger_inline_heal
+from ._cookies import (
+    assert_usable_storage_state,
+    describe_inline_heal_reason,
+    heal_warning_detail,
+    psidts_domains,
+    would_trigger_inline_heal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,12 +189,7 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
         storage_state = json.loads(cred)
         assert_usable_storage_state(storage_state)
         if would_trigger_inline_heal(storage_state):
-            logger.warning(
-                "%s 的 __Secure-1PSIDTS 已過期或 scope 無法送到 accounts.google.com;"
-                "0.8.1 會觸發 inline RotateCookies heal,但 _lifespan 的 rotation flock "
-                "會擋住 POST。請更新 Doppler 憑證,並執行 scripts/sync-auth.sh。",
-                name,
-            )
+            logger.warning("%s %s", name, heal_warning_detail(storage_state))
     except Exception as exc:  # ValueError(JSON / 缺 cookie / 空值)、型別不對…一律具名重拋
         raise RuntimeError(
             f"{name} 不是可用的 storage_state:{type(exc).__name__}: {exc}"
@@ -256,6 +257,39 @@ async def _account_label(client: object, slot: int) -> str:
     return email
 
 
+def _slot_diagnostic(slot: int, cred: str | None) -> dict[str, object]:
+    """一個槽位的**非機密**啟動診斷,給 `auth_check(all_slots=True)` 事後回報用。
+
+    `refreshable` 與啟動 warning **量的是同一個 predicate**,這是重點:兩盞燈不同源的話,
+    人看到的狀態與 log 說的會各講各的,而那正是這輪要修掉的問題。
+
+    `cred` 是 None 代表非 inline(本機 storage_state 檔),我們手上沒有那份 JSON ——
+    誠實回 `None` 表示「沒量」,不要拿 True/False 假裝量過。
+
+    ⚠️ **整段包在 try 裡,因為這是觀測層,不該有能力弄掛被觀測的東西。** 走到這裡時
+    憑證其實已經通過 `_write_credential_file` / `from_storage`,理論上解得開;但這支的
+    唯一產出是一則診斷,而它若拋例外就會**把整台 server 的啟動變成失敗** —— 拿「看儀表」
+    去換「引擎發不動」是絕對划不來的交易。量不到就誠實回 `None`(= 沒量),與非 inline
+    路徑同一種語意。
+    """
+    row: dict[str, object] = {"slot": slot, "env": _slot_env_name(slot)}
+    if cred is None:
+        row.update(refreshable=None, heal_reason=None, psidts_domains=[])
+        return row
+    try:
+        storage_state = json.loads(cred)
+        reason = describe_inline_heal_reason(storage_state)
+        row.update(
+            refreshable=not reason,
+            heal_reason=reason or None,
+            psidts_domains=psidts_domains(storage_state),
+        )
+    except Exception as exc:  # noqa: BLE001 —— 診斷失敗只降級成「沒量」,不影響啟動
+        logger.debug("%s 的啟動診斷算不出來(不影響服役):%r", row["env"], exc)
+        row.update(refreshable=None, heal_reason=None, psidts_domains=[])
+    return row
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
     # notebooklm-py 0.8.x:from_storage() 是同步函式,回傳可直接 async with 的
@@ -277,6 +311,7 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
     try:
         async with contextlib.AsyncExitStack() as stack:
             pool: list[tuple[str, object]] = []
+            diagnostics: list[dict[str, object]] = []
             if len(creds) > 1:
                 # 多帳號:每個槽位各自一份 storage_state 檔,client 自己帶著身分走。
                 # **env 完全不動** —— 它不再是身分,只是 Doppler 注入的原始輸入。
@@ -354,6 +389,7 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                             f"{_slot_env_name(slot)} 的憑證建不出 client:{exc}"
                         ) from exc
                     pool.append((await _account_label(client, slot), client))
+                    diagnostics.append(_slot_diagnostic(slot, cred))
             else:
                 # 單帳號 inline 不需要這把 flock:`_resolve_recovery_path` 先看 path,
                 # 再看 `resolve_auth_json_env()`。這條分支不傳 path,而 inline_auth 為真
@@ -364,8 +400,11 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                     NotebookLMClient.from_storage(allow_headless=False)
                 )
                 pool.append((await _account_label(client, 1), client))
+                diagnostics.append(_slot_diagnostic(1, creds[0] if creds else None))
             _reject_duplicate_accounts(pool)
             runtime.set_clients(pool)
+            # 一定要在 set_clients 之後:它會清空診斷(換 pool = 換一輪)。
+            runtime.set_slot_diagnostics(diagnostics)
             try:
                 yield
             finally:

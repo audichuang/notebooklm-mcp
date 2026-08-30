@@ -75,6 +75,14 @@ REQUIRED_CONTRACT_TERMS = (
                               # 首發時間的稽核
     "EP{n:02d}.",             # v0.9.20:serial 標題必須自己帶集號。字串含句點,才
                               # 跟命名鐵律的 `EP{n:02d} {title}`(空格、沒句點)分得開
+    "all_slots",              # auth_check 預設**只量作用中那一槽**,而配額
+                              # failover 會在生成中途換帳號 —— 真正被用到的槽位可能
+                              # 從頭到尾沒被探過。不寫進文件,呼叫端會拿 1/N 的綠燈
+                              # 當「長跑前已經 fail-fast 過了」
+    "refreshable",            # 同一支的回傳:`usable`(真 RPC,現在能不能用)與
+                              # `refreshable`(PSIDTS 能不能 refresh)**是兩件事**。
+                              # 合成一盞燈的話,prd 槽位 1 那種「可服役但不可 refresh」
+                              # 會被讀成故障 —— 那個誤讀真的發生過,還引出過重登建議
 )
 
 
@@ -94,6 +102,10 @@ SKILL_MD_REQUIRED_TERMS = (
     "next_step",
     "abandon_in_flight",
     "auth_expired",
+    # `auth_check` 的射程。只補進 tool-reference 的話,路由層仍教「長流程前跑
+    # auth_check」,agent 照做會拿**1/N 的綠燈**當「整個 pool 已經 fail-fast 過了」——
+    # 而那正是這次改動要修掉的誤讀。與上面 v0.9.12 是同一個洞,所以釘在同一個地方。
+    "all_slots",
     # v0.9.18:§Publish 的交付清單要求「每集音檔全綠才可發布」,deferred 集永遠不會全綠
     # —— 只補 tool-reference 的話,agent 會照主路由層停在清單那一步,根本走不到已經
     # 會正確跳過它的 publisher。這正是上面那個 v0.9.12 教訓的同一個洞。

@@ -821,3 +821,170 @@ async def test_pool_is_torn_down_even_if_a_later_client_fails(monkeypatch):
     assert not built[0].path.parent.exists()
     # 失敗也要還原 env,別把中間狀態留給下一段程式。
     assert app.os.environ["NOTEBOOKLM_AUTH_JSON"] == _cred("1")
+
+
+def _youtube_scope_psidts_cred() -> str:
+    """prd 槽位 1 的真實形狀:PSIDTS **沒有過期**,但 scope 在 `.youtube.com`。
+
+    這份憑證不 routable(refresh 做不到)卻一直在服役 —— 整組 heal 訊息就是為了讓人
+    分得出這種情況與「憑證要死了」,所以測試資料要照真實那一種造。
+    """
+    storage_state = json.loads(_expired_psidts_cred())
+    for cookie in storage_state["cookies"]:
+        if cookie["name"] == "__Secure-1PSIDTS":
+            cookie["domain"] = ".youtube.com"
+            cookie["expires"] = -1  # session cookie = 不會過期
+            cookie["value"] = "unique-secret-psidts-marker-should-not-leak"
+    return json.dumps(storage_state)
+
+
+def test_heal_reason_splits_the_or_that_got_misread():
+    """啟動 warning 原本把兩個原因寫在同一個「或」裡,而 prd 槽位 1 命中的一直是
+    scope 那一支 —— 有人據此判定「憑證從某天起在過期、登入要死了」,對過 Doppler
+    與真 RPC 之後診斷不成立。分類器就是為了讓那句話不能再被這樣讀。
+
+    **每一列都是對上游實際行為量出來的**(見 `_cookies.describe_inline_heal_reason`
+    的表),特別是「一筆過期 + 一筆未過期」:上游採保守規則整組不 routable,所以
+    yield=0,歸類到 expired 而不是 scope 問題。
+    """
+    from notebooklm_mcp import _cookies
+
+    def state(*cookies):
+        return {"cookies": list(cookies)}
+
+    def psidts(domain=".google.com", expires=-1):
+        return {
+            "name": "__Secure-1PSIDTS", "value": "t",
+            "domain": domain, "path": "/", "expires": expires,
+        }
+
+    assert _cookies.describe_inline_heal_reason(state(psidts())) == ""
+    assert _cookies.describe_inline_heal_reason(state(psidts(".youtube.com"))) == "wrong_scope"
+    assert _cookies.describe_inline_heal_reason(state(psidts(expires=1))) == "expired"
+    assert _cookies.describe_inline_heal_reason(
+        state(psidts(expires=1), psidts())
+    ) == "expired"
+    assert _cookies.describe_inline_heal_reason(state()) == "missing"
+
+    # domain 是 wrong_scope 唯一可操作的證據,而它不是秘密(值才是)。
+    assert _cookies.psidts_domains(state(psidts(".youtube.com"))) == [".youtube.com"]
+
+
+def test_wrong_scope_credential_is_warned_but_still_accepted(tmp_path, caplog):
+    """prd 槽位 1 的形狀:不 routable,但**照樣落檔、照樣服役**。
+
+    v0.9.14 已經推翻過「不 routable 就拒收」,這條守著那個決定不被新訊息偷偷改掉:
+    分類器只換措辭,接受條件一個字都沒動。
+    """
+    from notebooklm_mcp import _cookies
+
+    cred = _youtube_scope_psidts_cred()
+    assert _cookies.would_trigger_inline_heal(json.loads(cred)) is True
+    assert _cookies.describe_inline_heal_reason(json.loads(cred)) == "wrong_scope"
+
+    path = tmp_path / "youtube-scope.json"
+    with caplog.at_level(logging.WARNING, logger=app.logger.name):
+        assert app._write_credential_file(cred, path, 1) == path
+    assert path.read_text(encoding="utf-8") == cred
+
+    # 訊息要能回答「哪一槽、哪一種、要不要緊、怎麼修」四件事。
+    assert "NOTEBOOKLM_AUTH_JSON" in caplog.text
+    assert ".youtube.com" in caplog.text
+    # 「要不要緊」只能講到量得到的地方為止:refresh 做不到 ≠ 不能用,而可用性要另外量。
+    # ⚠️ 這裡曾經斷言「沒有過期 / 仍在服役」—— 兩句都超出 routability 量得到的範圍
+    # (混合情境下「沒有過期」根本是假的),已隨訊息一起改掉,別再加回來。
+    assert "routability 證明不了可用性" in caplog.text
+    assert "auth_check" in caplog.text
+    # 這一份是單筆、未過期、只有 scope 錯,所以不該出現「另有 N 筆」那句。
+    assert "另有" not in caplog.text
+    # 漏了 --config prd 會寫進正式環境不讀的 config,所以指令必須可以直接照抄。
+    assert "--config prd" in caplog.text
+    # cookie 值永遠不進 log。
+    assert "unique-secret-psidts-marker-should-not-leak" not in caplog.text
+
+
+def test_heal_reason_is_message_only_and_never_gates():
+    """分類器不參與任何接受判斷 —— 三種原因的憑證,`assert_usable_storage_state`
+    的結果必須與 routable 那一份完全一樣(都通過)。
+
+    這條紅了代表有人把 `describe_inline_heal_reason` 接到了 gate 上,
+    也就是 `docs/gotchas-pool.md` §一③ 那條紅線又被踩了一次。
+    """
+    from notebooklm_mcp import _cookies
+
+    for tag, cred in (
+        ("routable", _expired_psidts_cred().replace('"expires": 1', '"expires": -1')),
+        ("expired", _expired_psidts_cred()),
+        ("wrong_scope", _youtube_scope_psidts_cred()),
+    ):
+        state = json.loads(cred)
+        cookies = _cookies.assert_usable_storage_state(state)
+        assert cookies["__Secure-1PSIDTS"], f"{tag}:接受條件被分類器影響了"
+
+
+async def test_startup_diagnostic_never_breaks_startup(monkeypatch, caplog):
+    """診斷算不出來時降級成「沒量」,**不能**讓 server 起不來。
+
+    `_slot_diagnostic` 的唯一產出是一則給 `auth_check(all_slots=True)` 看的診斷。
+    拿「看得到儀表」去換「引擎發不動」是划不來的交易 —— 這條把那個取捨釘住:
+    分類器整支炸掉,pool 照樣裝好,只是那一槽的 refreshable 變成 None(未知)。
+    """
+    from notebooklm_mcp import app as app_module
+
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", _cred("1"))
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", _cred("2"))
+    monkeypatch.setattr(
+        app.NotebookLMClient,
+        "from_storage",
+        _fake_from_storage([], emails=["a@x.com", "b@x.com"]),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "describe_inline_heal_reason",
+        lambda _state: (_ for _ in ()).throw(RuntimeError("上游換形狀了")),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=app.logger.name):
+        async with app._lifespan(app.mcp):
+            assert runtime.account_count() == 2          # 啟動沒有被診斷拖垮
+            rows = runtime.slot_diagnostics()
+
+    assert [row["refreshable"] for row in rows] == [None, None]  # 誠實回「沒量」
+    assert [row["env"] for row in rows] == [
+        "NOTEBOOKLM_AUTH_JSON",
+        "NOTEBOOKLM_AUTH_JSON_2",
+    ]
+
+
+def test_mixed_identity_wrong_scope_does_not_claim_nothing_expired():
+    """混合情境:一筆過期的 `.google.com` + 一筆未過期但 scope 錯的 `.youtube.com`。
+
+    分類會落在 `wrong_scope`(有候選、但路不到),而**第一版的訊息在這裡是假的** ——
+    它寫「cookie 本身沒有過期,這個槽位仍在服役」,兩句都超出量到的範圍:確實有一筆
+    過期了,而 routability 從來就證明不了槽位可不可用。在一個專門修「訊息宣稱過頭」的
+    改動裡寫出過頭的訊息,所以這條把它釘死。
+    """
+    import time
+
+    from notebooklm_mcp import _cookies
+
+    now = time.time()
+    state = {"cookies": [
+        {"name": "__Secure-1PSIDTS", "value": "a", "domain": ".google.com",
+         "path": "/", "expires": now - 10, "httpOnly": True, "secure": True},
+        {"name": "__Secure-1PSIDTS", "value": "b", "domain": ".youtube.com",
+         "path": "/", "expires": -1, "httpOnly": True, "secure": True},
+    ]}
+
+    assert _cookies.describe_inline_heal_reason(state) == "wrong_scope"
+    detail = _cookies.heal_warning_detail(state)
+
+    # 只能講候選的 scope,不能把過期那一筆也算進「候選在哪」。
+    assert ".youtube.com" in detail
+    # 被前置篩選丟掉的那一筆要講出來,而且不替它定性成「一定是過期」。
+    assert "另有 1 筆連候選都進不了" in detail
+    # 兩句被推翻的宣稱不可以再出現。
+    assert "沒有過期" not in detail
+    assert "仍在服役" not in detail
+    # 可用性一律指向真 RPC。
+    assert "auth_check" in detail and "證明不了可用性" in detail

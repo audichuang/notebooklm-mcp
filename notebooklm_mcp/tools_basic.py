@@ -21,7 +21,7 @@ from ._sources import (
 )
 from ._status import ensure_completed, ensure_started
 from ._text import _CITATION_RE, norm as _norm, strip_inline_emphasis
-from .auth_probe import probe_auth
+from .auth_probe import RELOGIN_HINT, _AuthProbeError, probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
 from .app import mcp
@@ -105,13 +105,75 @@ async def _probe_extraction(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def auth_check() -> dict:
+async def auth_check(all_slots: bool = False) -> dict:
     """輕量真 RPC 驗證 NotebookLM 認證(cookie)是否有效。
 
     長流程(整季生成、發布)前先跑,cookie 死了會秒退並回重登指引,
     避免燒掉數小時等待。回傳 {"ok": True, "notebooks": N}。
+
+    ⚠️ **預設只量「當下作用中」那一個槽位**,而配額 failover 會在生成中途換帳號 ——
+    所以真正被用到的那個槽位可能從頭到尾沒被探過。9 槽 pool 綠燈只代表 1/9 綠。
+    要涵蓋整個 pool 就傳 ``all_slots=True``:每槽各打一次真 RPC,回傳多一個 ``slots``
+    表(槽位 / env 名 / 帳號 / usable / notebooks / refreshable / heal_reason /
+    psidts_domains)與 ``all_usable``。代價是 N 次 RPC,所以它是**選配、不是預設**。
+
+    ``refreshable`` 與啟動時那則 routability warning **量的是同一個 predicate**,
+    這是刻意的:兩盞燈不同源的話,人看到的狀態會與 log 各講各的。它回答的是
+    「PSIDTS 能不能被 refresh」,**不是「現在能不能用」** —— 後者是 ``usable``
+    這一欄(真 RPC)。prd 槽位 1 長期是 ``usable=true`` + ``refreshable=false``
+    (scope 在 ``.youtube.com``),那是已知且可服役的狀態,不是故障。
+
+    ``usable`` 三態:``true`` = 真 RPC 過;``false`` = 確認是認證錯誤;
+    ``null`` = 探測撞到**非認證**錯誤(網路 / 限流),沒量到,別讀成壞掉。
+    **頂層 ``ok`` 同樣三態**(它就是作用中那一槽的 ``usable``):``null`` = 沒量到。
+    預設模式在同一種情況下是原樣拋出那個非認證例外,所以這裡回 ``null`` 才與它一致 ——
+    回 ``false`` 等於把「沒量到」講成「不能用」。
+
+    ``all_slots=True`` 只在**每一槽都不可用**時才 raise(等同預設模式的 fail-fast:
+    整條路都走不動);只要還有一槽活著就回表,因為丟出例外會把你要的診斷一起丟掉。
     """
-    return await probe_auth(runtime.get_client())
+    if not all_slots:
+        return await probe_auth(runtime.get_client())
+
+    # pool 沒裝起來時要與預設模式**同樣** raise(`get_client()` 的訊息)。少了這行,
+    # 掃描模式會回一張空表 + `ok:false`,把「server lifespan 沒跑」偽裝成「認證有問題」
+    # —— 兩件事的修法完全不同,不能長得一樣。
+    runtime.get_client()
+
+    diagnostics = {row["slot"]: row for row in runtime.slot_diagnostics()}
+    # 掃描期間如果有並行的 failover rotate,這個游標快照會過時 —— **可以接受**,因為
+    # `active` 在這裡純粹是顯示用的標記,不是記帳。`snapshot()` 那條「記帳與送出必須同源」
+    # 的紀律管的是會寫進 manifest 的身分(ADR-0010),這支不寫任何東西。
+    active = runtime.active_account()
+    slots: list[dict] = []
+    for index, (label, client) in enumerate(runtime.all_clients(), start=1):
+        row: dict = {"slot": index, "account": label, "active": label == active}
+        row.update({k: v for k, v in diagnostics.get(index, {}).items() if k != "slot"})
+        try:
+            row.update(usable=True, notebooks=(await probe_auth(client))["notebooks"])
+        except _AuthProbeError:
+            # 確認是認證失效(probe_auth 已分類過)。重登指引在下面整批一次給,不逐列重複。
+            row.update(usable=False, error="auth_expired")
+        except Exception as exc:  # noqa: BLE001 —— 網路/限流:沒量到,不等於壞掉
+            row.update(usable=None, error=f"{type(exc).__name__}: {exc}")
+        slots.append(row)
+
+    if slots and all(row["usable"] is False for row in slots):
+        raise RuntimeError(f"pool 裡 {len(slots)} 個槽位全部認證失效。\n{RELOGIN_HINT}")
+    # `ok` 與預設模式同義:**作用中那一槽**能不能用 —— 不要為了 all_slots 改寫它的意思,
+    # 呼叫端讀同一個欄位得到同一個問題的答案。整個 pool 的健康度看 `all_usable`。
+    #
+    # ⚠️ **`ok` 也是三態,理由與 `usable` 完全一樣。** 早一版寫成
+    # `any(active and usable is True)`,於是作用中槽位撞到 Timeout(= 沒量到)時
+    # `ok` 變成 `false` —— 把「沒量到」壓回「不能用」,正好是這支工具存在要消滅的那個
+    # 混淆。而且預設模式在同一種情況下是**原樣拋出**那個非認證例外(`probe_auth` 的契約),
+    # 根本不會產生 `ok:false`;回 `null` 才是與它一致的表達。
+    active_row = next((row for row in slots if row["active"]), None)
+    return {
+        "ok": active_row["usable"] if active_row else None,
+        "all_usable": bool(slots) and all(row["usable"] is True for row in slots),
+        "slots": slots,
+    }
 
 
 def _pool_peers(context: str, active_label: str) -> list[str]:

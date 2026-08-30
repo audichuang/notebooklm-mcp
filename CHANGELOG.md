@@ -8,6 +8,68 @@
 
 ## Unreleased
 
+### 認證的兩盞燈:啟動 warning 講得出「哪一種」,`auth_check` 看得到整個 pool
+
+**症狀是一次誤判,不是一次故障。** 有人讀了啟動時那則 routability warning
+(「`__Secure-1PSIDTS` 已過期**或** scope 無法送到 accounts.google.com」),把它讀成
+「prd 槽位 1 的憑證從 8/16 起在過期、續命已死」,並建議立刻重登。對過 Doppler 與真 RPC
+之後診斷不成立:五槽 RPC 全通,PSIDTS 還有 280–340 天,8/16 到期的是與登入無關的 OTZ;
+槽位 1 命中的一直是那個「或」的**後半**(scope 在 `.youtube.com`),而那是 v0.9.14 就記錄
+在案、刻意接受的已知狀態。
+
+**這則訊息在結構上就分不出兩種原因**:`would_trigger_inline_heal` 只回一個 bool
+(它委派上游的 `_psidts_routes_to_rotate`,而那支把 expiry 與 domain 摺進同一個 predicate),
+所以文案只能兩種都寫、用「或」連起來。讀的人沒有辦法從訊息本身判斷是哪一種。
+
+- **`_cookies.describe_inline_heal_reason`** 把失敗拆成 `wrong_scope` / `expired` / `missing`,
+  `heal_warning_detail` 據此產生精確文案,並明說**「refresh 做不到」不等於「現在不能用」**、
+  要量後者請跑 `auth_check`。分類**直接複用上游同一組零件**(先 `_iter_routable_psidts_cookies`
+  濾過期、再問 domain),不自己判 expiry/domain —— `_cookies.py` 的模組 docstring 講過
+  「各寫一份是這個 repo 記過最多次的帳」。
+  ⚠️ **它只產生訊息,永遠不 gate。** 決策仍然只有 `would_trigger_inline_heal` 一個出口
+  (紅線見 `docs/gotchas-pool.md` §一③),所以分類算錯的代價上限是 log 裡一個詞不準,
+  不是誤拒一份還能服役的憑證 —— v0.9.14 已經為後者付過學費。
+  `test_heal_reason_is_message_only_and_never_gates` 守著這條。
+- **`auth_check(all_slots=True)`**。原本它只探**當下作用中**那一個 client,而配額 failover
+  會在生成中途換帳號 —— 所以「長跑前 fail-fast」這個承諾**只覆蓋 1/N**,真正被用到的槽位
+  可能從頭到尾沒被探過。新增的掃描模式每槽各打一次真 RPC,回傳 `usable`(真 RPC)與
+  `refreshable`(與啟動 warning **同一個 predicate**)兩欄。
+  兩欄刻意分開:`usable=true` + `refreshable=false` 正是槽位 1 那種已知可服役的狀態,
+  合成一盞燈就會被讀成故障 —— 那個誤讀真的發生過。`usable` 是三態,`null` 代表探測撞到
+  **非認證**錯誤(網路/限流)、沒量到,不是壞掉。只在**每一槽都失效**時才 raise
+  (還有一槽活著就回表,丟例外會把你要的診斷一起丟掉)。預設回傳形狀一個字沒動。
+
+#### 獨立 review 抓到的三條(都已修,值得留下的是第一條)
+
+1. **新訊息自己過度宣稱了。** 第一版 `wrong_scope` 的文案寫「cookie 本身沒有過期,這個
+   槽位仍在服役」—— **兩句都超出量到的範圍**:混合情境(過期的 A + 未過期但 scope 錯的 B)
+   會落在 `wrong_scope`,「沒有過期」在那裡是假的;而 routability **從來就證明不了槽位
+   可不可用**。在一個專門修「訊息宣稱過頭」的改動裡寫出過頭的訊息。
+   改成只陳述量到的計數(候選的 scope 在哪、另有幾筆連候選都進不了),可用性一律指向
+   `auth_check`。`test_mixed_identity_wrong_scope_does_not_claim_nothing_expired` 釘住。
+2. **`ok` 也必須是三態。** 早一版是 `any(active and usable is True)`,於是作用中槽位撞到
+   Timeout(= 沒量到)時 `ok` 變 `false` —— 把「沒量到」壓回「不能用」,正是這支工具要
+   消滅的那個混淆;而預設模式在同一情況是**原樣拋出**,根本產生不了 `ok:false`。
+3. **`--help` 被自己的說明擠掉了。** `sync-auth.sh` 的 `-h` 是 `sed -n '2,25p'` 寫死行號,
+   補上 `--config` 的警語之後,help 剛好停在「參數」標題,`--config` / `--profile` /
+   `--storage` 一個都印不出來 —— 諷刺的是那次補的正是「`--config` 不能省」。
+   改成 awk 動態印開頭那整段註解,行號不再會腐化。
+
+### 重登指引會把人導向正式環境讀不到的 config
+
+`RELOGIN_HINT`(認證真的失效時給人看的那段字)寫的是 `bash scripts/sync-auth.sh`,
+而那支腳本的 `--config` **預設是 `dev`**,正式 server 跑的是 `doppler run -c prd`。
+照著做的人會看到「✅ 同步完成!驗證成功」、重啟、然後**照樣壞**,而畫面上沒有任何東西
+指向原因。這段字出現的時機正好是最沒餘裕慢慢查的時候。
+
+- `RELOGIN_HINT` 與 `sync-auth.sh` 的用法區塊改成 `bash scripts/sync-auth.sh --config prd`,
+  並點名「漏了它會寫進 dev」。
+- **預設值刻意不改成 prd**:`dev` 是活的(AGENTS.md:prd 的 `PODCAST_TOKEN_SALT` 必須逐字
+  等於 dev 的),改預設會讓既有 dev 流程靜默改指向。改成**不傳 `--config` 就出聲**:
+  互動時停下來要一句 `yes`,非互動只警告不擋(不改壞既有自動化)。
+- 兩處都補上「這支只更新**不帶後綴**的 `NOTEBOOKLM_AUTH_JSON`(＝槽位 1)」——
+  多帳號 pool 的 `_2..N` 要各自重登再寫回,而原本的指引讀起來像一條命令修好全部。
+
 ### 安裝：`latest` 是 CI 維護的移動指針
 
 消費端改裝 `@latest`,不再在 README / AGENTS / mcp-setup 寫死 `v0.9.x`。

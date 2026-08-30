@@ -14,12 +14,20 @@ except ImportError:  # notebooklm-py 0.8.0; remove after the public helper ships
     from notebooklm._runtime import is_auth_error
 from notebooklm.exceptions import RPCError
 
+# ⚠️ **`--config` 一定要寫出來。** `sync-auth.sh` 的預設是 `dev`,而正式 server 跑的是
+# `doppler run -c prd`(見 AGENTS.md);漏了它,腳本會印「✅ 同步完成」然後把新憑證寫進
+# 一個正式環境根本不讀的 config —— 重啟後照樣壞,而且沒有任何訊號指向原因。
+# 這段字出現的時機正好是最沒餘裕慢慢查的時候,所以指令必須可以直接照抄。
 RELOGIN_HINT = (
     "NotebookLM 認證失效。請在有 GUI 的機器重登後同步\n"
     "(在 notebooklm-mcp repo 目錄下執行):\n"
-    "  uv run notebooklm login                     # 測試帳號加 -p test\n"
-    "  bash scripts/sync-auth.sh                   # 測試帳號:--profile test --config stg\n"
-    "再重啟 MCP server(Doppler 會注入新的 NOTEBOOKLM_AUTH_JSON)。"
+    "  uv run notebooklm login                                  # 測試帳號加 -p test\n"
+    "  bash scripts/sync-auth.sh --config prd                   # 測試帳號:--profile test --config stg\n"
+    "再重啟 MCP server(Doppler 會注入新的 NOTEBOOKLM_AUTH_JSON)。\n"
+    "⚠️ `--config prd` 不能省(預設是 dev,正式 server 讀不到)。\n"
+    "⚠️ 這支只更新**不帶後綴**的 NOTEBOOKLM_AUTH_JSON,也就是槽位 1。多帳號 pool 的\n"
+    "   NOTEBOOKLM_AUTH_JSON_2..N 要各自重登該帳號再 `doppler secrets set --raw` 寫回;\n"
+    "   要看是哪一槽死了,跑 auth_check(all_slots=True)。"
 )
 
 

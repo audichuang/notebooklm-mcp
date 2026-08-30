@@ -22,9 +22,9 @@ from notebooklm.types import (
     utf16_len,
 )
 
-from conftest import _structured_document
+from conftest import FakeClient, _structured_document
 
-from notebooklm_mcp import tools_basic as t
+from notebooklm_mcp import runtime, tools_basic as t
 from notebooklm_mcp._errors import NotebookAccessDenied
 
 
@@ -783,3 +783,111 @@ async def test_artifact_retry_failed_refuses_a_healthy_artifact(fake_client):
     with pytest.raises(ValueError, match="不是 failed 狀態"):
         await t.artifact_retry_failed("nb-123", "deck-1")
     assert not [c for c in fake_client.artifacts.calls if c[0] == "retry_failed"]
+
+
+# ---- auth_check 的射程:預設只量作用中那一槽 -------------------------------------
+
+def _pool(*clients):
+    """裝一個多槽 pool,label 用 index 區分。"""
+    runtime.set_clients([(f"acct{i}@x", c) for i, c in enumerate(clients, start=1)])
+
+
+async def test_auth_check_default_only_measures_the_active_slot(fake_client):
+    """**這是要修的那個射程問題,先把現況釘住。**
+
+    預設模式只探作用中那一個 client —— 別的槽位死光了它照樣回綠。而配額 failover
+    會在生成中途換帳號,所以「長跑前 fail-fast」這個承諾預設只覆蓋 1/N。
+    這條紅了代表預設模式的成本或語義變了,要回頭確認 `all_slots` 那條路還在不在。
+    """
+    dead = FakeClient()
+    dead.notebooks.fail_list = True
+    _pool(fake_client, dead)
+
+    assert await t.auth_check() == {"ok": True, "notebooks": 1}
+
+
+async def test_auth_check_all_slots_reports_every_slot_with_refreshability(fake_client):
+    """`all_slots=True` 把整個 pool 攤開,而且 `usable` 與 `refreshable` 是兩件事。
+
+    prd 槽位 1 的真實狀態就是 `usable=True` + `refreshable=False`(scope 在
+    `.youtube.com`)—— 那是已知可服役的狀態,不是故障,所以兩欄一定要分開回報:
+    合成一盞燈的話,這個槽位會被讀成壞掉,而那正是這輪要修的誤讀。
+    """
+    dead = FakeClient()
+    dead.notebooks.fail_list = True
+    _pool(fake_client, dead)
+    runtime.set_slot_diagnostics([
+        {"slot": 1, "env": "NOTEBOOKLM_AUTH_JSON", "refreshable": False,
+         "heal_reason": "wrong_scope", "psidts_domains": [".youtube.com"]},
+        {"slot": 2, "env": "NOTEBOOKLM_AUTH_JSON_2", "refreshable": True,
+         "heal_reason": None, "psidts_domains": [".google.com"]},
+    ])
+
+    result = await t.auth_check(all_slots=True)
+
+    assert result["ok"] is True          # 作用中那一槽活著 —— 與預設模式同義
+    assert result["all_usable"] is False  # 但 pool 不是全綠
+    first, second = result["slots"]
+    assert first["slot"] == 1 and first["active"] is True
+    assert first["usable"] is True and first["notebooks"] == 1
+    assert first["refreshable"] is False and first["heal_reason"] == "wrong_scope"
+    assert first["psidts_domains"] == [".youtube.com"]
+    assert second["usable"] is False and second["error"] == "auth_expired"
+    assert second["active"] is False
+
+
+async def test_auth_check_all_slots_raises_only_when_the_whole_pool_is_dead(fake_client):
+    """全滅才 fail-fast(整條路都走不動,等同預設模式的秒退);還有一槽活著就回表,
+    因為丟例外會把你叫它去查的診斷一起丟掉。"""
+    dead_a, dead_b = FakeClient(), FakeClient()
+    dead_a.notebooks.fail_list = dead_b.notebooks.fail_list = True
+    _pool(dead_a, dead_b)
+
+    with pytest.raises(RuntimeError, match="sync-auth"):
+        await t.auth_check(all_slots=True)
+
+
+async def test_auth_check_all_slots_marks_non_auth_errors_as_unmeasured(fake_client):
+    """網路 / 限流不是「認證壞了」—— 回 `usable=None`(沒量到),不要記成 False。
+
+    `probe_auth` 刻意讓非認證錯誤保留原型別讓呼叫端退避;掃描模式不能把那個區別
+    壓成一個布林,否則一次限流會被讀成「這個帳號的憑證死了」而引出不必要的重登。
+    """
+    flaky = FakeClient()
+
+    async def _boom():
+        raise TimeoutError("upstream slow")
+
+    flaky.notebooks.list = _boom
+    _pool(fake_client, flaky)
+
+    result = await t.auth_check(all_slots=True)
+
+    assert result["all_usable"] is False
+    assert result["slots"][1]["usable"] is None
+    assert "TimeoutError" in result["slots"][1]["error"]
+
+
+async def test_auth_check_all_slots_ok_is_null_when_the_active_slot_was_not_measured(
+    fake_client,
+):
+    """作用中槽位撞到**非認證**錯誤時,`ok` 要回 `null`(沒量到),不是 `false`。
+
+    早一版寫成 `any(active and usable is True)`,於是一次 Timeout 就讓 `ok` 變 false ——
+    把「沒量到」壓回「不能用」,正好是這支工具存在要消滅的那個混淆。而且預設模式在
+    同一種情況下是**原樣拋出**那個例外(`probe_auth` 的契約),根本產生不了 `ok:false`。
+    """
+    flaky = FakeClient()
+
+    async def _boom():
+        raise TimeoutError("upstream slow")
+
+    flaky.notebooks.list = _boom
+    _pool(flaky, fake_client)          # 作用中 = 第一槽 = 探測不到的那個
+
+    result = await t.auth_check(all_slots=True)
+
+    assert result["slots"][0]["active"] is True
+    assert result["slots"][0]["usable"] is None
+    assert result["ok"] is None, "沒量到被壓成了「不能用」"
+    assert result["all_usable"] is False

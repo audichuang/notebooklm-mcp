@@ -519,6 +519,17 @@ def test_psidts_recovery_and_cookie_sanitizer_private_surface():
     assert _params(psidts_recovery._recover_psidts_inline) == ["path"]
     assert _params(cookies._sanitized_auth_entries) == ["storage_state"]
 
+    # `_cookies.describe_inline_heal_reason` 另外用這兩個把 routability 失敗拆成
+    # expired / wrong_scope / missing。**它只產生訊息、不參與任何 gate**,所以這裡
+    # 紅了不代表接受條件破功 —— 是 warning 的措辭會退回「講不出是哪一種」,
+    # 而那正是這組訊息當初被誤讀成「登入要死了」的原因。
+    assert _params(psidts_recovery._iter_routable_psidts_cookies) == [
+        "entries",
+        "to_cookie",
+        "now",
+    ]
+    assert psidts_recovery._PSIDTS_COOKIE == "__Secure-1PSIDTS"
+
 
 def test_notebooklm_py_lower_bound_excludes_0_8_0():
     """分發路徑不讀 lock,所以 pyproject 的版本下界是唯一實裝約束。
