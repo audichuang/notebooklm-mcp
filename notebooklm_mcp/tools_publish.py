@@ -218,6 +218,57 @@ async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None, staging_
     return staging
 
 
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _mp3_provenance_gap(ep: dict, local_path: str) -> str | None:
+    """發布前驗「這顆 mp3 真的是 promoted attempt 產出的那顆」。
+
+    回傳 None = 驗過相符;回傳字串 = 驗不動的原因(呼叫端收進
+    `sha_unverified_episodes` 標註——「沒驗」必須明講,不能讀成「驗過了」)。
+    不符或 canonical 歧義 → raise,擋在任何 PUT 之前。
+
+    存在的理由(podcast-lab retracted-slot-rename 2026-08-19):QA 拒收的音檔坐在
+    預設檔名槽,而 `_ensure_local_mp3` 只 resolve「檔案存在」——存在即過,拒收版
+    就冒充 canonical 上了公網。「認 canonical 一律比 sha」原本是 host 手動紀律,
+    這裡下沉成 fail-closed 閘。legacy manifest(無 attempts)刻意放行:整季
+    republish 不能因為驗不動就死(deferred 事故的形狀)。"""
+    n = ep.get("episode")
+    attempts = ep.get("attempts") or []
+    promoted = ep.get("output_attempt_id")
+    if not attempts and not promoted:
+        return "legacy manifest(無 attempts 記錄,無從比對)"
+    if not promoted:
+        raise ValueError(
+            f"episode {n}: 有 attempts 但沒有 output_attempt_id,分不出哪一顆是 canonical"
+            " —— 不靜默挑一顆(那正是本閘要消滅的路徑);用工具把輸出 promote 回"
+            " episode 層再發布"
+        )
+    attempt = next((a for a in attempts if a.get("attempt_id") == promoted), None)
+    if attempt is None:
+        raise ValueError(
+            f"episode {n}: output_attempt_id {promoted} 指向不存在的 attempt"
+            " —— manifest 不自洽,不發布"
+        )
+    expected = ((attempt.get("finalize") or {}).get("download") or {}).get("sha256")
+    if not expected:
+        return f"promoted attempt {promoted} 沒記 finalize.download.sha256(舊版 finalize 形狀)"
+    actual = _file_sha256(local_path)
+    if actual != expected:
+        raise ValueError(
+            f"episode {n}: mp3 檔案的 sha256 與 promoted attempt 不符"
+            f"(檔案 {actual[:12]}…,attempt {promoted} 記錄 {expected[:12]}…)"
+            " —— 檔案被換過或 mp3_path 指錯位置;重新對帳 manifest,別讓"
+            "「檔案存在」冒充 canonical"
+        )
+    return None
+
+
 async def _auth_precheck(client, base: str, upload_token: str) -> None:
     """Probe GET /healthz WITH the bearer before sending any big mp3, so a wrong
     token (or a PODCAST_UPLOAD_URL mis-pointed at the read-only Caddy) fails fast
@@ -619,6 +670,15 @@ async def publish_series(
         for ep in manifest_eps:
             resolved_mp3[int(ep["episode"])] = await _ensure_local_mp3(ep, notebook_id, staging_dir)
 
+        # resolve 完接著驗出身:resolve 只答「有沒有檔」,這裡答「是不是那顆」。
+        # 逐集 sha 整季幾 GB 的雜湊屬昂貴同步 I/O,丟 thread(同 _embed_cover 的理由)。
+        sha_unverified: list[int] = []
+        for ep in manifest_eps:
+            n = int(ep["episode"])
+            gap = await asyncio.to_thread(_mp3_provenance_gap, ep, resolved_mp3[n])
+            if gap:
+                sha_unverified.append(n)
+
         # 講義 HTML 也預先渲染:render_report_html 命中 script/外部資源會 fail-closed,
         # 那是本機可預判的 deterministic 失敗,不該等到前幾集 PUT 完才爆。Markdown 渲染
         # 後通常幾十 KB,整季加總遠小於單一 mp3,不構成 RAM 壓力。
@@ -776,6 +836,9 @@ async def publish_series(
         # 被 publication_state 扣下的集數。**一定要回報** —— 50 集的 manifest 回
         # episode_count=49 而不說是哪一集不見了,看起來就像發布漏集。
         "deferred_episodes": withheld,
+        # provenance 閘驗不動的集數(legacy 無 attempts / 舊 finalize 沒記 sha)。
+        # 「沒驗」要明講,不能讀成「驗過了」——check_episode.py 的同一條紀律。
+        "sha_unverified_episodes": sorted(sha_unverified),
         "episodes": episodes_out,
     }
 

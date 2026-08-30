@@ -2084,3 +2084,118 @@ def test_backfill_still_repairs_a_season_it_does_not_break(monkeypatch, tmp_path
            for ep in json.loads(open(manifest, encoding="utf-8").read())["episodes"]}
     assert eps[1] == "Fri, 31 Jul 2026 07:00:00 +0800"            # 回填成首發時間
     assert eps[2] == "Fri, 31 Jul 2026 08:00:00 +0800"
+
+
+# ---------------------------------------------------------------------------
+# mp3 provenance:preflight 比對 promoted attempt 的 finalize.download.sha256
+#
+# 實測(podcast-lab retracted-slot-rename 2026-08-19):QA 拒收的音檔坐在預設檔名槽,
+# 而 preflight 只 resolve「檔案存在」——存在即過,拒收版就能冒充 canonical 上公網。
+# 根層 AGENTS 的「認 canonical 一律比 sha」一直是 host 手動紀律;這裡把它下沉成
+# fail-closed 閘:有 sha 不符即 raise(任何 PUT 之前)、canonical 歧義即 raise、
+# legacy(無 attempts)放行但回傳 sha_unverified_episodes 標註「沒驗」。
+# ---------------------------------------------------------------------------
+
+def _attach_attempt(manifest_path, n, *, sha, attempt_id=None, point=True):
+    """給第 n 集掛一顆帶 finalize.download.sha256 的 attempt;point=False 不寫
+    output_attempt_id(模擬「有 attempts 卻分不出 canonical」的歧義形狀)。"""
+    attempt_id = attempt_id or f"att-{n}"
+    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    for ep in stored["episodes"]:
+        if ep["episode"] == n:
+            ep.setdefault("attempts", []).append({
+                "attempt_id": attempt_id,
+                "finalize": {"download": {"status": "completed", "sha256": sha}},
+            })
+            if point:
+                ep["output_attempt_id"] = attempt_id
+    open(manifest_path, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+
+
+def _sha256_hex(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+async def test_preflight_rejects_mp3_that_is_not_the_promoted_attempts_bytes(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """冒充檔在任何 PUT 之前被擋下,訊息指名是哪一集。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    _attach_attempt(manifest, 1, sha=_sha256_hex(b"audio-1"))
+    _attach_attempt(manifest, 2, sha=_sha256_hex(b"the real canonical bytes"))
+
+    with pytest.raises(ValueError, match="episode 2.*sha256"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_preflight_passes_when_mp3_matches_the_promoted_attempt(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    _attach_attempt(manifest, 1, sha=_sha256_hex(b"audio-1"))
+    _attach_attempt(manifest, 2, sha=_sha256_hex(b"audio-2"))
+
+    res = await _publish(manifest, artwork_png)
+    assert res["sha_unverified_episodes"] == []
+
+
+async def test_legacy_episodes_without_attempts_publish_but_are_flagged(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """legacy 整季 republish 不能因為驗不動就死(deferred 事故的形狀);
+    但「沒驗」必須明講,不能讀成「驗過了」——check_episode.py 的同一條紀律。"""
+    _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+
+    res = await _publish(manifest, artwork_png)
+    assert res["sha_unverified_episodes"] == [1, 2]
+
+
+async def test_attempts_without_a_promoted_pointer_are_ambiguous_and_rejected(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """attempts 非空卻沒有 output_attempt_id = 分不出 canonical——這正是本閘要消滅的
+    情境,靜默挑一顆等於把 bug 換個地方藏。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    _attach_attempt(manifest, 1, sha=_sha256_hex(b"audio-1"))
+    _attach_attempt(manifest, 2, sha=_sha256_hex(b"audio-2"), point=False)
+
+    with pytest.raises(ValueError, match="episode 2.*output_attempt_id"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_promoted_pointer_to_a_missing_attempt_is_rejected(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """幽靈指標在 ManifestStore 載入驗證就 fail-closed(先於本閘、先於任何 PUT)——
+    鎖住這層既有防線;_mp3_provenance_gap 裡的同型 raise 是給非 store 路徑的備援。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    _attach_attempt(manifest, 1, sha=_sha256_hex(b"audio-1"))
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored["episodes"][1]["output_attempt_id"] = "att-ghost"
+    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+
+    with pytest.raises(ValueError, match="output_attempt_id does not reference"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_promoted_attempt_without_a_recorded_sha_is_flagged_not_fatal(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """舊版 finalize 形狀可能沒記 sha256:驗不動 ≠ 不符,放行但標註。"""
+    _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    _attach_attempt(manifest, 1, sha=_sha256_hex(b"audio-1"))
+    _attach_attempt(manifest, 2, sha=None)
+
+    res = await _publish(manifest, artwork_png)
+    assert res["sha_unverified_episodes"] == [2]
