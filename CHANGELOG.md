@@ -6,7 +6,7 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
-## Unreleased
+## v0.9.22 — 認證的兩盞燈:警告講得出「哪一種」,auth_check 看得到整個 pool
 
 ### 認證的兩盞燈:啟動 warning 講得出「哪一種」,`auth_check` 看得到整個 pool
 
