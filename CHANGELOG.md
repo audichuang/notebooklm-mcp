@@ -6,6 +6,44 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.23 — 送出即正本:brief 全文進 attempt,發布端驗 mp3 出身
+
+### attempt 內嵌送出的 brief 全文(314709b)
+
+**症狀**(podcast-lab agent-memory 一季五集實測):送出的 inline brief 與磁碟
+`brief.md` 的 sha256 全數不符——貼上會剝檔尾換行(傳輸層),更糟的是貼上瞬間的手改;
+EP23 手改未記錄,事後三輪重建都對不回 attempt 記的 `brief_sha256`,實際生成輸入從此
+沒有正本。
+
+**根因**:attempt 只存 `brief_sha256`。雜湊證明得了「不一樣」,證明不了「送了什麼」;
+「靠人記 divergence」這條補償路徑實測不可靠(五集完整度呈梯度,最差的一集直接失傳)。
+
+**修法**:`_create_audio_attempt` 在 `brief_sha256` 旁存 `"brief"` 原文,episode/series
+兩入口共用一處。既有比對(`_is_resendable_same_request`、series prepared-attempt 的
+settings 逐字等值)都是逐欄位比,不受新 key 影響;manifest 進版控,送出 bytes 從此有正本。
+
+### publish preflight 的 mp3 provenance 閘(e6c96d5)
+
+**症狀**(podcast-lab retracted-slot-rename 2026-08-19):QA 拒收的音檔坐在預設檔名槽,
+preflight 只 resolve「檔案存在」——存在即過,拒收版能冒充 canonical 上公網。
+「認 canonical 一律比 sha」一直是 host 手動紀律,publisher 自己不驗。
+
+**修法**:`_ensure_local_mp3` 之後、任何 PUT 之前,逐集比對 mp3 檔案 sha256 與
+`output_attempt_id` 那顆 attempt 的 `finalize.download.sha256`:不符 raise(訊息帶兩邊
+雜湊前綴)、attempts 非空但無 `output_attempt_id`(分不出 canonical)也 raise;
+legacy(無 attempts)與舊 finalize 沒記 sha 的集放行,集號列在新回傳欄位
+`sha_unverified_episodes`——「沒驗」明講,不能讀成「驗過了」,legacy 整季 republish
+也不因驗不動而死(deferred 事故的形狀)。幽靈 `output_attempt_id` 由 ManifestStore
+載入驗證的既有防線擋(這次補了測試鎖住)。
+
+### 文件債的代價:`regeneration_source_ids` 誤修事件(818b2fe;audi-skill 33ddbde)
+
+40ee6e7 加進 retract/series 停點回傳的 `regeneration_source_ids` 漏寫進 skill docs
+半個月——兩份 host 紀錄如實引用它,反而被拿著文件當否定證據的稽核「修正」掉,
+還連鎖到 skill 短暫寫入「沒有這個欄位」的假斷言(同日撤回)。契約詞閘補上
+`regeneration_source_ids` 與 `sha_unverified_episodes`;教訓寫進 docs:**否定斷言
+(「沒有 X」)也要對真 code 驗,文件不能當自己的否定證據**。
+
 ## v0.9.22 — 認證的兩盞燈:警告講得出「哪一種」,auth_check 看得到整個 pool
 
 ### 認證的兩盞燈:啟動 warning 講得出「哪一種」,`auth_check` 看得到整個 pool
