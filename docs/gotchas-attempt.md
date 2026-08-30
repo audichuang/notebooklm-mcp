@@ -87,13 +87,13 @@
   ——最後這個當初無條件回 `not_accepted`,而 manifest 可能寫的是 `acceptance_unknown`,
   回報與紀錄相反。姊妹分支早就有「讀 manifest 覆核、例外型別只是入場券」的寫法,
   照抄過去即可。完整推導見
-  [升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §1。
+  [升級筆記](notebooklm-py-0.8-upgrade.md)的 §1。
 - **「從未 dispatch 的 attempt」由建立它的那支工具原樣重呼續推**(`_is_resendable_same_request`)。
   帶 `source_ids` 的 attempt `podcast_series` 接不了,只有 `podcast_episode` 能續。
   **「逐字相同」是安全邊界** —— 設定變了還沿用等於靜默換掉生成輸入。連帶三條:
   ①`_reset_attempt_for_resend` 要 dispatch 與 remote **一起**清(只清一半會讓 series 看到
   `remote.status="failed"` 而誤判該 supersede);②診斷靠 `errors[]`(只 append),不靠
-  `remote`;③**驗證一律先於變更**。事故經過見 [CHANGELOG](CHANGELOG.md) v0.7.2。
+  `remote`;③**驗證一律先於變更**。事故經過見 [CHANGELOG](../CHANGELOG.md) v0.7.2。
   **現況更新**:這支函式現在只做一件事——真的要重送時的逐欄位相等閘門(notebook /
   標題 / brief 雜湊 / settings / frozen bundle 綁定,少一個都不放行)。它**不再是**
   「能不能重送」這句指引訊息的來源——那個角色已經被上一條紅線講的 `_attempt_capabilities()`
@@ -167,3 +167,21 @@
   誤綁給不相干的新 attempt——不是 bug,但代價要記下來。否定答案(「確認這顆候選不屬於
   這次 dispatch」)的出路有端到端測試鎖著:
   `tests/test_audio_attempts.py::test_tombstone_blocker_offers_and_executes_the_negative_candidate_path`。
+
+## `source_delete` 的清理語意(ADR-0009 清理義務的執行面;從 AGENTS.md 降層,2026-08-30)
+
+SDK 的 `sources.delete` 雖是 idempotent(0.7.0 起),但它的 mutation payload 只有 `source_id`、`notebook_id`
+只是 routing header;公開工具 `source_delete` 會先用 `source_list` 驗證該 id 屬於指定 notebook,
+**查無此 id 就不發那個 destructive RPC**(否則打錯 notebook 會刪到別本的來源),回 `was_present=False`。
+
+**刻意不 fail-loud**:`podcast_attempt_retract` 的清理契約要求呼叫端照回傳的 `source_cleanup_obligations`
+「逐一 `source_delete`」,而 response 遺失後重放整個迴圈是預期操作 —— 對已刪掉的那一筆拋錯會讓自動化 host
+停在半路,剩下的 id 從此沒人刪。安全性質留在「不打 RPC」、冪等留在「不 raise」,所以 `idempotentHint` 保留。
+`deleted` 只代表「呼叫後該 id 已不在這個 notebook」,要區分「本來就不在」看 `was_present`;要確認刪掉某既有
+來源,先用 `source_list` 取真實 `source_id`。
+
+⚠️ **刪除後 `source_fulltext` 用同一個 `source_id` 仍讀得回全文(實測 55 分鐘後仍可)—— 那是預期的,不是清理失敗**:
+它繞過 notebook 直接查 source 物件,而生成用的來源清單與 `source_list` 同走 `GET_NOTEBOOK`。所以 ADR-0009 的
+清理義務有效。推導的三個前提由
+`tests/test_contracts.py::test_generation_takes_its_source_list_from_the_notebook_not_the_server`
+釘住(**它紅就代表推導失效、清理義務要重新論證**),完整論證在該測試的 docstring。

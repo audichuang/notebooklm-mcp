@@ -34,7 +34,7 @@
 - **(0.8.0)`rename(return_object=False)` 不再是 fire-and-forget**(#1362):兩種模式都做
   存在性檢查,查不到就 raise。`artifacts.rename` 因此每次多一趟 `LIST_ARTIFACTS`,而且**多了
   一條原本不存在的失敗路徑**。我們仍一律傳 `False`;哪些呼叫點該防、哪些**刻意不防**,
-  見[升級筆記](docs/notebooklm-py-0.8-upgrade.md)的 §2。
+  見[升級筆記](notebooklm-py-0.8-upgrade.md)的 §2。
 - 0.7.0 起 source add API 尾端參數(`wait`/`wait_timeout`/`title` 等)**keyword-only**,
   位置呼叫直接 TypeError(contract 測試有鎖)。0.8.0 起 `add_url` 也有 `title=`,**刻意不用**
   ——命名鐵律靠顯式 rename 的 fail-loud 後檢守著。
@@ -51,3 +51,26 @@
 - **(0.8.0)`retry_failed` 與其他 generate 的錯誤契約現在一致了**:全部對同步拒絕 raise
   (0.7.x 只有 `retry_failed` 這樣)。「哪支會 raise」不再需要記;`ensure_started` 在所有
   呼叫點仍保留(擋空 task_id,且 0.7.x 形狀萬一回來也仍被正確處理)。
+
+## 行為差異與 server 端的緩解(從 AGENTS.md 降層,2026-08-30)
+
+- **(0.8.1)`answer_document.render()` 只處理 block 級標記,而且會靜默丟掉解不出的 block。**
+  v0.9.14 真實驗收兩條,兩條都直通公開 RSS `<description>`,所以 server 端各補了一道:
+  ①inline 的 `**粗體**` 它**不管**(`###` 標題、`*` 條列它會拿掉)→ `_text.strip_inline_emphasis`
+  在 `chat_ask`(`strip_citations=True` 那條路)與 `episode_set_description` 兩處清。**底線刻意不清**:`_斜體_` 與
+  `NOTEBOOKLM_AUTH_JSON` / `source_id` 同形。
+  ②上游解不出 spans 的 block(實測 `CODE_BLOCK`)**整段消失,連 U+FFFC 都不留**
+  —— 上游文件說 `.text` 會填 U+FFFC,**實測空 spans 時兩邊都不填**,而剩下的句子讀起來
+  完全通順(「以下是一段示範程式碼:」直接接下一段)→ `tools_basic._assert_no_dropped_blocks` fail-loud。
+  判準是**有沒有解出文字**,不是 block 的 kind:`CODE_BLOCK` 帶 spans 時 `render()` 照樣輸出它。
+- **(0.8.1)`Artifact.source_ids` 在生產資料上**有值**,而且是生成當下的歷史快照。**
+  v0.9.14 驗收結案(在此之前只當觀測面、不准當 gate):11 顆 audio artifact 全部帶出非空
+  `source_ids`,值對得上生成當時 notebook 內的來源;**但其中一顆的 id 全部已不在
+  `source_list` 裡** —— 它記的是生成當下的狀態,不是即時 join。
+  所以可以拿來看「這顆是用哪些來源生的」,**不可以拿來反查現存 source**(會查到已刪除的 id)。
+- **`get_fulltext` 會在 CJK 字元間插空格**;關鍵字比對前先 `"".join(text.split())`(`_text.norm` 已封裝)。
+- **`chat_ask` 回答夾帶引用標記**(`[1]`/`[3, 4]`/`[8-10]`)。`strip_citations=True` 時由 server 端用
+  `_text._CITATION_RE` 清 —— 注意 `chat_ask` 這個參數**預設 False**(`tools_basic.py`),`episode_set_description`
+  預設 True 且會再清一次。**新程式碼別再自己寫 regex**,要改清理規則改 `_CITATION_RE` 一處。
+- **homepage probe 會 false-positive**(jacob-bd #250):長跑工具(`podcast_episode`/`podcast_series`)在**本地驗證之後**
+  用 `auth_probe.probe_auth` 做輕量真 RPC 認證預檢;獨立工具版是 `auth_check`。

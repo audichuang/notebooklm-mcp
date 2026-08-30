@@ -181,3 +181,18 @@
   `_embed_cover` 換成 no-op；真媒體 regression 鎖住 MP4→MP3、
   MP3 保留、ADTS 拒絕、端到端 uploaded bytes/副檔名/RSS MIME 一致與決定性。
 
+
+## 附件 mutation 的 preflight 與重入債(從 AGENTS.md 降層,2026-08-30)
+
+**遠端 mutation 前要有便宜 preflight,但那不是 durable attempt**:`artifact_revise_slide` 與 `artifact_retry_failed`
+改的是**遠端狀態**(不像 download 類救援只寫本機檔),而兩支 RPC 都只靠 `artifact_id` 定位、`notebook_id` 只是
+routing header,錯配 ID 伺服器不會擋 → 用 `artifacts.get_or_none`(它是 list 後比對 id,一次同時驗存在與歸屬)
+先驗 kind/status。`generate_slides` / `generate_report` / `revise_slide` 也在生成前先驗 `episode_n` 存在,免得打錯
+集號要燒完一次配額才 raise。
+
+**仍未解的是重入**:外層在 mutation 成功後、回寫前斷線,重跑會再 mutate 一次。這是整個 slides/report 家族共有的
+架構債(`generate_slides` 逐字同形),要修得做成涵蓋 generate 與 revise 的 attachment attempt(含 manifest 存
+`slides_artifact_id` 才能驗 episode binding),不是替 revise 單獨拆 kickoff/finalize。**v0.9.16 接上配額 failover 時
+刻意沒順手還這筆債** —— 理由寫在 [ADR-0011](adr/0011-attachment-failover-buys-audit-with-an-episode-field-not-an-attempt.md):
+failover 的正確性只需要「拒絕時什麼都沒建出來」,重入的正確性需要 attempt,而重入在**沒有** failover 的時候就已經壞了,
+綁在一起做只會讓一個本來就成立的修正等一個大重構。

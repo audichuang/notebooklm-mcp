@@ -22,6 +22,8 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 消費端裝 `@latest`,文件不再寫死 `v0.9.x`。發版要改的版本號只剩:
 
 1. `pyproject.toml` 的 `version`(正本)
+2. `uv.lock` 裡本套件的 `version` —— bump 之後跑一次 `uv lock`,**與 pyproject 同一個 release commit**。
+   v0.9.23、v0.9.24 都是事後才用 chore commit 補(`uv run` 會自動重同步 lock 並弄髒 working tree)。
 
 `vMAJOR.MINOR.PATCH` tag 是不可變錨點;`latest` 是 CI 維護的移動指針。
 推上 `vX.Y.Z` 之後 `.github/workflows/retag-latest.yml` 跑
@@ -75,3 +77,23 @@ grep -rEn "notebooklm-mcp\.git@v[0-9]" --include="*.md" . ../podcast-lab \
 **gitignored、可重生**的本機 docs 快照,正本在 `audi-skill/notebooklm/`;
 它現在也不寫死版本(見 `references/setup.md`)。要更新是重生快照,不是編輯它。
 
+
+## 依賴版本對帳:lock vs 消費端實裝(發版時做)
+
+`uv tool install git+…` **不讀 `uv.lock`**,所以 lock 鎖的版本與四台生產機實裝的版本會自己漂開,而且**不是純帳面
+差異**:2026-08-09 量到 lock 1.28.1 / 實裝 1.29.0,1.29.0 啟動時多印一行
+`pydantic_settings … IncompleteFieldDefinitionWarning: Field 'lifespan' has an incomplete definition`,1.28.1 完全不印
+(走 stderr 沒破壞 stdio 協定,但證明實裝版本有 CI 從沒跑過的行為)。2026-08-30 又漂成 1.29.0 / 1.29.1。
+
+```sh
+grep -A1 'name = "mcp"' uv.lock | grep version                       # lock 鎖的
+~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('mcp'))"   # 實裝的
+```
+
+漂了就:`uv lock --upgrade-package mcp && uv sync --extra dev && uv run pytest -q`,全綠再 commit uv.lock;
+必要時同步更新 `pyproject.toml` 的下界。**對齊要用 `uv sync --extra dev`,不是 `uv pip install -e .`** —— 後者不會把
+venv 拉到 lock 的版本。
+
+**要對某個特定依賴版本跑測試**(例如試 notebooklm-py 的新版):開一個獨立 venv、用它自己的 `bin/python -m pytest`。
+別在共用 venv 上 `uv pip install X==版本` 之後跑 `uv run`(即使帶 `--no-sync`)—— 它可能把 venv 拉回 lock 的版本,
+而你以為在測 X。
