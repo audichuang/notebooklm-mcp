@@ -896,6 +896,10 @@ def _create_audio_attempt(
         "episode": episode_n,
         "title": title.strip(),
         "brief_sha256": hashlib.sha256(brief.encode("utf-8")).hexdigest(),
+        # 全文與雜湊並存:雜湊只能證明「不一樣」,證明不了「送了什麼」。實測一季五集的
+        # 送出 brief 與磁碟 brief.md 全數 sha 不符(貼上剝檔尾換行+貼上瞬間手改),其中
+        # 一集手改未記錄,事後永遠重建不出實際生成輸入——manifest 是唯一進版控的正本。
+        "brief": brief,
         "settings": _audio_settings(language, audio_format, audio_length, source_ids),
         "dispatch": {
             "status": "prepared",
