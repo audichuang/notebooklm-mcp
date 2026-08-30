@@ -83,6 +83,13 @@ REQUIRED_CONTRACT_TERMS = (
                               # `refreshable`(PSIDTS 能不能 refresh)**是兩件事**。
                               # 合成一盞燈的話,prd 槽位 1 那種「可服役但不可 refresh」
                               # 會被讀成故障 —— 那個誤讀真的發生過,還引出過重登建議
+    "regeneration_source_ids",  # 40ee6e7 加進 retract/series 停點回傳,但文件漏記了
+                              # 半個月 —— 兩份 host 紀錄如實引用它,反而被拿著文件當
+                              # 否定證據的稽核「修正」掉。回傳欄位漏寫的代價不只是
+                              # 查不到,是**正確的用法會被當成幻覺**
+    "sha_unverified_episodes",  # publish preflight 的 mp3 provenance 閘:驗不動的集
+                              # (legacy 無 attempts / 舊 finalize 沒記 sha)放行但列在
+                              # 這裡 —— 「沒驗」不明講,就會被讀成「驗過了」
 )
 
 
