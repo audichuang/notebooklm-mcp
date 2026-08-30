@@ -91,6 +91,9 @@ REQUIRED_CONTRACT_TERMS = (
     "sha_unverified_episodes",  # publish preflight 的 mp3 provenance 閘:驗不動的集
                               # (legacy 無 attempts / 舊 finalize 沒記 sha)放行但列在
                               # 這裡 —— 「沒驗」不明講,就會被讀成「驗過了」
+    "retired",                # v0.9.24:manifest 頂層旗標,publish_series 讀完就擋。與
+                              # publication_state 同類 —— 工具名與參數都沒變、純 manifest
+                              # 欄位,正是本 checker 最容易漏的那一類
 )
 
 

@@ -40,3 +40,31 @@ def is_withheld(episode: dict) -> bool:
         f"episode {episode.get('episode')}: unknown publication_state {state!r} "
         f"(扣下的狀態只有 {sorted(WITHHELD_PUBLICATION_STATES)};要照發就別設這個欄位)"
     )
+
+
+def assert_not_retired(manifest: dict) -> None:
+    """退役 manifest(頂層 `retired: true`)一律不得發布;放在讀完 manifest 之後、任何網路動作
+    之前呼叫。
+
+    **為什麼需要一個旗標而不是靠位置**(podcast-lab graphify 2026-08-30 審查):兩份退役
+    快照搬進 `archive/` 之後仍通過 ManifestStore schema、`show_id` 仍能打到第一季的舊 feed;
+    legacy 集(無 attempts)又不比 sha,`mp3_path` 哪天被「修好」就會把別節目的音檔以舊節目
+    名義送上公網。目錄名與 README 只擋得住讀過它們的人。
+
+    判準同 `is_withheld`:**欄位在不在**。缺席 = 照發;`true` = 退役;其他任何值(`false`、
+    `null`、字串、`1`)raise,不 fall through —— 這個欄位唯一的用途就是「別發這份」,寫錯
+    就靜默照發正好在它該生效時失效,而 feed host 永不刪檔。`is True` 不是 `== True`:
+    `1 == True` 在 Python 成立。只管發布層:生成、retract、腳本刻意不看這個欄位。
+    """
+    if "retired" not in manifest:
+        return
+    flag = manifest["retired"]
+    if flag is True:
+        raise ValueError(
+            "manifest is retired(頂層 `retired: true`):這是退役快照,不得作為 manifest_path"
+            " 發布 —— 正本是該節目工作區裡現行的 series_manifest.json"
+        )
+    raise ValueError(
+        f"manifest 頂層 retired 只能是 true,得到 {flag!r} —— 要發布就把整個欄位移除,"
+        "不要填 false/null/字串(與 publication_state 同一條紀律:缺席才是照發)"
+    )

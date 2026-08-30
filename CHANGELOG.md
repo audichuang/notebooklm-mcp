@@ -25,6 +25,19 @@ bundle 相對於它;沒傳時仍推祖父目錄,但祖父目錄裡還有**別的
 單節目佈局行為不變(既有 31 條 bundle 測試全綠,新增 3 條)。`manifest_workspace_sha256`
 語義不變。**show-root 佈局的節目從此必傳 `workspace_root`**,bundle 路徑不再帶節目前綴。
 
+### `publish_series`:manifest 頂層 `retired: true` → 任何 PUT 之前 raise
+
+**症狀**(podcast-lab graphify 2026-08-30 Codex 審查):兩份退役 manifest 搬進 `archive/`
+之後仍通過 ManifestStore schema、`show_id` 仍能打到第一季的舊 feed;今天 publisher 會在
+resolve 擋下只是因為 8 個 `mp3_path` **恰好不存在**——legacy 集不比 sha,路徑一被「修好」,
+Audicast 的音檔就會以舊節目名義上公網。目錄名與 README 只擋得住讀過它們的人。
+
+**修法**(ADR-0013):`publish/state.assert_not_retired`,讀完 manifest 的第一步就叫,在
+auth probe 之前。判準同 `publication_state`:缺席=照發、`true`=擋、其他值 fail-loud
+(`is True`,`1` 不算)。只管發布層;不加寫入工具,標記走 `ManifestStore.update` 一次。
+`retired` 進 `check_skill_sync` 契約詞。新增 7 條 publish 測試(含 `healthz_status=500`
+證明閘排在任何網路動作之前)。
+
 ## v0.9.23 — 送出即正本:brief 全文進 attempt,發布端驗 mp3 出身
 
 ### attempt 內嵌送出的 brief 全文(314709b)

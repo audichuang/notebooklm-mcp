@@ -563,6 +563,57 @@ async def test_all_episodes_deferred_fails_instead_of_publishing_empty_feed(
     assert captured == []
 
 
+def _retired_manifest(tmp_path, value):
+    """一份**完全合法、能發**的兩集 manifest,只多了頂層 `retired`。合法是重點:閘要證明的是
+    「內容再對也不發」,拿一份本來就會被別的 preflight 擋下的 manifest 測不出這件事。"""
+    manifest = _two_episode_manifest(tmp_path, filename=f"retired-{value!r}.json")
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored["retired"] = value
+    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    return manifest
+
+
+async def test_retired_manifest_is_refused_before_any_network(env, tmp_path, artwork_png, monkeypatch):
+    """manifest 頂層 `retired: true` → 在任何網路動作(連 `/healthz` probe)之前 raise。
+
+    存在的理由(podcast-lab graphify 2026-08-30 審查):兩份退役快照搬進 `archive/`
+    之後仍通過 ManifestStore schema、`show_id` 仍能打到第一季的舊 feed;只靠位置與 README
+    擋,`mp3_path` 哪天被「修好」就會把別節目的音檔以舊節目名義送上公網(legacy 集不比
+    sha,`_mp3_provenance_gap` 攔不到)。位置不是安全邊界,machine-readable 旗標才是。
+
+    `healthz_status=500`:若閘沒有排在最前面,會先撞 auth precheck 的錯誤訊息而非本閘的。"""
+    captured = _install_mock(monkeypatch, healthz_status=500)
+    manifest = _retired_manifest(tmp_path, True)
+    with pytest.raises(ValueError, match="is retired"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+@pytest.mark.parametrize("value", [False, None, "true", 1, "yes"])
+async def test_retired_accepts_only_true_and_never_falls_through(
+    env, tmp_path, artwork_png, monkeypatch, value
+):
+    """`retired` 一旦出現只認 `true`;`false`/`null`/字串/`1` 一律 raise,**不 fall through
+    成照發**(與 `publication_state`、`published_at` 同一條:缺席才是照發,要發就移除欄位)。
+    `1` 特別列入:`1 == True` 在 Python 成立,寫成 `== True` 會放行一個沒人打算寫的值。"""
+    captured = _install_mock(monkeypatch, healthz_status=500)
+    manifest = _retired_manifest(tmp_path, value)
+    with pytest.raises(ValueError, match="retired 只能是 true"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_manifest_without_retired_field_publishes(env, tmp_path, artwork_png, monkeypatch):
+    """對照組:沒有這個欄位的 manifest 行為不變(既有幾十條 publish 測試都是這種形狀,
+    這條只是把「缺席=放行」講成一條看得見的契約)。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    assert "retired" not in json.loads(open(manifest, encoding="utf-8").read())
+    out = await _publish(manifest, artwork_png)
+    assert out["episode_count"] == 2
+    assert captured
+
+
 async def test_writer_tool_round_trips_with_the_publisher(
     env, tmp_path, artwork_png, monkeypatch
 ):

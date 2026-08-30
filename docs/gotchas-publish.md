@@ -56,6 +56,13 @@
   gate,不是 await barrier**(分不出「manifest 有舊路徑、新版正在重生」),也**不保證零 orphan
   blob**(網路/ffmpeg/uploader 階段失敗仍會留未引用的 immutable blob,那是 media-first 發布
   的已知代價)。
+- **(v0.9.24)manifest 頂層 `retired: true` = 退役快照,`publish_series` 讀完 manifest 的第一步
+  就 raise(auth probe 與任何 PUT 之前)。** 判準在 [`publish/state.assert_not_retired`](../notebooklm_mcp/publish/state.py),
+  同 `publication_state` 的紀律:缺席=照發、`true`=擋、`false`/`null`/字串/`1` 一律 fail-loud
+  (`is True`,不是 `== True`)。**只管發布層**,生成/retract/腳本不看它。存在的理由是 graphify
+  兩份 archive manifest:位置與 README 擋不住「mp3_path 被修好」的那一天,而 legacy 集不比 sha
+  (見 [ADR-0013](adr/0013-retired-manifests-are-fenced-by-a-flag-not-a-location.md))。
+  標記走 `ManifestStore.update`,不加工具;要復活就移除欄位,沒有 `retired: false`。
 - **(v0.9.18)`publication_state: "deferred"` 是 host↔`publish_series` 的契約:那一集留在
   manifest 當 audit、但不進 feed。** 這不是假想功能 —— `podcast-lab/output/series_manifest.json`
   的 EP46 就是這個狀態(音檔五次 semantic QA 拒收、全部 attempt 已撤回、`mp3_path: null`、

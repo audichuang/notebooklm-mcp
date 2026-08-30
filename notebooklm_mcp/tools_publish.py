@@ -449,6 +449,9 @@ async def publish_series(
     ``podcast_series`` / attempt 掃描刻意不看這個欄位。未知的 ``publication_state``
     值直接 raise(不會 fall through 成照發)。
 
+    manifest 頂層 ``retired: true`` = **退役快照**(換過 show_id 之後留作稽核的舊 manifest):
+    讀完 manifest 的第一步就 raise,任何 PUT 之前;``true`` 以外的值也 raise,要發就移除欄位。
+
     完整參數/回傳/preflight 涵蓋範圍見 skill ``references/tool-reference.md``。"""
     base_url = _require_url_env("PODCAST_PUBLIC_BASE_URL")
     # return_episodes 只是回傳過濾器,但舊版拖到所有 PUT + manifest 回寫都完成後才
@@ -467,6 +470,11 @@ async def publish_series(
     # (manifest 先讀——show 設定在裡面;episodes preflight 沿用同一份。)
     store = ManifestStore(manifest_path)
     manifest = store.read()
+    # 退役快照(graphify `archive/` 那兩份)仍通過 ManifestStore schema、show_id 仍能打到舊
+    # feed;位置與 README 擋不住「mp3_path 被修好」的那一天,machine-readable 旗標才擋得住
+    # (ADR-0013)。放在讀完 manifest 的第一步:它之後的每一道 preflight 都是在替一份不該
+    # 發的東西驗細節。
+    state_mod.assert_not_retired(manifest)
     saved_show = manifest.get("show") or {}
     show_cfg = {
         "show_id": show_id or saved_show.get("show_id"),
