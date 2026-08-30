@@ -41,8 +41,10 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 **tag 之前**:CI 綠(它含 wheel 的 `uv tool install` + `--help` 冒煙),
 **tag 之後**:
 
-1. 等 `retag-latest` workflow 綠。`git ls-remote origin refs/tags/latest` 的 SHA
-   必須等於 `git rev-parse vX.Y.Z^{}`。沒動就 `gh workflow run retag-latest.yml`,
+1. 等 `retag-latest` workflow 綠。**`latest` 是 annotated tag**,`git ls-remote origin
+   refs/tags/latest` 印的是 tag 物件的 SHA,永遠對不上 commit —— 要比 peeled 那行:
+   `git ls-remote --tags origin | grep 'latest^{}'` 的 SHA 必須等於 `git rev-parse vX.Y.Z^{}`
+   (v0.9.24 實際踩到:沒 peel 就誤判成「指針沒動」)。沒動就 `gh workflow run retag-latest.yml`,
    或本機 `bash scripts/retag-latest.sh --push`。
 2. 用 `@latest` 真的裝一次再收工 —— v0.7.0 的撞名就是這一步才發現的。
    **「裝完」要驗版本號,不能只看它印 `Installed 2 executables`**:uv 的 git cache
