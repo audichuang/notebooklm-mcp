@@ -59,12 +59,14 @@
     artifact 的 unique id/confined relative path/lowercase SHA-256/positive byte count。
     `rollback_attempt_binding` 只刪「這次自己寫的那份 bytes」,清理失敗回 note 掛上
     原例外而**不 raise**(在 except handler 裡再拋會蓋掉真正該讀的錯誤)。
-    **`input_bundle_path` 是相對於 workspace 的路徑**(workspace = manifest 的祖父目錄),
-    絕對路徑、`..`、路徑上任何 symlink 一律拒。**manifest 的父目錄刻意不限定名稱**——
-    三個 podcast 專案分別用 `manifest/`(network-podcast)、`output/`(podcast-lab)、
-    `season-01/output/`(data-structure-podcast),曾經寫死 `manifest/` 讓功能只有一個專案
-    能用,而那個專案根本還沒有 bundle;containment 由 `relative_to(workspace)` 保證,
-    目錄**名字不是安全邊界**。目前只有 `podcast_episode` 支援,`podcast_series` 尚未接。
+    **`input_bundle_path` 是相對於 workspace 的路徑**,絕對路徑、`..`、路徑上任何 symlink 一律拒。
+    **workspace 由 host 用 `workspace_root` 宣告**(節目目錄,manifest 必須在它底下);省略時推成
+    manifest 的祖父目錄,但祖父目錄裡還有別的 `series_manifest.json` 就 fail-closed(ADR-0012:
+    manifest 放 show root 時祖父是整個多節目容器,別節目的 bundle 會過圍籬,2026-08-30 實測)。
+    **manifest 的父目錄刻意不限定名稱**——三個 podcast 專案分別用 `manifest/`、`output/`、
+    `season-01/output/`,曾經寫死 `manifest/` 讓功能只有一個專案能用;containment 由
+    `relative_to(workspace)` 保證,目錄**名字與深度都不是安全邊界**。目前只有 `podcast_episode`
+    支援,`podcast_series` 尚未接。
   - `publish/notes_html.py` — report Markdown → 自包含 HTML;渲染後掃描 script/外部資源標記,命中 fail-closed
   - `tools_podcast.py` — manifest-backed audio attempt 的 durable generate／reconcile／explicit adopt／
     checkpointed finalize;`podcast_series` 只越過已完成 postconditions,standalone resume 是 fallback。

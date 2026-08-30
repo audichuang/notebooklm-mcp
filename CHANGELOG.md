@@ -6,6 +6,25 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.24(尚未發 tag)— 凍結輸入的圍籬由 host 宣告
+
+### `podcast_episode` 新增 `workspace_root`;推導出多節目容器就 fail-closed
+
+**症狀**(podcast-lab 2026-08-30 獨立審查實測):五個把 manifest 放 show root 的節目
+(`shows/<show>/series_manifest.json`),`load_frozen_generation_input` 推出的 workspace
+= manifest 的祖父目錄 = **整個 `shows/`**。用 graphify 的 manifest 傳
+`input_bundle_path="audicast/episodes/EP46-…/attempt-005"`,loader 照吃、`read_attempt_binding`
+回 `None`;帶認證跑下去就是拿別節目的 brief 燒配額,並留下一筆說謊的 binding。
+
+**根因**:圍籬規則刻意不限定 manifest 父目錄的**名字**(v0.4.x 教訓),卻隱含限定了**深度**
+——manifest 一定在節目目錄下兩層。深度跟名字一樣不是安全邊界。
+
+**修法**(ADR-0012):`workspace_root` 讓 host 宣告節目目錄,manifest 必須在它底下、
+bundle 相對於它;沒傳時仍推祖父目錄,但祖父目錄裡還有**別的** `series_manifest.json`
+(`os.walk`,不限深度、不跟 symlink)就拒,錯誤訊息指名要傳 `workspace_root`。
+單節目佈局行為不變(既有 31 條 bundle 測試全綠,新增 3 條)。`manifest_workspace_sha256`
+語義不變。**show-root 佈局的節目從此必傳 `workspace_root`**,bundle 路徑不再帶節目前綴。
+
 ## v0.9.23 — 送出即正本:brief 全文進 attempt,發布端驗 mp3 出身
 
 ### attempt 內嵌送出的 brief 全文(314709b)

@@ -2783,6 +2783,7 @@ async def podcast_episode(
     manifest_path: str | None = None,
     input_bundle_path: str | None = None,
     source_ids: list[str] | None = None,
+    workspace_root: str | None = None,
 ) -> dict:
     """生成、命名、下載並回錄一集 podcast。
 
@@ -2792,7 +2793,10 @@ async def podcast_episode(
 
     傳 ``manifest_path`` 時，attempt 會在任何遠端 generation 副作用前持久化；
     若另傳 ``input_bundle_path``（相對 workspace 的路徑），``brief`` 必須為 ``None``，
-    provider 輸入只來自驗過雜湊的 frozen bytes。timeout／斷線後須依錯誤中的
+    provider 輸入只來自驗過雜湊的 frozen bytes。**workspace 由 ``workspace_root`` 宣告**
+    (節目目錄,manifest 必須在它底下);省略時推成 manifest 的祖父目錄,但祖父目錄裡還有
+    別的 ``series_manifest.json``(多節目容器、manifest 放 show root)就 fail-closed,
+    因為那個「祖父」是整個容器、別節目的 bundle 會過圍籬(ADR-0012)。timeout／斷線後須依錯誤中的
     ``attempt_id`` 呼叫 ``podcast_episode_reconcile``，不可重送本工具來重生。
     finalize 各步驟皆 checkpoint，可用 ``podcast_episode_resume`` 接續。不傳 manifest
     則保留 standalone best-effort 行為。
@@ -2821,6 +2825,8 @@ async def podcast_episode(
             "use an already verified notebook source or standalone best-effort"
         )
     prepared_generation_input = None
+    if workspace_root is not None and input_bundle_path is None:
+        raise ValueError("workspace_root only applies to input_bundle_path (frozen generation input)")
     if input_bundle_path is not None:
         if brief is not None:
             raise ValueError(
@@ -2833,6 +2839,7 @@ async def podcast_episode(
             manifest_path=manifest_path,
             input_bundle_path=input_bundle_path,
             episode_n=episode_n,
+            workspace_root=workspace_root,
         )
         # Existing sidecars are replay authority. Validate their request/workspace
         # identity before auth or any cleanup/baseline RPC; a copied bound bundle

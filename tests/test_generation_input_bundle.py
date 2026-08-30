@@ -883,3 +883,90 @@ def test_post_publish_temp_cleanup_failure_keeps_the_binding(tmp_path, monkeypat
     monkeypatch.setattr(Path, "unlink", refuse_temp)
     _, encoded = gi.write_attempt_binding(prepared, attempt_id="a1")
     assert (prepared["bundle"] / "attempt-binding.json").read_bytes() == encoded
+
+
+# ---- workspace_root:圍籬由 host 宣告,不從目錄深度推 ------------------------------------
+# podcast-lab 的真實形狀:`shows/` 底下十幾個節目,其中五個把 manifest 直接放 show root。
+# 「workspace = manifest 的祖父目錄」在那些節目上會變成**整個 shows/**——2026-08-30 實測
+# graphify 的 manifest 吃進了 audicast 的 bundle(回 binding None),下一步就是拿別節目的
+# brief 燒配額。目錄深度不是安全邊界,所以圍籬改由 host 宣告;推不出唯一節目時 fail-closed。
+
+
+def _multi_show_container(tmp_path):
+    shows = tmp_path / "shows"
+    (shows / "graphify").mkdir(parents=True)
+    (shows / "audicast" / "output").mkdir(parents=True)
+    (shows / "audicast" / "output" / "series_manifest.json").write_text("{}", encoding="utf-8")
+    return shows
+
+
+def test_multi_show_container_is_refused_without_workspace_root(tmp_path):
+    """祖父目錄裡還有別的 series_manifest.json = 多節目容器 → 沒宣告 workspace_root 就拒,
+    而且要在讀任何 bundle bytes 之前拒(別節目的 bundle 路徑合法、檔案都在,靠圍籬才擋得住)。"""
+    shows = _multi_show_container(tmp_path)
+    foreign, _ = _write_bundle(shows / "audicast")
+
+    with pytest.raises(ValueError, match="workspace_root"):
+        load_frozen_generation_input(
+            manifest_path=str(shows / "graphify" / "series_manifest.json"),
+            input_bundle_path=foreign.relative_to(shows).as_posix(),
+            episode_n=1,
+        )
+
+
+def test_workspace_root_confines_bundle_to_the_declared_show(tmp_path):
+    shows = _multi_show_container(tmp_path)
+    own, brief = _write_bundle(shows / "graphify")
+    foreign, _ = _write_bundle(shows / "audicast")
+    manifest = shows / "graphify" / "series_manifest.json"
+    root = str(shows / "graphify")
+
+    prepared = load_frozen_generation_input(
+        manifest_path=str(manifest),
+        input_bundle_path=own.relative_to(shows / "graphify").as_posix(),
+        episode_n=1,
+        workspace_root=root,
+    )
+    assert prepared["brief"] == brief
+    # record 的 path 相對於宣告的 workspace,不再帶節目前綴
+    assert prepared["record_base"]["path"] == own.relative_to(shows / "graphify").as_posix()
+
+    # 別節目的 bundle:只能用 `..` 才指得到,圍籬擋下
+    with pytest.raises(ValueError, match="confined"):
+        load_frozen_generation_input(
+            manifest_path=str(manifest),
+            input_bundle_path="../audicast/" + foreign.relative_to(shows / "audicast").as_posix(),
+            episode_n=1,
+            workspace_root=root,
+        )
+    # manifest 自己不在宣告的 workspace 裡:宣告與 manifest 各說各話,拒
+    with pytest.raises(ValueError, match="workspace_root"):
+        load_frozen_generation_input(
+            manifest_path=str(shows / "audicast" / "output" / "series_manifest.json"),
+            input_bundle_path=own.relative_to(shows / "graphify").as_posix(),
+            episode_n=1,
+            workspace_root=root,
+        )
+
+
+async def test_podcast_episode_passes_workspace_root_through(fake_client, tmp_path):
+    """工具層把 workspace_root 傳下去,show-root manifest 的節目就能在多節目容器裡用凍結輸入。"""
+    shows = _multi_show_container(tmp_path)
+    own, brief = _write_bundle(shows / "graphify")
+
+    await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(shows / "graphify"),
+        manifest_path=str(shows / "graphify" / "series_manifest.json"),
+        input_bundle_path=own.relative_to(shows / "graphify").as_posix(),
+        workspace_root=str(shows / "graphify"),
+    )
+    generate = next(c for c in fake_client.artifacts.calls if c[0] == "generate_audio")
+    assert generate[1]["instructions"] == brief
+    binding = json.loads((own / "attempt-binding.json").read_text(encoding="utf-8"))
+    assert binding["manifest_workspace_sha256"] == hashlib.sha256(
+        str((shows / "graphify" / "series_manifest.json").resolve()).encode("utf-8")
+    ).hexdigest()

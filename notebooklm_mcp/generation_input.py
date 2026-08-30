@@ -210,23 +210,67 @@ def _discard(path: Path) -> None:
         pass
 
 
+def _other_series_manifests(workspace: Path, manifest: Path) -> list[Path]:
+    """Every ``series_manifest.json`` under ``workspace`` except ``manifest`` itself.
+
+    不限深度、不跟 symlink、跳過隱藏目錄(``.venv`` / ``.git``)。寫死 glob 深度就是下一個
+    「寫死 ``manifest/``」——對現在的佈局成立、對下一季的佈局不成立。"""
+    others: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if "series_manifest.json" in filenames:
+            found = Path(dirpath, "series_manifest.json")
+            if found.resolve(strict=False) != manifest:
+                others.append(found)
+    return others
+
+
 def load_frozen_generation_input(
-    *, manifest_path: str, input_bundle_path: str, episode_n: int
+    *,
+    manifest_path: str,
+    input_bundle_path: str,
+    episode_n: int,
+    workspace_root: str | None = None,
 ) -> dict[str, Any]:
     """Read each frozen byte sequence once and return the exact provider brief.
 
-    **Workspace** = the manifest's grandparent (`<workspace>/<any>/series_manifest.json`),
-    and it is the only containment boundary: the bundle must resolve inside it, with no
-    symlink on any segment. The manifest's parent directory name is deliberately NOT
-    constrained — a directory *name* is not a security boundary, and the three podcast
-    workspaces in use disagree on it (`manifest/`, `output/`, `season-01/output/`).
-    Requiring one of them made the feature unreachable everywhere but one project,
-    while adding nothing that ``relative_to(workspace)`` did not already guarantee.
+    **Workspace** is the only containment boundary: the bundle must resolve inside it,
+    with no symlink on any segment. The host declares it with ``workspace_root`` (the
+    show's directory; the manifest must live inside it). When omitted, it is inferred as
+    the manifest's grandparent (`<workspace>/<any>/series_manifest.json`) — the manifest's
+    parent directory name is deliberately NOT constrained, because a directory *name* is
+    not a security boundary and the podcast workspaces in use disagree on it
+    (`manifest/`, `output/`, `season-01/output/`).
+
+    Inference fails closed when the grandparent also holds **another**
+    ``series_manifest.json``: that means the manifest sits at a show root inside a
+    multi-show container, so "grandparent" is the whole container and a bundle from a
+    *different* show would pass the fence (observed 2026-08-30: a show-root manifest
+    accepted another show's bundle). Pass ``workspace_root`` in that layout (ADR-0012).
     """
     manifest = Path(manifest_path).expanduser().resolve(strict=False)
     if manifest.name != "series_manifest.json":
         raise ValueError("frozen input requires a series_manifest.json path")
-    workspace = manifest.parent.parent.resolve()
+    if workspace_root is not None:
+        workspace = Path(workspace_root).expanduser().resolve(strict=False)
+        try:
+            manifest.relative_to(workspace)
+        except ValueError as error:
+            raise ValueError(
+                "manifest_path must live inside workspace_root "
+                f"(manifest {manifest}, workspace_root {workspace})"
+            ) from error
+    else:
+        workspace = manifest.parent.parent.resolve()
+        others = _other_series_manifests(workspace, manifest)
+        if others:
+            raise ValueError(
+                f"inferred workspace {workspace} (the manifest's grandparent) also contains "
+                f"{len(others)} other series_manifest.json — this is a multi-show container, "
+                "and a bundle from another show would pass the fence. Pass "
+                "workspace_root=<this show's directory> (the manifest must be inside it) "
+                "and give input_bundle_path relative to that directory."
+            )
     raw_bundle = Path(input_bundle_path).expanduser()
     if raw_bundle.is_absolute() or ".." in raw_bundle.parts:
         raise ValueError("input_bundle_path must be a confined relative path")
