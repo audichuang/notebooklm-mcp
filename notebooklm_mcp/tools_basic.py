@@ -890,6 +890,55 @@ async def source_fulltext(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def source_search(
+    notebook_id: str,
+    query: str,
+    source_ids: list[str] | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Rank source passages by relevance to a question — find WHERE the sources
+    say something, without pulling whole documents into context.
+
+    回 `chunks`(最相關在前),每筆是 `{source_id, text, rank, start, end}`。
+    `source_ids` 限定要搜哪幾筆(省 token、也避免回錄的舊集干擾);不傳 = 整本。
+    `limit` 限制回幾段;不傳 = 伺服器排序後的全部。
+
+    **跟 `source_fulltext(contains=…)` 是兩件事,別互相取代**:
+    - `contains` 是**精確子字串**比對,答的是「這個詞有沒有真的進到 body」——
+      驗 PDF / Medium 有沒有吃到內文用它,語意檢索在這裡反而會答錯(它會回
+      「在講那件事」但不含該詞的段落)。
+    - 這支是**語意排序**,答的是「哪幾段在談 X」,而且回的是**段落原文**,
+      不是布林值 —— 呼叫端看得到證據本身。
+
+    生成前拿它核對 brief 的說法在來源裡站不站得住,比生成完再聽出問題便宜得多
+    (EP46 曾連五次 semantic QA 拒收、五次生成全部作廢)。
+
+    ⚠️ `rank` 是**全域**排序且**越小越相關**;`0` 代表伺服器沒給排名(不是最相關)。
+    `start` / `end` 是 source 內的字元 offset,伺服器沒給時是 `None`(不是 0)。
+    ⚠️ 這是檢索 RPC(`RETRIEVE_RELEVANT_CHUNKS`),不是 Studio 生成;但**索引涵蓋範圍
+    未實測** —— 上傳的 mp3 轉錄稿搜不搜得到,還沒有實跑證據,別預設它一定在。
+
+    參數驗證(空 query、`source_ids` 型別、`limit` 正整數)**刻意不在這裡重寫**,
+    一律由 SDK 的 `_sources.validate_search` 在打 RPC 之前擋掉 —— 自己再寫一份就是
+    第二份會漂的規則。前提由 test_contracts 釘住。
+    """
+    chunks = await runtime.get_client().sources.search(
+        notebook_id, query, source_ids=source_ids, limit=limit
+    )
+    rows = [
+        {
+            "source_id": c.source_id,
+            "text": c.text,
+            "rank": c.rank,
+            "start": c.start,
+            "end": c.end,
+        }
+        for c in chunks
+    ]
+    return {"count": len(rows), "chunks": rows}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def notebook_get(notebook_id: str) -> dict:
     """Get a notebook's metadata (title, source count, owner) — confirm you're
     targeting the right notebook before generating or publishing.

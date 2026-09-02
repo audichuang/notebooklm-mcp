@@ -23,6 +23,37 @@ def test_from_storage_is_sync_context_factory():
     assert p[:3] == ["path", "timeout", "profile"]
 
 
+def test_default_backend_is_still_web():
+    """0.8.2 起 client 有 web / android 兩個 backend,**我們整套都建在 web 上**。
+
+    android 走 master token + gRPC,不吃 cookie —— 一旦上游把預設翻成 android,
+    `_auth.psidts_recovery` / keepalive / `_sanitized_auth_entries` 這些 pool 的
+    憑證機制會整組變成死碼,而**本檔其餘 `getsource` 斷言全都釘在 `_web.*` 上、
+    照樣綠**(它們驗的是 web 實作,不是實際跑的那個 backend)。所以預設值本身
+    要有人釘住。
+
+    `explicit=None`(我們不傳 `backend=`)+ `env=None`(不設 NOTEBOOKLM_BACKEND)
+    是我們的實際呼叫形狀。
+    """
+    import inspect as _inspect
+
+    from notebooklm import _client_assembly
+
+    pref = _client_assembly.resolve_backend_preference(explicit=None, env=None)
+    assert (pref.preferred, pref.reason) == ("web", "default")
+
+    # 但預設值只在「沒人設環境變數」時成立,而這條測試自己看不見環境。真正的 fail-closed
+    # 在 `app._INLINE_AUTH_ENV_OVERRIDES` 把 `NOTEBOOKLM_BACKEND` 刪掉 —— 那道護欄綁的是
+    # **字面字串**(上游沒有導出常數),所以名字要在這裡對回 SDK,否則上游改名之後我們的
+    # 覆寫會靜默變成 no-op,而症狀是「某天 pool 整個換 backend」。
+    from notebooklm_mcp.app import _BACKEND_ENV, _INLINE_AUTH_ENV_OVERRIDES
+
+    assert f'os.environ.get("{_BACKEND_ENV}")' in _inspect.getsource(
+        _client_assembly
+    ), "SDK 讀的 backend 環境變數名改了,app 的 inline 覆寫要跟著改"
+    assert _INLINE_AUTH_ENV_OVERRIDES[_BACKEND_ENV] is None
+
+
 def test_generate_audio_signature():
     from notebooklm._artifacts import ArtifactsAPI
 
@@ -180,17 +211,24 @@ def test_rename_false_no_longer_short_circuits():
     永遠走不到的死碼,而 `_finalize_episode` 的註解會變成謊話——這裡先紅。
 
     用原始碼比對而不是打 RPC:contract 測試必須離線。
+
+    **0.8.2 起 `getsource` 一律要對 `_web.*` 的實作**:那一版把公開 facade
+    (`ArtifactsAPI` / `SourcesAPI` / `NotebooksAPI` …)改成 ABC,方法體只剩
+    `raise NotImplementedError`,實作搬到 `_web.*`(另一半是新的 android backend)。
+    對 ABC 抓原始碼**不會爆,只會靜默失去意義** —— `"短路字串" not in stub` 恆真,
+    這條測試會從此永遠綠。簽名斷言(`_params`)留在 facade 是對的(那是兩個 backend
+    共同的契約、也是我們實際呼叫的東西),**只有讀 body 的斷言要下沉**。
     """
     import inspect as _inspect
 
-    from notebooklm._artifacts import ArtifactsAPI
-    from notebooklm._sources import SourcesAPI
+    from notebooklm._web.artifacts import WebArtifactsAPI
+    from notebooklm._web.sources import WebSourcesAPI
 
-    art_src = _inspect.getsource(ArtifactsAPI.rename)
+    art_src = _inspect.getsource(WebArtifactsAPI.rename)
     # 0.7.x 的短路長這樣;0.8.0 應該已經不存在。
     assert "if not return_object and not future_errors_enabled()" not in art_src
     assert "ArtifactNotFoundError" in art_src, "artifacts.rename 應該仍會在查不到時 raise"
-    src_src = _inspect.getsource(SourcesAPI.rename)
+    src_src = _inspect.getsource(WebSourcesAPI.rename)
     assert "SourceNotFoundError" in src_src, "sources.rename 應該仍會在查不到時 raise"
 
 
@@ -204,7 +242,7 @@ def test_generation_kickoff_refuses_by_raising():
     import inspect as _inspect
 
     from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
-    from notebooklm._artifact import generation
+    from notebooklm._web.artifact import generation
 
     assert issubclass(RateLimitError, Exception)
     assert issubclass(ArtifactFeatureUnavailableError, Exception)
@@ -351,6 +389,7 @@ def test_slide_and_report_enum_members():
     assert ReportFormat.STUDY_GUIDE.value == "study_guide"
     assert ReportFormat.BRIEFING_DOC.value == "briefing_doc"
     assert ReportFormat.BLOG_POST.value == "blog_post"
+    assert ReportFormat.CONCEPT_EXPLANATION.value == "concept_explanation"
     # CUSTOM 是 generate_report(custom_prompt=…) 的前提;它消失就要回頭改 enums 白名單。
     assert ReportFormat.CUSTOM.value == "custom"
 
@@ -531,12 +570,17 @@ def test_psidts_recovery_and_cookie_sanitizer_private_surface():
     assert psidts_recovery._PSIDTS_COOKIE == "__Secure-1PSIDTS"
 
 
-def test_notebooklm_py_lower_bound_excludes_0_8_0():
+def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
     """分發路徑不讀 lock,所以 pyproject 的版本下界是唯一實裝約束。
 
     `uv tool install git+…` 不讀 `uv.lock`;Codex 將兩處下界改回 `>=0.8` 時,
     117 個測試仍全綠,但 0.8.0 wheel 實際 import 會因缺少私有符號而炸掉。
     這證明版本字串本身需要行為性契約測試,不能只依賴目前 venv 的實裝版本。
+
+    被擋掉的版本各有理由:**0.8.0** 缺我們 import 的私有符號;**0.8.1** 沒有
+    `notebooklm._web.*`,而本檔的 `getsource` 斷言全釘在那裡 —— production code
+    在 0.8.1 仍跑得起來,但「測的」與「裝的」會是不同版,而那正是 release-checklist
+    §依賴版本對帳整節在防的事。
     """
     import tomllib
     from pathlib import Path
@@ -560,7 +604,8 @@ def test_notebooklm_py_lower_bound_excludes_0_8_0():
     assert len(notebooklm_requirements) == 2
     for requirement in notebooklm_requirements:
         assert Version("0.8.0") not in requirement.specifier
-        assert Version("0.8.1") in requirement.specifier
+        assert Version("0.8.1") not in requirement.specifier
+        assert Version("0.8.2") in requirement.specifier
 
 
 def test_rotation_lock_and_file_lock_semantics_that_app_lifespan_depends_on(tmp_path):
@@ -755,7 +800,7 @@ def test_sync_auth_uses_the_sdk_profile_path_resolver():
 
 def test_auth_probe_matches_the_sdk_http_auth_error_shape():
     """The compatibility shim must follow the HTTP cause retained by SDK 0.8.0."""
-    from notebooklm._rpc_executor import RpcExecutor
+    from notebooklm._web.transport.executor import RpcExecutor
     from notebooklm._runtime import is_auth_error
     from notebooklm.exceptions import RPCError
     from notebooklm.rpc.types import RPCMethod
@@ -797,11 +842,14 @@ def test_generation_takes_its_source_list_from_the_notebook_not_the_server():
 
     三環有任何一環被上游改掉,這個推導就失效,清理義務要重新論證 —— 那正是這條測試
     要攔的。**不要因為它綠就以為驗過了生成端**:它證明的是推導的前提,不是端到端行為。
+
+    三環都釘在 `_web.*` 實作上,理由見
+    `test_rename_false_no_longer_short_circuits`(對 ABC facade 抓原始碼會靜默恆真)。
     """
-    from notebooklm._artifact.generation import ArtifactGenerationService
-    from notebooklm._notebooks import NotebooksAPI
-    from notebooklm._source.content import SourceContentRenderer
-    from notebooklm._source.listing import SourceLister
+    from notebooklm._web.artifact.generation import ArtifactGenerationService
+    from notebooklm._web.notebooks import WebNotebooksAPI
+    from notebooklm._web.sources.content import SourceContentRenderer
+    from notebooklm._web.sources.listing import SourceLister
 
     gen = inspect.getsource(ArtifactGenerationService.generate_audio)
     assert "get_source_ids" in gen, (
@@ -809,7 +857,7 @@ def test_generation_takes_its_source_list_from_the_notebook_not_the_server():
         "『source_delete 之後不會進生成』就完全失去依據"
     )
 
-    assert "GET_NOTEBOOK" in inspect.getsource(NotebooksAPI.get_raw)
+    assert "GET_NOTEBOOK" in inspect.getsource(WebNotebooksAPI.get_raw)
     assert "GET_NOTEBOOK" in inspect.getsource(SourceLister.list), (
         "sources.list 與 get_source_ids 不再同源 —— source_list 的觀察結果推不出生成端行為"
     )
@@ -818,3 +866,63 @@ def test_generation_takes_its_source_list_from_the_notebook_not_the_server():
     assert "[[source_id]" in fulltext and "notebook_id" not in fulltext.split("params =")[1][:120], (
         "get_fulltext 開始帶 notebook_id 了 —— 那樣『刪掉還讀得回』就變成真的異常,要重查"
     )
+
+
+def test_source_search_signature_and_chunk_fields():
+    """`source_search` 直接把三個參數轉給 SDK,不自己重寫任何驗證。
+
+    **空 query 的拒絕留給 SDK**(`ValidationError`):自己再寫一份 `if not query.strip()`
+    就是第二份會漂的規則。代價是這裡要釘住「SDK 真的會擋」,否則哪天它改成回空
+    list,我們的工具會安靜地把一次無意義的 RPC 當成「查無結果」回給呼叫端。
+
+    `source_ids` / `limit` 是 keyword-only —— 跟 source add 那一組同紀律(位置呼叫
+    會 TypeError),鎖住免得有人寫成位置參數之後上游再插參數就靜默錯位。
+    """
+    import dataclasses
+
+    from notebooklm._sources import SourcesAPI
+    from notebooklm.types import RelevantChunk
+
+    params = inspect.signature(SourcesAPI.search).parameters
+    assert list(params) == ["self", "notebook_id", "query", "source_ids", "limit"]
+    for name in ("source_ids", "limit"):
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
+
+    # 工具原樣轉發這五個欄位;少一個就是回傳契約破掉。
+    assert {f.name for f in dataclasses.fields(RelevantChunk)} == {
+        "source_id",
+        "text",
+        "rank",
+        "start",
+        "end",
+    }
+
+
+def test_source_search_inputs_are_validated_by_the_sdk_before_any_rpc():
+    """接續上一條:證明「不自己驗」是安全的,而不是漏驗。
+
+    驗證住在 **backend-neutral 的 `_sources.validate_search`**(web / android 共用),
+    不是 web 實作裡 —— 所以這條不必跟著 `_web.*` 下沉,也不會因為哪天多一個 backend
+    而失效。三樣都由它擋:空 query、`source_ids` 不是字串序列、`limit` 非正整數。
+
+    這三樣**全部**發生在打 RPC 之前。少了這個前提,`source_search` 那句「參數驗證交給
+    SDK」就會從紀律變成漏洞。
+    """
+    from notebooklm._sources import validate_search
+    from notebooklm.exceptions import ValidationError
+
+    for bad_query in ("", "   ", None):
+        with pytest.raises(ValidationError):
+            validate_search(bad_query, None, None)
+
+    # str 是 Sequence,不擋就會把 "abc" 拆成三個 id 打出去。
+    with pytest.raises(ValidationError):
+        validate_search("q", "not-a-list", None)
+    with pytest.raises(ValidationError):
+        validate_search("q", ["ok", ""], None)
+    for bad_limit in (0, -1, True, 1.5):
+        with pytest.raises(ValidationError):
+            validate_search("q", None, bad_limit)
+
+    # 正常輸入:query 去頭尾空白、source_ids 去重且保序、limit 原樣。
+    assert validate_search("  q  ", ["b", "a", "b"], 3) == ("q", ("b", "a"), 3)

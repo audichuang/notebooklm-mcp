@@ -94,6 +94,12 @@ grep -A1 'name = "mcp"' uv.lock | grep version                       # lock 鎖�
 必要時同步更新 `pyproject.toml` 的下界。**對齊要用 `uv sync --extra dev`,不是 `uv pip install -e .`** —— 後者不會把
 venv 拉到 lock 的版本。
 
+**升 notebooklm-py 之前先跑 `scripts/compare_sdk_surface.py`**:兩版各一個獨立 venv,各跑一次再 `diff`。
+上游 CHANGELOG 講的是「他們改了什麼」,不是「我們會不會壞」——0.8.2 那次兩者差很多,而且它挖出一筆
+**跟該版本無關**的舊帳(`ReportFormat.CONCEPT_EXPLANATION` 白名單漏了),那只有逐項比對 enum 值才看得到。
+用法與四個區塊各防什麼,寫在該檔的 docstring。**新增 SDK 呼叫點時把它加進腳本的 `_CALLS`** ——
+那份清單就是「我們的依賴表面」的定義,沒加進去的呼叫,升級時不會被比對到。
+
 **要對某個特定依賴版本跑測試**(例如試 notebooklm-py 的新版):開一個獨立 venv、用它自己的 `bin/python -m pytest`。
 別在共用 venv 上 `uv pip install X==版本` 之後跑 `uv run`(即使帶 `--no-sync`)—— 它可能把 venv 拉回 lock 的版本,
 而你以為在測 X。

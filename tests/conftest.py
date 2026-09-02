@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from notebooklm.exceptions import RPCError
+from notebooklm.exceptions import RPCError, ValidationError
 from notebooklm._types.research import (
     RESEARCH_RESULT_TYPE_REPORT,
     ResearchSource,
@@ -278,6 +278,10 @@ class FakeSources:
         # 設 "" 模擬 paywall/空殼;fulltext_raises=True 模擬 probe RPC 失敗。
         self.fulltext_content = "來源全文"
         self.fulltext_raises = False
+        # search() 回什麼由測試 seed。**放真的 RelevantChunk**,不放 SimpleNamespace ——
+        # 這個 fake 一旦跟實裝 dataclass 走形,測試會替上游的欄位改名背書
+        # (`Source.created_at` 的 tz 那次事故就是 fake 說謊)。
+        self.search_results: list = []
 
     def _add(
         self,
@@ -389,6 +393,24 @@ class FakeSources:
                        wait_timeout=120.0, idempotent=False):
         self.calls.append(("add_text", dict(title=title, wait=wait)))
         return type("Src", (), {"id": self._add(title)})()
+
+    async def search(self, notebook_id, query, *, source_ids=None, limit=None):
+        self.calls.append(
+            (
+                "search",
+                dict(
+                    notebook_id=notebook_id,
+                    query=query,
+                    source_ids=source_ids,
+                    limit=limit,
+                ),
+            )
+        )
+        # 空 query 由 SDK 擋(ValidationError),fake 照做 —— 我們的工具刻意不自己重寫
+        # 這條驗證,所以 fake 不能比實裝寬鬆,否則「不重寫」這個決定就沒被測到。
+        if not query.strip():
+            raise ValidationError("query must not be blank")
+        return list(self.search_results)
 
     async def delete(self, notebook_id, source_id):
         self.calls.append(("delete", dict(source_id=source_id)))

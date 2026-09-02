@@ -1,10 +1,11 @@
 # notebooklm-mcp
 
-Thin self-built MCP server over `notebooklm-py>=0.8.1,<0.9` for NotebookLM automation: notebooks, sources, zh_Hant-first audio overview, source-grounded chat, deterministic episodic podcast seasons, per-episode attachments, and RSS publishing.
+Thin self-built MCP server over `notebooklm-py>=0.8.2,<0.9` for NotebookLM automation: notebooks, sources, zh_Hant-first audio overview, source-grounded chat, deterministic episodic podcast seasons, per-episode attachments, and RSS publishing.
 
 ## Requirements
 
-- Python 3.12 only. Python 3.14 triggers a `notebooklm-py` SDK `inspect.signature` bug.
+- Python 3.12 only. (The `inspect.signature` bug that 3.14 used to trigger was fixed upstream in
+  `notebooklm-py` 0.8.2; 3.13+ is still unverified on our side, so the `<3.13` cap stays.)
 - `uv`
 - Doppler CLI with project `notebooklm`, config `dev`, and `NOTEBOOKLM_AUTH_JSON`
 

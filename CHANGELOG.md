@@ -38,6 +38,154 @@ auth probe 之前。判準同 `publication_state`:缺席=照發、`true`=擋、�
 `retired` 進 `check_skill_sync` 契約詞。新增 7 條 publish 測試(含 `healthz_status=500`
 證明閘排在任何網路動作之前)。
 
+### 跟上 notebooklm-py 0.8.2:contract tripwire 下沉到 `_web.*`,pin 抬到 `>=0.8.2`
+
+**症狀**:上游 2026-09-02 發 0.8.2。我們的 pin 是 `>=0.8.1,<0.9`,**它本來就吃得下**
+——四台生產機下一次 `uv tool install` 就會靜默換上 0.8.2,不需要我們同意。對 0.8.2 跑
+全套離線測試:13065 passed / 3 failed,三條全在 `tests/test_contracts.py`。
+
+**根因**:0.8.2 把 client 拆成 web / android 兩個 backend。公開 facade
+(`ArtifactsAPI` / `SourcesAPI` / `NotebooksAPI` / `SharingAPI` …)變成 ABC,方法體只剩
+`raise NotImplementedError`,web 實作搬到 `notebooklm._web.*`;`_rpc_executor` →
+`_web.transport.executor`、`_artifact.generation` → `_web.artifact.generation`、
+`_source.{content,listing}` → `_web.sources.{content,listing}`。**production code
+一行都不用改**(我們只碰 `notebooklm.types` / `exceptions` / `rpc.types` / `_auth.*` /
+`_runtime.is_auth_error` / `_research` 這些沒搬家的東西,13065 條全綠可證)。
+
+**這次真正的收穫是那條沒紅的**:`test_rename_false_no_longer_short_circuits` 只紅了
+sources 那一半,artifacts 那一半**照樣綠**——因為 `getsource(ArtifactsAPI.rename)` 抓到
+的是 ABC 的 stub,而 `"if not return_object and not future_errors_enabled()" not in stub`
+恆真。同一個機制也讓 `getsource(NotebooksAPI.get_raw)` 裡的 `GET_NOTEBOOK` 斷言變成
+死條文。**對 ABC facade 抓原始碼不會爆,只會靜默失去意義**——tripwire 半盲比全紅危險。
+
+**修法**:讀 body 的 `getsource` 斷言全部下沉到 `_web.*` 實作;簽名斷言(`_params`)
+留在 facade——那是兩個 backend 共同的契約,也正是我們實際呼叫的東西。紅線寫進 AGENTS.md
+的 `test_contracts.py` 那一列。另補一條 `test_default_backend_is_still_web`:預設翻成
+android 的話,cookie 那一整套(`_auth.psidts_recovery` / keepalive /
+`_sanitized_auth_entries`)會變死碼,而下沉到 `_web.*` 的斷言驗的是 web 實作、**照樣全綠**,
+所以預設值本身要有人釘。
+
+**pin**:`notebooklm-py>=0.8.2,<0.9`(含 `login` extra)+ `uv.lock` 0.8.1→0.8.2。抬下界
+不是功能需求(production 兩版都跑),是為了「測的」與「裝的」是同一版。0.8.2 另外兩項
+碰到我們的變更,查完都不用動:①#2296 寫入操作被拒不再回報成功——`_web.sharing.set_users`
+仍是 `allow_null=True` + `return get_status(...)`,**沒有**驗 grant 有沒有生效,層次跟
+`_share_each` 的 `get_status` 語意後檢不同(RPC 層 vs 語意層),兩道都留;②web chat 的配額
+耗盡改 raise `RateLimitError`——`chat_ask` 不吃例外、chat 也不在 `_failover` 迴圈裡,純粹是
+更好的錯誤;③SourceType code 14 由 `GOOGLE_SPREADSHEET` 改判 `GOOGLE_DRIVE`——我們的工具
+不序列化 source type,無感。另記一筆:#2268 修掉的正是我們 `requires-python <3.13` 註解裡
+點名的 3.14 `inspect.signature` bug(上游 CI 現在跑 3.10–3.14 全矩陣),**但 3.13 我方仍未驗,
+這輪不動 ceiling**。
+
+**不靠上游 CHANGELOG,逐項對帳過**(方法留著,下次升級照跑):兩版各開一個 venv,把我們實際
+依賴的表面 dump 成文字再 diff——① 所有 enum 成員與**整數值**(`AudioFormat` / `AudioLength` /
+`SlideDeckFormat` / `SlideDeckLength` / `ReportFormat` / `SharePermission` / `GrpcStatusCode` /
+`ShareViewLevel` / `ArtifactType`)**逐字相同**;② 我們呼叫的每一支 method 簽名相同(只有型別
+註解的字串化形式變了);③ exception 階層零移除、零改父類別,只新增 `PlayBookNotExportableError`
+與 `UnsupportedOperationError` —— `RateLimitError` / `ArtifactFeatureUnavailableError` 沒動,
+`_failover.REFUSED_WITHOUT_DISPATCH` 的前提完好;④ 13 個我們直接 import 的私有符號全在、簽名相同;
+⑤ 把行為函式的原始碼 hash 起來對(`StructuredDocument.render/.text/.slice`、
+`SourceFulltext.find_citation_context`、`normalize_rpc_code`、`is_auth_error`、
+`_sanitized_auth_entries`、psidts 四支、`_file_lock_try_exclusive`)——**17 支裡 16 支逐字相同**,
+唯一變的 `_normalize_import_verification_url` 用 19 個 URL 實測輸出完全一致(它變成 alias,邏輯照搬)。
+`_auth/` 裡我們碰的四個檔(`cookies` / `keepalive` / `psidts_recovery` / `storage_lock`)**0 行變動**;
+變動集中在 `browser_capture`(互動登入,只有本機)、`mint_service`(master token)、
+`session`(新增 epoch fence,是 in-process 的,取代不了我們跨機的 flock)。
+
+**唯一真的有行為變化、而且離線測不到的一塊:下載路徑的憑證附掛方式。**
+`download_audio` / `download_report` / `download_slide_deck` 每一集都跑。0.8.1 是把 cookie 交給
+httpx client 的 constructor jar,靠 same-origin 規則決定哪一跳帶得到;0.8.2 改成
+`cookies=None` + 每一跳由 `CredentialPolicy` 決定,`_on_request` 先把 `cookie` /
+`authorization` / `proxy-authorization` **全部拔掉**再套當跳的政策結果,另外新增 `_on_response`
+把 redirect 的 `Set-Cookie` 收回外部 jar 供下一跳用。**信任邊界沒動**——
+`_TRUSTED_DOWNLOAD_DOMAINS`(`.google.com` / `.googleusercontent.com` / `.googleapis.com`)與
+`_is_trusted_download_host` 兩版逐字相同。方向是收緊 + 修掉「redirect 發的 cookie 被丟掉」,
+但 mock client 對這段一個字都證明不了,所以**放 0.8.2 上四台機器前跑一次真實
+`artifact_download_audio`**(唯讀、零副作用,不必開整套 acceptance-workspace)。
+
+**`NOTEBOOKLM_BACKEND` 改成 fail-closed**:0.8.2 起 `from_storage()` 沒傳 `backend=` 時會讀這個
+環境變數,`"android"` 會把整個 client 換成 master-token + gRPC 的 namespace ——
+我們的憑證是 cookie snapshot,換過去等於拿一個沒有的憑證去打沒驗過的傳輸層,而
+`test_default_backend_is_still_web` 驗的是 `env=None` 的預設值、**看不見環境裡真的有人設了**。
+所以把它加進 `app._INLINE_AUTH_ENV_OVERRIDES` 設成 `None`(inline auth 期間刪掉),
+理由與另外四個不同(不是 cookie 重鑄),在該處另列。上游沒導出常數,名字由
+`test_default_backend_is_still_web` 對回 `_client_assembly` 的原始碼釘住,改名時會紅。
+
+**`Source.kind` 的標籤會變(但我們碰不到)**:`SourceType` 新增 6 個成員,code 14 由
+`GOOGLE_SPREADSHEET` 改判 `GOOGLE_DRIVE`。`source_list` 確實序列化 `kind`
+(`tools_basic.py:849`),所以**如果**筆記本裡有 Drive 檔案,那一列的 `kind` 字串會變 ——
+我們只加 URL / 檔案 / 純文字來源,實務上碰不到,但呼叫端若對 `kind` 做字串比對要知道這件事。
+
+**`audio_finalize` 的 rename 不用改**:#2296 讓寫入被拒不再回報成功。那條路本來就是
+「catch `Exception` → `_artifact_title_state` 實查 → 沒落地就標 `outcome_unknown` 並 re-raise」,
+成功時也照樣後檢。新增的 raise 只是走進既有的實查分支,而真正危險的方向(假成功)本來就擋著。
+
+**順帶挖到一筆跟 0.8.2 無關的舊帳,一併修掉**:`_REPORT_FORMAT` 白名單漏了
+`ReportFormat.CONCEPT_EXPLANATION`(0.8.1 / 0.8.2 都有),跟當年漏掉 `CUSTOM` 是同一個根因 ——
+上游一直有這個成員,白名單沒有,所以整個「概念解釋」形狀的講義對呼叫端等於不存在。
+`generate_report(report_format="concept_explanation")` 現在可用,`generate_report` 的 docstring
+從「三種靜態模板」改成四種,skill 的 `tool-reference.md` 兩處格式清單同步。
+
+**更重要的是讓它不會有第三次**:`test_every_sdk_enum_member_is_mapped_or_explicitly_declined`
+逐個 enum 檢查「SDK 的每個成員,要嘛在我們的 map 裡、要嘛在 `_DECLINED` 裡且寫得出理由」。
+已驗它會紅(拿掉 declined 條目即 fail)。`_DECLINED` 目前是**空的** —— 五個 enum 全開放,
+下次上游長出新成員時它才會再有東西,而那必須是一個寫得出理由的決定,不是沒人注意到。
+
+**方法本身收成 `scripts/compare_sdk_surface.py`**:這一輪的 dump/diff 不是一次性腳本 ——
+上游是月更節奏(0.8.0 七月 / 0.8.1 八月 / 0.8.2 九月),而 CONCEPT_EXPLANATION 這種帳
+**只有逐項比對 enum 值才看得到**,讀 CHANGELOG 一萬次都不會出現。四個區塊(enum 值 /
+dataclass 欄位 / 呼叫簽名 / 行為函式 hash)各防一種漂移,輸出是穩定排序的純文字所以
+`diff` 就是報告。`release-checklist.md` 的依賴對帳一節指向它,並寫明**新增 SDK 呼叫點時
+要一起加進腳本的 `_CALLS`** —— 那份清單就是「我們的依賴表面」的定義。
+
+### 配上 0.8.2 的新能力:新增 `source_search`(13 支新 API 只收這一支)
+
+把 0.8.2 的 13 支新公開 API 逐一對回**我們自己有紀錄的痛**,只有一支對得上:
+
+| 新 API | 判斷 |
+|---|---|
+| `sources.search` | **收**。見下 |
+| `chat.cancel` / `chat.session_status` | 不收。SDK 自己的 docstring 講明「Google 停止送 answer frame,但**不會關掉既有的 Web streaming response**」,而我們在這個 repo 的取消曝險是在**數分鐘**的工具(`podcast_episode` / `research_wait`),`chat_ask` 不是。配額 failover 那條路另外被 ADR-0010 擋著(`chat_ask` 沒有 manifest = 沒有稽核面 = 不准換帳號) |
+| `research.discover` | 不收。`research_start(mode="fast")` **本來就立刻回 task_id**;`discover` 是阻塞 ~8s 才回,而被取消的呼叫**沒有落地的 task_id** —— 那正是 ADR-0001 拆成三支要保住的性質。省一次往返,賠一條紀律 |
+| `artifacts.get_customization_choices` | 不收。要連網,進不了離線 contract test;它能抓的白名單漂移,已由這一輪新增的 `test_every_sdk_enum_member_is_mapped_or_explicitly_declined` 離線擋掉 |
+| `notebooks.copy` / `sources.copy` / `artifacts.copy` / `sources.append_text` / `sources.add_urls_async` / `notebooks.suggest_next_steps` | 不收。對不到任何有紀錄的痛(每集只加一篇文章;回錄外洩的根因是 `source_ids`,ADR-0007 已解) |
+| `sources.list_play_books` / `add_play_book` | 不收。用不到 |
+
+**為什麼 `source_search` 收**:我們**已經手工做過這件事的低配版** —— `source_fulltext` 的
+`max_chars=0, contains=[…]` 是把**整份全文拉回來**在自己的 Python 裡做精確子字串比對
+(還得先 `_norm` 繞開 NotebookLM 對 CJK 插空格)。`sources.search` 是伺服器端的語意排序檢索,
+回的是**段落原文 + 全域 rank + source 內 offset**,不是布林值。
+
+**兩支不互相取代,所以都留**:`contains` 是**精確**比對,答「這個詞有沒有真的進到 body」——
+驗擷取用它,語意檢索在這裡會答錯(會回「在講那件事」但不含該詞的段落);`source_search`
+答「哪幾段在談 X」並附證據原文。tool 與 skill 兩邊的文件都把這條寫死。
+
+真正的價值在**生成之前**:本 repo 最貴的失敗是 semantic QA 拒收(`gotchas-publish.md` 記的 EP46
+連五次拒收、五個 attempt 全撤回 = 五次生成作廢)。生成前用檢索核對 brief 的說法在來源裡站不站得住,
+比生成完再聽出問題便宜一個數量級。
+
+**實作是薄的,而且刻意薄**:參數驗證(空 query、`source_ids` 型別、`limit` 正整數)全部交給 SDK 的
+**backend-neutral** `_sources.validate_search`,在打 RPC 之前擋;我們不重寫任何一條 —— 第二份規則就是
+會漂的規則。這個前提由兩條 contract 測試釘住(簽名/欄位 + `validate_search` 的實際行為,含
+「`str` 也是 Sequence,不擋就會把 `"abc"` 拆成三個 id」這種)。第一版把 `getsource` 斷言指向
+`_web.sources.search` 時**紅了**,才發現驗證住在 backend-neutral 層——那比原本的猜測更好,
+斷言因此不必跟著 `_web.*` 下沉。
+
+**沒加 contract term**:`REQUIRED_CONTRACT_TERMS` 收的是「host 照 skill 跑流程時必須傳/必須讀、
+否則走不完」的欄位;`rank` 的 `0` 語意是使用建議,不是流程閘,由 tool docstring 與
+tool-reference 的 ⚠️ 承擔。工具名本身已被 `check_skill_sync` 的 tool-name 檢查涵蓋。
+
+**未實測、文件已寫明**:索引涵蓋範圍不知道 —— 上傳的 mp3 逐字稿搜不搜得到沒有實跑證據,
+docstring 與 tool-reference 都要求呼叫端別預設它一定在。這是唯讀 RPC,零遠端副作用,
+所以照 AGENTS.md 以離線測試 + contract pin 結案;要確認索引涵蓋範圍再開一次唯讀實跑即可。
+
+跨 repo:`audi-skill/notebooklm` 的 `SKILL.md`(路由表 + §來源對帳)與
+`references/tool-reference.md` 同步加了 `source_search`,`check_skill_sync` 從 36 → 37 支。
+
+**驗收**:沒碰遠端副作用路徑(只改測試 + pin),照 AGENTS.md 的準則以離線測試結案。
+SDK 內部搬家記進 [docs/gotchas-sdk.md](docs/gotchas-sdk.md);
+`test_notebooklm_py_lower_bound_excludes_0_8_0` 改名為
+`…_excludes_versions_we_cannot_import`,同時擋 0.8.0(缺私有符號)與 0.8.1(無 `_web.*`)。
+
 ## v0.9.23 — 送出即正本:brief 全文進 attempt,發布端驗 mp3 出身
 
 ### attempt 內嵌送出的 brief 全文(314709b)

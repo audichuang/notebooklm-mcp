@@ -17,6 +17,7 @@ EXPECTED_READ_ONLY = {
     "notebook_get",
     "source_list",
     "source_fulltext",
+    "source_search",
     "artifact_list",
     "artifact_wait",
     "feed_info",

@@ -51,6 +51,12 @@ _REPORT_FORMAT = {
     # CUSTOM 走 generate_report(custom_prompt=…) 完全自訂結構;沒有它,三種靜態模板
     # 以外的講義形狀對呼叫端等於不存在(SDK 一直有這個成員,只是白名單漏了)。
     "custom": ReportFormat.CUSTOM,
+    # CONCEPT_EXPLANATION 跟 CUSTOM 同一個根因:上游一直有,白名單漏了,整個形狀對
+    # 呼叫端等於不存在。這一筆是 0.8.2 升級時逐項比對 enum 值才發現的(0.8.1 就漏著)。
+    "concept_explanation": ReportFormat.CONCEPT_EXPLANATION,
+    # ⚠️ 這份**現在**等於 ReportFormat 的全部,但別預設它永遠是。上游新增成員時由
+    # tests/test_enums.py 的 test_every_sdk_enum_member_is_mapped_or_explicitly_declined
+    # 逼著做決定(進白名單、或進 _DECLINED 寫下理由),而不是靠有人剛好去比對。
 }
 
 

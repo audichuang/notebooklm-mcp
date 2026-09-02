@@ -2,6 +2,19 @@
 
 直接呼叫 SDK(而不是經過我們的工具)之前讀。**一律以實裝版本為準**,別信 `_research/` 的 HEAD clone;0.7.3 → 0.8.0 的完整升級推導在 [notebooklm-py-0.8-upgrade.md](notebooklm-py-0.8-upgrade.md),0.8.0 → 0.8.1 在 [CHANGELOG](../CHANGELOG.md) v0.9.14。
 
+- **(0.8.2)公開 facade 變成 ABC,實作在 `notebooklm._web.*`;要讀 body 就得往下沉。**
+  0.8.2 拆出 web / android 兩個 backend:`ArtifactsAPI` / `SourcesAPI` / `NotebooksAPI` /
+  `SharingAPI` 這些名字現在只是抽象契約(方法體 `raise NotImplementedError`),web 實作在
+  `_web.artifacts` / `_web.sources` / `_web.notebooks` / `_web.sharing`,另有幾支搬家:
+  `_rpc_executor` → `_web.transport.executor`、`_artifact.generation` → `_web.artifact.generation`、
+  `_source.{content,listing}` → `_web.sources.{content,listing}`。**呼叫端不受影響**(簽名沒變、
+  `client.<namespace>` 拿到的就是 web 實例);受影響的是任何用 `inspect.getsource` 驗行為的東西 ——
+  對 ABC 抓原始碼**不會爆,只會靜默恆真**(`tests/test_contracts.py` 實際踩過)。
+  我們**沒有**啟用 android backend(它走 master token,不吃 cookie)。預設是 web,但
+  `from_storage()` 沒傳 `backend=` 時會讀 `NOTEBOOKLM_BACKEND` —— **自己直接呼叫 SDK 時
+  那個變數是活的**,`app._INLINE_AUTH_ENV_OVERRIDES` 只在走 `app._lifespan` 的 inline auth
+  路徑把它刪掉。`test_default_backend_is_still_web` 釘的是「預設值 + 那道覆寫還在 + 變數名沒改」,
+  釘不到你 shell 裡設了什麼。
 - **(0.8.1)`from_storage(path=…)` 的載入會在 PSIDTS 過期或 scope 不對時發 `RotateCookies`,
   而 `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE` 管不到它。** 那是 L2 inline recovery,不是 keepalive
   poke;`_resolve_recovery_path` 對明確 `path` 一律優先,所以 `NOTEBOOKLM_AUTH_JSON` 那道

@@ -45,6 +45,7 @@ _DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
 _HEADLESS_REAUTH_ENV = "NOTEBOOKLM_HEADLESS_REAUTH"
 _REFRESH_CMD_ENV = "NOTEBOOKLM_REFRESH_CMD"
 _REFRESH_CMD_MIDSESSION_ENV = "NOTEBOOKLM_REFRESH_CMD_MIDSESSION"
+_BACKEND_ENV = "NOTEBOOKLM_BACKEND"
 
 # inline auth(Doppler 注入 NOTEBOOKLM_AUTH_JSON)期間強制成這樣;None = 刪掉該變數。
 # 共同理由:**任何會在本 process 內重鑄 cookie 的機制,在 inline 模式都是淨損失**——
@@ -64,11 +65,21 @@ _REFRESH_CMD_MIDSESSION_ENV = "NOTEBOOKLM_REFRESH_CMD_MIDSESSION"
 #     不是修現存漏洞；仍顯式壓掉,別讓紀律取決於別人的環境。
 # 這些 override 都只在 inline 模式壓:登入機讀本機 storage_state 時,重鑄後寫得回檔案,
 # 是對的行為。
+#
+# BACKEND 刪掉的理由**不同**(不是 cookie 重鑄,所以另列):0.8.2 起
+# `from_storage()` 在沒傳 `backend=` 時會讀 `NOTEBOOKLM_BACKEND`,`"android"` 會讓整個
+# client 換成 master-token + gRPC 的那套 namespace。我們的憑證是 cookie snapshot
+# (`NOTEBOOKLM_AUTH_JSON`),換過去只會用一個我們沒有的憑證去打一個沒驗過的傳輸層,而
+# **本 repo 的 contract 測試全部釘在 `_web.*` 上、對這件事一個字都證明不了**(見
+# `tests/test_contracts.py::test_default_backend_is_still_web`,它驗的是 `env=None` 的
+# 預設值,看不見環境裡真的有人設了)。要走 android 是一次帶驗收的決策,不是誰的
+# shell 或 Doppler 專案裡多一個變數就發生。
 _INLINE_AUTH_ENV_OVERRIDES: dict[str, str | None] = {
     _DISABLE_KEEPALIVE_ENV: "1",
     _HEADLESS_REAUTH_ENV: None,
     _REFRESH_CMD_ENV: None,
     _REFRESH_CMD_MIDSESSION_ENV: None,
+    _BACKEND_ENV: None,
 }
 
 

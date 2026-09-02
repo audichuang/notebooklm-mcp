@@ -891,3 +891,63 @@ async def test_auth_check_all_slots_ok_is_null_when_the_active_slot_was_not_meas
     assert result["slots"][0]["usable"] is None
     assert result["ok"] is None, "沒量到被壓成了「不能用」"
     assert result["all_usable"] is False
+
+
+class TestSourceSearch:
+    """`source_search`:排序過的段落檢索,取代「整份全文拉回來自己比對」。
+
+    與 `source_fulltext(contains=…)` **不重疊也不取代**:那支是單一 source 的
+    **精確子字串**比對(驗「這個詞有沒有真的進到 body」,語意檢索反而會答錯);
+    這支是 notebook 範圍的**語意排序**檢索(問「哪幾段在談 X」)。
+    """
+
+    async def test_passes_every_argument_through_untouched(self, fake_client):
+        from notebooklm.types import RelevantChunk
+        from notebooklm_mcp import tools_basic as t
+
+        fake_client.sources.search_results = [
+            RelevantChunk(source_id="s1", text="第一段", rank=1, start=0, end=3),
+            RelevantChunk(source_id="s2", text="第二段", rank=2, start=None, end=None),
+        ]
+        out = await t.source_search(
+            "nb1", "  什麼是 X  ", source_ids=["s1", "s2"], limit=5
+        )
+
+        call = [c for c in fake_client.sources.calls if c[0] == "search"][-1]
+        assert call[1] == {
+            "notebook_id": "nb1",
+            "query": "  什麼是 X  ",
+            "source_ids": ["s1", "s2"],
+            "limit": 5,
+        }, "參數要原樣轉給 SDK —— 去空白/去重/驗證都是它的事(見 contract 測試)"
+        assert out["count"] == 2
+        assert out["chunks"][0] == {
+            "source_id": "s1",
+            "text": "第一段",
+            "rank": 1,
+            "start": 0,
+            "end": 3,
+        }
+        # span 缺席時原樣回 None,不要自作主張補 0(0 是合法 offset)。
+        assert out["chunks"][1]["start"] is None and out["chunks"][1]["end"] is None
+
+    async def test_defaults_search_the_whole_notebook(self, fake_client):
+        from notebooklm_mcp import tools_basic as t
+
+        await t.source_search("nb1", "X")
+        call = [c for c in fake_client.sources.calls if c[0] == "search"][-1]
+        assert call[1]["source_ids"] is None and call[1]["limit"] is None
+
+    async def test_sdk_validation_error_is_not_swallowed(self, fake_client):
+        """空 query 必須爆,不可以變成「查無結果」——那會讓呼叫端以為來源裡沒有。"""
+        from notebooklm.exceptions import ValidationError
+        from notebooklm_mcp import tools_basic as t
+
+        with pytest.raises(ValidationError):
+            await t.source_search("nb1", "   ")
+
+    async def test_empty_result_is_a_real_answer_not_an_error(self, fake_client):
+        from notebooklm_mcp import tools_basic as t
+
+        fake_client.sources.search_results = []
+        assert await t.source_search("nb1", "X") == {"count": 0, "chunks": []}

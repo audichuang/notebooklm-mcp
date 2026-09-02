@@ -414,10 +414,11 @@ async def test_inline_auth_suppresses_the_refresh_command(monkeypatch):
         NOTEBOOKLM_HEADLESS_REAUTH_ENV,
         NOTEBOOKLM_REFRESH_CMD_ENV,
         NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV,
+        app._BACKEND_ENV,
     ],
 )
 async def test_inline_auth_overrides_are_applied_and_restored(monkeypatch, name):
-    """四個 inline override 都要真的進出 lifespan,不是只在 mapping 裡存在。"""
+    """每個 inline override 都要真的進出 lifespan,不是只在 mapping 裡存在。"""
     sentinel = "pre-existing-value"
     override = app._INLINE_AUTH_ENV_OVERRIDES[name]
     assert override != sentinel

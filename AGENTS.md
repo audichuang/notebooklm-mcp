@@ -60,7 +60,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 | `_errors.py` | `NotebookAccessDenied` / `is_permission_denied`(`tools_basic` 與 `tools_podcast` 共用) | 各寫一份 = 上游改 `rpc_code` 時只有一處被改到 |
 | `_status.py` `_atomic.py` `_text.py` `runtime.py` `languages.py` `enums.py` | generation-status 防護 / 原子寫入 / 文字正規化 / client holder / 白名單 / enum 映射 | `_atomic` 見 [gotchas-files](docs/gotchas-files.md) |
 | `auth_probe.py` `auth_cli.py` `cover_cli.py` `assets/` | 認證預檢 / headless 建檔備援 / 封面 CLI + 凍結的 HTML template | 封面見 [gotchas-publish](docs/gotchas-publish.md) |
-| `tests/test_contracts.py` | 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API 的離線 tripwire | 對**實裝版本**跑,別信 `_research/` 的 HEAD clone |
+| `tests/test_contracts.py` | 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API 的離線 tripwire | 對**實裝版本**跑,別信 `_research/` 的 HEAD clone。**讀 body 的 `getsource` 斷言一律對 `notebooklm._web.*`**——0.8.2 起公開 facade 是 ABC(另一半是 android backend),對 ABC 抓原始碼不會爆、只會靜默恆真;簽名斷言(`_params`)留在 facade |
 | `scripts/` | CI 硬檢查(`check_skill_sync.py`)、認證/測試環境腳本、`published_at` 的兩支一次性修復 | backfill = 重生漂移、reorder = 亂序生成造成的集序錯位;都 dry-run 預設、走 `ManifestStore` |
 
 **文件的分工**:[CHANGELOG](CHANGELOG.md) = 各版本改了什麼/為什麼/踩到什麼事故(**版本敘事只寫在那裡,不要回填進本檔**);
@@ -68,7 +68,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 [docs/design-notes.md](docs/design-notes.md) = 模組設計細節;`docs/gotchas-*.md` = 按需載入的雷區(路由表見 §Gotchas 末尾);
 `docs/superpowers/` = 設計/計畫/findings。**SKILL.md 路由層 + references 不在本 repo**,在 `audi-skill/notebooklm`。
 
-## Gotchas(notebooklm-py 0.8.1,pin `>=0.8.1,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
+## Gotchas(notebooklm-py 0.8.2,pin `>=0.8.2,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
 
 - **`mcp[cli]` 必須有上界(`>=1.27,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端每次安裝都自由解析成當下
   最新 —— 上界擋 2.0 被靜默吃進去。lock 與實裝之間的漂移會自己長回來(已量到三次,且曾帶行為差異),
