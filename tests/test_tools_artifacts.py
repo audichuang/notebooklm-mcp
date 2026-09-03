@@ -773,3 +773,29 @@ async def test_generate_report_without_selection_keeps_sdk_fallback(fake_client,
     gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_report")
     assert gen["source_ids"] is None
     assert not [c for c in fake_client.sources.calls if c[0] == "list"]
+
+
+async def test_backend_undispatchable_report_format_is_refused_before_any_dispatch(
+    fake_client, tmp_path
+):
+    """web 生不出來的格式要在**進 closure 之前**被擋掉,不是在裡面炸。
+
+    v0.9.25-rc 驗收 5.1 的事故形狀:`concept_explanation` 一度被加進
+    `enums._REPORT_FORMAT`(當時的理由是「SDK enum 有,白名單漏了」),於是
+    `to_report_format()` 放行,失敗點移進 closure 裡的 SDK param builder ——
+    而 `_dispatch_attachment` 的泛用 except 把那個**純本地** `ValidationError`
+    記成 `attachment_acceptance_unknown`。實測 `CREATE_ARTIFACT` 打了**零次**,
+    呼叫端卻被叫去跑一次註定撈不到東西的對帳。
+
+    `tools_artifacts` 早就有正確的紀律(「純本地轉換擋在 closure 外」),壞的是
+    白名單讓本地錯誤穿過去。所以這條測試釘的是**零 dispatch**,不是錯誤訊息長相 ——
+    後者會隨上游措辭漂,前者才是不變式。能不能開放某個格式由
+    `tests/test_enums.py::test_report_format_whitelist_matches_what_the_web_backend_can_dispatch`
+    守著。
+    """
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError, match="report format"):
+        await a.generate_report("nb-1", m, 1, report_format="concept_explanation")
+    assert not fake_client.artifacts.calls, (
+        "本地就該拒絕的格式跑進了 dispatch —— 它會被記成假的 acceptance_unknown"
+    )

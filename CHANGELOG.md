@@ -6,37 +6,7 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
-## v0.9.24(尚未發 tag)— 凍結輸入的圍籬由 host 宣告
-
-### `podcast_episode` 新增 `workspace_root`;推導出多節目容器就 fail-closed
-
-**症狀**(podcast-lab 2026-08-30 獨立審查實測):五個把 manifest 放 show root 的節目
-(`shows/<show>/series_manifest.json`),`load_frozen_generation_input` 推出的 workspace
-= manifest 的祖父目錄 = **整個 `shows/`**。用 graphify 的 manifest 傳
-`input_bundle_path="audicast/episodes/EP46-…/attempt-005"`,loader 照吃、`read_attempt_binding`
-回 `None`;帶認證跑下去就是拿別節目的 brief 燒配額,並留下一筆說謊的 binding。
-
-**根因**:圍籬規則刻意不限定 manifest 父目錄的**名字**(v0.4.x 教訓),卻隱含限定了**深度**
-——manifest 一定在節目目錄下兩層。深度跟名字一樣不是安全邊界。
-
-**修法**(ADR-0012):`workspace_root` 讓 host 宣告節目目錄,manifest 必須在它底下、
-bundle 相對於它;沒傳時仍推祖父目錄,但祖父目錄裡還有**別的** `series_manifest.json`
-(`os.walk`,不限深度、不跟 symlink)就拒,錯誤訊息指名要傳 `workspace_root`。
-單節目佈局行為不變(既有 31 條 bundle 測試全綠,新增 3 條)。`manifest_workspace_sha256`
-語義不變。**show-root 佈局的節目從此必傳 `workspace_root`**,bundle 路徑不再帶節目前綴。
-
-### `publish_series`:manifest 頂層 `retired: true` → 任何 PUT 之前 raise
-
-**症狀**(podcast-lab graphify 2026-08-30 Codex 審查):兩份退役 manifest 搬進 `archive/`
-之後仍通過 ManifestStore schema、`show_id` 仍能打到第一季的舊 feed;今天 publisher 會在
-resolve 擋下只是因為 8 個 `mp3_path` **恰好不存在**——legacy 集不比 sha,路徑一被「修好」,
-Audicast 的音檔就會以舊節目名義上公網。目錄名與 README 只擋得住讀過它們的人。
-
-**修法**(ADR-0013):`publish/state.assert_not_retired`,讀完 manifest 的第一步就叫,在
-auth probe 之前。判準同 `publication_state`:缺席=照發、`true`=擋、其他值 fail-loud
-(`is True`,`1` 不算)。只管發布層;不加寫入工具,標記走 `ManifestStore.update` 一次。
-`retired` 進 `check_skill_sync` 契約詞。新增 7 條 publish 測試(含 `healthz_status=500`
-證明閘排在任何網路動作之前)。
+## v0.9.25 — 跟上 notebooklm-py 0.8.2:contract tripwire 下沉 `_web.*`,新增 `source_search`
 
 ### 跟上 notebooklm-py 0.8.2:contract tripwire 下沉到 `_web.*`,pin 抬到 `>=0.8.2`
 
@@ -92,15 +62,22 @@ android 的話,cookie 那一整套(`_auth.psidts_recovery` / keepalive /
 `session`(新增 epoch fence,是 in-process 的,取代不了我們跨機的 flock)。
 
 **唯一真的有行為變化、而且離線測不到的一塊:下載路徑的憑證附掛方式。**
-`download_audio` / `download_report` / `download_slide_deck` 每一集都跑。0.8.1 是把 cookie 交給
-httpx client 的 constructor jar,靠 same-origin 規則決定哪一跳帶得到;0.8.2 改成
-`cookies=None` + 每一跳由 `CredentialPolicy` 決定,`_on_request` 先把 `cookie` /
-`authorization` / `proxy-authorization` **全部拔掉**再套當跳的政策結果,另外新增 `_on_response`
-把 redirect 的 `Set-Cookie` 收回外部 jar 供下一跳用。**信任邊界沒動**——
-`_TRUSTED_DOWNLOAD_DOMAINS`(`.google.com` / `.googleusercontent.com` / `.googleapis.com`)與
-`_is_trusted_download_host` 兩版逐字相同。方向是收緊 + 修掉「redirect 發的 cookie 被丟掉」,
-但 mock client 對這段一個字都證明不了,所以**放 0.8.2 上四台機器前跑一次真實
-`artifact_download_audio`**(唯讀、零副作用,不必開整套 acceptance-workspace)。
+`download_audio` / `download_report` / `download_slide_deck` 每一集都跑。0.8.2 引入
+`CredentialPolicy`:`_on_request` 每一跳先把 `cookie` / `authorization` /
+`proxy-authorization` **全部拔掉**,再依政策(https + 可信 host 才給)重套;另外新增
+`_on_response` 把 redirect 的 `Set-Cookie` 收回外部 jar 供下一跳用。
+
+⚠️ **這一段第一版寫錯了,v0.9.25-rc 驗收糾正**:原本寫「0.8.2 改成 `cookies=None`」——
+那行**只在 curl_cffi 分支**(要 `NOTEBOOKLM_TRANSPORT=curl_cffi` 才走得到)。我們走的
+**httpx 分支仍然傳 `cookies=cookies` 給 constructor**;真正的改動是 policy 被串進
+redirect hook,由 hook 逐跳覆蓋。驗收工作區的 §8a 斷言照著這個錯誤描述寫,**會過,
+但驗的是走不到的那條路** —— 已改成驗「policy 有沒有串進 hook」。
+
+**信任邊界沒動**——`_TRUSTED_DOWNLOAD_DOMAINS`(`.google.com` / `.googleusercontent.com`
+/ `.googleapis.com`)與 `_is_trusted_download_host` 兩版逐字相同。
+
+✅ **v0.9.25-rc 驗收實跑通過**:4 跳跨 host 全通、兩次下載位元組相同。這一塊因此從
+「離線測不到的核心風險」降級成下一輪的順帶對帳。
 
 **`NOTEBOOKLM_BACKEND` 改成 fail-closed**:0.8.2 起 `from_storage()` 沒傳 `backend=` 時會讀這個
 環境變數,`"android"` 會把整個 client 換成 master-token + gRPC 的 namespace ——
@@ -119,16 +96,17 @@ httpx client 的 constructor jar,靠 same-origin 規則決定哪一跳帶得到;
 「catch `Exception` → `_artifact_title_state` 實查 → 沒落地就標 `outcome_unknown` 並 re-raise」,
 成功時也照樣後檢。新增的 raise 只是走進既有的實查分支,而真正危險的方向(假成功)本來就擋著。
 
-**順帶挖到一筆跟 0.8.2 無關的舊帳,一併修掉**:`_REPORT_FORMAT` 白名單漏了
-`ReportFormat.CONCEPT_EXPLANATION`(0.8.1 / 0.8.2 都有),跟當年漏掉 `CUSTOM` 是同一個根因 ——
-上游一直有這個成員,白名單沒有,所以整個「概念解釋」形狀的講義對呼叫端等於不存在。
-`generate_report(report_format="concept_explanation")` 現在可用,`generate_report` 的 docstring
-從「三種靜態模板」改成四種,skill 的 `tool-reference.md` 兩處格式清單同步。
+**順帶挖到一筆跟 0.8.2 無關的舊帳**:`_REPORT_FORMAT` 白名單漏了
+`ReportFormat.CONCEPT_EXPLANATION`(0.8.1 / 0.8.2 都有),跟當年漏掉 `CUSTOM` 看起來是同一個
+根因 —— 上游有這個成員、白名單沒有。**於是我把它加進白名單,而那是錯的** ——
+它在 web backend 生不出來,真實驗收才抓到。完整推導與修法見下面那節;
+**發出去的這一版沒有 `concept_explanation`**。
 
-**更重要的是讓它不會有第三次**:`test_every_sdk_enum_member_is_mapped_or_explicitly_declined`
+**同一輪補的 tripwire**:`test_every_sdk_enum_member_is_mapped_or_explicitly_declined`
 逐個 enum 檢查「SDK 的每個成員,要嘛在我們的 map 裡、要嘛在 `_DECLINED` 裡且寫得出理由」。
-已驗它會紅(拿掉 declined 條目即 fail)。`_DECLINED` 目前是**空的** —— 五個 enum 全開放,
-下次上游長出新成員時它才會再有東西,而那必須是一個寫得出理由的決定,不是沒人注意到。
+它擋的是「沒人注意到」,**擋不了「注意到但判斷錯」** —— 而且它問的問題本身就把人推向錯答案
+(見下)。所以最後這一版是兩條一起守:這條保證**有人做過決定**,新增的
+`test_report_format_whitelist_matches_what_the_web_backend_can_dispatch` 保證**那個決定對**。
 
 **方法本身收成 `scripts/compare_sdk_surface.py`**:這一輪的 dump/diff 不是一次性腳本 ——
 上游是月更節奏(0.8.0 七月 / 0.8.1 八月 / 0.8.2 九月),而 CONCEPT_EXPLANATION 這種帳
@@ -185,6 +163,101 @@ docstring 與 tool-reference 都要求呼叫端別預設它一定在。這是唯
 SDK 內部搬家記進 [docs/gotchas-sdk.md](docs/gotchas-sdk.md);
 `test_notebooklm_py_lower_bound_excludes_0_8_0` 改名為
 `…_excludes_versions_we_cannot_import`,同時擋 0.8.0(缺私有符號)與 0.8.1(無 `_web.*`)。
+
+### 真實驗收(v0.9.25-rc,stg)抓到一個必須擋發版的東西:`concept_explanation` 是死選項
+
+**症狀**:`generate_report(report_format="concept_explanation")` 在我們唯一能用的 backend 上
+**必定失敗** —— `Unsupported report format <ReportFormat.CONCEPT_EXPLANATION>; expected one of:
+briefing_doc, study_guide, blog_post, custom`。也就是說,上一段那個「白名單漏了 SDK 成員」
+的修正**開出了一個永遠生不出來的選項**,而且它已經寫進了 skill 文件。
+
+**根因(比表面深一層)**:0.8.2 把 client 拆成 web / android 之後,`ReportFormat` 仍是
+**backend-neutral 的 enum**,但 dispatch config 是 **backend-specific** ——
+`_web.params.artifacts._STATIC_REPORT_CONFIGS` 只有三個,`CONCEPT_EXPLANATION` **只在
+`_android` 有**,而我們釘在 web(`test_default_backend_is_still_web`)。
+
+**離線為什麼沒抓到 —— 是我新寫的 tripwire 把人推向錯誤答案。**
+`test_every_sdk_enum_member_is_mapped_or_explicitly_declined` 斷言「每個 enum 成員都要進
+白名單或進 `_DECLINED`」,於是「加進白名單」看起來就是讓它變綠的正解。**它驗錯了對象**:
+拿 backend-neutral 的 enum 當「我們生得出什麼」的判準。
+
+**修法不是把它放回 `_DECLINED` 了事**,那治不了根因。新增
+`test_report_format_whitelist_matches_what_the_web_backend_can_dispatch`,直接對
+`_STATIC_REPORT_CONFIGS` 驗:**我們開放的每個靜態格式,web 都要生得出來**
+(`CUSTOM` 走 `custom_prompt` 不是靜態模板,單獨排除)。反向也擋 —— 上游哪天把新格式加進
+web 的表,它會告訴我們可以開放了。已做突變驗證:把 `concept_explanation` 加回白名單即紅,
+訊息直接指名是哪個格式、web 現在支援哪三個。
+
+**連帶修掉一個誤標**:那次失敗被記成 `attachment_acceptance_unknown`,而實測 `CREATE_ARTIFACT`
+打了**零次** —— 呼叫端被叫去跑一次註定撈不到東西的對帳。`tools_artifacts` 其實**早就有**
+正確紀律(「純本地轉換擋在 closure 外」,`to_report_format()` 本來就在外面);是白名單放行
+讓本地錯誤穿過護欄跑進 closure。補了零 dispatch 回歸測試(釘 `assert not …calls`,
+不釘錯誤訊息長相 —— 後者會隨上游措辭漂)。
+
+### 驗收把三個「未實測」關掉了,也糾正了我對下載路徑的描述
+
+覆蓋 33/37 工具實跑(4 支寫明理由;唯一實質缺口是 PDF 下載型別判定 —— 簡報三次都沒生出來)。
+
+**可以拿掉「未實測」的三件**:
+- **`source_search` 的索引涵蓋上傳媒體** —— 一集回錄 mp3 的 **27 段全部檢索得到**。
+- **`rank` 實跑一次都沒遇到 `0`** —— 但契約沒改,`0 = 沒給排名` 的判斷保留。
+- **下載路徑 4 跳跨 host 全通、兩次位元組相同** —— 這一塊從「離線測不到的核心風險」
+  降級成下一輪的順帶對帳。
+
+**新量到、已回寫文件的四件**(全部進 docstring + skill,細節見
+[docs/acceptance-v0.9.25-rc-findings.md](docs/acceptance-v0.9.25-rc-findings.md)):
+- **`start`/`end` 只對無標記純文字準**:markdown 來源錯位 **44~170 字**(伺服器索引去標記後的
+  文字),而**回傳裡沒有欄位分得出是哪一種**。offset 只能當「大概在哪」。
+- **`limit=N` 是全域前 N 名**,不是每筆來源各 N 段 —— 某一筆沒出現 ≠ 它沒有。
+- **`notebook_list` 只列「這個帳號開過的」**:9 個 pool 帳號全部 `notebook_get` 得到同一本,
+  卻只有 **2/9** 在清單裡。配額 failover 換帳號後照標題比對會得到**假的「找不到」** ——
+  這是 skill「manifest 優先」那條路由的**正確性**理由,不只是省一趟 RPC。
+- **`chat_ask` 的回答尾端常被伺服器接一句自我推銷**(💡/🧠 + 「我可以為您設計一份測驗」),
+  `strip_citations=True` 清不掉(那不是 citation),`episode_set_description` 的 preflight
+  也攔不住(非空/不等於標題/自包含三條全過)。實測 **2/2 次都出現** ——
+  直通就會進 Apple Podcast 的單集簡介。server 端刻意不自動剝:判準是語意不是字面。
+
+**還有一件是我自己寫錯、驗收糾正的**:上一段原本說「0.8.2 把下載改成 `cookies=None`」——
+那行**只在 curl_cffi 分支**。我們走的 httpx 分支仍傳 `cookies=cookies`;真正的改動是
+policy 被串進 redirect hook 逐跳覆蓋。已更正,驗收工作區照著錯誤描述寫的 §8a 斷言也一併改成
+驗「policy 有沒有串進 hook」——它原本**會過,但驗的是走不到的那條路**。
+
+**驗收工作區的兩個範本缺陷也修了**(它們從 v0.9.0 起被逐字複製進每一個工作區):
+§2 對 `tools_podcast` 源碼做字面比對,而 v0.9.16 把 failover 迴圈抽到
+`_failover.dispatch_with_failover`、那行 return 跟著搬家 → 從此一路假紅;改成驗不變式
+(keyword-only、三元組標註、直接 import 共用迴圈驗)。
+
+## v0.9.24 — 凍結輸入的圍籬由 host 宣告
+
+### `podcast_episode` 新增 `workspace_root`;推導出多節目容器就 fail-closed
+
+**症狀**(podcast-lab 2026-08-30 獨立審查實測):五個把 manifest 放 show root 的節目
+(`shows/<show>/series_manifest.json`),`load_frozen_generation_input` 推出的 workspace
+= manifest 的祖父目錄 = **整個 `shows/`**。用 graphify 的 manifest 傳
+`input_bundle_path="audicast/episodes/EP46-…/attempt-005"`,loader 照吃、`read_attempt_binding`
+回 `None`;帶認證跑下去就是拿別節目的 brief 燒配額,並留下一筆說謊的 binding。
+
+**根因**:圍籬規則刻意不限定 manifest 父目錄的**名字**(v0.4.x 教訓),卻隱含限定了**深度**
+——manifest 一定在節目目錄下兩層。深度跟名字一樣不是安全邊界。
+
+**修法**(ADR-0012):`workspace_root` 讓 host 宣告節目目錄,manifest 必須在它底下、
+bundle 相對於它;沒傳時仍推祖父目錄,但祖父目錄裡還有**別的** `series_manifest.json`
+(`os.walk`,不限深度、不跟 symlink)就拒,錯誤訊息指名要傳 `workspace_root`。
+單節目佈局行為不變(既有 31 條 bundle 測試全綠,新增 3 條)。`manifest_workspace_sha256`
+語義不變。**show-root 佈局的節目從此必傳 `workspace_root`**,bundle 路徑不再帶節目前綴。
+
+### `publish_series`:manifest 頂層 `retired: true` → 任何 PUT 之前 raise
+
+**症狀**(podcast-lab graphify 2026-08-30 Codex 審查):兩份退役 manifest 搬進 `archive/`
+之後仍通過 ManifestStore schema、`show_id` 仍能打到第一季的舊 feed;今天 publisher 會在
+resolve 擋下只是因為 8 個 `mp3_path` **恰好不存在**——legacy 集不比 sha,路徑一被「修好」,
+Audicast 的音檔就會以舊節目名義上公網。目錄名與 README 只擋得住讀過它們的人。
+
+**修法**(ADR-0013):`publish/state.assert_not_retired`,讀完 manifest 的第一步就叫,在
+auth probe 之前。判準同 `publication_state`:缺席=照發、`true`=擋、其他值 fail-loud
+(`is True`,`1` 不算)。只管發布層;不加寫入工具,標記走 `ManifestStore.update` 一次。
+`retired` 進 `check_skill_sync` 契約詞。新增 7 條 publish 測試(含 `healthz_status=500`
+證明閘排在任何網路動作之前)。
 
 ## v0.9.23 — 送出即正本:brief 全文進 attempt,發布端驗 mp3 出身
 

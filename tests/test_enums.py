@@ -48,19 +48,6 @@ def test_to_report_format():
         to_report_format("bogus")
 
 
-def test_to_report_format_supports_concept_explanation():
-    """ReportFormat 的第五個成員。跟 CUSTOM 同一個根因:上游一直有,白名單漏了,
-    所以整個「概念解釋」形狀的講義對呼叫端等於不存在。
-
-    這一筆是 0.8.2 升級時**逐項比對 enum 值**才浮出來的(0.8.1 就漏著,不是新的漂移),
-    現在由 test_every_sdk_enum_member_is_mapped_or_explicitly_declined 擋住第三次。
-    """
-    from notebooklm.types import ReportFormat
-    from notebooklm_mcp.enums import to_report_format
-
-    assert to_report_format("concept_explanation") == ReportFormat.CONCEPT_EXPLANATION
-
-
 def test_to_report_format_supports_custom():
     """ReportFormat 有第四個成員 CUSTOM(配 custom_prompt 完全自訂講義結構),
     白名單漏了它等於整個能力對呼叫端不存在。"""
@@ -70,15 +57,56 @@ def test_to_report_format_supports_custom():
     assert to_report_format("custom") == ReportFormat.CUSTOM
 
 
+def test_report_format_whitelist_matches_what_the_web_backend_can_dispatch():
+    """`ReportFormat` 有幾個成員 ≠ 我們生得出幾個。**判準是 backend 的 dispatch table。**
+
+    v0.9.25-rc 驗收 5.1 的事故:上一版把 `CONCEPT_EXPLANATION` 加進白名單,理由是
+    「SDK 有這個成員,白名單漏了就等於能力對呼叫端不存在」—— 那個推理對 `CUSTOM` 成立,
+    對這一個**不成立**。0.8.2 把 client 拆成 web / android 之後,`ReportFormat` 仍是
+    backend-neutral,但 dispatch config 是 backend-specific:`CONCEPT_EXPLANATION`
+    只在 `_android` 有,而我們釘在 web。實跑拿到的是
+    `Unsupported report format …; expected one of: briefing_doc, study_guide, blog_post, custom`。
+
+    **上一版的 tripwire 指錯方向,而且是它把人推向錯誤答案的**:它斷言「每個 enum 成員
+    都要進白名單或進 `_DECLINED`」,於是「加進白名單」看起來就是讓它變綠的正解。
+    真正的不變式是**我們開放的每一個靜態格式,web 都生得出來** —— 這一條會攔下那次改動,
+    而且反向也有用:上游哪天把某個格式加進 web 的表,這裡會告訴我們現在可以開放了。
+
+    `CUSTOM` 不在 `_STATIC_REPORT_CONFIGS` 裡是正常的 —— 它走 `custom_prompt`,
+    不是靜態模板,所以單獨排除。
+    """
+    from notebooklm._web.params.artifacts import _STATIC_REPORT_CONFIGS
+    from notebooklm.types import ReportFormat
+    from notebooklm_mcp.enums import _REPORT_FORMAT
+
+    exposed_static = {v for v in _REPORT_FORMAT.values() if v is not ReportFormat.CUSTOM}
+    dispatchable = set(_STATIC_REPORT_CONFIGS)
+
+    dead = exposed_static - dispatchable
+    assert not dead, (
+        f"白名單開放了 web 生不出來的格式 {sorted(f.name for f in dead)} —— 呼叫端會拿到 "
+        f"`Unsupported report format`,而那是燒完一次呼叫才發現的死選項。"
+        f"web 現在支援:{sorted(f.name for f in dispatchable)}"
+    )
+
+    # 反向只是通報,不是失敗:上游把新格式加進 web 的表時,我們可以開放它。
+    unexposed = dispatchable - exposed_static
+    assert not unexposed, (
+        f"web 支援但我們沒開放:{sorted(f.name for f in unexposed)} —— 要嘛加進 "
+        f"enums._REPORT_FORMAT(順便同步 generate_report docstring 與 skill),"
+        f"要嘛在這裡寫明為什麼不開放。"
+    )
+
+
 def test_every_sdk_enum_member_is_mapped_or_explicitly_declined():
     """SDK enum 長出新成員時要爆,而不是靜默對呼叫端不存在。
 
     `ReportFormat.CUSTOM` 被漏掉過一次(上游一直有,白名單沒有,整個「自訂講義結構」
-    的能力對呼叫端等於不存在,直到有人手動比對才發現)。**同一個根因現在還躺著第二筆**:
-    `CONCEPT_EXPLANATION`(0.8.1 / 0.8.2 都有)。這條測試把「漏了」變成「必須明講」——
-    要嘛進白名單,要嘛進 `_DECLINED` 並寫下理由。
+    的能力對呼叫端等於不存在,直到有人手動比對才發現)。這條測試把「漏了」變成「必須明講」。
 
-    這不是 0.8.2 帶來的問題(兩版一模一樣),是升級時逐項比對 enum 值才浮出來的。
+    **但「明講」不等於「開放」** —— v0.9.25-rc 驗收 5.1:上一版把
+    `CONCEPT_EXPLANATION` 加進白名單只為了讓這條綠,結果開出一個 web 生不出來的死選項。
+    能不能開放由上面那條(對 backend dispatch table 驗)決定;這一條只保證**有人做過決定**。
     """
     from notebooklm.rpc.types import AudioFormat, AudioLength
     from notebooklm.types import ReportFormat, SlideDeckFormat, SlideDeckLength
@@ -91,9 +119,13 @@ def test_every_sdk_enum_member_is_mapped_or_explicitly_declined():
     )
 
     # 已知、刻意不開放的成員 → 值是「為什麼」。空 dict = 該 enum 全部開放。
-    # **現在是空的**:v0.9.24 把 CONCEPT_EXPLANATION 補進白名單之後,五個 enum 全開放。
-    # 下次上游長出新成員時這裡才會再有東西 —— 而那必須是一個寫得出理由的決定。
-    _DECLINED: dict[str, dict[str, str]] = {}
+    _DECLINED = {
+        "ReportFormat": {
+            # web backend 的 `_STATIC_REPORT_CONFIGS` 沒有它(只在 _android),
+            # 而我們釘在 web。開放 = 死選項。實測訊息見上一條測試的 docstring。
+            "CONCEPT_EXPLANATION": "web backend 沒有 dispatch config,只有 android 有",
+        },
+    }
 
     for name, sdk_enum, ours in [
         ("AudioFormat", AudioFormat, _FORMAT),
@@ -107,7 +139,6 @@ def test_every_sdk_enum_member_is_mapped_or_explicitly_declined():
         unaccounted = {member.name for member in sdk_enum} - mapped - declined
         assert not unaccounted, (
             f"{name} 有沒被交代的成員 {sorted(unaccounted)}:上游新增了能力而我們的白名單"
-            f"沒跟上,呼叫端無從使用。要嘛加進 enums.py 的 map,要嘛加進本測試的 _DECLINED "
-            f"並寫下理由。"
+            f"沒跟上。**先確認 backend 生不生得出來**,再決定加進 enums.py 的 map、"
+            f"還是加進本測試的 _DECLINED 並寫下理由。"
         )
-        # 反向也要顧:map 指到已被上游移除的成員,import 就會先爆,不必另測。

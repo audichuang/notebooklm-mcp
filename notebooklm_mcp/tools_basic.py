@@ -801,6 +801,13 @@ async def chat_ask(
     include_references=False 省掉引用清單——省 token 也免手動 regex;
     預設兩者不動(既有 caller 依標記對照 references 的行為不變)。
 
+    🔴 **伺服器會在回答尾端接一句自我推銷,這裡清不掉。** v0.9.25-rc 驗收 2/2 次出現
+    (「我可以為您設計一份隨堂測驗」之類,前面帶 💡 / 🧠)。它**不是 citation 標記**,
+    所以 `strip_citations=True`、`_CITATION_RE`、`render()` 三者都不會動它,而
+    `episode_set_description` 的 preflight(非空 / 不等於標題 / 自包含)也全過 ——
+    直通就會出現在公開 RSS 的單集簡介裡。**產公開文案時呼叫端自己看最後一行並刪掉。**
+    server 端刻意不自動剝:判準是語意不是字面,寫死 pattern 會誤刪真正的結尾句。
+
     **v0.9.14 真實驗收補了兩道**(只作用在 `strip_citations=True` 這條路):
 
     - `render()` 只拿掉 **block 級**標記(`###` 標題、`*` 條列),**inline 的
@@ -913,10 +920,22 @@ async def source_search(
     生成前拿它核對 brief 的說法在來源裡站不站得住,比生成完再聽出問題便宜得多
     (EP46 曾連五次 semantic QA 拒收、五次生成全部作廢)。
 
-    ⚠️ `rank` 是**全域**排序且**越小越相關**;`0` 代表伺服器沒給排名(不是最相關)。
-    `start` / `end` 是 source 內的字元 offset,伺服器沒給時是 `None`(不是 0)。
-    ⚠️ 這是檢索 RPC(`RETRIEVE_RELEVANT_CHUNKS`),不是 Studio 生成;但**索引涵蓋範圍
-    未實測** —— 上傳的 mp3 轉錄稿搜不搜得到,還沒有實跑證據,別預設它一定在。
+    ⚠️ **`limit=N` 是「全域前 N 名」,不是「每筆來源 N 段」也不是「N 段相關的」**。
+    排序跨所有被搜的來源,所以某一筆完全沒被選中是正常結果 —— 要確定某一筆有沒有,
+    用 `source_ids` 限定它再查,別從沒出現推論「它沒有」。
+
+    ⚠️ `rank` **越小越相關**;`0` 依上游契約代表「伺服器沒給排名」,**不是**最相關。
+    (v0.9.25-rc 驗收實跑一次都沒遇到 `0`,但契約沒改,別拿掉這個判斷。)
+
+    ⚠️ **`start` / `end` 只在無標記純文字來源上對得準。** v0.9.25-rc 實測:對貼上的
+    純文字,offset 拿去切 `source_fulltext` 的內容完全吻合;對 **markdown** 來源會
+    **錯位 44~170 字**(伺服器索引的是去標記後的文字,`source_fulltext` 回的是原文),
+    而**回傳裡沒有任何欄位分得出是哪一種**。所以 offset 適合當「大概在哪」的定位,
+    不要拿它做精確切片再宣稱那是原文;要精確就用 `text` 欄位本身。
+    伺服器沒給 span 時是 `None`(不是 0)。
+
+    這是檢索 RPC(`RETRIEVE_RELEVANT_CHUNKS`),不是 Studio 生成。**索引涵蓋上傳媒體的
+    逐字稿** —— v0.9.25-rc 實測一集回錄 mp3 的 27 段全部檢索得到。
 
     參數驗證(空 query、`source_ids` 型別、`limit` 正整數)**刻意不在這裡重寫**,
     一律由 SDK 的 `_sources.validate_search` 在打 RPC 之前擋掉 —— 自己再寫一份就是

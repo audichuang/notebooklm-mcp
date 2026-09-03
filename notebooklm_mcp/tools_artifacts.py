@@ -662,9 +662,8 @@ async def generate_report(
 ) -> dict:
     """生成該集研讀文件(預設 study_guide)並下載 Markdown,路徑回寫 report_md_path。
 
-    `report_format="custom"` + `custom_prompt` = 完全自訂講義結構(四種靜態模板
-    study_guide / briefing_doc / blog_post / concept_explanation 之外的形狀)。
-    兩者必須成對,且 custom
+    `report_format="custom"` + `custom_prompt` = 完全自訂講義結構(三種靜態模板
+    study_guide / briefing_doc / blog_post 之外的形狀)。兩者必須成對,且 custom
     格式不吃 `extra_instructions`——要求併進 `custom_prompt`。
 
     配額 failover 與 `generate_slides` 逐字同形(共用同一個迴圈);實際生成的帳號寫進
