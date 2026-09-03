@@ -61,6 +61,33 @@ v0.9.0 / v0.9.7 amendment);本檔是**動 code 時的紅線與測試鎖**。
   另外兩台下次啟動就掛,而本機正常啟動只有 debug 訊息。
   推導與取捨見 [ADR-0010](adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md) 的 v0.9.0 amendment。
 
+## 二之二、憑證殘留不需要有人 `kill` —— 正常關 session 就有約 10~15%
+
+**已知取捨的發生率被低估了。** 原本的說法是「`kill -9` / `SIGTERM` 不展開
+`AsyncExitStack`,憑證會留在 `$TMPDIR`」,讀起來像是要有人動手殺才會發生。
+v0.9.25-rc 驗收把因果釘死了:**MCP client 關掉 stdin 之後只等
+`PROCESS_TERMINATION_TIMEOUT = 2.0` 秒就自己送 SIGTERM** —— 所以「正常結束」這條路
+本身就會在展開超過 2 秒時退化成 SIGTERM。
+
+判別實驗(30 次自起 server,強迫觸發):
+
+| 寬限 | 殘留 | SIGTERM 觸發 |
+|---|---|---|
+| 0.1s | 3/3 | 3/3 |
+| 30s | 0/3 | 0/3 |
+
+展開的中位數只有 **0.55 秒**,所以不是「一律太慢」,是**偶爾**超過 2 秒 ——
+實測殘留率約 10~15%。**為什麼偶爾慢,仍是 inconclusive**(沒查出是哪一段展開變慢)。
+
+實務結論:`/tmp/notebooklm-mcp-auth-*` 的殘留是**常態而非異常**,四台機器每天開關
+session 都在累積。收尾清理不是驗收專屬的禮貌,是日常義務 —— 而清理**不能**用
+`fuser` / `lsof` 判斷「有沒有 process 持有」(server 寫完 slot 檔就關 FD,對每一個
+活著的 server 都會判成沒人持有,包括正在跑正式節目的那台)。判法見
+`.claude/skills/acceptance-workspace/template/CLAUDE.md` §三。
+
+**刻意仍不加「啟動時掃掉舊目錄」**:同機並行的 MCP process 會互刪 —— 這台常有 3 個
+server 在跑。要根治得換方向(例如把展開搬到 SIGTERM handler 裡),那是另一個決定。
+
 ## 三之〇、配額不是一個布林值,是 **per-kind**(v0.9.16 實測)
 
 **這條直接影響整季怎麼排,而它此前沒有寫在任何地方** —— ADR-0010 的容量模型讀起來像
