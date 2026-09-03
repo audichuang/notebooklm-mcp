@@ -55,6 +55,13 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
    `~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"`;
    數字不對就 `uv cache clean notebooklm-mcp` 再 `--force --reinstall`。
 
+⚠️ **「重裝回發布版」不等於回到基線 —— 依賴會往前跑。** pin 是**範圍**(`>=x,<y`),而
+`uv tool install git+…` 不讀 `uv.lock`,所以上游發了新版之後重裝 `@latest`,拿到的是
+「舊的我方程式碼 + 新的依賴」這個**從沒測過的組合**。v0.9.25-rc 驗收實際踩到:rc 測完把
+`nblm-mcp` 還原成 v0.9.24,以為回到原點,實際是 `0.9.24 + notebooklm-py 0.8.2`,而四台機器
+跑 `@latest` 全都一樣。**上游發版之後,「發我們的版」就從「讓機器裝得到新功能」變成
+「讓機器離開未測組合」** —— 抬 pin 下界正是把它從意外解析變成明確宣告。
+
 **editable 裝的 tool venv 完全不受這條保護**:`uv tool install -e <repo>` 之後 metadata 版本
 與**依賴**都停在安裝當時,而 `uv tool list` 印得一切正常 —— 2026-08-16 實測本機停在
 `0.9.12` + `notebooklm-py 0.8.0`,那時 repo 已 `0.9.15`、pin 已是 `>=0.8.1`(**實裝連自己的

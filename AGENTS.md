@@ -78,10 +78,9 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
   **別裝 `notebooklm-py[mcp]`**。
 - **上游/NotebookLM 行為突變時的情報站**:`_research/notebooklm-mcp-cli`(jacob-bd)的 CHANGELOG.md 與
   docs/KNOWN_ISSUES.md —— bl 漂移、cookie 語意、RPC schema 變動幾乎都最先出現在那;再對照 notebooklm-py 的 GitHub issues。
-- **文字清理一律走 `_text`**(`strip_inline_emphasis` / `_CITATION_RE` / `norm`),新程式碼別自己寫 regex ——
-  上游 `render()` 不清 inline 粗體、會靜默丟整個 block、`get_fulltext` 在 CJK 間插空格,緩解各只寫一處。
-  `chat_ask` 的 `strip_citations` 預設 **False**,產公開文案要顯式傳 True(`episode_set_description` 預設 True)。
-  細節見 [gotchas-sdk](docs/gotchas-sdk.md)。
+- **文字清理一律走 `_text`**(`strip_inline_emphasis` / `_CITATION_RE` / `norm`),新程式碼別自己寫 regex。
+  `chat_ask` 的 `strip_citations` 預設 **False**(`episode_set_description` 預設 True)——上游三種靜默
+  行為與各自的緩解在 [gotchas-sdk](docs/gotchas-sdk.md)。
 - **`Artifact.source_ids` 是生成當下的歷史快照**:可以看「這顆用哪些來源生的」,**不可反查現存 source**(會查到已刪除的 id)。
 - **`source_delete` 查無此 id 就不發 destructive RPC、也不 raise**(回 `was_present=False`):retract 的清理迴圈要能在
   response 遺失後重放。刪除後 `source_fulltext` 仍讀得回全文是預期,清理義務仍有效 —— 前提由 `tests/test_contracts.py`
@@ -111,5 +110,10 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 - **要不要真實驗收,看改動有沒有碰到遠端副作用路徑**(`generate` / `add_user` / `delete` 這類會在雲端留下東西的呼叫)。
   沒碰 → 離線測試 + 用既有實測前提推導結案(`source_delete` 的清理義務、v0.9.2 的 owner 定位都是這樣結的);碰了 → 開
   `acceptance-workspace`。**推導要逐條指出前提在哪次實測被證明**,不能只說「應該沒事」。
+- **tripwire 要驗「我們真的做得到什麼」,不是「上游宣告了什麼」。** v0.9.25 的 blocker:
+  `test_every_sdk_enum_member_…` 問「每個 SDK enum 成員有沒有被交代」,於是「加進白名單」看起來
+  就是讓它變綠的正解 —— 但 enum 是 backend-neutral、能力是 backend-specific,那個白名單開出一個
+  伺服器生不出來的死選項,真實驗收才擋下。**一條問錯問題的 tripwire 比沒有更糟:它會把人推向錯答案。**
+  寫 contract test 時先問「這條紅了,正確的反應是什麼」——如果答案是「照它說的加一筆」就重寫它。
 - **大型修復輪派 agent:實作 → 獨立審查 → 主迴圈裁決**,四條操作紀律(各是一次事故)見
   [docs/agent-review-playbook.md](docs/agent-review-playbook.md);修正輪之後再派一輪**只看成品、不看原 findings**的複審。

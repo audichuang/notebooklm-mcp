@@ -10,6 +10,15 @@
   `_source.{content,listing}` → `_web.sources.{content,listing}`。**呼叫端不受影響**(簽名沒變、
   `client.<namespace>` 拿到的就是 web 實例);受影響的是任何用 `inspect.getsource` 驗行為的東西 ——
   對 ABC 抓原始碼**不會爆,只會靜默恆真**(`tests/test_contracts.py` 實際踩過)。
+  🔴 **推論的方向也跟著變了:「SDK enum 有這個成員」不再等於「我們生得出來」。**
+  enum(`ReportFormat` 等)是 backend-neutral,**dispatch config 是 backend-specific** ——
+  `_web.params.artifacts._STATIC_REPORT_CONFIGS` 只有三種靜態講義格式,第四種
+  (`CONCEPT_EXPLANATION`)**只在 `_android` 有**。v0.9.25 一度照舊推理「白名單漏了成員」
+  把它開放出去,結果是個必定 `Unsupported report format` 的死選項,真實驗收才擋下。
+  **要開放某個 enum 值之前,先確認 web 的 dispatch table 收不收它**
+  (`tests/test_enums.py::test_report_format_whitelist_matches_what_the_web_backend_can_dispatch`
+  就是釘這件事的;它反向也會告訴你「上游把新格式加進 web 了,現在可以開放」)。
+
   我們**沒有**啟用 android backend(它走 master token,不吃 cookie)。預設是 web,但
   `from_storage()` 沒傳 `backend=` 時會讀 `NOTEBOOKLM_BACKEND` —— **自己直接呼叫 SDK 時
   那個變數是活的**,`app._INLINE_AUTH_ENV_OVERRIDES` 只在走 `app._lifespan` 的 inline auth

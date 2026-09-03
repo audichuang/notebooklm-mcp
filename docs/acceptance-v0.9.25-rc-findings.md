@@ -2697,3 +2697,29 @@ $ grep -coE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' FINDINGS.md
 (`account` / `shared_by` / `shared_with` / `from_account` / `to_account` / `owner_email`)。
 **貼之前就該替換,不要等收工才 scrub** —— 收工才做的話,中間任何一次
 「把 FINDINGS 複製出去」都會漏出去。
+
+---
+
+## 收工後追記(對話收割,2026-09-03):一個結構性待辦
+
+**`.gitignore:24` 是 `.claude/`,所以 `acceptance-workspace` skill 沒有版控。**
+
+那個 skill 是 752 行的驗收紀律 —— 五個判準(影響半徑 / 判別實驗 / 覆蓋自檢 / 照著做 /
+inconclusive)、Phase 排序原則、範本的 `CLAUDE.md` 鐵律與 `local-checks.sh` §0–§8z,
+每一條都對應一次真實事故。它現在:
+
+- **不隨 code 版控** —— 改它沒人 review,換一台機器就沒有;
+- **AGENTS.md §Conventions 指著它**(「碰了 → 開 `acceptance-workspace`」),
+  clone 這個 repo 的人照著找會找不到;
+- **這一輪修的兩處範本缺陷也在版控外**:§2 對 `tools_podcast` 源碼做字面比對(v0.9.16
+  把 failover 迴圈抽到 `_failover.dispatch_with_failover` 之後一路假紅)、
+  §8a 斷言 `cookies=None` 而那行只在 curl_cffi 分支(我們走 httpx)。兩個修正都會靜默漂走。
+
+**這輪的決定:先不動結構,記在這裡當待辦。** 選項是「把
+`.claude/skills/acceptance-workspace/` 從 gitignore 排除並 commit」或「維持本機工具,
+但在 AGENTS.md 註明它不在 repo 裡」。前者讓紀律隨 code 走且會過 review,後者至少不讓
+別人照著指引撲空。
+
+(其餘這場學到的已各自歸位:tripwire 方向 → AGENTS.md §Conventions;
+enum ≠ 能力 → `docs/gotchas-sdk.md`;「還原 ≠ 回到基線」→ `docs/release-checklist.md`;
+憑證殘留發生率 → `docs/gotchas-pool.md` §二之二。)
