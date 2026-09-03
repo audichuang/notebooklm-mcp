@@ -2700,7 +2700,115 @@ $ grep -coE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' FINDINGS.md
 
 ---
 
+## 追記(2026-09-04 06:1x)— v0.9.25 已發版,對**發布版**補跑 Phase 0
+
+session 閒置過夜期間 **v0.9.25 發出去了**,而且 release commit 訊息就叫
+「跟上 notebooklm-py 0.8.2,新增 source_search;**驗收擋下一個死選項**」。
+
+### A. 實裝現況(消費端路徑,不是本機工作樹)
+
+```json
+{"url":"https://github.com/audichuang/notebooklm-mcp.git",
+ "vcs_info":{"vcs":"git","commit_id":"ef59209109201a62ae56df9e2674798ea1d198aa",
+             "requested_revision":"latest"}}
+
+notebooklm-mcp 0.9.25 | notebooklm-py 0.8.2 | mcp 1.29.1
+工具數 37 | source_search: True | concept_explanation 在白名單: False
+```
+
+**CLAUDE.md §〇 要求的那一步做到了**:這份是**從 git 的 `latest` tag 裝的**
+(不是本機工作樹),所以「消費端從 git 裝得起來」這條實測成立 ✅
+`git ls-remote` 顯示遠端 `refs/tags/latest` 與 `v0.9.25` 都已推上去
+(本機 repo 的 `latest` ref 還停在 v0.9.24,只是沒 fetch,不影響安裝)。
+
+### B. 🎯 5.1 的阻擋項**已修,而且修法比我建議的更好**
+
+`notebooklm_mcp/enums.py` 拿掉了那一筆,並留下判準的正本:
+
+> ⚠️ **這份不等於 `ReportFormat` 的全部,而且不該等於。** `ReportFormat` 是
+> backend-neutral 的 enum,但能不能真的生出來是 **backend-specific** 的……
+> `CONCEPT_EXPLANATION` **只在 `_android` 有 dispatch config**,而我們釘在 web……
+> 判準因此是「web 生得出來」,不是「enum 有這個成員」——
+> **tests/test_enums.py 的 tripwire 現在對 `_STATIC_REPORT_CONFIGS` 驗,別再改回對 enum 驗。**
+
+`_DECLINED` 也照 5.6 填了理由。實測產品端已擋:
+
+```
+to_report_format("concept_explanation")
+→ ValueError: Invalid report format 'concept_explanation'.
+  Choose from: study_guide, briefing_doc, blog_post, custom
+```
+
+**比 5.6 多做的一件**:新 tripwire 是**雙向**的 ——
+「上游哪天把某個格式加進 web 的表,這裡會告訴我們現在可以開放了」。
+我建議的版本只擋單向(開放了送不出去的)。
+
+### C. 收工那條「未測組合」也一併解決了
+
+release commit 開頭就是:
+
+> **這一版把四台機器從一個沒測過的組合移開。** v0.9.24 的 pin 是範圍 `>=0.8.1,<0.9`,
+> 而 `uv tool install git+…` **不讀 `uv.lock`** —— 上游 9/2 發 0.8.2 之後,所有機器
+> 下一次 `@latest` 安裝就靜默拿到「v0.9.24 程式碼 + 0.8.2」,而那個組合從來沒人測過。
+> 把下界抬到 `>=0.8.2` 是讓它從「意外解析到」變成「明確宣告且驗過」。
+
+→ 現在 `@latest` 拿到的是 **v0.9.25 + 0.8.2 = 測過的組合** ✅
+
+### D. skill 也回寫了 —— 本輪四項實測都進去了
+
+上游 skill HEAD:`9e13cff docs(notebooklm): 撤回 concept_explanation(web 生不出來),
+回寫 v0.9.25-rc 驗收的四項實測`。`references/tool-reference.md` 的 diff:
+
+- **8.3** →「`limit=N` 是**全域前 N 名**,不是每筆來源 N 段……別從『沒出現』推論『它沒有』」
+- **4a.3** →「`0` 依契約 = 伺服器沒給排名。**v0.9.25-rc 實跑一次都沒遇到 `0`,
+  但契約沒改,判斷別拿掉**」(我在 4a.3 訂的節制被原樣保留 ✅)
+- **4a.4 / 4b.3** →「`start`/`end` **只在無標記純文字來源上對得準**……
+  **markdown 來源會錯位 44~170 字**……回傳裡沒有欄位分得出是哪一種」(數字逐字採用)
+- **4b.1** →「✅ **索引涵蓋上傳媒體的逐字稿**:實測一集回錄 mp3 的 27 段全部檢索得到」
+- **5.1** → `generate_report` 的格式清單移除 `concept_explanation`,並加了一段
+  「不要開放它」的警語 + MCP 端有 tripwire 擋著
+
+### E. 對發布版重跑 `local-checks.sh`:**17 通過 / 0 失敗** ✅
+
+第一次跑是 15/2,兩個 ❌ 都是**本工作區的副本過期,不是產品回歸**
+(與 0.5 的 §2 同一種)。逐項修好之後全綠:
+
+| 失敗 | 原因 | 處置 |
+|---|---|---|
+| §8c | 舊斷言 `assert not missing` 要求**每個 enum 成員都進白名單** —— 那正是 5.2 指出的「方向相反」,產品修對之後它必紅 | 改成對 `_STATIC_REPORT_CONFIGS` 驗(即 5.2 的建議),並加一條「`concept_explanation` 又被開放就紅」;標籤文字一併更新 |
+| §8z | 快照落後(先重拉);重拉後仍紅,原因是上游**新增了 `.mcp.example.json`**,而 §8z 的修法指令只複製 `SKILL.md` + `references` → **這條 check 永遠綠不了** | 把 `.mcp.example.json` 加進排除清單(與已被排除的 `.mcp.json` 同類:設定範例,不是 skill 內容) |
+
+📌 **要帶回工作區範本的三條修正**(累計):
+1. **§2** 的字面比對(v0.9.16 抽離後假紅,見 0.5)
+2. **§8c** 改成對 backend dispatch table 驗(見 5.2)
+3. **§8z** 的排除清單要含 `.mcp.example.json`,否則新工作區第一次跑就紅
+
+### F. 本輪剩下**未結案**的
+
+> 校正(2026-09-04,主迴圈):原表把下面兩列標成未修,那是**這份追記寫在 `9e13cff` 推上去之前**
+> 的狀態。已對推完的 skill 覆核並改成事實;其餘各列維持原判。
+
+| 項目 | 狀態 |
+|---|---|
+| 5.3 純本地 `ValueError` 記成 `attachment_acceptance_unknown` | **未修**(release commit 沒提)。護欄要延伸到 backend param builder |
+| 6.3d failover 留下不可追蹤的孤兒 artifact | **未修**;`attachment_errors` 仍沒記被棄置的 `artifact_id` |
+| 6.5a `chat_ask` 推銷尾巴直通公開 feed | ✅ **已回寫**(9e13cff):skill §Publish 2 加「回寫前自己看最後一行」紅線(`SKILL.md:296`),`chat_ask` docstring 也加了。server 端刻意不自動剝——判準是語意不是字面 |
+| 收工 `notebook_list` 不列「被分享但沒碰過的」 | ✅ **已回寫**(9e13cff):skill §MCP Tools 加紅線含 2/9 實測(`SKILL.md:21`),並讓「manifest 優先」從省一趟 RPC 升級成**正確性**理由 |
+| 收工 `notebook_delete` 缺席 | **未補**;§八 的清理仍只能繞過 MCP |
+| PDF 下載型別判定 | **本輪缺口**,下一輪要補 |
+| Phase 8 前兩列 | **未驗**(prompt 已備好,見〈待使用者執行〉) |
+
+⚠️ **`-c prd` server(pid 479717)已連續跑約 24 小時**,記憶體裡是 9/3 06:20 載入的
+**v0.9.24 + 0.8.1** 程式碼,而磁碟上的 venv 這段期間被換過三次
+(rc → v0.9.24/0.8.2 → v0.9.25/0.8.2)。延遲 import 會拉到現在磁碟上的 module。
+**建議找空檔重啟它**,讓程式碼與 venv 一致。
+
+---
+
 ## 收工後追記(對話收割,2026-09-03):一個結構性待辦
+
+> 這段原本寫在檔尾,被 9/4 的〈追記〉覆蓋掉,現補回。兩者不衝突:上面那份是**對發布版
+> 補跑 Phase 0**,這一份是**把這場對話學到的東西路由回 context 檔**。
 
 **`.gitignore:24` 是 `.claude/`,所以 `acceptance-workspace` skill 沒有版控。**
 
@@ -2711,9 +2819,11 @@ inconclusive)、Phase 排序原則、範本的 `CLAUDE.md` 鐵律與 `local-chec
 - **不隨 code 版控** —— 改它沒人 review,換一台機器就沒有;
 - **AGENTS.md §Conventions 指著它**(「碰了 → 開 `acceptance-workspace`」),
   clone 這個 repo 的人照著找會找不到;
-- **這一輪修的兩處範本缺陷也在版控外**:§2 對 `tools_podcast` 源碼做字面比對(v0.9.16
-  把 failover 迴圈抽到 `_failover.dispatch_with_failover` 之後一路假紅)、
-  §8a 斷言 `cookies=None` 而那行只在 curl_cffi 分支(我們走 httpx)。兩個修正都會靜默漂走。
+- **範本缺陷的修正也都在版控外**。累計已知三條(§E 也列了同一份):
+  §2 對 `tools_podcast` 源碼做字面比對(v0.9.16 抽離 `_failover.dispatch_with_failover`
+  之後一路假紅)、§8a 斷言 `cookies=None` 而那行只在 curl_cffi 分支(我們走 httpx)、
+  §8c 要改成對 backend dispatch table 驗。**這三條修在本機就會靜默漂走** ——
+  §E 說「要帶回工作區範本」,而範本本身沒有版控,正是這個待辦要解的。
 
 **這輪的決定:先不動結構,記在這裡當待辦。** 選項是「把
 `.claude/skills/acceptance-workspace/` 從 gitignore 排除並 commit」或「維持本機工具,
