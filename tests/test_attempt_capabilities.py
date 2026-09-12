@@ -954,3 +954,68 @@ def test_post_retract_replacement_identity_carries_the_artifact_id_for_resume():
     assert caps["safe_next_action"] == p.ACTION_RESUME, caps
     assert caps["safe_next_attempt_id"] == "att-b", caps
     assert caps["safe_next_artifact_id"] == "art-b", caps
+
+
+def test_post_retract_delegation_also_swaps_regeneration_source_ids():
+    """**同一根因的第十二次現形(v0.9.26 三視角複核確認,實跑重現)。**
+
+    交棒給替代 attempt 時,`safe_next_action` / `safe_next_attempt_id` /
+    `safe_next_artifact_id` 三個欄位都已經整組換成 B 的,**只有
+    `regeneration_source_ids` 還是從 A 的 settings 讀**。
+
+    後果:host 拒收 A(來源 s1+s2)之後改用 s1+s3 重生成 B,B 撞配額停在
+    `not_accepted`;host 冪等重呼 retract(A) 想確認狀態,拿到的
+    `regeneration_source_ids` 是 **A 的 s1+s2**。照著帶回去重生,host 那次刻意
+    的來源置換被**靜默還原**,而工具全程回報成功。
+
+    突變驗證:把 `_safe_next_target()` 裡交棒那一段的 `regeneration_source_ids`
+    拿掉、改回讀 `attempt`,這條就會紅。
+    """
+    attempt_a = {
+        "attempt_id": "att-a",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "completed", "artifact_id": "art-a"},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
+                     "source_ids": ["s1", "s2"]},
+        "retraction": {"stale_source_ids": []},
+    }
+    attempt_b = {
+        "attempt_id": "att-b",
+        "dispatch": {"status": "acceptance_unknown"},
+        "remote": {},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
+                     "source_ids": ["s1", "s3"]},
+    }
+    episode = {
+        "episode": 1,
+        "active_attempt_id": "att-b",
+        "attempts": [attempt_a, attempt_b],
+    }
+
+    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+
+    # 前提:這確實是交棒的那一格(身分已經換成 B)。
+    assert caps["safe_next_attempt_id"] == "att-b", caps
+    # 本條要守的:來源集合也必須是 B 的,不是被 retract 的 A 的。
+    assert caps["regeneration_source_ids"] == ["s1", "s3"], caps
+
+
+def test_regeneration_source_ids_stays_the_retracted_attempt_when_not_delegating():
+    """沒有交棒時不變:`regeneration_source_ids` 就是這顆 attempt 自己的來源集合。
+
+    這是上一條的反面鎖 —— 修法若寫成「一律讀 replacement」,這條會紅。
+    """
+    attempt_a = {
+        "attempt_id": "att-a",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "completed", "artifact_id": "art-a"},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
+                     "source_ids": ["s1", "s2"]},
+        "retraction": {"stale_source_ids": []},
+    }
+    episode = {"episode": 1, "active_attempt_id": "att-a", "attempts": [attempt_a]}
+
+    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+
+    assert caps["post_retract_replacement_caps"] is None, caps
+    assert caps["regeneration_source_ids"] == ["s1", "s2"], caps

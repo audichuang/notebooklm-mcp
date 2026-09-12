@@ -238,9 +238,11 @@ def _safe_next_target(
     *,
     attempt_id: str,
     remote: dict,
+    settings: dict,
     replacement_caps: dict | None,
-) -> tuple[str | None, str | None]:
-    """把 `safe_next_action` 翻成呼叫端**照做時要傳的目標身分**(attempt_id／artifact_id)。
+) -> tuple[str | None, str | None, list | None]:
+    """把 `safe_next_action` 翻成呼叫端**照做時要傳的那一組參數**:目標身分
+    (attempt_id／artifact_id)**與重生要帶的 `source_ids`**。
 
     P1(Codex 獨立審查實跑驗證):`podcast_attempt_retract` 委派給 sibling(retract 之後
     發現 `active_attempt_id` 指向另一顆還在飛的 attempt B)時,`safe_next_action` 換成了
@@ -257,22 +259,24 @@ def _safe_next_target(
     `action`):目標身分整段換成替代 attempt 自己算出來的身分,不能沿用這顆(A)的
     `attempt_id`/`remote`——那正是 P1 的根因。
     """
+    own_source_ids = (settings or {}).get("source_ids")
     if action is None:
-        return None, None
+        return None, None, own_source_ids
     if replacement_caps is not None and action == replacement_caps["safe_next_action"]:
         return (
             replacement_caps["safe_next_attempt_id"],
             replacement_caps["safe_next_artifact_id"],
+            replacement_caps["regeneration_source_ids"],
         )
     if action == ACTION_RESUME:
         # `podcast_episode_resume` 認 artifact_id,不是 attempt_id。
-        return attempt_id, remote.get("artifact_id")
+        return attempt_id, remote.get("artifact_id"), own_source_ids
     if action in (ACTION_RETRACT, ACTION_RECONCILE, ACTION_ADOPT):
-        return attempt_id, None
+        return attempt_id, None, own_source_ids
     # regeneration entry(series/episode)是全新呼叫,不指名既有 attempt;
     # source_delete／notebook_share_with_pool 認的是別種身分(source_id／notebook_id),
     # 兩者都已經在各自的回傳欄位裡(`stale_source_ids`／呼叫端自己的 notebook_id)。
-    return None, None
+    return None, None, own_source_ids
 
 
 def _attempt_capabilities(
@@ -528,10 +532,11 @@ def _attempt_capabilities(
     else:
         safe_next_action = ACTION_RETRACT
 
-    safe_next_attempt_id, safe_next_artifact_id = _safe_next_target(
+    safe_next_attempt_id, safe_next_artifact_id, regeneration_source_ids = _safe_next_target(
         safe_next_action,
         attempt_id=attempt_id,
         remote=remote,
+        settings=attempt.get("settings") or {},
         replacement_caps=replacement_caps,
     )
 
@@ -572,7 +577,12 @@ def _attempt_capabilities(
         # 那件事。照著做不了的結果是靜默不指名:`podcast_episode` 的 `source_ids`
         # 預設 `None`,直接讀整本筆記本。`None` = manifest 沒記(例如 resume 建的
         # `{"origin": "explicit_resume"}`),那時 hint 會說「要自己指名」。
-        "regeneration_source_ids": (attempt.get("settings") or {}).get("source_ids"),
+        # **交棒時這一格也要跟著換。** `safe_next_*` 三個欄位都由 `_safe_next_target()`
+        # 整組換成替代 attempt 的,而這一格原本寫死讀 `attempt`(被 retract 的那顆)——
+        # host 拒收 A(s1+s2)後改用 s1+s3 重生 B、B 撞配額停住,冪等重呼 retract(A)
+        # 拿到的卻是 A 的 s1+s2,照著帶回去就把那次刻意的來源置換**靜默還原**
+        # (v0.9.26,同一根因第十二次現形)。
+        "regeneration_source_ids": regeneration_source_ids,
         "regeneration_hint": _regeneration_hint(
             attempt, resend_possible=can_resend and not post_retract
         ),
@@ -2785,31 +2795,24 @@ async def podcast_episode(
     source_ids: list[str] | None = None,
     workspace_root: str | None = None,
 ) -> dict:
-    """生成、命名、下載並回錄一集 podcast。
+    """生成、命名、下載並回錄一集 podcast(單集入口;整季走 ``podcast_series``)。
 
-    Studio artifact 與回錄 source 都命名為 ``EP{n:02d} 正文``(``naming.episode_label``
-    會剝掉匹配的 ``EP{n:02d}. `` / ``EP{n:02d} `` 前綴,所以 serial RSS 標題
-    ``EP01. 心法篇`` 的工作室名仍是 ``EP01 心法篇``)。
+    ``brief`` 與 ``input_bundle_path`` **二擇一**:給 bundle 時 ``brief`` 必須是 ``None``,
+    且須同時給 ``manifest_path`` 與 ``workspace_root``(bundle 路徑相對於它)。
 
-    傳 ``manifest_path`` 時，attempt 會在任何遠端 generation 副作用前持久化；
-    若另傳 ``input_bundle_path``（相對 workspace 的路徑），``brief`` 必須為 ``None``，
-    provider 輸入只來自驗過雜湊的 frozen bytes。**workspace 由 ``workspace_root`` 宣告**
-    (節目目錄,manifest 必須在它底下);省略時推成 manifest 的祖父目錄,但祖父目錄裡還有
-    別的 ``series_manifest.json``(多節目容器、manifest 放 show root)就 fail-closed,
-    因為那個「祖父」是整個容器、別節目的 bundle 會過圍籬(ADR-0012)。timeout／斷線後須依錯誤中的
-    ``attempt_id`` 呼叫 ``podcast_episode_reconcile``，不可重送本工具來重生。
-    finalize 各步驟皆 checkpoint，可用 ``podcast_episode_resume`` 接續。不傳 manifest
-    則保留 standalone best-effort 行為。
+    傳 ``manifest_path`` = durable attempt:timeout／斷線後依錯誤裡的 ``attempt_id`` 呼叫
+    ``podcast_episode_reconcile``,**不可重送本工具重生**;finalize 中斷走
+    ``podcast_episode_resume``。不傳則是 standalone best-effort(無 durable 對帳)。
 
-    ``source_ids`` 指名這一集只讀哪幾筆來源（用 ``source_list`` 取得真實 id）；省略則用
-    筆記本全部來源。**回頭重生某一集時要傳**：筆記本此時已有後續各集的題目與音檔回錄，
-    不指名就會讓那些內容洩進這一集。它與 language／format／length 一樣算生成輸入，會存進
-    attempt settings，resume 時不得改動。
+    ``source_ids`` 指名這一集只讀哪幾筆來源(id 用 ``source_list`` 取),省略 = 讀筆記本
+    全部來源。**回頭重生某一集時必須傳** —— 否則後續各集的題目與音檔回錄會洩進這一集。
+    它算生成輸入,存進 attempt settings,resume 時不得改動。
 
-    ⚠️ **帶進生成的來源 >= 10 筆會在任何副作用之前 raise**（實測 11–15 筆會讓模型拿前面
-    集數的內容填空，而音檔／sha／時長全部正常，事後只有逐字稿提問驗得出來）。判準是
-    **筆數**不是「有沒有指名」：指名 12 筆與不指名 12 筆一樣被擋。抓約 6 筆——本集自己的
-    來源 + 最近 5 集的音檔回錄，集號比本集大的回錄一律排除。
+    ⚠️ **帶進生成的來源 >= 10 筆會在任何副作用之前 raise**(指名與不指名同一把尺)。抓約
+    6 筆:本集自己的來源 + 最近 5 集的音檔回錄,集號比本集大的回錄一律排除。
+
+    命名:Studio artifact 與回錄 source 都是 ``EP{n:02d} 正文``(title 上匹配的
+    ``EP{n:02d}. `` / ``EP{n:02d} `` 前綴會先剝掉)。
     """
     # 本地驗證先行(壞參數 ValueError 秒退,不浪費 RPC),再做認證預檢:
     # 單集也要等最多 20 分鐘,cookie 死了先秒退(見 auth_probe docstring)。
@@ -2928,20 +2931,19 @@ async def podcast_episode_reconcile(
     attempt_id: str,
     wait_timeout: float = 1200.0,
 ) -> dict:
-    """在不重新生成的前提下，找回遺失的 ``generate_audio`` response。
+    """不重新生成,找回遺失的 ``generate_audio`` response —— 只補綁 artifact identity,
+    不 wait／rename／download／finalize。
 
-    只收養一筆建立時間符合持久化 dispatch window、且尚未被認領的 audio artifact；
-    零筆或多筆候選都安全停止，不做猜測。
+    只收養一筆「建立時間落在持久化 dispatch window、且尚未被任何 attempt 認領」的 audio
+    artifact;零筆或多筆候選都安全停止,不猜。``wait_timeout`` 縮不小原 dispatch 承諾的窗,
+    但**傳更大的值會放大候選窗**去撈更晚出現的 artifact —— 零候選不等於死路。
 
-    ``observed_state="reconciliation_ambiguous"`` 時回傳含 ``blocking_attempt_ids``
-    （F5 補記）：唯一候選存在，但同一本 notebook 底下還有**別的** attempt 也還沒被
-    認領（dispatching／acceptance_unknown／reconciliation_ambiguous 且尚未 claim 到
-    artifact）——那顆唯一候選有可能其實是它的產物，manifest 分不出歸屬，所以不自動
-    綁定，改停在 ``reconciliation_ambiguous`` 讓呼叫端用 ``podcast_attempt_adopt``
-    明確指名。真的有 2 筆以上候選時這個欄位固定是空陣列（那條路本來就不是被別的
-    attempt 卡住,單純候選本身不只一個）。⚠️ 這個欄位一旦不是空陣列，代表其中某顆
-    attempt 若是 ``abandon_in_flight`` 作廢的產物，會**永久**卡住這本 notebook 之後
-    每一次的候選自動綁定（見 ``docs/gotchas-attempt.md`` 的相關記錄）。
+    ``reconciliation_ambiguous`` 且 ``blocking_attempt_ids`` 非空 = 有唯一候選,但同一本
+    notebook 還有別的 attempt 也已送出未認領,歸屬判定不了所以不自動綁;外部確認後以
+    ``podcast_attempt_adopt`` 從 ``candidate_artifact_ids`` 指名。
+    ⚠️ 其中若有 ``abandon_in_flight`` 作廢出來的 attempt,它會**永久**留在這個清單裡,
+    於是這本 notebook 之後**每一次**候選自動綁定都要走一次人工 adopt —— 那是帶那個旗標
+    最貴的長期副作用。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
         raise ValueError("manifest_path must be a non-empty string")
@@ -3239,13 +3241,16 @@ async def podcast_episode_resume(
     wait_timeout: float = 1200.0,
     manifest_path: str | None = None,
 ) -> dict:
-    """接續一個「已在 NotebookLM 雲端啟動」的音檔生成,續完後半段而**不重新生成**。
+    """接續一個已在 NotebookLM 雲端啟動的音檔生成,續完後半段(等完成 → 命名 → 下載
+    → 上傳回錄)而**不重新生成**。
 
-    ``artifact_id`` 應來自原呼叫的 durable attempt 或
-    ``podcast_episode_reconcile`` 唯一收養結果，不可自行猜「最新」artifact。
+    什麼時候用:對帳拿到 ``observed_state="accepted"``,或已有 ``artifact_id`` 但 wait／
+    download／upload 中斷。``artifact_id`` 只能來自 durable attempt 或 reconcile／adopt 的
+    結果,**不可拿 ``artifact_list`` 最新一筆盲猜**。
 
-    傳 ``manifest_path`` 時，各 finalize 步驟皆依 checkpoint 與 postcondition
-    冪等接續，重複呼叫不會新增第二筆 source。不傳時僅 best-effort。
+    傳 ``manifest_path`` 時各步驟依 checkpoint 冪等接續,重呼不會多一筆 source;**與生成
+    同一道閘** —— ``podcast_attempt_retract`` 留下的清理義務未結案前 fail-closed。不傳時
+    僅 standalone best-effort(legacy artifact 尚無 manifest 才用)。
     """
     # 本地驗證先行(壞參數 ValueError 秒退),再認證預檢——與 podcast_episode 同一
     # fail-fast 順序:認證錯誤不得蓋掉參數錯誤。
@@ -3462,9 +3467,18 @@ async def podcast_attempt_adopt(
     artifact_id: str | None = None,
     feedback_source_id: str | None = None,
 ) -> dict:
-    """將 caller 明確選定且已驗證的遠端 identity 原子綁回既有產製記錄。
+    """把呼叫端**明確指名、且重新讀遠端驗證過**的 identity 原子綁回既有產製記錄:不
+    generate、不 upload、不 rename,也**不以唯一同名項目推定 identity**。
 
-    本工具只做 identity adoption，不會 generate、upload、rename 或 download。
+    ``artifact_id`` 與 ``feedback_source_id`` **恰好擇一**;帶 ``artifact_id`` 時
+    ``attempt_id`` 必填。
+
+    候選 id 取自停點回傳:``candidate_artifact_ids``(artifact 對帳歧義)或
+    ``candidate_source_ids``(回錄 source 上傳歧義)。``continuity_unverified`` /
+    ``legacy_output_unverified`` 刻意不附候選,要自己 ``source_list`` 找出正確 id。
+
+    換掉 source 時,舊 id 與同輪落選候選會排進該集清理義務,回傳 ``stale_source_ids`` 且
+    ``safe_next_action`` 變 ``source_delete``。綁定後照 ``safe_next_action`` 續推。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
         raise ValueError("manifest_path must be a non-empty string")
@@ -3847,83 +3861,36 @@ async def podcast_attempt_retract(
     reason: str,
     abandon_in_flight: bool = False,
 ) -> dict:
-    """QA 拒收的唯一正門：純本機 manifest mutation，不打 RPC、不動遠端或本機檔案。
+    """QA 拒收的唯一正門:純本機 manifest mutation,不打 RPC、不動遠端或本機檔案(所以
+    **取消不了已經在燒的遠端生成**)。``attempt_id`` 必須是該集的 ``output_attempt_id``,
+    或掛在 ``active_attempt_id`` 但從未 promote 的 candidate;``reason`` 必填非空。重呼
+    冪等;取代版不得改標題。
 
-    ``attempt_id`` 必須是該集的 ``output_attempt_id``，或掛在 ``active_attempt_id`` 但
-    從未 promote 的未授權 candidate；``reason`` 必填非空。
+    **``abandon_in_flight=True`` 只在這三個狀態需要**:``acceptance_unknown`` /
+    ``dispatching`` / ``accepted`` 且遠端未回終態 —— manifest 推導不出有沒有東西在跑,只有
+    呼叫端握有外部知識(例如 ``artifact_list`` 實際查過雲端零 artifact,或明知送進去的
+    brief 就是錯的)。其餘都不用旗標:``prepared`` / ``not_accepted``、``remote`` 已
+    ``failed`` / ``removed``、它本身已是正式輸出、該集已有別顆 attempt 接手。已被 supersede
+    的歷史 attempt 誰都動不了,傳旗標一樣被拒。
 
-    **要不要 ``abandon_in_flight``，看那顆 attempt 的 ``dispatch.status``：**
+    **retract 後必須把回傳的 ``source_cleanup_obligations``(每筆帶 ``notebook_id`` +
+    ``source_id``)逐一 ``source_delete``** —— 別只看 ``stale_source_ids``,生成前 gate 對帳
+    才撈到的孤兒不在那裡。下一次生成**或 resume** 前會實查 notebook,還在就 fail-closed。
 
-    - ``prepared`` / ``not_accepted``（配額被拒、502 同步拒絕……）——**不需要旗標**。
-      契約保證伺服器沒建出 task，作廢它是純本機、零遠端後果，manifest 自己就知道。
-    - ``remote`` 已 ``failed`` / ``removed``——**不需要旗標**（遠端已回報終態）。
-      ⚠️ 但它**不能**原樣重送：重送走的是 supersede 建新 attempt，不是沿用這顆。
-    - 已經是該集 ``output_attempt_id`` 的正式輸出，或該集已有**別顆** attempt 接手
-      ——**不需要旗標**（正常的 QA 拒收路徑）。
-    - 已被 supersede 的**歷史** attempt——誰都動不了它，旗標傳了也一樣被拒；
-      工具會告訴你現在真正的 active／output 是哪顆。
-    - 其餘（``acceptance_unknown`` / ``dispatching`` / ``accepted`` 且遠端未回終態）
-      ——**需要 ``abandon_in_flight=True``**。
-      這幾種 manifest **推導不出來**有沒有東西在跑：它與「第一次 dispatch、還在飛」逐欄位
-      相同，差別只在呼叫端握有的外部知識（例如 ``artifact_list`` 實際查過雲端零 artifact，
-      或明知送進去的 brief 本身就是錯的、等它跑完也沒有意義）。所以必須顯式宣告，預設不開；
-      不宣告時那個狀態刻意留給 ``podcast_episode_reconcile`` / ``podcast_episode_resume``。
+    ``source_cleanup_unresolved=True``(upload 已送出、``source_id`` 還沒落盤)時
+    **照回傳的 ``safe_next_action`` 做,不要照這個狀態名猜**:gate 已經對帳到具體 id 就是
+    ``source_delete``(義務在 ``source_cleanup_obligations`` 裡,照樣要逐筆刪);還撈不到
+    id 才是 ``null`` —— 那種是**要等、不是死路**(候選窗自 dispatch 起算最多 12 分鐘,
+    窗關且零候選才放行)。要保住那筆 source 的身分就別 retract,改走
+    ``podcast_episode_resume``。
 
-    **回錄 source 的 upload 已 dispatch、``source_id`` 還沒落盤時（``dispatching`` /
-    ``acceptance_unknown`` / ``reconciliation_ambiguous``），retract 一樣做得到**，但
-    tombstone 會多帶一筆 ``source_cleanup_unresolved``：遠端可能已經多出一筆沒人記得的
-    media，義務由下一次生成前的 gate 用候選窗對帳結案（撈到就要求 ``source_delete``，
-    零候選且窗已關才放行）。**刻意不擋**：那個狀態靠一次 client cancellation 就能永久
-    存在，而擋住的唯一出路是「先把這顆完整 finalize 再作廢」—— 比 ``abandon_in_flight``
-    本來要避免的後果還多一輪遠端副作用。要保住那筆 source 的身分就走 capabilities 指的
-    ``podcast_episode_resume``；要作廢就帶旗標，義務不會消失。
+    **``safe_next_action`` 不一定是重生**:該集已有別顆 attempt 成為正式輸出時是 ``null``;
+    已有替代 attempt 在飛時指向**那一顆**現在能做的事。⚠️ **執行它一律用
+    ``safe_next_attempt_id`` / ``safe_next_artifact_id``,不要用 ``attempt_id``**(那永遠是
+    被 retract 的稽核主體)—— 拿錯會撞 tombstone 或冪等重跑成無限迴圈。重生指回
+    ``podcast_episode`` 時,把 ``regeneration_source_ids`` 原樣帶進 ``source_ids``。
 
-    ⚠️ ``acceptance_unknown`` 撞上「原樣重呼」死結時就是走這條：``podcast_episode`` 會擋、
-    而它給的出路「用 identical arguments 重送」要求 brief 逐字相同——中途改過產生器就重現
-    不了。查過 ``artifact_list`` 確認雲端零 artifact 之後，``abandon_in_flight=True`` 是正門；
-    低階 ``generate_audio`` + ``podcast_attempt_adopt`` 也走得通，但會多燒一次生成配額。
-
-    **它省不了配額**：生成已經在燒，retract 是純本機動作、取消不了遠端。省的是整整
-    一輪 finalize（下載 mp3 → 上傳回錄 source → promote → 再 retract → ``source_delete``）
-    以及那筆回錄 source 對後續各集 context 的污染。遠端那個 artifact 會成為孤兒，但
-    ``_claimed_artifact_ids`` 掃所有 attempt（含 retracted），所以它不會被後續 reconcile
-    誤 claim。
-
-    retract 後必須把回傳的 ``stale_source_ids`` 逐一 ``source_delete``：下一次生成或
-    resume 前會實際查 notebook 驗證，還在就 fail-closed。標題不可在取代時改。同一
-    attempt 重呼冪等。
-
-    回傳的 ``safe_next_action`` 不是每次都要求重生（F5 補記，避免呼叫端誤以為 retract
-    永遠要接一次重生）：
-
-    - 這一集已經有**另一顆** attempt 接手成為正式輸出（active≠output 分岔，或替代版
-      已完成 finalize）——``safe_next_action`` 是 ``null``，``next_step`` 會說「既有正式
-      輸出不受影響，不必重生」。
-    - 這一集已經有替代 attempt 在飛（重生成功但還沒 promote 成 output，例如上一次
-      response 遺失）——``safe_next_action`` 會改指向那顆替代 attempt 現在真正能做的
-      事（例如 ``podcast_episode_reconcile``），**不會**再指回原本建立這顆 attempt 的
-      入口，因為那條路此時會被「episode 已有 durable active attempt」擋下來。
-    - 其餘情況才是「重生」：``safe_next_action`` 指回原本建立這顆 attempt 的入口
-      （``podcast_series`` 或 ``podcast_episode``）。
-
-    ⚠️ **P1 修復（Codex 獨立審查，同一根因第十一次現形）**：回傳裡的 ``attempt_id``
-    永遠是**這次被 retract 的那一顆**（稽核主體，不會變），但上面第二種情況
-    （委派給還在飛的替代 attempt）時，``safe_next_action`` 教的動作要用的是**那顆
-    替代 attempt 的身分，不是 ``attempt_id``**——原樣拿 ``attempt_id`` 去執行
-    ``safe_next_action`` 會撞 tombstone（``podcast_episode_reconcile``）或冪等重跑成
-    無限迴圈（``podcast_attempt_retract`` 撞回一模一樣的回傳）。所以回傳額外帶
-    ``safe_next_attempt_id`` / ``safe_next_artifact_id``：**執行 ``safe_next_action``
-    一律用這兩個欄位，不要用 ``attempt_id``**（兩者在委派情況下不同；沒有委派、且
-    ``safe_next_action`` 本身認的就是「這顆 attempt」的身分——``podcast_episode_resume``
-    ／``podcast_attempt_retract``／``podcast_episode_reconcile``／``podcast_attempt_adopt``
-    ——時，``safe_next_attempt_id`` 才等於 ``attempt_id``；``safe_next_action`` 是全新
-    呼叫（``podcast_series``／``podcast_episode`` 這類 regeneration entry）或
-    ``source_delete``／``notebook_share_with_pool`` 這類認的是別種身分（source_id／
-    notebook_id）時，``safe_next_attempt_id`` 是 ``null``——P3 修復，見
-    ``docs/gotchas-attempt.md``，這句先前寫反了）。``safe_next_artifact_id`` 只在
-    下一步是 ``podcast_episode_resume`` 時非空（該工具認的是 artifact_id）。
-
-    詳見 skill ``references/tool-reference.md`` 與 ADR-0009。
+    完整狀態表、稽核欄位與回傳形狀見 ``references/tool-reference.md`` 與 ADR-0009。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
         raise ValueError("manifest_path must be a non-empty string")
@@ -4272,28 +4239,25 @@ async def podcast_series(
     audio_length: str | None = "long",
     wait_timeout: float = 1200.0,
 ) -> dict:
-    """依 manifest 的安全續點，確定性地生成整季 podcast。
+    """依 manifest 的安全續點,確定性地生成整季 podcast。
 
-    ⚠️ **一次呼叫會連續生成到 `episodes` 清單結束或外層 timeout 砍掉**，不是「推進一集
-    就回來」。timeout 只殺 MCP request——已經送出的下一集在遠端照樣生完。所以**清單裡
-    只放你真的要生成的集**；還沒把來源放進筆記本的集數先別放進來，否則它會用「筆記本
-    此刻的來源」生成，而那不是那一集該聽的東西（2026-08 有 host 因此 13 集裡 9 集內容
-    錯置，工具全程回報成功）。
+    ⚠️ **一次呼叫會連續生成到 ``episodes`` 清單結束或外層 timeout 砍掉**,不是推進一集就
+    回來;timeout 只殺 MCP request,已送出的下一集在遠端照樣生完。**清單裡只放你真的要生成
+    的集** —— 來源還沒進筆記本的集數先別放,否則它會拿「筆記本此刻的來源」生那一集。
 
-    ⚠️ **這支工具不能指名來源**：每一集都用筆記本當下的**全部**來源。超過 9 筆會讓模型
-    拿前面集數的內容填空，所以生成前有一道 fail-closed 的筆數守門。超標時**不外拋**，
-    而是回結構化安全停點（`observed_state="too_many_sources"`，已跑完的集仍在
-    `episodes` 裡）。`safe_next_action` **分兩種，照回傳的那個做**：這一集還沒有 attempt
-    時是 `podcast_episode`（直接帶 `source_ids` 進來）；已經有 active attempt 時是
-    `podcast_attempt_retract`——那顆的 settings 是「不指名來源」，直接改呼單集入口會被
-    durable-active-attempt guard 擋掉。實務上就是**從 EP06 起改用單集入口**
-    （本集來源 + 最近 5 集回錄 ≈ 6 筆）；重呼本工具只會停在同一集。
+    ``start`` 是執行下界、**不是重生旗標**:``episodes`` 仍須傳完整清單(集號由索引決定),
+    ``start`` 之前的集不讀也不驗證。
 
-    ⚠️ **回錄 source 上傳撞 `reconciliation_ambiguous` 時**（`observed_state` 是這個值、
-    `safe_next_action` 是 `podcast_attempt_adopt`），回傳會帶 `candidate_source_ids`
-    （與 artifact 對帳歧義的 `candidate_artifact_ids` 同一個家族）：`podcast_attempt_adopt`
-    必填 `feedback_source_id` 或 `artifact_id` 之一，只讀 `safe_next_action` 不夠，要從
-    這個欄位挑一個候選傳進去。"""
+    ⚠️ **這支不能指名來源**,每集都用筆記本當下的**全部**來源;生成前有 fail-closed 守門,
+    >= 10 筆時**不外拋**,回安全停點 ``observed_state="too_many_sources"``(已跑完的集仍留在
+    ``episodes``)。``safe_next_action`` **分兩種、照回傳的那個做**:這集還沒有 attempt →
+    ``podcast_episode``(帶 ``source_ids``);已有 active attempt → ``podcast_attempt_retract``
+    (那顆 settings 不指名來源,直接改呼單集入口會被 durable-active-attempt guard 擋)。
+    實務上就是**從 EP06 起改用單集入口**;重呼本工具只會停在同一集。
+
+    ⚠️ 停在 ``reconciliation_ambiguous`` / ``safe_next_action="podcast_attempt_adopt"`` 時,
+    候選在 ``candidate_artifact_ids``(artifact 對帳)或 ``candidate_source_ids``(回錄
+    source 上傳);adopt 必填其中一個 id,只讀動作名執行不了。"""
     # start 是執行下界，不是重生旗標；N 以前的 plan 是 caller 明示的 trust
     # boundary，不讀、不驗證。範圍錯誤仍須在任何遠端副作用前失敗。
     if start < 1:
