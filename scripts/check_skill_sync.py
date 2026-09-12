@@ -128,11 +128,14 @@ SKILL_MD_REQUIRED_TERMS = (
     # v0.9.20:title 生成時鎖死,缺前綴不能事後補。只補 tool-reference 的話,host 照
     # §Episodic 用裸標題生完整季,發布才被擋,整季 title 全部改不了。
     "EP{NN}.",
-    # v0.9.26:retract／series 停點已經替呼叫端算好重生的來源集合,而 SKILL.md 原本主動教
-    # 「自己算」。它已經在 REQUIRED_CONTRACT_TERMS(tool-reference 那側)裡,但路由層缺席時
-    # agent 根本走不到那一格 —— 而省略 source_ids **不是用預設**,`None` 是讀整本筆記本,
-    # 後面各集的回錄會全部洩進重生的那一集,正是 §Episodic 那個🔴「頂替」失效模式。
-    # 與 v0.9.12 的 source_cleanup_obligations 同一個洞,所以釘在同一個地方。
+    # v0.9.26:省略 `source_ids` **不是用預設**,`None` 是讀整本筆記本,後面各集的回錄會
+    # 全部洩進重生的那一集(§Episodic 那個🔴「頂替」)。所以路由層必須講到這個欄位。
+    # ⚠️ **但它常常是 `null`,而 `null` 要自己算**:`podcast_series` 建的 attempt 從來不
+    # 指名來源(settings 沒有這個 key),拒收 series 生的集時這個欄位必定是 `null` 且
+    # `regeneration_hint` 是空字串 —— 工具零警告。SKILL.md 必須同時講到「有值原樣帶回」
+    # 與「null 自己算」兩半,只講前半會把人帶進讀整本那條路(v0.9.26 獨立複審抓到)。
+    # 也別把它寫成「所有 series 停點都會帶」——只有 reentry 那幾條帶,`too_many_sources`
+    # 不帶。與 v0.9.12 的 source_cleanup_obligations 同一個洞,所以釘在同一個地方。
     "regeneration_source_ids",
 )
 

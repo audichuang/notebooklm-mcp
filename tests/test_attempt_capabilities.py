@@ -1000,11 +1000,55 @@ def test_post_retract_delegation_also_swaps_regeneration_source_ids():
     assert caps["regeneration_source_ids"] == ["s1", "s3"], caps
 
 
-def test_regeneration_source_ids_stays_the_retracted_attempt_when_not_delegating():
-    """沒有交棒時不變:`regeneration_source_ids` 就是這顆 attempt 自己的來源集合。
+def test_regeneration_source_ids_follows_the_replacement_even_when_next_action_is_cleanup():
+    """**替代 attempt 在飛、但下一步是清理**(`safe_next_action=source_delete`)。
 
-    這是上一條的反面鎖 —— 修法若寫成「一律讀 replacement」,這條會紅。
+    這一格是獨立複審抓到的:身分(`safe_next_attempt_id`)只在「動作就是替代那顆的」
+    時才換,而 `regeneration_source_ids` 原本綁在**同一個** action 條件上,於是這裡
+    回被 retract 那顆的來源 —— 而同一份 payload 的 `next_step` 正說著「替代 attempt
+    已經在飛,不能再走重生」。**欄位與散文互相矛盾**,照欄位做的自動化拿到的正是這個
+    欄位當初要防的靜默還原。
+
+    重生的**意圖**只要有替代版就是它的,與這一步要做什麼無關 —— 所以兩者的條件不同。
+
+    突變驗證:把 `regeneration_source_ids` 綁回 `_safe_next_target()` 的 action 條件,
+    這條就會紅(舊寫法在這一格回 `["s1", "s2"]`)。
     """
+    attempt_a = {
+        "attempt_id": "att-a",
+        "dispatch": {"status": "accepted"},
+        "remote": {"status": "completed", "artifact_id": "art-a"},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
+                     "source_ids": ["s1", "s2"]},
+        "retraction": {"stale_source_ids": ["src-old"],
+                       "source_cleanup_obligations": [{"notebook_id": "nb", "source_id": "src-old"}]},
+    }
+    attempt_b = {
+        "attempt_id": "att-b",
+        "dispatch": {"status": "acceptance_unknown"},
+        "remote": {},
+        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
+                     "source_ids": ["s1", "s3"]},
+    }
+    episode = {
+        "episode": 1,
+        "active_attempt_id": "att-b",
+        "attempts": [attempt_a, attempt_b],
+        "pending_source_cleanup": [{"notebook_id": "nb", "source_id": "src-old"}],
+    }
+
+    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+
+    # 前提:這一格的下一步是清理,**不是**替代那顆的動作 —— 所以身分不換。
+    assert caps["safe_next_action"] == p.ACTION_SOURCE_DELETE, caps["safe_next_action"]
+    assert caps["safe_next_attempt_id"] is None, caps
+    # 但重生的意圖仍然是替代版的,才不會與 next_step 打架。
+    assert caps["regeneration_source_ids"] == ["s1", "s3"], caps
+    assert "不能再走「重生」" in p._attempt_next_step(caps)
+
+
+def test_regeneration_source_ids_stays_own_when_there_is_no_replacement():
+    """沒有替代版時就是這顆自己的來源集合 —— 擋掉「一律讀 replacement」那種修法。"""
     attempt_a = {
         "attempt_id": "att-a",
         "dispatch": {"status": "accepted"},

@@ -238,11 +238,9 @@ def _safe_next_target(
     *,
     attempt_id: str,
     remote: dict,
-    settings: dict,
     replacement_caps: dict | None,
-) -> tuple[str | None, str | None, list | None]:
-    """把 `safe_next_action` 翻成呼叫端**照做時要傳的那一組參數**:目標身分
-    (attempt_id／artifact_id)**與重生要帶的 `source_ids`**。
+) -> tuple[str | None, str | None]:
+    """把 `safe_next_action` 翻成呼叫端**照做時要傳的目標身分**(attempt_id／artifact_id)。
 
     P1(Codex 獨立審查實跑驗證):`podcast_attempt_retract` 委派給 sibling(retract 之後
     發現 `active_attempt_id` 指向另一顆還在飛的 attempt B)時,`safe_next_action` 換成了
@@ -259,24 +257,22 @@ def _safe_next_target(
     `action`):目標身分整段換成替代 attempt 自己算出來的身分,不能沿用這顆(A)的
     `attempt_id`/`remote`——那正是 P1 的根因。
     """
-    own_source_ids = (settings or {}).get("source_ids")
     if action is None:
-        return None, None, own_source_ids
+        return None, None
     if replacement_caps is not None and action == replacement_caps["safe_next_action"]:
         return (
             replacement_caps["safe_next_attempt_id"],
             replacement_caps["safe_next_artifact_id"],
-            replacement_caps["regeneration_source_ids"],
         )
     if action == ACTION_RESUME:
         # `podcast_episode_resume` 認 artifact_id,不是 attempt_id。
-        return attempt_id, remote.get("artifact_id"), own_source_ids
+        return attempt_id, remote.get("artifact_id")
     if action in (ACTION_RETRACT, ACTION_RECONCILE, ACTION_ADOPT):
-        return attempt_id, None, own_source_ids
+        return attempt_id, None
     # regeneration entry(series/episode)是全新呼叫,不指名既有 attempt;
     # source_delete／notebook_share_with_pool 認的是別種身分(source_id／notebook_id),
     # 兩者都已經在各自的回傳欄位裡(`stale_source_ids`／呼叫端自己的 notebook_id)。
-    return None, None, own_source_ids
+    return None, None
 
 
 def _attempt_capabilities(
@@ -532,12 +528,20 @@ def _attempt_capabilities(
     else:
         safe_next_action = ACTION_RETRACT
 
-    safe_next_attempt_id, safe_next_artifact_id, regeneration_source_ids = _safe_next_target(
+    safe_next_attempt_id, safe_next_artifact_id = _safe_next_target(
         safe_next_action,
         attempt_id=attempt_id,
         remote=remote,
-        settings=attempt.get("settings") or {},
         replacement_caps=replacement_caps,
+    )
+    # **有替代 attempt 在飛 = 重生的意圖已經是它的**,與這一步要做什麼無關。綁在
+    # `safe_next_action` 上會產生自相矛盾的 payload:`safe_next_action=source_delete`
+    # 時欄位給被 retract 那顆的來源,而同一份回傳的 `next_step` 正說著「替代 attempt
+    # 已經在飛,不能再走重生」。照欄位做的自動化拿到的正是這個欄位要防的靜默還原。
+    regeneration_source_ids = (
+        replacement_caps["regeneration_source_ids"]
+        if replacement_caps is not None
+        else (attempt.get("settings") or {}).get("source_ids")
     )
 
     return {
@@ -2795,7 +2799,8 @@ async def podcast_episode(
     source_ids: list[str] | None = None,
     workspace_root: str | None = None,
 ) -> dict:
-    """生成、命名、下載並回錄一集 podcast(單集入口;整季走 ``podcast_series``)。
+    """生成、命名、下載並回錄一集 podcast。**單集與整季的預設入口都是這支** —— ``podcast_series``
+    只在「共用 notebook + 整季 <=5 集 + 不必指名來源」時用。
 
     ``brief`` 與 ``input_bundle_path`` **二擇一**:給 bundle 時 ``brief`` 必須是 ``None``,
     且須同時給 ``manifest_path`` 與 ``workspace_root``(bundle 路徑相對於它)。
@@ -3880,8 +3885,8 @@ async def podcast_attempt_retract(
     ``source_cleanup_unresolved=True``(upload 已送出、``source_id`` 還沒落盤)時
     **照回傳的 ``safe_next_action`` 做,不要照這個狀態名猜**:gate 已經對帳到具體 id 就是
     ``source_delete``(義務在 ``source_cleanup_obligations`` 裡,照樣要逐筆刪);還撈不到
-    id 才是 ``null`` —— 那種是**要等、不是死路**(候選窗自 dispatch 起算最多 12 分鐘,
-    窗關且零候選才放行)。要保住那筆 source 的身分就別 retract,改走
+    id 才是 ``null`` —— 那種是**要等、不是死路**(候選窗自 dispatch 起算,窗關且零候選才放行;
+    實際秒數由 ``UPLOAD_DISPATCH_WINDOW`` 決定,錯誤訊息會給)。要保住那筆 source 的身分就別 retract,改走
     ``podcast_episode_resume``。
 
     **``safe_next_action`` 不一定是重生**:該集已有別顆 attempt 成為正式輸出時是 ``null``;

@@ -20,7 +20,7 @@ from ._sources import (
     to_source_ids,
 )
 from ._status import ensure_completed, ensure_started
-from ._text import _CITATION_RE, norm as _norm, strip_inline_emphasis
+from ._text import norm as _norm, strip_citations as _strip_citations, strip_inline_emphasis
 from .auth_probe import RELOGIN_HINT, _AuthProbeError, probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
@@ -714,7 +714,7 @@ def _dropped_blocks(document) -> list[str]:
         if not any((getattr(s, "text", "") or "").strip() for s in getattr(block, "spans", ()) or ()):
             dropped.append(kind)
     # **整份**都沒有文字 ≠ 部分丟失:那是「上游根本沒給結構化文件」,既有的
-    # `render().strip()` fallback 會退回 `_CITATION_RE` 清 `res.answer`,那條路是對的
+    # `render().strip()` fallback 會退回 `_strip_citations` 清 `res.answer`,那條路是對的
     # (`test_chat_ask_strip_citations_falls_back_when_document_is_whitespace_only` 守著)。
     # 這裡要抓的是「有些 block 有字、有些沒有」——那才是靜默少一段。
     if considered and len(dropped) == considered:
@@ -772,7 +772,7 @@ async def chat_ask(
     if strip_citations:
         _assert_no_dropped_blocks(res.answer_document)
         rendered = res.answer_document.render()
-        answer = rendered if rendered.strip() else _CITATION_RE.sub("", answer)
+        answer = rendered if rendered.strip() else _strip_citations(answer)
         # render() 只管 block 級標記;inline 的 `**粗體**` 要另外清(FINDING-D)。
         answer = strip_inline_emphasis(answer)
     return {

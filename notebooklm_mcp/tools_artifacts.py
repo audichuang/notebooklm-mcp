@@ -15,7 +15,7 @@ from ._status import ensure_completed
 from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
 from .app import mcp
-from ._text import _CITATION_RE, strip_inline_emphasis
+from ._text import strip_citations as _strip_citations, strip_inline_emphasis
 from .manifest_store import ManifestStore
 from .publish import notes_html
 # 白名單的正本在 publish/state.py(那個模組的 docstring 解釋為什麼不能放 tools_publish)。
@@ -181,7 +181,7 @@ async def episode_set_description(
         # 引用標記 + inline 星號強調一起清:v0.9.14 驗收實測,含 `**粗體**` 的字串
         # 原樣寫進 manifest 再原樣進公開 RSS。清理放這裡(不是只放 chat_ask)是因為
         # 呼叫端也可能自己組 show notes,而這支是進 manifest 的唯一正門。
-        desc = strip_inline_emphasis(_CITATION_RE.sub("", desc)).strip()
+        desc = strip_inline_emphasis(_strip_citations(desc)).strip()
     if not desc:
         raise ValueError("description is empty(清完引用標記後也不可為空)")
     # 跑 publish 端那顆一模一樣的 guard。少了這道,夾帶 markdown 圖片／javascript: 連結的
