@@ -104,11 +104,25 @@ client 一 initialize 就把 `_POOL` 換掉、`_ACTIVE` 歸零,而第一個可�
 
 ### 兩份文件層的沉默故障
 
-**`scripts/check_skill_sync.py` 自 v0.9.18 起一直是紅的。** `publication_state` 這個契約詞
-從來沒有以裸 `` `publication_state` `` 的形式在 SKILL.md 出現過(只有
-`publication_state="deferred"` 與 `` `episode_set_publication_state` ``),而 checker 做的是
-精確的 backtick token 比對。也就是說**這道防 skill/MCP 漂移的 CI 硬檢查一直沒在守任何東西**
-—— 而它正是 v0.9.12 / v0.9.18 兩次漂移事故之後立的。現在綠:37 tools + 33 contract terms。
+**跨 repo 的 sync check 只在兩個 repo 的其中一個上跑,所以它斷了 8 天沒人知道。**
+本地跑 `scripts/check_skill_sync.py` 時是紅的:SKILL.md 缺契約詞 `publication_state`。
+
+**但它不是一直紅的。** 查 CI:2026-09-03 的 run(`33812358995`)印的是
+`skill docs cover 37 MCP tools + 33 contract terms (9 of them also required in SKILL.md)`
+—— 綠的,checker 那時確實在守。斷點在 skill repo 這側:`audi-skill@1d11381d`(09-05,
+「封面指令對新節目是死路,砍掉 54 行 docstring 重抄」)把裸的 `` `publication_state` ``
+改寫掉了,只剩 `publication_state="deferred"` 與 `` `episode_set_publication_state` ``,
+而 checker 做的是精確的 backtick token 比對。
+
+**根因是觸發條件,不是 checker 的邏輯**:CI 只掛在 **MCP repo 的 push** 上(它 clone
+遠端 audi-skill 來驗),而這次的破壞來自 **skill repo 的 push** —— 那一側沒有任何東西會
+跑這個檢查。於是 09-05 到 09-13 之間,這道「防 skill/MCP 漂移」的守門是壞的,而兩邊的
+CI 都是綠的。**一道只在被守的兩個 repo 之一上觸發的守門,對另一側等於不存在。**
+
+本輪先把詞補回去(現在綠:37 tools + 33 contract terms,10 個在 SKILL.md)。
+真正的修法是讓 audi-skill 的 push 也能觸發一次(該 repo 的 CI 反向 clone 本 repo,或
+本 repo 加一個 scheduled run),留給下一輪 —— 它要動的是 skill repo 的 workflow,不在
+本次發版範圍。
 
 **`sync-auth.sh` 的重登指令四處漏 `--config prd`。** 腳本預設寫 `dev`,而非互動執行
 (agent 跑 Bash)時它**只警告不擋** —— 新憑證進了正式環境不讀的 config、畫面印
