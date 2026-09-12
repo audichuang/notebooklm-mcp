@@ -171,13 +171,11 @@ async def episode_set_description(
     description: str,
     strip_citations: bool = True,
 ) -> dict:
-    """把單集 show notes 寫進 manifest 的 description(預設先清引用標記 [n])。
+    """把單集 show notes 寫進 manifest 的 `description`。
 
-    取代「host 開 bash 改 JSON」那步:本工具與 generate_slides/generate_report 的
-    回寫同在 server process 事件迴圈內同步讀改寫,天然不 interleave——chat_ask 產完
-    show notes 即可回寫,不用等三個生成到齊。注意這不是跨 process 檔案鎖,別再用
-    外部腳本同時改同一份 manifest。並前置驗 publish 的**全部** preflight 條件(非空、
-    不等於標題、渲染後自包含),讓錯誤在寫入當下就爆,不留到發布才 fail。"""
+    `strip_citations` 預設 True(清 `[n]` 引用標記與 inline `**粗體**`)。寫入當下就驗
+    publish 的 preflight:非空、不等於該集 title、渲染後自包含(外連圖片 / `javascript:`
+    會擋),違反即 ValueError。⚠️ manifest 只由 MCP 工具寫,外部腳本直接改 JSON 會 lost update。"""
     desc = description.strip()
     if strip_citations:
         # 引用標記 + inline 星號強調一起清:v0.9.14 驗收實測,含 `**粗體**` 的字串
@@ -230,28 +228,14 @@ async def episode_set_publication_state(
     state: str | None,
     reason: str | None = None,
 ) -> dict:
-    """標記或解除某一集「稽核上刻意不公開」(`publication_state`)。
+    """標記或解除某一集「稽核上刻意不公開」(manifest 的 `publication_state`)。
 
-    `state="deferred"` = 那一集**留在 manifest 保住完整 audit,但 `publish_series` 完全
-    跳過它**(不驗它的檔、不上傳、不進 feed,集號回在 `deferred_episodes`)。用在音檔被 QA
-    拒收、attempt 全部撤回、暫時沒有可公開成品的時候 —— 少了這個狀態,整季 republish 會
-    因為那一集缺 mp3 而整批 raise。`state=None` = 解除,三個欄位一起移除。
-
-    **這支存在的理由是 lifecycle,不是方便**:v0.9.18 之前 `publish_series` 讀這個欄位,
-    卻沒有任何工具寫得動它 —— 而 `series_manifest.json` 只由工具寫入的紀律不允許 host 手改
-    JSON,於是「解除」在受支持的路徑上是死路(EP46 之後生出可用音檔也解不開)。
-
-    ⚠️ **它只管發布層,不代表禁止重生**:`podcast_series`、attempt / artifact / 清理義務掃描
-    一律不看這個欄位。標記一集**不會**動它的 attempt、artifact 或本機檔案。
-    ⚠️ **扣下一集已經在線上的節目,下次 `publish_series` 會讓它從 feed 消失**(show.json
-    重建時就沒有它了)。既有 enclosure URL 仍然通 —— feed host 永不刪檔 —— 只是不再被列出。
-    **本工具刻意不回報「這一集是否在線上」**:第一版有個 `has_output` 欄位想回答它,但它只
-    看 `mp3_path`/`artifact_id` 的 truthiness,而那四種情形全都會說謊 —— 已生成未發布的回
-    `True`(沒東西可下架)、已上線但 output 欄位被 retract 清掉的回 `False`(其實會下架)、
-    路徑指向不存在的檔也回 `True`。真的要答得準必須讀 ADR-0003 的 deployment snapshot,
-    不是 episode projection 推導得出來的,所以那個欄位整個刪掉,不留一個好看的近似值。
-    ⚠️ **不會自動解除。** 生成完成不等於 QA 通過,所以沒有任何路徑會替你清掉這個狀態;
-    要放行必須顯式再呼叫一次 `state=None`。"""
+    `state="deferred"`(唯一可設值)= 保住該集 audit,但 `publish_series` **完全跳過它**
+    (不驗檔、不上傳、不進 feed,集號回在 `deferred_episodes`)—— 音檔被 QA 拒收、暫時沒有
+    可公開成品時用。設定時 `reason` 必填;`state=None` = 解除三欄(此時不可傳 `reason`)。
+    ⚠️ 只管發布層:不動 attempt / artifact / 本機檔案,重生流程一律不看它,也**不會自動解除**。
+    ⚠️ 扣下**已上線**的集,下次 `publish_series` 會讓它從 feed 消失(舊 enclosure URL 仍通,
+    只是不再被列出)。本工具不回報「這集是否在線上」,那要讀已發布的 show.json。"""
     if state is not None:
         if state not in WITHHELD_PUBLICATION_STATES:
             raise ValueError(
@@ -433,11 +417,14 @@ async def generate_slides(
     slide_length: str | None = "default",
     wait_timeout: float = 1800.0,
 ) -> dict:
-    """生成該集簡報並下載 PDF,路徑回寫 manifest 的 slides_pdf_path。
+    """生成該集簡報並下載 PDF,路徑回寫 manifest 的 `slides_pdf_path`。
 
-    配額被拒(`RateLimitError`)時會**換 pool 裡下一個帳號原地重送**,與音檔家族同一個
-    迴圈(`_failover.dispatch_with_failover`);實際生成的帳號寫進 `slides_account`,
-    每一次換帳號往 `attachment_errors` append 一筆。全部帳號都被拒才原樣拋出。"""
+    ⚠️ `source_ids` 不指名 = 用**全部**來源,續集筆記本後面各集的回錄會洩進這一集。
+    `slide_format`:`detailed`(預設)/ `presenter`;`slide_length`:`default` / `short`。
+
+    配額被拒會自動換 pool 下一個帳號**原地重送**(實際生成的帳號寫進該集的
+    `slides_account`,每次換人往 `attachment_errors` append 一筆);**拋出配額錯誤 =
+    整個 pool 都被拒,不要自己再重試**。"""
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 打錯集號別燒一次生成配額
     # 記帳與送出同源:`snapshot()` 一次取 `(label, client)`,之後任何並行的 rotate 都
@@ -494,11 +481,11 @@ async def artifact_download_slides(
     artifact_id: str,
     wait_timeout: float = 1800.0,
 ) -> dict:
-    """把**已經生成**的簡報用 artifact_id 下載並回寫 manifest,不重新生成。
+    """把**已經生成**的簡報用 `artifact_id` 下載並回寫 manifest,不重新生成。
 
-    救援用:client timeout 砍掉 `generate_slides` 時雲端那份其實生完了,用
-    `artifact_list(kind="slide_deck")` 找回 ID 就能省一次配額。不確定是哪一筆別猜
-    ——重生比綁錯便宜。"""
+    救援用:外層 timeout 砍掉 `generate_slides` 時雲端那份其實生完了,用
+    `artifact_list(kind="slide_deck")` 找回 ID 省一次配額。分不出是哪一筆別猜 —— 綁錯會
+    下載成功並發出錯的附件,重生比綁錯便宜。"""
     client = runtime.get_client()
     return await _finish_slides(
         client,
@@ -520,21 +507,13 @@ async def artifact_revise_slide(
     prompt: str,
     wait_timeout: float = 1800.0,
 ) -> dict:
-    """改**已生成簡報中的單一頁**(0-based `slide_index`),再重新下載回寫 manifest。
+    """改**已生成簡報中的單一頁**(0-based `slide_index`),下載後回寫 manifest。
 
-    省配額用:一頁改一句話不必整份重生(那還會連帶改動其他頁)。結束後走與生成相同的
-    尾段(等完成→原子換檔下載→回寫 `slides_pdf_path`)。
-    `artifact_id` 用 `artifact_list(kind="slide_deck")` 找。
-
-    ⚠️ **這不是就地修改:遠端會多出一顆新 artifact,舊的留著。** v0.9.0 真實驗收實測
-    (本 docstring 原本寫「artifact 不變」,是錯的):revise 之後 `artifact_list` 多一顆
-    `<原標題> (2)`,原本那顆**原封不動還在**。回傳的 `artifact_id` 是**新的那顆**
-    (manifest 也回寫成它),`superseded_artifact_id` 是被取代的舊那顆。
-
-    所以連續 revise 會讓遠端堆出 `(2)`、`(3)`… 而它們**標題只差一個序號**——正好放大
-    「artifact_list 分不出這是哪一集的 deck」那個既有風險。要清乾淨的話,拿
-    `superseded_artifact_id` 自己決定要不要刪(本工具刻意不自動刪:那是遠端破壞性動作,
-    而且萬一新的那顆有問題,舊的是唯一的退路)。"""
+    省配額:一頁改一句話不必整份重生(重生會連帶改動其他頁)。`artifact_id` 先讀該集
+    manifest 的 `slides_artifact_id`,沒有才用 `artifact_list(kind="slide_deck")` 找 ——
+    靠標題猜會把講義 id 餵進來(本工具只吃 slide_deck)。
+    ⚠️ **不是就地修改:遠端會多一顆新 artifact,舊的留著。** 回傳的 `artifact_id` 是新那顆
+    (manifest 也回寫成它),`superseded_artifact_id` 是舊那顆 —— 要清自己拿去刪。"""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string(空 prompt 等於白改一次)")
     artifact_id = _require_artifact_id(artifact_id)
@@ -660,14 +639,17 @@ async def generate_report(
     custom_prompt: str | None = None,
     wait_timeout: float = 1800.0,
 ) -> dict:
-    """生成該集研讀文件(預設 study_guide)並下載 Markdown,路徑回寫 report_md_path。
+    """生成該集研讀文件並下載 Markdown,路徑回寫 manifest 的 `report_md_path`。
 
-    `report_format="custom"` + `custom_prompt` = 完全自訂講義結構(三種靜態模板
-    study_guide / briefing_doc / blog_post 之外的形狀)。兩者必須成對,且 custom
-    格式不吃 `extra_instructions`——要求併進 `custom_prompt`。
+    `report_format`:`study_guide`(預設)/ `briefing_doc` / `blog_post` / `custom`。
+    `custom` 與 `custom_prompt` **必須成對**:`custom` 少了它 raise,而 `custom_prompt`
+    配別的 format 也 raise(想拿它替 `study_guide` 加要求走不通)。`custom` 不吃
+    `extra_instructions`(SDK 靜默丟掉,要求請併進 `custom_prompt`)。
+    ⚠️ `source_ids` 不指名 = 用**全部**來源,續集筆記本後面各集的回錄會洩進這一集。
 
-    配額 failover 與 `generate_slides` 逐字同形(共用同一個迴圈);實際生成的帳號寫進
-    `report_account`。"""
+    配額被拒會自動換 pool 下一個帳號**原地重送**(實際生成的帳號寫進該集的
+    `report_account`,每次換人往 `attachment_errors` append 一筆);**拋出配額錯誤 =
+    整個 pool 都被拒,不要自己再重試**。"""
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)      # 同上
@@ -721,10 +703,10 @@ async def artifact_download_report(
     report_format: str = "study_guide",
     wait_timeout: float = 1800.0,
 ) -> dict:
-    """把**已經生成**的講義用 artifact_id 下載並回寫 manifest,不重新生成。
+    """把**已經生成**的講義用 `artifact_id` 下載並回寫 manifest,不重新生成。
 
-    救援用,同 `artifact_download_slides`(client timeout 丟掉結果時省一次配額)。
-    `report_format` 只影響回寫 manifest 的標記,傳當初生成用的那個值。"""
+    救援用,同 `artifact_download_slides`(一樣分不出是哪一筆就別猜)。`report_format`
+    只影響回寫 manifest 的標記,傳當初生成用的那個值。"""
     client = runtime.get_client()
     return await _finish_report(
         client,

@@ -25,7 +25,9 @@ uv tool install --python 3.12 --force "git+https://github.com/audichuang/noteboo
 # 跑 MCP server(認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON);repo 內開發用 uv run python -m notebooklm_mcp.server
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 #   HTTP 模式:--transport streamable-http --host 127.0.0.1 --port 8484
-#   ⚠️ streamable-http / sse「無認證」——勿綁非 loopback host(同網段可驅動帳號)。
+#   ⚠️ streamable-http / sse「無認證」——勿綁非 loopback host(同網段可驅動帳號);
+#      **且只能給單一 client**(每 session 一個 lifespan 會互相換掉 process 全域 pool,
+#      見 gotchas-pool)。生產四台全走 stdio。
 #   註冊進 Claude Code 見 docs/mcp-setup.md。
 ```
 

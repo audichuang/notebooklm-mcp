@@ -132,6 +132,27 @@ server 在跑。要根治得換方向(例如把展開搬到 SIGTERM handler 裡)
   只有真的沒有 id 才算零副作用。已 dispatch 之後換帳號 = ADR-0009 禁止的改寫因果紀錄。
   `tests/test_pool_gaps.py`(經突變驗證)是這區最敏感的守門員。
 
+## ⚠️ `--transport streamable-http` 只能給**單一** client 用(v0.9.26 確認,未修)
+
+pool 住在 `runtime` 的 **process 全域**(`_POOL` / `_ACTIVE` / `_COOLING`),而 stateful 的
+streamable-http **每個 session 各跑一次 `_lifespan`**。所以第二個 client 一 initialize,
+它的 `runtime.set_clients()` 就把 `_POOL` 換成自己那一份、`_ACTIVE` 歸零、`_COOLING` 清空
+—— 而第一個 session 可能正卡在一次數十分鐘的生成裡。更糟的是它斷線時的 `finally` 會清掉
+**現任** owner 裝的 pool,不是自己那份。
+
+`runtime.py` 的模組 docstring 說「這裡沒有鎖,也不需要有」—— 那段推論的前提是
+**同一個 lifespan 內**的並行,對「兩個 lifespan」不成立。
+
+**現況的正確用法:HTTP 模式只給一個 client 的本機開發用。** 四台生產機全走 stdio
+(每個 client 自己一個 process,天然隔離),所以這條打不到生產路徑 —— 這也是它沒有在
+v0.9.26 一起修的原因:pool 生命週期是本 repo 疤最多的一區(ADR-0010 五條紅線),
+改它要開 acceptance-workspace 實跑,不能靠離線測試推導結案。
+
+修法草稿(留給下一輪):`set_clients()` 回一個 owner token,`_lifespan` 的 `finally` 改成
+`runtime.release(token)` —— 只有現任 owner 清得掉,非 owner 的 `set_clients()` 拒絕或退化成
+共用第一份 pool。真正一勞永逸是把 pool 放進 lifespan context 而非 module 全域,但那會動到
+46 個 `get_client()` 呼叫點。
+
 > 從 `AGENTS.md` 外移(2026-08-16):內容一字未改,只是改成**按需載入** —— 三條都只在動
 > 憑證/lifespan/dispatch 時才用得到,而它們合計 59 行,占了主檔 §Gotchas 的四成。
 > 主檔留一條紅線指過來。

@@ -109,21 +109,14 @@ async def research_start(
     source: str = "web",
     mode: str = "fast",
 ) -> dict:
-    """啟動 NotebookLM 內建研究,**立即**回可輪詢的 task_id(不等完成)。
+    """啟動 NotebookLM 內建研究,**立即**回可輪詢的 `task_id`(不等完成)。
 
-    `mode="fast"` 快速網路搜尋(預設,便宜);`mode="deep"` Deep Research,會產出一份
-    引用導向的報告,但要數十分鐘且吃配額——只用在跨來源有爭議、需要引用地圖的題目。
-    `source="web"`(預設)或 `"drive"`;**deep 只支援 web**。
-
-    ⚠️ 這支 RPC **只送 query 字串**:筆記本裡已有的來源對搜尋內容毫無影響。要讓搜尋
-    貼著你已查證的種子走,得把專有名詞、別名、版本號、時間界線寫進 `query` 本身。
-
-    回傳的 task_id 請先落地,再呼叫 `research_wait`——中途斷線可以重跑 wait 接回來。
-    這是 MCP 統一的 polling handle:deep 取 SDK report_id,fast 取 SDK task_id。
-
-    **`account` 也要一起落地,並原樣傳回給 `research_wait` / `research_import`**:
-    research session 綁在發起它的帳號上(把 notebook 分享給全 pool 也沒用),而多帳號
-    pool 只要發生一次配額 failover,下一次呼叫就換人輪詢,拿到的會是 `no_research`。"""
+    `mode`:`fast`(預設,快速網搜、便宜)/ `deep`(引用導向報告,數十分鐘且吃配額,只用在
+    跨來源有爭議的題目)。`source`:`web`(預設)/ `drive`,deep 只支援 web。
+    ⚠️ 這支 RPC **只送 query 字串**,筆記本既有來源對搜尋毫無影響 —— 種子的專有名詞、版本號、
+    時間界線都要寫進 `query`。
+    ⚠️ `task_id` 與 `account` 都要落地並原樣傳給 `research_wait` / `research_import`(一律傳
+    `task_id`,不是 `report_id`);handle 綁發起帳號,換帳號輪詢會等滿 timeout 拿到 `no_research`。"""
     query = _require(query, "query")
     # 記帳與送出同源:snapshot() 一次取 (label, client),之後任何 rotate 都影響不到
     # 這一次——分兩次讀會讓回傳的 account 記到別人身上(同 ADR-0010 ③)。
@@ -159,22 +152,15 @@ async def research_wait(
     max_report_chars: int = 0,
     account: str | None = None,
 ) -> dict:
-    """等 research 完成,回**候選來源 + 報告**。不匯入任何東西。
+    """等 research 完成,回**候選來源 + 報告**(預設只回報告長度),不匯入任何東西。
 
-    可重入:同一個 task_id 重跑就是繼續等(斷線救援用這支,不要重新 `research_start`)。
-    **`account` 傳 `research_start` 回的那個值**:handle 綁在發起它的帳號上,pool 換人
-    輪詢會拿到 `no_research`(見 `_handle_client`)。沒傳 = 用作用中帳號(單帳號無差)。
-    `candidates` 每筆有 `url` / `title` / `cited`(該 URL 是否被報告引用)。挑完之後把
-    URL 交給 `research_import`。
-
-    `max_report_chars` 預設 **0 = 不回報告本文**,只回 `report_chars` 讓你知道有多長
-    ——deep research 報告動輒上萬字,預設灌回 context 太貴,而你真正要挑的是
-    `candidates`。要讀報告就傳一個上限(例如 4000);task 已完成時重呼本工具會立刻回,
-    不會重等也不燒配額。`include_report=True` 的匯入**不需要**先把報告讀回來
-    (`research_import` 會在 server 端重新 poll 取得完整報告)。
-
-    `report_importable=True` 表示這次(deep)research 產出了一份報告,可以在 import 時用
-    `include_report=True` 一併收進筆記本。"""
+    可重入:同 `task_id` 重跑就是繼續等 —— 斷線救援用這支,**不要**重新 `research_start`
+    (會再燒一次配額)。`account` 傳 `research_start` 回的那個值(換帳號會等滿 timeout)。
+    `candidates` 每筆 `url`/`title`/`cited`(是否被報告引用,事實標記非篩選決定),挑完把 URL
+    交給 `research_import`。
+    `max_report_chars` 預設 **0 = 不回報告本文**,只回全文長度 `report_chars`;要讀就傳上限
+    (例如 4000)。`report_importable=True` = 這次有報告,`research_import(include_report=True)`
+    收得進來,不必先讀回。"""
     task_id = _require(task_id, "task_id")
     if not isinstance(max_report_chars, int) or isinstance(max_report_chars, bool):
         raise ValueError("max_report_chars must be an int")
@@ -233,18 +219,15 @@ async def research_import(
     max_elapsed: float = 1800.0,
     account: str | None = None,
 ) -> dict:
-    """把 **host 指名的**候選來源匯入筆記本。沒指名的一律不進來。
+    """把 **host 指名的**候選來源匯入筆記本,沒指名的一律不進來。
 
-    `account` 同 `research_wait`:傳 `research_start` 回的那個值,否則 pool 換人之後
-    這裡的 `research.poll` 會查不到這個 task。
-
-    `urls` 用 `research_wait` 回的候選 URL 原樣傳(比對前會做正規化)。指名了不存在的
-    URL 會直接 raise 並列出來——寧可爆掉,也不要靜默少匯入幾筆讓你以為都進去了。
-    `include_report=True` 另外收進 deep research 的報告本身。
-
-    ⚠️ 匯入的是**這個 notebook_id**。research 建議跑在拋棄式 scratch notebook,核可的
-    來源再用 `source_add_url` 進 episode notebook,避免候選污染生成用的來源集
-    (見 ADR-0008)。"""
+    `urls` 用 `research_wait` 回的候選 URL 原樣傳,不在候選清單裡的會直接 raise 並列出。
+    `include_report=True` 另收 deep 報告本身(沒有 URL,只能靠這個旗標)。`account` 同
+    `research_wait`。
+    ⚠️ 匯入目標就是傳入的 `notebook_id`。research 跑拋棄式 scratch notebook,核可的來源再用
+    `source_add_url` 進 episode notebook,否則被否決的候選會污染來源集。
+    ⚠️ 外層 timeout 砍掉本呼叫時伺服器可能已 commit,**別直接重呼**(會重複匯入),先用
+    `source_list` 對帳。"""
     # 走 SDK 的 import_sources_with_verification:IMPORT_RESEARCH 在 deep 負載下常常超過
     # 30 秒、client 端先 timeout 但伺服器其實已經 commit,它用 source list 對帳只補送真的
     # 沒進去的那幾筆,不盲目重送造成重複來源。

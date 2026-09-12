@@ -438,10 +438,13 @@ _INSTRUCTIONS = """\
 NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
 
 主流程(優先用高階工具,別自己拼低階步驟):
-- 整季/一般單集生成 → podcast_series(episodes 放一集即單集)。若 host 已建立
-  frozen generation input bundle，改用 podcast_episode(brief=null, manifest_path=...,
-  input_bundle_path=...)(路徑與冪等規則見 skill)。有 manifest-backed attempt 時，
-  依工具回傳的 safe_next_action 續跑。
+- 生成 → 預設 podcast_episode(manifest_path, source_ids=[…]);podcast_series 只在
+  「共用 notebook + <=5 集 + 不指名來源」時用,且**一次呼叫會連續生完 episodes 清單
+  裡的每一集**(清單放錯 = 整季內容錯置)。host 已凍 bundle 時
+  podcast_episode(brief=null, input_bundle_path=...)(路徑與冪等規則見 skill)。
+  有 manifest-backed attempt 時,依工具回傳的 safe_next_action 續跑。
+- 來源 >= 10 筆時音檔入口全部 fail-closed(上限 9);重生不指名 source_ids
+  **就是讀整本筆記本**,後面各集的回錄會洩進那一集。
 - 發布成 Apple RSS → publish_series(讀 series_manifest.json;需 env
   PODCAST_PUBLIC_BASE_URL / PODCAST_TOKEN_SALT / PODCAST_UPLOAD_URL /
   PODCAST_UPLOAD_TOKEN)。
@@ -449,7 +452,8 @@ NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
   一般流程不需逐個手動呼叫。
 
 鐵律:
-- 任何長跑前先 auth_check;cookie 死了秒退,別燒掉數小時。
+- 任何長跑前先 auth_check(all_slots=true) —— **預設只量當下作用中那一槽**,而
+  配額 failover 會中途換帳號,不傳旗標拿到的是 1/N 的綠燈。
 - start=N 只是 execution lower bound/trust boundary,不會重生已完成集。
 - 長 MCP request 可能被 client cancellation 終止；可靠性來自 manifest checkpoint
   與重呼,不保證 server 在背景跑完。未傳 manifest_path 的 standalone call 僅 best-effort。

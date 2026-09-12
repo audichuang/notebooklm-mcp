@@ -106,31 +106,21 @@ async def _probe_extraction(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def auth_check(all_slots: bool = False) -> dict:
-    """輕量真 RPC 驗證 NotebookLM 認證(cookie)是否有效。
+    """輕量真 RPC 驗證認證(cookie)有沒有效;長流程(整季生成、發布)前先跑,cookie 死了
+    秒退並回重登指引。
 
-    長流程(整季生成、發布)前先跑,cookie 死了會秒退並回重登指引,
-    避免燒掉數小時等待。回傳 {"ok": True, "notebooks": N}。
+    ⚠️ **預設只量「當下作用中」那一槽**,而配額 failover 會在生成中途換帳號 —— 9 槽 pool
+    的綠燈只代表 1/9 綠。要涵蓋整個 pool 傳 ``all_slots=True``(每槽一次真 RPC,多回
+    ``slots`` 表與 ``all_usable``;N 次 RPC,所以是選配)。
 
-    ⚠️ **預設只量「當下作用中」那一個槽位**,而配額 failover 會在生成中途換帳號 ——
-    所以真正被用到的那個槽位可能從頭到尾沒被探過。9 槽 pool 綠燈只代表 1/9 綠。
-    要涵蓋整個 pool 就傳 ``all_slots=True``:每槽各打一次真 RPC,回傳多一個 ``slots``
-    表(槽位 / env 名 / 帳號 / usable / notebooks / refreshable / heal_reason /
-    psidts_domains)與 ``all_usable``。代價是 N 次 RPC,所以它是**選配、不是預設**。
+    **兩種模式的失敗語意不同**:預設模式**不回 false** —— 認證失效或撞到非認證錯誤都是
+    **原樣拋例外**(這就是它「秒退」的方式)。``all_slots=True`` 才會回表而不拋:每槽的
+    ``usable`` 是三態(``true`` = 真 RPC 過;``false`` = 確認認證失效;``null`` = 撞到非認證
+    錯誤、**沒量到**,別讀成壞掉),判斷寫 ``usable is True``;**全部槽位都不可用時**它才
+    比照預設模式 raise。
 
-    ``refreshable`` 與啟動時那則 routability warning **量的是同一個 predicate**,
-    這是刻意的:兩盞燈不同源的話,人看到的狀態會與 log 各講各的。它回答的是
-    「PSIDTS 能不能被 refresh」,**不是「現在能不能用」** —— 後者是 ``usable``
-    這一欄(真 RPC)。prd 槽位 1 長期是 ``usable=true`` + ``refreshable=false``
-    (scope 在 ``.youtube.com``),那是已知且可服役的狀態,不是故障。
-
-    ``usable`` 三態:``true`` = 真 RPC 過;``false`` = 確認是認證錯誤;
-    ``null`` = 探測撞到**非認證**錯誤(網路 / 限流),沒量到,別讀成壞掉。
-    **頂層 ``ok`` 同樣三態**(它就是作用中那一槽的 ``usable``):``null`` = 沒量到。
-    預設模式在同一種情況下是原樣拋出那個非認證例外,所以這裡回 ``null`` 才與它一致 ——
-    回 ``false`` 等於把「沒量到」講成「不能用」。
-
-    ``all_slots=True`` 只在**每一槽都不可用**時才 raise(等同預設模式的 fail-fast:
-    整條路都走不動);只要還有一槽活著就回表,因為丟出例外會把你要的診斷一起丟掉。
+    ``refreshable`` 問的是「PSIDTS 能不能 refresh」,**不是「現在能不能用」**(那是
+    ``usable``)。``usable=true`` + ``refreshable=false`` 是已知可服役,不要據此去重登。
     """
     if not all_slots:
         return await probe_auth(runtime.get_client())
@@ -378,23 +368,15 @@ def _nothing_to_share(notebook_id: str, executor_label: str | None) -> dict:
 
 @mcp.tool()
 async def notebook_share_with_pool(notebook_id: str) -> dict:
-    """把**既有** notebook 分享給多帳號 pool 裡的其餘帳號(EDITOR)。
+    """把**既有** notebook 分享給多帳號 pool 的其餘帳號(EDITOR)。少了它,配額耗盡
+    failover 換帳號時會 `NotebookAccessDenied`。`notebook_create`(v0.8.1 起)已自動做,
+    這支是補給網頁上手動建的、或 v0.8.1 之前建的。
 
-    `notebook_create` 從 v0.8.1 起會自動做這件事;這支是給**既有** notebook 補的
-    ——v0.8.1 之前建的、或在 NotebookLM 網頁上手動建的。沒有這個前置狀態,配額耗盡
-    後 failover 換帳號時會 `NotebookAccessDenied`。
+    **冪等,重跑安全**:已是 EDITOR/OWNER 的列在 `already_shared`(手動分享的 **VIEWER
+    不算**已分享,會補成 EDITOR);單帳號模式 no-op。
 
-    **冪等**:已經是 EDITOR/OWNER 的帳號直接跳過,重跑安全。單帳號模式是
-    no-op(不打任何 RPC)。
-
-    **自己找得動手的那個帳號,不看游標。** 這支工具的典型使用時機,就是
-    `podcast_series` 因為權限被拒而停下、指引呼叫端來跑它 —— 而那個當下,
-    作用中帳號**正好是看不到這個 notebook 的那一個**(配額 failover 換過去了)。
-    照著游標走的話,指引自己也 permission denied,呼叫端只是從一個死路換到另一個
-    (v0.9.0 真實驗收 Phase 9-1 實測)。所以這裡改成掃 pool 找出**分享得動它**的
-    帳號來執行(見 `_resolve_share_executor`:先試作用中的,再依槽位順序,成功之後
-    還要換到 owner)。掃描只打唯讀 `get_status`,而且**不動輪替游標** —— 那個游標的
-    語意是「配額走到哪」,借去做別的事會讓 failover 的帳號記帳失去意義。
+    **不看輪替游標**,自己掃 pool 找分享得動這本的帳號來執行 —— 所以作用中帳號正好看不到
+    這本時照樣跑得動,那正是它的典型使用時機。
     """
     # **順序有意義:沒有 peers 就先走人,不要用一趟遠端呼叫換一個純本機的答案。**
     # v0.9.1 一度把 executor 掃描擺在這之前,於是單帳號模式對一個不屬於自己的
@@ -420,10 +402,9 @@ async def notebook_share_with_pool(notebook_id: str) -> dict:
 async def notebook_create(title: str) -> dict:
     """Create a new notebook. Returns its id.
 
-    多帳號 pool 模式下會自動把它分享給其餘帳號(EDITOR):failover 換帳號後是拿新
-    帳號對**同一個 notebook_id** 送出,新帳號看不到它的話整條 pool 是空談
-    (v0.8.0 驗收 F-2:實測其餘帳號 `notebooks.get` 一律 permission denied)。
-    單帳號模式完全不打額外 RPC,行為不變。既有 notebook 用 `notebook_share_with_pool`。
+    多帳號 pool 模式下會自動分享給其餘帳號(EDITOR),回傳 `shared_with`:failover 換帳號
+    後是拿新帳號對**同一個 notebook_id** 送出,新帳號看不到它整條 pool 就是空談。
+    單帳號模式不打額外 RPC。既有 notebook 補分享用 `notebook_share_with_pool`。
     """
     # 驗證一律先於變更:_pool_peers 是純本機檢查(只讀 runtime.all_accounts()),
     # 卻原本放在 create() 之後——某槽位啟動時拿不到 email 是**決定性**失敗
@@ -454,16 +435,20 @@ async def notebook_create(title: str) -> dict:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def notebook_list() -> dict:
-    """List all notebooks."""
+    """List all notebooks(**答得不完整**)。
+
+    ⚠️ 被分享給你、但這個帳號**從沒開過**的 notebook 不會出現(實測 9 個 pool 帳號只有
+    2/9 列得到同一本)。所以照標題比對會得到**假的「找不到」** —— 別據此 `notebook_create`
+    一本新的,改用 `notebook_get` 拿候選 id 直接驗。"""
     nbs = await runtime.get_client().notebooks.list()
     return {"notebooks": [{"notebook_id": n.id, "title": getattr(n, "title", "")} for n in nbs]}
 
 
 @mcp.tool()
 async def source_add_url(notebook_id: str, url: str, wait: bool = True) -> dict:
-    """Add a URL or YouTube link as a source. wait=True(預設)時回傳附帶 best-effort
-    落地驗證:char_count(擷取字數;0 = 疑似 paywall/空殼,附 warning)——多數情況
-    看回傳即完成對帳,不用再跑 source_list + source_fulltext。"""
+    """Add a URL or YouTube link as a source。`wait=True`(預設)的回傳附帶 best-effort
+    落地驗證:`char_count` = 擷取字數,**0 代表疑似 paywall/空殼**並附 warning(該
+    `source_delete` 掉、改抓全文用 `source_add_text`)。看回傳即完成對帳。"""
     client = runtime.get_client()
     src = await client.sources.add_url(notebook_id, url, wait=wait, wait_timeout=600.0)
     out = {"source_id": src.id}
@@ -487,14 +472,12 @@ async def source_add_file(
     wait: bool = True,
     title: str | None = None,
 ) -> dict:
-    """Add a local file as a source. mp3 回饋來源用 mime_type="audio/mpeg";
-    title 可直接命名(如手動補一集時傳 "EP03 標題",與 Studio artifact 同名)。
+    """Add a local file as a source. mp3 回饋來源用 mime_type="audio/mpeg";`title` 可直接
+    命名(如手動補一集傳 "EP03 標題",與 Studio artifact 同名)。
 
     endpoint 不吃的副檔名(`.json`/`.ts`/`.py`/`.yaml`…)若是純文字會自動包成
-    `<原檔名>.md` 上傳,回傳帶 `converted_from`——caller 不必自己先改名。傳了
-    `mime_type` 就照傳入值原樣送(顯式宣告優先);HTML 維持上游的 fail-loud。
-    注意這是 caller-facing 的通用檔案入口;podcast finalize 的已知 mp3 路徑
-    直接走 SDK,不經過這裡。"""
+    `<原檔名>.md` 上傳,回傳多一個 `converted_from`,caller 不必自己先改名。
+    **顯式傳了 `mime_type` 就原樣送**(自動包裝不生效);HTML 維持上游的 fail-loud。"""
     # SDK 會 strip title 後才落地;先在這裡 strip,後檢比較基準才會一致,
     # 否則呼叫端傳前後空白會被誤判成「title 未生效」而 raise(明明成功了)。
     title = title.strip() if title is not None else None
@@ -539,12 +522,12 @@ async def source_add_file(
 async def source_delete(notebook_id: str, source_id: str) -> dict:
     """Delete a caller-selected source that is no longer needed.
 
-    這是 generic source 管理能力，不代表可覆寫 manifest-backed completed episode。
-    SDK 的 delete 允許刪不存在的 id，但 RPC 只送 source_id、notebook_id 只是 routing
-    header；工具會先以 source_list 驗證它屬於指定 notebook，**查無此 id 時不發那個
-    destructive RPC**（否則打錯 notebook 會刪到別本的來源），回 was_present=False。
-    `deleted` 一律代表「呼叫後該 id 已不在這個 notebook」；要區分「本來就不在」看
-    `was_present`。"""
+    這是 generic source 管理能力,**不是**覆寫 manifest-backed completed episode 的手段
+    (那條正門是 `podcast_attempt_retract`)。
+
+    查無此 id 時**不發那個破壞性 RPC、也不 raise**,回 `was_present=False` —— 所以清理
+    迴圈斷線後可以整份重放。`deleted` 一律代表「呼叫後該 id 已不在這個 notebook」,
+    要分辨「本來就不在」看 `was_present`。"""
     client = runtime.get_client()
     sources = await client.sources.list(notebook_id)
     if not any(getattr(source, "id", None) == source_id for source in sources):
@@ -572,24 +555,14 @@ async def generate_audio(
 ) -> dict:
     """Generate an audio overview. Defaults to zh_Hant and returns task_id.
 
-    ``source_ids`` 指名只讀哪幾筆來源(用 source_list 取得真實 id);省略則用筆記本
-    全部來源。要排除哪些是呼叫端的政策。
+    ``source_ids`` 指名這次只讀哪幾筆來源(用 `source_list` 取真實 id);省略 = 筆記本
+    **全部**來源。要排除哪些是呼叫端的政策。
 
-    ⚠️ **帶進生成的來源 >= 10 筆會在打 RPC 之前 raise**,與 ``podcast_episode`` 同一道
-    守門(實測 11–15 筆會讓模型拿別的來源內容填空,而 task_id／時長全部正常)。
-    這支是低階救援入口,但**失效模式跟高階完全一樣**——守門只掛在 podcast 家族的話,
-    這裡就是繞過它的公開後門。
+    ⚠️ **帶進生成的來源 >= 10 筆會在打 RPC 之前 raise**(判準是筆數,不是有沒有指名)。
+    實測 11–15 筆會讓模型拿別的來源內容填空,而 task_id 與時長全部正常 —— 看不出來。
 
-    ⚠️ **這支沒有配額 failover**:它用 ``runtime.get_client()``(此刻作用中的那一個),
-    撞到配額就直接 raise,不會換帳號重送。多帳號 pool 裝了幾個帳號都一樣。
-    根因是它**連 `manifest_path` 參數都沒有** —— 共用迴圈 (`_failover`) 收到
-    ``record_failover=None`` 就一律不換,因為沒地方寫「A 拒絕 → 換 B」的稽核紀錄
-    (ADR-0010:對 client 透明可以,對紀錄不行)。
-    **v0.9.16 起 `generate_slides` / `generate_report` / `artifact_revise_slide` 都接上了**
-    ——它們吃 `manifest_path` + `episode_n`,稽核寫進 episode 的
-    ``slides_account`` / ``report_account`` 與 append-only ``attachment_errors``(ADR-0011)。
-    這支要跟上得先有地方落帳,那等於把它升成 manifest-backed 能力,不在本工具範圍。
-    所以拿這支當 ``acceptance_unknown`` 的備援出路時,配額拒絕要由呼叫端自己處理。"""
+    ⚠️ **這支沒有配額 failover**:撞到配額直接 raise,多帳號 pool 也一樣,要由呼叫端自己
+    處理。要 failover 走 manifest-backed 的 `podcast_episode`。"""
     selected = to_source_ids(source_ids)
     client = runtime.get_client()
     await assert_source_count_is_safe(client, notebook_id, selected)
@@ -611,14 +584,12 @@ async def generate_audio(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
-    """List artifacts already in a notebook, so you can see and recover them —
-    e.g. an audio episode whose download got interrupted (find its artifact_id
-    here, then artifact_download_audio). Pass kind to filter: "audio", "video",
-    "report", "quiz", "flashcards", "mind_map", "infographic", "slide_deck",
-    "data_table"; omit for everything.
+    """List artifacts already in a notebook —— 救援/對帳用,例如下載被打斷的音檔(在這裡
+    找到 `artifact_id`,再 `artifact_download_audio`)。`kind` 可篩:audio / video / report /
+    quiz / flashcards / mind_map / infographic / slide_deck / data_table;省略 = 全部。
 
-    `source_ids` 是 0.8.1 的觀測欄位，僅原樣回傳供人工查看；尚未在生產資料驗收，
-    不得拿它當 gate 或驗證條件。
+    ⚠️ 每筆的 `source_ids` 是**生成當下的歷史快照**,不是即時 join:答「這顆用哪些來源
+    生的」(可對帳某集有沒有把回錄吃進去),**不可反查現存 source** —— 裡面有已刪除的 id。
     """
     from notebooklm.types import ArtifactType
 
@@ -646,7 +617,8 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def artifact_wait(notebook_id: str, task_id: str, timeout: float = 1200.0) -> dict:
-    """Wait for a generation task to complete."""
+    """Wait for a generation task to complete —— 傳 `generate_*` 回的 `task_id`,不是
+    notebook_id。SDK 回 failed status 時這裡 raise(fail-closed)。"""
     status = await runtime.get_client().artifacts.wait_for_completion(notebook_id, task_id, timeout=timeout)
     # Fail-closed: the SDK returns a FAILED status (not an exception) when generation
     # fails mid-poll; without this a failed wait would be reported as success.
@@ -682,27 +654,16 @@ async def artifact_rename(notebook_id: str, artifact_id: str, new_title: str) ->
 
 @mcp.tool()
 async def artifact_retry_failed(notebook_id: str, artifact_id: str) -> dict:
-    """把**失敗的** artifact 原地重跑(UI 的 Retry),artifact_id 不變。
+    """把**失敗的** artifact 原地重跑(UI 的 Retry),`artifact_id` 不變 —— 省下「刪掉重生」
+    那一次配額。用 `artifact_list` 找 `completed=False` 的那筆,retry 後接 `artifact_wait`,
+    **再用對應的 `artifact_download_*`** 才會落地並回寫 manifest —— wait 完不等於結束。
 
-    省配額用:舊路徑是刪掉重生,等於再花一次生成配額;這裡重用同一個 artifact。
-    用 `artifact_list` 找出 completed=False 的那筆,retry 後接 `artifact_wait`,
-    再用對應的 download 工具。
+    ⚠️ **來源集合變動過的 failed AUDIO 別用這支。** RETRY_ARTIFACT 只送 artifact_id,伺服器
+    沿用該 artifact **原本**的來源集合(實測:失敗**之後**新增的來源不會被吃進去),所以這裡
+    **沒有**來源筆數守門;而「失敗之後**刪掉**原來源」與跨帳號重跑都沒驗過 —— 來源動過就一律改走
+    `podcast_episode(..., source_ids=[...])` 重生。
 
-    注意 SDK 對伺服器端的同步拒絕(rate limit / 配額 / 不可重試的 artifact)是
-    **raise**(不像 generate_* 吞成 failed status),所以拒絕會直接冒出來。
-
-    ⚠️ **部分驗證的邊界**:AUDIO 的 retry 這裡**沒有**來源筆數守門(`generate_audio` /
-    `podcast_episode` 都有)。RETRY_ARTIFACT 只送 artifact_id,伺服器沿用該 artifact
-    原本的來源集合、不重抓筆記本當下全部——**v0.9.3 真實驗收(2026-08-10)實測過一次**:
-    對一顆 failed AUDIO,在失敗之後才把 4 篇全新領域的來源加進筆記本(共 12 筆、已超標),
-    retry 完的逐字稿對那 4 篇的 16 個獨有指紋 **0/16 命中**;同一批來源用
-    `podcast_episode(source_ids=[...])` 生一集當正向對照則 **16/16 命中**(證明探針有效)。
-    所以守門仍然不加(加了會廢掉一條救援路)。
-
-    **但這只結案了一半,別讀成「這支工具安全」**:n=1,而且只測了「失敗**之後新增**
-    來源」。**沒測**失敗之後**刪掉**原來源(原集合的 id 失效時伺服器行為未知)、
-    也沒測跨帳號重跑。要重跑一顆來源集合已經**變動過**的 failed AUDIO,走
-    `podcast_episode(..., source_ids=[...])` 重生仍然比較保險。"""
+    伺服器端的同步拒絕(限流/配額/不可重試)是 **raise**,會直接冒出來。"""
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id must be a non-empty string")
     artifact_id = artifact_id.strip()
@@ -785,37 +746,24 @@ async def chat_ask(
     strip_citations: bool = False,
     include_references: bool = True,
 ) -> dict:
-    """Ask a source-grounded question.
+    """Ask a source-grounded question. Returns answer + references + conversation_id.
 
-    Pass source_ids to focus on specific sources (e.g. one episode's article,
-    excluding earlier episodes' audio) so show notes don't get polluted; pass
-    conversation_id to continue a thread. Returns answer + citation references +
-    conversation_id. NOTE: answer carries citation markers like [1]/[3, 4].
-    產公開文案(show notes)時傳 strip_citations=True 會優先取 0.8.1 起新增的
-    `answer_document.render()`——上游把同一份文件的三種 rendering 分工寫死:
-    `.text` 是 offset-faithful layout,為了讓 citation `slice()` 精確,刻意不插入
-    任何分隔符(段落會黏在一起),且用 U+FFFC 填補圖片/程式碼區塊等無法解碼的位置
-    (文字裡會留下可見的 ￼);`render()` 才是上游文件寫明「唯一為閱讀而造」的
-    rendering——join 同一個 block 內的文字、分隔不同 block,同樣不帶 markdown
-    標記。render() 為空或全空白時才退回 server 端 `_CITATION_RE` 清標記。
-    include_references=False 省掉引用清單——省 token 也免手動 regex;
-    預設兩者不動(既有 caller 依標記對照 references 的行為不變)。
+    `source_ids` 聚焦特定來源(只看該集原文、排除前幾集的回錄音檔,免得 show notes 被汙染);
+    `conversation_id` 續問同一串。
 
-    🔴 **伺服器會在回答尾端接一句自我推銷,這裡清不掉。** v0.9.25-rc 驗收 2/2 次出現
-    (「我可以為您設計一份隨堂測驗」之類,前面帶 💡 / 🧠)。它**不是 citation 標記**,
-    所以 `strip_citations=True`、`_CITATION_RE`、`render()` 三者都不會動它,而
-    `episode_set_description` 的 preflight(非空 / 不等於標題 / 自包含)也全過 ——
-    直通就會出現在公開 RSS 的單集簡介裡。**產公開文案時呼叫端自己看最後一行並刪掉。**
-    server 端刻意不自動剝:判準是語意不是字面,寫死 pattern 會誤刪真正的結尾句。
+    **產公開文案(show notes)傳 `strip_citations=True`**(預設 **False**,answer 會夾帶
+    `[1]` / `[3, 4]` 引用標記)+ `include_references=False` 省 token。`strip_citations=True`
+    清掉引用標記、`###` 標題、`*` 條列與 inline `**粗體**`。**兩種標記刻意不清**:底線
+    `_斜體_`(與 `snake_case` 識別碼同形)與**單星號** `*斜體*`(與 `A*搜尋`、`*p` 同形,
+    而 CJK 沒有空格可以當界線)—— 所以輸出**不保證**零 Markdown,產公開文案時要自己看過。
+    要保留 Markdown 就別傳它。
 
-    **v0.9.14 真實驗收補了兩道**(只作用在 `strip_citations=True` 這條路):
+    🔴 **伺服器會在回答尾端接一句自我推銷**(「我可以為您設計一份隨堂測驗」之類,帶 💡/🧠)。
+    它不是引用標記,`strip_citations` 清不掉,`episode_set_description` 的 preflight 也全過
+    —— 直通就會進公開 RSS 的單集簡介。**產公開文案時自己看最後一行並刪掉。**
 
-    - `render()` 只拿掉 **block 級**標記(`###` 標題、`*` 條列),**inline 的
-      `**粗體**` 原樣留著**(實測)。這裡再過一次 `strip_inline_emphasis`。
-      **底線不清** —— `_斜體_` 與識別碼(`NOTEBOOKLM_AUTH_JSON`、`source_id`)撞得太兇。
-    - 上游沒解出文字的 block(`CODE_BLOCK` 等)會**整段靜默消失且不留 U+FFFC**,
-      而剩下的句子讀起來仍然通順 —— `_assert_no_dropped_blocks` 在這裡 fail-loud,
-      不讓它流進公開 RSS。要完整內容就用 `strip_citations=False`。
+    `strip_citations=True` 撞到上游解不出文字的 block(程式碼區塊等)會 raise —— 那些內容
+    會**靜默消失**而剩下的句子仍通順,所以擋在這裡,訊息帶兩條出路。
     """
     res = await runtime.get_client().chat.ask(
         notebook_id, question, source_ids=source_ids, conversation_id=conversation_id
@@ -843,10 +791,9 @@ async def chat_ask(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def source_list(notebook_id: str) -> dict:
-    """List a notebook's sources — find a source_id for explicit source
-    management or a focused generate_slides/report source_ids set, and confirm
-    uploads landed. Each entry has ready=True once
-    NotebookLM finished ingesting it."""
+    """List a notebook's sources —— 找 `source_id`(給 `source_delete`,或給 `generate_*` /
+    `podcast_episode` 的 `source_ids` 聚焦用),也確認上傳落地。`ready=True` 代表
+    NotebookLM 已經吃完那筆來源。"""
     srcs = await runtime.get_client().sources.list(notebook_id)
     return {
         "sources": [
@@ -868,13 +815,13 @@ async def source_fulltext(
     max_chars: int | None = None,
     contains: list[str] | None = None,
 ) -> dict:
-    """Get a source's extracted full text — verify a PDF / Medium / pasted article
-    actually ingested its body, or read back an uploaded mp3's transcript.
+    """Get a source's extracted full text —— 驗 PDF / Medium / 貼上的文章有沒有真的吃進
+    正文,或讀回上傳 mp3 的逐字稿。
 
-    對帳省 token 姿勢:`max_chars=0, contains=["關鍵詞", …]` → 只回
-    {char_count, hits, content:""},不把全文灌進 host context(關鍵詞比對在
-    server 端做,已處理 NotebookLM 對 CJK 插空格的問題)。`max_chars` 截斷時回
-    truncated=True;char_count 永遠是全文長度。兩參數都不傳 = 照舊回全文。"""
+    **省 token 的對帳姿勢:`max_chars=0, contains=["關鍵詞", …]`** → 只回
+    `{char_count, hits, content:""}`,不把全文灌進 context(比對在 server 端做,已處理
+    CJK 插空格)。`max_chars` 截斷時回 `truncated=True`,`char_count` **永遠是全文長度**。
+    兩參數都不傳 = 回全文。"""
     if max_chars is not None and max_chars < 0:
         raise ValueError("max_chars must be >= 0")
     if contains is not None and any(not _norm(k) for k in contains):
@@ -903,43 +850,24 @@ async def source_search(
     source_ids: list[str] | None = None,
     limit: int | None = None,
 ) -> dict:
-    """Rank source passages by relevance to a question — find WHERE the sources
-    say something, without pulling whole documents into context.
+    """Rank source passages by relevance to a question —— 找出來源**在哪裡**講了什麼,不必
+    把整份文件拉進 context。回 `chunks`(最相關在前),每筆 `{source_id, text, rank, start, end}`。
+    `source_ids` 限定搜哪幾筆(省 token,也避免回錄舊集干擾);`limit` 不傳 = 全部。
+    生成前拿它核對 brief 的說法在來源裡站不站得住,比生成完再聽出問題便宜。
 
-    回 `chunks`(最相關在前),每筆是 `{source_id, text, rank, start, end}`。
-    `source_ids` 限定要搜哪幾筆(省 token、也避免回錄的舊集干擾);不傳 = 整本。
-    `limit` 限制回幾段;不傳 = 伺服器排序後的全部。
+    **與 `source_fulltext(contains=…)` 不可互相取代**:`contains` 是**精確子字串**比對,答
+    「這個詞有沒有進到 body」(驗擷取用它;語意檢索會回「在講那件事」但不含該詞的段落);
+    這支是**語意排序**,答「哪幾段在談 X」並回段落原文當證據。
 
-    **跟 `source_fulltext(contains=…)` 是兩件事,別互相取代**:
-    - `contains` 是**精確子字串**比對,答的是「這個詞有沒有真的進到 body」——
-      驗 PDF / Medium 有沒有吃到內文用它,語意檢索在這裡反而會答錯(它會回
-      「在講那件事」但不含該詞的段落)。
-    - 這支是**語意排序**,答的是「哪幾段在談 X」,而且回的是**段落原文**,
-      不是布林值 —— 呼叫端看得到證據本身。
+    ⚠️ **`limit=N` 是「全域前 N 名」**,不是「每筆來源 N 段」—— 排序跨所有被搜的來源,某一筆
+    完全沒被選中是正常結果。要確定它有沒有,用 `source_ids` 限定它再查一次,別從「沒出現」
+    推論「它沒有」。
 
-    生成前拿它核對 brief 的說法在來源裡站不站得住,比生成完再聽出問題便宜得多
-    (EP46 曾連五次 semantic QA 拒收、五次生成全部作廢)。
+    ⚠️ `rank` **越小越相關**;`0` = 伺服器沒給排名,**不是**最相關。
 
-    ⚠️ **`limit=N` 是「全域前 N 名」,不是「每筆來源 N 段」也不是「N 段相關的」**。
-    排序跨所有被搜的來源,所以某一筆完全沒被選中是正常結果 —— 要確定某一筆有沒有,
-    用 `source_ids` 限定它再查,別從沒出現推論「它沒有」。
-
-    ⚠️ `rank` **越小越相關**;`0` 依上游契約代表「伺服器沒給排名」,**不是**最相關。
-    (v0.9.25-rc 驗收實跑一次都沒遇到 `0`,但契約沒改,別拿掉這個判斷。)
-
-    ⚠️ **`start` / `end` 只在無標記純文字來源上對得準。** v0.9.25-rc 實測:對貼上的
-    純文字,offset 拿去切 `source_fulltext` 的內容完全吻合;對 **markdown** 來源會
-    **錯位 44~170 字**(伺服器索引的是去標記後的文字,`source_fulltext` 回的是原文),
-    而**回傳裡沒有任何欄位分得出是哪一種**。所以 offset 適合當「大概在哪」的定位,
-    不要拿它做精確切片再宣稱那是原文;要精確就用 `text` 欄位本身。
-    伺服器沒給 span 時是 `None`(不是 0)。
-
-    這是檢索 RPC(`RETRIEVE_RELEVANT_CHUNKS`),不是 Studio 生成。**索引涵蓋上傳媒體的
-    逐字稿** —— v0.9.25-rc 實測一集回錄 mp3 的 27 段全部檢索得到。
-
-    參數驗證(空 query、`source_ids` 型別、`limit` 正整數)**刻意不在這裡重寫**,
-    一律由 SDK 的 `_sources.validate_search` 在打 RPC 之前擋掉 —— 自己再寫一份就是
-    第二份會漂的規則。前提由 test_contracts 釘住。
+    ⚠️ **`start`/`end` 只在無標記純文字來源上對得準**,markdown 來源會錯位數十到上百字,而
+    回傳裡分不出是哪一種 —— 只能當「大概在哪」,要精確引用就用 `text` 欄位本身。沒給 span
+    時是 `None`(不是 0)。索引**涵蓋上傳媒體的逐字稿**。
     """
     chunks = await runtime.get_client().sources.search(
         notebook_id, query, source_ids=source_ids, limit=limit
@@ -959,19 +887,12 @@ async def source_search(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def notebook_get(notebook_id: str) -> dict:
-    """Get a notebook's metadata (title, source count, owner) — confirm you're
-    targeting the right notebook before generating or publishing.
+    """Get a notebook's metadata (title, source count, owner) —— 生成或發布前確認跑對筆記本。
+    找不到會 fail-fast。
 
-    `is_owner` 由上游 0.8.1(#2125)重新推導:欄位來源從「有沒有共享者」
-    (有共享者就恆為 False,即使呼叫的正是 owner 本人)改成真正的 userRole,
-    當 `role` 有解出值時才成立 `is_owner == (role is SharePermission.OWNER)`
-    (`Notebook.__setattr__` 在設定 `role` 時同步維持這個不變式)。`role is None`
-    時代表該筆資料沒有講出等級,`is_owner` 停在樂觀預設 `True`,呼叫端無法分辨
-    「真的是 owner」與「role 未知」。回傳的 `role` 欄位就是用來讓呼叫端自己分辨。
-    **同一支呼叫在升版前後回傳值會不同**——升版前多帳號 pool 模式下這個
-    欄位實務上恆為 False,升版後才反映真實歸屬。上游同時新增了語意更完整的
-    `Notebook.role: SharePermission | None`(能分辨 EDITOR/VIEWER,不只是
-    「是不是 owner」),之後要更細緻的權限判斷可以改讀回傳的 `role` 欄位。
+    ⚠️ **不要單看 `is_owner` 判歸屬。** `role` 是 `null`(伺服器沒回權限層級)時 `is_owner`
+    會停在**樂觀預設 `True`**,分不出「真的是 owner」與「問不出來」。要判歸屬看 `role`
+    (`"OWNER"`/`"EDITOR"`/`"VIEWER"`/`null`),`null` = 這次查詢問不出來,不是「不是 owner」。
     """
     try:
         nb = await runtime.get_client().notebooks.get(notebook_id)

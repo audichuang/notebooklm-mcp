@@ -418,41 +418,33 @@ async def publish_series(
     require_slides: bool | None = None,
     require_report: bool | None = None,
 ) -> dict:
-    """Publish a whole podcast series (one topic = one feed) as a static RSS feed.
+    """把整季 manifest 發布成一條 Apple 合規 RSS feed(一題一 feed)。
 
-    Reads series_manifest.json, content-hashes each episode mp3, renders an
-    Apple-compliant feed.xml + index.html in memory, and PUTs the season to the
-    feed host's uploader. Deterministic: same show_id -> same URL/token; mp3
-    content -> stable enclosure URL. The uploader never deletes, so a regenerated
-    episode gets a NEW immutable URL while old cached URLs keep working.
+    重跑冪等:同 `show_id` → 同 feed URL/token;同 mp3 內容 → 同 enclosure URL。
+    ⚠️ **uploader 永不刪檔**:重生只會產生新的不可變 URL,已公開的舊檔收不回來。
 
-    show 七欄首次傳齊即存進 ``manifest["show"]``,之後滾動加集只傳 ``manifest_path``
-    (+ ``return_episodes=[N]``,讓回傳不隨集數膨脹)。顯式參數永遠優先並回寫。
-    ``notebook_id`` 只是某集 mp3 不在本機時的重抓 fallback,且**每集 manifest 自己的
-    ``notebook_id`` 優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
+    **首發**傳齊 show_id / show_title / show_description / author / owner_name /
+    owner_email / artwork_path(缺一 raise),成功後存進 `manifest["show"]`;**之後滾動
+    加集只傳 `manifest_path`** 即沿用。顯式參數永遠優先並回寫;`category` / `explicit` /
+    `itunes_type` / `require_*` 同樣沿用。
 
-    ``itunes_type`` 是**季級**設定(沿用規則同 show 七欄):``serial`` = 連載,播放器改用
-    ``itunes:episode`` 由第一集排;``episodic``(預設)= 時事,照 ``pubDate`` 由新到舊排。
-    **缺這個宣告時 Apple 當 episodic**,於是有嚴格集序的節目打開會看到最後一集在最前面
-    (`itunes:episode` 基本被忽略)——連載節目請顯式傳 ``serial``。只補宣告、不動 item
-    排序與 ``guid``/``enclosure`` URL,所以改完重跑不需要重生任何音檔,Apple 視為同一
-    節目的更新。
+    `return_episodes` **只過濾回傳的 `episodes`,不縮小發布範圍** —— 每次呼叫一律重發
+    整季;傳 `[N]` 只是免得回傳隨集數膨脹。
 
-    ``require_slides`` / ``require_report`` 是**季級政策**(沿用規則同 show 七欄):為
-    True 時 manifest 未回寫該附件路徑就拒絕發布 —— fail-closed required-deliverable
-    preflight gate,**不是 await barrier**(分不出「舊路徑 + 新版正在重生」)。使用者
-    明講整季不做某一項時才關掉對應那個。
+    `itunes_type` 預設 `episodic`(照 pubDate 由新到舊排)。**連載節目不顯式傳 `serial`
+    不會報錯,只會在播放器裡靜默倒序。**
 
-    集層 ``publication_state: "deferred"`` = **稽核上刻意不公開**(例如音檔經 QA 拒收、
-    attempt 全撤回):那一集留在 manifest 保住完整 audit,但不進 feed、也不做任何檔案
-    preflight,集號回在 ``deferred_episodes``。**它只管發布層,不代表禁止重生** ——
-    ``podcast_series`` / attempt 掃描刻意不看這個欄位。未知的 ``publication_state``
-    值直接 raise(不會 fall through 成照發)。
+    `require_slides` / `require_report` 預設 True:manifest 未回寫該附件路徑就在任何上傳
+    前拒發;**只驗路徑已回寫、不等背景生成**(舊路徑 + 新版正在重生 → 照樣放行)。
+    使用者明講整季不做某一項時才關掉對應那一個。
 
-    manifest 頂層 ``retired: true`` = **退役快照**(換過 show_id 之後留作稽核的舊 manifest):
-    讀完 manifest 的第一步就 raise,任何 PUT 之前;``true`` 以外的值也 raise,要發就移除欄位。
+    `notebook_id` 只是某集 mp3 不在本機時的重抓 fallback,**每集 manifest 自己的
+    `notebook_id` 優先**(每集獨立筆記本時別傳 show 層的,會抓錯本)。
 
-    完整參數/回傳/preflight 涵蓋範圍見 skill ``references/tool-reference.md``。"""
+    某集帶 `publication_state: "deferred"` 就**不進 feed**:集號回在 `deferred_episodes`,
+    `episode_count` 只算真的發出去的(manifest 50 集、扣下 1 集 → 回 49,不是漏集)。
+
+    完整回傳欄位與 preflight 涵蓋範圍見 skill `references/tool-reference.md`(**參數的正本是這支的 inputSchema**,不必為了湊參數去讀那份)。"""
     base_url = _require_url_env("PODCAST_PUBLIC_BASE_URL")
     # return_episodes 只是回傳過濾器,但舊版拖到所有 PUT + manifest 回寫都完成後才
     # `set(return_episodes)`——傳個 [[1]] 之類的壞型別會在「發布其實已成功」之後才
@@ -853,9 +845,8 @@ async def publish_series(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def feed_info(show_id: str) -> dict:
-    """Deterministic feed identity + public URLs for a show_id. Pure computation
-    (token = HMAC(salt, show_id)); the MCP keeps no state, so per-episode detail
-    is NOT returned — fetch feed.xml over the read port for that."""
+    """由 `show_id` 純計算 feed 身分與公開 URL(token = HMAC(salt, show_id)),不打網路。
+    **不含各集細節** —— 要看已發布的集就去抓 `feed_url`。"""
     base_url = _require_env("PODCAST_PUBLIC_BASE_URL")
     salt = _require_env("PODCAST_TOKEN_SALT")
     token = identity.make_token(show_id, salt)     # also validates show_id
