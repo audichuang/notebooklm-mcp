@@ -129,6 +129,75 @@ CI 都是綠的。**一道只在被守的兩個 repo 之一上觸發的守門,�
 「✅ 同步完成」、重啟後還是壞,而 troubleshooting 給的驗證指令讀的是 `-c prd` 拿到舊值,
 看起來也對。三層都沒有任何訊號指向原因。
 
+## v0.9.26.post — 發版後兩個 agent 獨立複審:四條,其中兩條是 v0.9.26 自己引入的
+
+發完版之後派兩個 agent 做**互相不知道對方在看什麼**的複審(一個看行為正確性、一個看
+三層文件契約),兩邊都**沒有**被餵這一輪已經發現過的東西。兩邊各自獨立指向 `_text` 那
+一區,而那正是這一輪自己改壞的地方 —— 這種「獨立收斂」就是
+[agent-review-playbook](docs/agent-review-playbook.md) 紀律③要的信號。
+
+### ① 引用標記的界線用 `\w`,漏清整類中文引用(v0.9.26 引入,已修)
+
+為了擋 `arr[0]` 被清成 `arr` 而加的 `(?<![\w\]])` —— **Python 的 `\w` 涵蓋 CJK**:
+
+```
+'重點[1]。'        ->  '重點[1]。'     (應為 '重點。')
+'見 [1][2] 兩篇'   ->  '見[2] 兩篇'    (既沒清乾淨又被改壞)
+```
+
+中文不用空格分詞,**標記緊貼正文才是最常見的形狀**,而這支的用途正是產繁中公開 show
+notes。比它原本要修的誤傷更糟;更糟的是同一輪有三處文件把它寫成「傳
+`strip_citations=true` 讓 server 清就好,不要自己寫 regex」的保證。
+
+界線改成 **ASCII-only**(識別碼是 ASCII);新增 `strip_citations()` **跑到不動點** ——
+`[1][2]` 的第二個標記前面是 `]`,單趟必然留殘骸,而 `a[1][2]` 兩個都被識別碼擋住,第一
+趟就是不動點。呼叫端用 `_strip_citations` 別名:兩支工具都有同名的
+`strip_citations: bool` 參數,直接 import 同名會被遮蔽,在 show notes 路徑上 `TypeError`
+(由測試擋下)。
+
+**教訓**:v0.9.26 的 CHANGELOG 寫「補上兩側」,而其實只補了 false-positive 那一側。
+「兩側」要逐條數過才能寫。
+
+### ② 重生意圖不該綁在 `safe_next_action` 上(v0.9.26 引入,已修)
+
+`_safe_next_target()` 的「交棒就整組換」對**身分**(attempt_id / artifact_id)是對的,
+但 `regeneration_source_ids` 是**意圖**:只要有替代 attempt 在飛,重生的意圖就是它的,
+與這一步要做什麼無關。綁在一起會產生自相矛盾的 payload:
+
+```
+safe_next_action        : source_delete
+regeneration_source_ids : ['s1', 's2']      <- 被 retract 那顆的
+next_step               : …替代 attempt 已經在飛,不能再走「重生」…   <- 同一份回傳
+```
+
+**而 v0.9.26 加的反面鎖是空的**:那條測試的「沒交棒」= 根本沒有 replacement,那一格
+不管怎麼寫都會回自己的來源;真正需要守門的第三態(有 replacement、但動作不是它的)
+零覆蓋 —— 突變驗證把守門整個拿掉,12,109 條全綠。commit 訊息宣稱「兩條測試各鎖一邊」,
+**其中一邊是假的**。現在改成真正的第三態,兩邊突變都會紅。
+
+### ③ `regeneration_source_ids` 是 `null` 時,SKILL.md 教的做法等於讀整本筆記本
+
+`podcast_series` 建的 attempt **從來不指名來源**(settings 裡沒有 `source_ids` 這個 key),
+所以拒收一集 series 生的節目時這個欄位**必定**是 `null`、`regeneration_hint` 是空字串
+—— 工具零警告。而 SKILL.md 上面那條「retract 後一律改用 `podcast_episode`」正好把人帶到
+這一格:照 v0.9.26 新寫的「原樣帶回」做就是 `source_ids=None` = 讀整本。⚠️ 共用 notebook
+的 ≤5 集節目來源常在 9 筆以內,**筆數守門不會叫**,原本沒有任何自動防線。
+
+舊版的退路「沒有這個欄位時才自己算」不會被觸發 —— 欄位**存在**,值是 `null`。
+已在 skill repo 改成「有值原樣帶回 / `null` 自己算」兩半。
+
+### ④ 三處自打架與假斷言
+
+- `podcast_episode` 第一句寫「單集入口;整季走 `podcast_series`」,而同一輪才剛把
+  `app.py` 的 `_INSTRUCTIONS` 從這個講法改掉。兩者都在每個 client 的 system prompt 裡。
+- retract docstring 把候選窗寫死「12 分鐘」,而 `audio_finalize.py:35-37` 的紅線明說那個
+  數字不可在別的 module 再寫一次。
+- `check_skill_sync.py` 的契約詞註解寫「retract／series 停點已經算好重生來源」——對
+  series 的主要停點是假的(只有 `reentry` 帶,`too_many_sources` 不帶)。**這道閘就是
+  為了防這個詞的文件債而加的,而它只驗「詞有沒有出現」,驗不到綁在詞上的指令是錯的。**
+
+13,093 passed / 597 skipped。
+
 ## v0.9.25 — 跟上 notebooklm-py 0.8.2:contract tripwire 下沉 `_web.*`,新增 `source_search`
 
 ### 跟上 notebooklm-py 0.8.2:contract tripwire 下沉到 `_web.*`,pin 抬到 `>=0.8.2`
