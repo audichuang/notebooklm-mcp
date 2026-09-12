@@ -140,5 +140,5 @@ def test_instructions_are_skeleton_not_parameter_detail():
     text = app._INSTRUCTIONS
     assert "路徑與冪等規則見 skill" in text
     assert "safe_next_action 續跑" in text
-    # 瘦身後 1,065 chars;上限留緩衝,但擋得住任何一整段細節(數百字)長回來。
+    # v0.9.26 起 1,271 chars(瘦身當時 1,065);上限留緩衝,但擋得住任何一整段細節長回來。
     assert len(text) <= 1400, f"instructions 長到 {len(text)} chars——細節請放 skill"

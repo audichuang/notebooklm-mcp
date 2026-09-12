@@ -32,7 +32,9 @@
 會讓你做錯、停點要讀回傳的哪個欄位;搬走事故敘事、版本考古、設計理由的辯護(去
 `references/tool-reference.md` 與 `docs/gotchas-*.md`)。
 
-描述總量 24,013 → 14,717 字元(-39%);payload 45,654 → 37,165(-19%)。差額是
+描述總量 24,013 → **15,717** 字元(**-34.5%**);payload 45,654 → 37,165(-19%)。
+(原本這裡寫 14,717 / -39%,那是複審修正**把幾條錯誤路徑契約補回描述之前**的
+中途數字 —— v0.9.27 查核時更正。)差額是
 `inputSchema`:全 repo 沒有任何 `Field(description=...)`,那一半由參數名與型別推導,
 **不刪參數就一個字都動不了**,而 `publish_series` 的 show 七欄 + 三個季級旗標每個都有
 現役呼叫端。`tests/test_tool_payload_budget.py` 釘住總量與單支上限。
@@ -51,16 +53,20 @@
   與「它與生成共用同一道 retract 清理義務閘」—— retract 完直接 resume 會 fail-closed,
   而呼叫端只會看到一個看不懂的 ValueError。
 
-### 三條呼叫端**根本看不到**的紅線
+### 一條呼叫端**根本看不到**的紅線,外加兩條 reference 缺漏
 
-- `generate_slides` / `generate_report` 的「`source_ids` 不指名 = 用全部來源,後面各集的
-  回錄會洩進這一集」原本只在 `tools_artifacts.py` 的**模組** docstring —— 而 MCP 只送
-  tool 的 `__doc__`,模組 docstring 一個字都不會到呼叫端。
-- `generate_audio` 的「**這支沒有配額 failover**」只存在於該 docstring,`tool-reference.md`
-  與 `SKILL.md` 都零命中。SDK 會丟 `RateLimitError`,但沒有任何東西告訴呼叫端「換一支
-  工具就會 failover」。
-- `chat_ask` 伺服器尾端自我推銷那條(直通公開 RSS)在 docstring + SKILL.md,但
-  `tool-reference.md` §`chat_ask` 一個字都沒有。
+**(v0.9.27 更正:原本這節寫「三條呼叫端根本看不到」,查核後只有第一條成立。)**
+
+- **真的看不到的只有這條**:`generate_slides` / `generate_report` 的「`source_ids` 不指名
+  = 用全部來源,後面各集的回錄會洩進這一集」原本只在 `tools_artifacts.py` 的**模組**
+  docstring —— 而 MCP 只送 tool 的 `__doc__`,模組 docstring 一個字都不會到呼叫端。
+- `generate_audio` 的「這支沒有配額 failover」與 `chat_ask` 的自我推銷紅線,**base 的
+  description 裡本來就有**;這一輪做的是把它們補進 `tool-reference.md`(那裡原本零命中),
+  不是把紅線從看不見變看得見。
+- ⚠️ 而且 `generate_audio` 這支**資訊是減少的**:新版刪掉了「v0.9.16 起 `generate_slides` /
+  `generate_report` / `artifact_revise_slide` 都接上了」這句(它告訴呼叫端**哪幾支有**
+  failover),只留「要 failover 走 `podcast_episode`」。取捨可以辯,但當時把它記成「增加」
+  是錯的。
 
 ### `_INSTRUCTIONS` 教錯預設入口(協定層,skill 沒載也收得到)
 
@@ -69,7 +75,7 @@
 **一次呼叫會連續生完 episodes 清單裡的每一集**,清單放錯就是整季內容錯置(實測 13 集裡
 9 集,工具全程回報 `ok=true`)。同一處的 `auth_check` 也補上 `all_slots` —— 不傳拿到的是
 1/N 的綠燈。改完 1,292 字元,仍在 `test_instructions_are_skeleton_not_parameter_detail`
-的 1,400 上限內。
+的 1,400 上限內(**v0.9.27 更正:實際是 1,271 字元,不是 1,292**)。
 
 ### 順手撿到的四條真缺陷(10 條候選 → 三視角反駁複核 → 4 條成立)
 
@@ -116,8 +122,14 @@ client 一 initialize 就把 `_POOL` 換掉、`_ACTIVE` 歸零,而第一個可�
 
 **根因是觸發條件,不是 checker 的邏輯**:CI 只掛在 **MCP repo 的 push** 上(它 clone
 遠端 audi-skill 來驗),而這次的破壞來自 **skill repo 的 push** —— 那一側沒有任何東西會
-跑這個檢查。於是 09-05 到 09-13 之間,這道「防 skill/MCP 漂移」的守門是壞的,而兩邊的
-CI 都是綠的。**一道只在被守的兩個 repo 之一上觸發的守門,對另一側等於不存在。**
+跑這個檢查(audi-skill 根本沒有 `.github/workflows`)。
+
+**(v0.9.27 更正:原本這裡寫「而兩邊的 CI 都是綠的」,那個判讀是錯的,而且錯得會把人
+帶去查錯地方。** 真相是 2026-09-03T22:17Z 到 09-12T18:49Z 之間 **MCP repo 一次 CI 都沒跑**
+—— 不是「跑了、回報綠、其實壞了」那種沉默通過,是**根本沒觸發**。照原本的敘述去找
+「為什麼綠燈卻是壞的」,會跑去查 checker 的判斷邏輯、加斷言、加測試,而那裡什麼都沒有。)
+
+**一道只在被守的兩個 repo 之一上觸發的守門,對另一側等於不存在。**
 
 本輪先把詞補回去(現在綠:37 tools + 33 contract terms,10 個在 SKILL.md)。
 真正的修法是讓 audi-skill 的 push 也能觸發一次(該 repo 的 CI 反向 clone 本 repo,或
@@ -128,6 +140,90 @@ CI 都是綠的。**一道只在被守的兩個 repo 之一上觸發的守門,�
 (agent 跑 Bash)時它**只警告不擋** —— 新憑證進了正式環境不讀的 config、畫面印
 「✅ 同步完成」、重啟後還是壞,而 troubleshooting 給的驗證指令讀的是 `-c prd` 拿到舊值,
 看起來也對。三層都沒有任何訊號指向原因。
+
+## v0.9.27 — v0.9.26 修好的東西**根本沒出貨**
+
+### 症狀:master 綠、CI 綠、我說「已修」—— 而所有人裝到的還是壞的
+
+v0.9.26 發版後派 agent 複審,抓到兩條 v0.9.26 自己引入的缺陷,修好、測試綠、
+push 上 `origin/master`(`8ae61cb`),然後我對外說「全部已修」。
+
+**再派一輪消費端檢查才發現:那句話是假的。**
+
+```
+origin/master        f3542d9   <- 修正在這
+refs/tags/latest^{}  371c832   <- uv tool install @latest 裝的是這
+refs/tags/v0.9.26^{} 371c832
+```
+
+消費端裝的是 **tag**,不是 master。修正沒進任何 tag = **沒有任何機器拿得到**。
+從中性目錄驗實裝的 build:
+
+```
+重點[1]。      -> '重點[1]。'     (漏清)
+見 [1][2] 兩篇 -> '見[2] 兩篇'    (既沒清乾淨又被改壞)
+```
+
+而 `episode_set_description(strip_citations=True)` 是**預設值**,沒有任何 preflight 會
+檢查殘留標記 —— 直接寫進 manifest → 公開 RSS `<description>`,**不會撞牆,是發出去才會
+發現**。
+
+**`retag-latest.sh` 救不了**:它取的是「最高的 `vX.Y.Z`」= 仍然是 v0.9.26 = `371c832`。
+要動 `latest` 只能**再發一版**。這就是 v0.9.27 存在的唯一理由。
+
+⚠️ **我自己也差點誤判**:在 repo 目錄下跑
+`~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import notebooklm_mcp._text"`,
+Python 把 cwd 排在 `sys.path` 最前面,載到的是**repo 的副本**,看起來一切正常。
+**驗實裝一定要 `cd /tmp` 之類的中性目錄**,並印出 `module.__file__` 確認路徑。
+
+### 這一版出貨的內容
+
+`8ae61cb` + `f3542d9` 的全部修正(逐條見 v0.9.26.post 那一節):
+
+- `_CITATION_RE` 的界線從 `\w` 改成 ASCII-only(`\w` 涵蓋 CJK,漏清整類中文引用),
+  並新增跑到不動點的 `strip_citations()` 處理 `[1][2]` 連續標記
+- `regeneration_source_ids` 改成跟著 replacement 而不是 `safe_next_action`
+- `podcast_episode` 第一句的預設入口、retract 的「12 分鐘」字面值、checker 註解的假斷言
+
+### 順帶更正 v0.9.26 一個已公布的數字
+
+描述總量寫成「24,013 → 14,717(-39%)」。實際發出去的 tag 上是 **15,717(-34.5%)** ——
+14,717 是**複審修正把幾條錯誤路徑契約補回描述之前**的中途數字,我引用了過程值當結果值。
+已在上面那一節就地更正。
+
+### 同一輪查核抓到的其他更正
+
+- **成本 -31.1% 量的是雜訊。** eval 的 `total_cost_usd` 包含受測 agent 自己 spawn 出去的
+  subagent(實際出現過 haiku-4.5 與 **fable-5.1**,後者佔原始總成本 **61%**),而「這次跑
+  有沒有 spawn」基本上是擲硬幣 —— 同一臂同一題兩次可以差 7.7 倍。乾淨的數字是
+  **只算 sonnet 主迴圈:-30.1%**(碰巧很接近,但原本那個是運氣)。`turns -25.5%` 與
+  `cache_creation -30.5%` 只反映主迴圈,不受影響。REPORT.md 已改用 sonnet-only 並標註。
+- **eval harness 把答案放進受測 agent 的 skill 目錄。** `b9c38ba` 把 12 題連同
+  expectations commit 進 `audi-skill/notebooklm/evals/evals.json`,而 harness 正是整包
+  symlink 那個目錄進受測 box。**這一輪的數字還乾淨**(當時 skill 裡是舊的 3 題版、兩臂
+  對稱),但**下一次任何人重跑就會拿到漂亮而無意義的分數**。已修:box 只連
+  `SKILL.md` 與 `references/`,跳過 `evals/`。
+- **量測涵蓋不到 `_INSTRUCTIONS`。** `stub_server.py` 只代理 `list_tools`,**不轉發 protocol
+  層 instructions**(stub 送 0 字元,正式 server 送 1,271)。所以 e5(series vs episode)與
+  e8(`all_slots`)的分數對這一輪的 `_INSTRUCTIONS` 修正**零資訊量**。
+- **`sync-auth.sh` 的洞只補了一半**:四處都在 skill repo,而 MCP repo 自己的
+  `docs/auth-and-config.md`(正式路徑那條)與 `docs/mcp-setup.md` 仍是裸指令。本版補上。
+- `tests/test_server_lifespan.py` 的行內註解仍停在瘦身當時的 1,065 字元。本版對齊 1,271。
+
+### 教訓(比 bug 本身重要)
+
+1. **「push 了」不等於「出貨了」。** 消費端裝 tag,而這個 repo 的 `latest` 只跟著
+   **最高 semver**。發版後的修正若不發新版,等於只修給自己看。
+   收工檢查要問的是「**從中性目錄驗實裝的 build**,行為對不對」,不是「master 綠不綠」。
+2. **引用中途數字。** 那個 -39% 是子 agent 回報的階段性總和,而我在那之後又改過描述。
+   凡是要寫進 CHANGELOG 的數字,**在要發的那個 commit 上重新量一次**。這一輪一共送出
+   **兩個在任何 commit 都不存在的數字**(tripwire 註解的 36,144、描述總量的 14,717),
+   第一個被下一輪抓到、第二個活到了 release commit 的標題裡 —— 而 commit 標題改不掉。
+3. **量到的東西要先問「這個量測會不會被別的東西汙染」。** 成本欄混進了受測 agent 自己
+   spawn 的 subagent,而那是擲硬幣。**先看 `modelUsage` 拆解再下結論**,不要直接用
+   `total_cost_usd`。
+4. **把 eval 放進 skill 目錄 = 把答案發給受測者。** 這是做「對的事」(evals 應該跟 skill
+   一起版本控管)反而製造的陷阱 —— harness 必須顯式排除。
 
 ## v0.9.26.post — 發版後兩個 agent 獨立複審:四條,其中兩條是 v0.9.26 自己引入的
 

@@ -61,7 +61,7 @@ When auth expires, refresh on a GUI machine and sync the storage state back to D
 
 ```bash
 uv run notebooklm login
-bash scripts/sync-auth.sh
+bash scripts/sync-auth.sh --config prd
 ```
 
 Live server boot smoke test:

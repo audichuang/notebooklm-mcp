@@ -16,7 +16,9 @@
 ```bash
 uv pip install -e ".[login]" && uv run playwright install chromium   # 僅登入機需要
 uv run notebooklm login                     # 開瀏覽器登入
-bash scripts/sync-auth.sh                   # 推到 Doppler，所有 VM 下次啟動即生效
+bash scripts/sync-auth.sh --config prd      # 推到 Doppler，所有 VM 下次啟動即生效
+#   ⚠️ `--config prd` 不能省:腳本預設寫 `dev`,而非互動執行(agent 跑 Bash)時它
+#      只警告不擋 —— 憑證進了正式環境不讀的 config,畫面照印「✅ 同步完成」。
 ```
 
 #### Config 佈局(2026-08-09)
