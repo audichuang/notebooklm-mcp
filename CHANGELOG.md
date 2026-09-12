@@ -6,6 +6,115 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.26 — 工具描述瘦身 39%:規則從事故敘事裡挖出來,順手撿到四條真缺陷
+
+### 為什麼動描述:它是跨所有使用者的固定成本,而代價不出現在任何人的畫面上
+
+`tools/list` 的 payload 會被灌進**每一個**連上這台 server 的 session 的 system prompt,
+不管那個 session 用不用得到 NotebookLM。這一輪第一次把它量出來(`claude -p
+--output-format json` 的 `usage`,乾淨 sandbox):
+
+| | cache_creation |
+|---|---|
+| 沒接 MCP 的 session | 18,685 |
+| 接上 notebooklm MCP | 33,021 |
+| **工具清單本身** | **14,336 tokens** |
+
+而且它不是付一次:每多一個 turn 就在 `cache_read` 裡再付一次。以前沒有人量過,所以
+描述只會單向長回去 —— 每次加紅線都加在描述裡最省事。
+
+**但這不只是省錢。** `podcast_attempt_retract` 的 3,981 字元裡,真正的規則(執行
+`safe_next_action` 要用 `safe_next_attempt_id` 而不是 `attempt_id`)被埋在 700 字元的
+「P1 修復…同一根因第十一次現形…這句先前寫反了」中間。**規則被敘事淹沒**與 description
+太長是同一件事的兩面,而前者才是呼叫端會做錯的原因。
+
+**判準**(37 支同一把尺):留「不讀就會呼叫錯」的 —— 怎麼在它和鄰居之間挑對、哪個預設值
+會讓你做錯、停點要讀回傳的哪個欄位;搬走事故敘事、版本考古、設計理由的辯護(去
+`references/tool-reference.md` 與 `docs/gotchas-*.md`)。
+
+描述總量 24,013 → 14,717 字元(-39%);payload 45,654 → 37,165(-19%)。差額是
+`inputSchema`:全 repo 沒有任何 `Field(description=...)`,那一半由參數名與型別推導,
+**不刪參數就一個字都動不了**,而 `publish_series` 的 show 七欄 + 三個季級旗標每個都有
+現役呼叫端。`tests/test_tool_payload_budget.py` 釘住總量與單支上限。
+
+### 三支刻意**加長** —— 因為原本的描述講不出怎麼正確呼叫它
+
+- **`notebook_list` 19 → 192**。「被分享給你、但這個帳號從沒開過的 notebook 不會出現」
+  (實測 9 個 pool 帳號只有 2/9 列得到同一本)這條紅線原本**只寫在 SKILL.md** —— 沒載
+  skill、直接接這台 MCP 的 session 完全看不到。失敗形狀是照標題比對得到假的「找不到」
+  → `notebook_create` 一本重複的空 notebook → 在上面燒配額。
+- **`podcast_attempt_adopt` 113 → 548**。它是 reconcile / series / retract 三個停點的
+  共同下游,但描述沒講「`artifact_id` 與 `feedback_source_id` 恰好擇一」「帶 `artifact_id`
+  時 `attempt_id` 必填」「候選 id 從停點回傳的 `candidate_*` 取」—— 呼叫端讀完
+  `safe_next_action="podcast_attempt_adopt"` 依然執行不了。
+- **`podcast_episode_resume` 274 → 470**。缺 routing(何時該改回重呼 `podcast_series`)
+  與「它與生成共用同一道 retract 清理義務閘」—— retract 完直接 resume 會 fail-closed,
+  而呼叫端只會看到一個看不懂的 ValueError。
+
+### 三條呼叫端**根本看不到**的紅線
+
+- `generate_slides` / `generate_report` 的「`source_ids` 不指名 = 用全部來源,後面各集的
+  回錄會洩進這一集」原本只在 `tools_artifacts.py` 的**模組** docstring —— 而 MCP 只送
+  tool 的 `__doc__`,模組 docstring 一個字都不會到呼叫端。
+- `generate_audio` 的「**這支沒有配額 failover**」只存在於該 docstring,`tool-reference.md`
+  與 `SKILL.md` 都零命中。SDK 會丟 `RateLimitError`,但沒有任何東西告訴呼叫端「換一支
+  工具就會 failover」。
+- `chat_ask` 伺服器尾端自我推銷那條(直通公開 RSS)在 docstring + SKILL.md,但
+  `tool-reference.md` §`chat_ask` 一個字都沒有。
+
+### `_INSTRUCTIONS` 教錯預設入口(協定層,skill 沒載也收得到)
+
+它寫「整季/一般單集生成 → `podcast_series`(episodes 放一集即單集)」,而 SKILL.md 的
+規則是 EP06+ / 獨立 notebook / 任何要指名來源的一律 `podcast_episode`。`podcast_series`
+**一次呼叫會連續生完 episodes 清單裡的每一集**,清單放錯就是整季內容錯置(實測 13 集裡
+9 集,工具全程回報 `ok=true`)。同一處的 `auth_check` 也補上 `all_slots` —— 不傳拿到的是
+1/N 的綠燈。改完 1,292 字元,仍在 `test_instructions_are_skeleton_not_parameter_detail`
+的 1,400 上限內。
+
+### 順手撿到的四條真缺陷(10 條候選 → 三視角反駁複核 → 4 條成立)
+
+**`_text` 兩支 regex 在 CJK + 程式碼文字上會吃掉正文**(實跑重現)。
+`strip_inline_emphasis("他說「A*搜尋」與「B*樹」的差別")` 回 `"他說「A搜尋」與「B樹」的差別"`;
+`_CITATION_RE` 把 `arr[0]` 清成 `arr`。兩支的產物直通公開 RSS(`chat_ask` →
+`episode_set_description` → manifest → Apple Podcast `<description>`),而**被改壞的句子
+仍然通順** —— 沒有任何東西會告訴呼叫端內容被動過。根因是兩支的界線都對著「空白分隔的
+西文散文」調,而 CJK 不用空格分詞。`_EMPHASIS_RE` 收成 `\*{2,3}`(事故本身的形狀是
+`**粗體**`,單星號從來不是);`_CITATION_RE` 加 `(?<![\w\]])`。既有測試只驗「該清的有
+清掉」,零 false-positive 案例,`tests/test_text_false_positives.py` 補上兩側。
+
+**交棒時 `regeneration_source_ids` 沒跟著換**(同一根因第十二次現形)。host 拒收 A
+(s1+s2)後改用 s1+s3 重生 B,B 撞配額停住;冪等重呼 `retract(A)` 時
+`safe_next_action` / `safe_next_attempt_id` / `safe_next_artifact_id` 都已整組換成 B 的,
+只有這一格還讀 A —— 照著帶回去,host 那次刻意的來源置換被**靜默還原**。修法是把它併進
+`_safe_next_target()` 那個「交棒就整組換身分」的單一映射點,不在旁邊再長 if/else。
+
+**`--transport streamable-http` 只能給單一 client**(確認,**本輪未修**)。pool 住在
+`runtime` 的 process 全域,而 stateful HTTP 每個 session 各跑一次 `_lifespan` —— 第二個
+client 一 initialize 就把 `_POOL` 換掉、`_ACTIVE` 歸零,而第一個可能正卡在數十分鐘的
+生成裡。`runtime.py` 的「這裡沒有鎖,也不需要有」那段推論的前提是**同一個 lifespan 內**
+的並行,對「兩個 lifespan」不成立。不在本輪修:pool 生命週期是本 repo 疤最多的一區
+(ADR-0010 五條紅線),照 §Conventions 要開 acceptance-workspace 實跑才能結案,而四台
+生產機全走 stdio,這條打不到生產路徑。修法草稿與理由寫在
+[gotchas-pool](docs/gotchas-pool.md)。
+
+被反駁掉的六條裡值得記一筆的:**`REFUSED_WITHOUT_DISPATCH` 把 HTTP 429 的
+`RateLimitError` 誤判成零副作用拒絕** —— 查證後不成立。真的 HTTP 429 代表請求被限流器
+擋在 handler 之前(`_web/transport/executor.py:328`),伺服器沒有處理過它;上游自己的
+`artifacts.py` retry 迴圈也是對 `RateLimitError` 重試,與我們的分類同一個前提。
+
+### 兩份文件層的沉默故障
+
+**`scripts/check_skill_sync.py` 自 v0.9.18 起一直是紅的。** `publication_state` 這個契約詞
+從來沒有以裸 `` `publication_state` `` 的形式在 SKILL.md 出現過(只有
+`publication_state="deferred"` 與 `` `episode_set_publication_state` ``),而 checker 做的是
+精確的 backtick token 比對。也就是說**這道防 skill/MCP 漂移的 CI 硬檢查一直沒在守任何東西**
+—— 而它正是 v0.9.12 / v0.9.18 兩次漂移事故之後立的。現在綠:37 tools + 33 contract terms。
+
+**`sync-auth.sh` 的重登指令四處漏 `--config prd`。** 腳本預設寫 `dev`,而非互動執行
+(agent 跑 Bash)時它**只警告不擋** —— 新憑證進了正式環境不讀的 config、畫面印
+「✅ 同步完成」、重啟後還是壞,而 troubleshooting 給的驗證指令讀的是 `-c prd` 拿到舊值,
+看起來也對。三層都沒有任何訊號指向原因。
+
 ## v0.9.25 — 跟上 notebooklm-py 0.8.2:contract tripwire 下沉 `_web.*`,新增 `source_search`
 
 ### 跟上 notebooklm-py 0.8.2:contract tripwire 下沉到 `_web.*`,pin 抬到 `>=0.8.2`

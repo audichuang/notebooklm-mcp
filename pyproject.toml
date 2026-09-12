@@ -1,6 +1,6 @@
 [project]
 name = "notebooklm-mcp"
-version = "0.9.25"
+version = "0.9.26"
 description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
 # 鎖 3.12:3.13+ 未驗過(原記在 AGENTS.md,2026-08-30 隨 pin 搬來)。
 # 當初另一半理由「3.14 會觸發 notebooklm-py 的 inspect.signature bug」已被上游 0.8.2 #2268 修掉,
