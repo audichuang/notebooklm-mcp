@@ -699,7 +699,14 @@ def refuse_first(client, method_name, calls, fail_first_n, exc=None):
     async def flaky(*args, **kwargs):
         calls.append(runtime.active_account())
         if len(calls) <= fail_first_n:
-            raise exc or RateLimitError("每日配額已用盡")
+            # rpc_code="USER_DISPLAYABLE_ERROR":真實 0.8.2 只有 decoder 的這條分支
+            # 契約保證「沒建出 task」(`_web/wire/decoder.py::extract_rpc_result`)。
+            # 這裡原本不帶 rpc_code(None),而 RateLimitError 還有另一個生產者——
+            # transport 層的 HTTP 429,同樣 rpc_code=None——兩種都不像時,整套
+            # failover 測試驗的其實是 decoder 產不出的形狀(round2 獨立複審 V-B)。
+            raise exc or RateLimitError(
+                "每日配額已用盡", rpc_code="USER_DISPLAYABLE_ERROR"
+            )
         return await original(*args, **kwargs)
 
     setattr(client.artifacts, method_name, flaky)
