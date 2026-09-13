@@ -62,7 +62,7 @@
  "e14-legacy-audio-missing": [
   "照回傳的 safe_next_action 做:先 podcast_attempt_adopt 帶 feedback_source_id(不傳 artifact_id),adopt 完再照它的回傳續跑(通常是 podcast_episode_resume 帶 artifact_id)",
   "沒有建議直接 podcast_episode_resume(或有指出直接 resume 會把同名回錄 source 重複上傳一次)",
-  "執行下一步用的 id 全部來自停點的公開回傳,沒有叫人去翻 manifest 或用唯一同名來源推定身分"
+  "執行下一步用的 attempt / artifact / source 身分(feedback_source_id、artifact_id)全部取自停點的公開回傳,沒有叫人去翻 manifest 找這些 id、也沒有用唯一同名來源推定身分(notebook_id、title 這類 host 自己本來就有的輸入不算)"
  ],
  "e15-prior-mp3-vs-source-ids": [
   "指名 source_ids 且把第 5 集回錄的 source id 直接放進 source_ids(先用 source_list 取 id)",
