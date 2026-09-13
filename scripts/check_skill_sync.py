@@ -94,6 +94,19 @@ REQUIRED_CONTRACT_TERMS = (
     "retired",                # v0.9.24:manifest 頂層旗標,publish_series 讀完就擋。與
                               # publication_state 同類 —— 工具名與參數都沒變、純 manifest
                               # 欄位,正是本 checker 最容易漏的那一類
+    "feed_identity_sha256",   # v0.9.28:publish_series 寫進 manifest["show"] 的 sha256(token),
+                              # 下次同一份 manifest 換 show_id 或 salt 會 fail-closed —— 純
+                              # manifest 欄位契約,撞到時的出路(照 ADR-0013 開新 manifest /
+                              # 移除欄位再發)只存在文件裡
+    "later_episode_has_output",  # v0.9.28:podcast_series 新停點 —— retract 中段集後這一集
+                              # 沒 output 而更大集號已有,series 重新 dispatch 會讀整本;
+                              # safe_next_action 是 podcast_episode(指名 source_ids)或先
+                              # retract,**不是**重呼 series。不寫進文件呼叫端會照舊重呼
+    "output_unverifiable",    # v0.9.28:已完成集的正式 artifact 在遠端驗不到(被刪/改名)——
+                              # 以前是裸 RuntimeError;現在是結構化停點,next_step 帶 start=N+1
+                              # 逃生口。呼叫端要知道這一集卡住不代表整季卡住
+    "promotion_refused",      # v0.9.28:series 在 promote 撞到三道守門(已 retract / 別顆
+                              # attempt 擁有 output / legacy 綁的是別顆 artifact)的結構化停點
 )
 
 
