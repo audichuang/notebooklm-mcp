@@ -1034,3 +1034,130 @@ async def test_resume_reports_a_deleted_remote_artifact_with_actionable_guidance
     message = str(excinfo.value)
     assert "podcast_attempt_retract" in message
     assert "podcast_episode_resume" not in message
+
+
+def _install_promotion_refusal(monkeypatch, message="GUARD MESSAGE MARKER"):
+    """T3(wp-a2):`_promote_attempt_output` 的三道 ValueError 守門(已 retract／
+    owned-by-another／legacy 不同 artifact)真正的觸發前提(`active_attempt_id`／
+    `output_attempt_id` 指向被 retract 的 attempt)都被
+    `manifest_store._validate` 擋在讀取端(「指標指向 tombstone」是它明文唯一擋
+    的手改形狀,連讀都會炸「manifest is corrupt」)——手搭那種 manifest 根本讀不
+    回來,唯一能重現的路是真並行。這裡直接注入拒絕,驗的是**接線**:`PromotionRefusedError`
+    丟出來之後,四個呼叫端(`podcast_episode`／`podcast_episode_resume`／
+    `podcast_series` 兩處)各自的處置對不對,不是重現三道守門各自的觸發條件
+    (那些已經被 `test_attempt_capabilities.py` 與上一輪迴歸鎖住)。"""
+
+    def _raise_refused(store, episode_n, attempt_id, output):
+        raise p.PromotionRefusedError(
+            message, episode_n=episode_n, attempt_id=attempt_id
+        )
+
+    monkeypatch.setattr(p, "_promote_attempt_output", _raise_refused)
+
+
+async def test_podcast_episode_promotion_refusal_still_raises_unchanged(
+    fake_client, tmp_path, monkeypatch
+):
+    """`podcast_episode` 是 raise 型停點,契約不變——`PromotionRefusedError` 是
+    `ValueError` 子類,既有 `pytest.raises(ValueError)` 不必逐一改,守門的原始
+    訊息也必須原封不動地出現(不接住轉換成結構化 partial,那是 series 才做的事)。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    _install_promotion_refusal(monkeypatch)
+
+    with pytest.raises(p.PromotionRefusedError, match="GUARD MESSAGE MARKER"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+
+async def test_podcast_episode_resume_promotion_refusal_still_raises_unchanged(
+    fake_client, tmp_path, monkeypatch
+):
+    """`podcast_episode_resume` 同樣是 raise 型停點——它對 promote 的呼叫點連
+    既有的 try/except 包裝都沒有,例外原樣往上炸,契約比 `podcast_episode` 更直接。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    _install_promotion_refusal(monkeypatch)
+
+    with pytest.raises(p.PromotionRefusedError, match="GUARD MESSAGE MARKER"):
+        await p.podcast_episode_resume(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            artifact_id=first["artifact_id"],
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+
+async def test_series_repair_path_promotion_refusal_becomes_a_structured_stop(
+    fake_client, tmp_path, monkeypatch
+):
+    """T3:series 的第一個 promote 呼叫點(已完成集的 drift 複驗/repair 路徑)
+    接住 `PromotionRefusedError` 翻成結構化 `partial(...)`——新契約詞
+    `observed_state="promotion_refused"`,`safe_next_action`/`next_step` 走
+    caps,不裸拋把已完成的 run_results 一起丟掉。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    await _complete_episode(fake_client, tmp_path, 1)
+    _install_promotion_refusal(monkeypatch)
+
+    out = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 1
+    assert out["observed_state"] == "promotion_refused"
+    # 這顆是已完成的 output attempt,caps 給的下一步是免旗標 retract。
+    assert out["safe_next_action"] == p.ACTION_RETRACT
+    assert "next_step" in out and out["next_step"]
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["output_attempt_id"] is not None, (
+        "促進被拒絕,既有 output 指標不能被動到"
+    )
+
+
+async def test_series_active_attempt_promotion_refusal_becomes_a_structured_stop(
+    fake_client, tmp_path, monkeypatch
+):
+    """T3:series 的第二個 promote 呼叫點(全新一集 dispatch → finalize → promote)
+    也要接住同一個例外——先讓一集停在「finalize 完成但被拒絕晉升」(active_attempt_id
+    有值、output_attempt_id 仍是 None),series 對它重跑會走這條路徑,再次撞見
+    同一顆拒絕。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    _install_promotion_refusal(monkeypatch)
+
+    with pytest.raises(p.PromotionRefusedError):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title=EPS3[0]["title"],
+            brief=EPS3[0]["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    episode = stored["episodes"][0]
+    assert episode.get("output_attempt_id") is None
+    assert episode.get("active_attempt_id")
+
+    out = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 1
+    assert out["observed_state"] == "promotion_refused"
+    # 這顆還沒 promote、但 finalize 已完成(remote.artifact_id 落盤),caps 給的下
+    # 一步是 resume 續完(不重新生成)。
+    assert out["safe_next_action"] == p.ACTION_RESUME
+    assert "next_step" in out and out["next_step"]

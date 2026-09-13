@@ -1997,6 +1997,23 @@ def _first_published_at(episode: dict) -> str | None:
     return None
 
 
+class PromotionRefusedError(ValueError):
+    """T3(wp-a2):`_promote_attempt_output` 的三道 ValueError 守門(已 retract／
+    owned-by-another／legacy 不同 artifact)收斂成這個具名例外,讓
+    `podcast_series` 的兩個 promote 呼叫點能接住它翻成結構化 `partial(...)`
+    (新契約詞 `observed_state="promotion_refused"`)——這三種情形都可能在
+    series 正在跑整季期間發生(另一個 process 剛 retract 掉這顆、或 legacy 集
+    撞到不同 artifact),裸拋會讓已完成的 run_results 一起丟掉,而且沒有
+    `safe_next_action`/`start=` 逃生口。`podcast_episode`/`podcast_episode_resume`
+    的呼叫點維持原樣 raise(它們本來就是 raise 型停點,訊息不變——是 ValueError
+    子類,既有 `pytest.raises(ValueError)` 不必逐一改)。"""
+
+    def __init__(self, message: str, *, episode_n: int, attempt_id: str) -> None:
+        super().__init__(message)
+        self.episode_n = episode_n
+        self.attempt_id = attempt_id
+
+
 def _promote_attempt_output(
     store: ManifestStore,
     episode_n: int,
@@ -2008,14 +2025,18 @@ def _promote_attempt_output(
         # 一個 retract 之前就啟動的 finalizer 不得把被拒收的那版重新掛回 output——
         # promotion 是它最後一個寫入點,也是唯一會復活 episode 級投影欄位的地方。
         if attempt.get("retraction"):
-            raise ValueError(
+            raise PromotionRefusedError(
                 f"attempt {attempt_id!r} was retracted; it cannot be promoted to "
-                f"episode {episode_n}'s output"
+                f"episode {episode_n}'s output",
+                episode_n=episode_n,
+                attempt_id=attempt_id,
             )
         if episode.get("output_attempt_id") not in (None, attempt_id):
-            raise ValueError(
+            raise PromotionRefusedError(
                 f"episode {episode_n} output is owned by "
-                f"{episode['output_attempt_id']!r}; refusing to promote {attempt_id!r}"
+                f"{episode['output_attempt_id']!r}; refusing to promote {attempt_id!r}",
+                episode_n=episode_n,
+                attempt_id=attempt_id,
             )
         # T2(wp-a2)更新:這道現在是**第二層 defense-in-depth**,不是唯一擋點——
         # `_ensure_resume_attempt` 的新建分支已經對同一個條件 fail-fast(打錯
@@ -2040,13 +2061,15 @@ def _promote_attempt_output(
             and legacy_artifact_id != output["artifact_id"]
         ):
             caps = _attempt_capabilities(episode, attempt, attempt_id)
-            raise ValueError(
+            raise PromotionRefusedError(
                 f"episode {episode_n} already has legacy output evidence bound to "
                 f"artifact {legacy_artifact_id!r}; promoting attempt {attempt_id!r} "
                 f"(artifact {output['artifact_id']!r}) would silently replace it "
                 "without an audit trail. " + _retract_hint(caps) + " retract pops "
                 "the legacy projection along with the stale feedback source, and "
-                "only then may the new artifact become the output."
+                "only then may the new artifact become the output.",
+                episode_n=episode_n,
+                attempt_id=attempt_id,
             )
         attempt["remote"]["status"] = "completed"
         attempt["remote"]["observed_at"] = datetime.now(timezone.utc).isoformat()
@@ -4539,6 +4562,27 @@ async def podcast_series(
             **extra,
         }
 
+    def promotion_refused_stop(exc: PromotionRefusedError) -> dict:
+        """T3(wp-a2):`_promote_attempt_output` 的兩個呼叫點共用同一份轉換——
+        `PromotionRefusedError` 收斂了三道 ValueError 守門(已 retract／owned-by-
+        another／legacy 不同 artifact),裸拋會讓已完成的 run_results 一起丟掉。
+        新契約詞 `observed_state="promotion_refused"`。"""
+        current = store.read()
+        episode, attempt = _attempt_record(
+            current, exc.episode_n, exc.attempt_id, allow_retracted=True
+        )
+        caps = _attempt_capabilities(
+            episode, attempt, exc.attempt_id,
+            post_retract=bool(attempt.get("retraction")),
+        )
+        return partial(
+            exc.episode_n,
+            exc.attempt_id,
+            "promotion_refused",
+            caps["safe_next_action"],
+            next_step=_attempt_next_step(caps),
+        )
+
     def reentry(episode: dict | None, attempt_id: str | None) -> dict:
         """認證恢復／連線恢復之後要呼哪一支工具,以及那句話怎麼講。
 
@@ -4859,9 +4903,12 @@ async def podcast_series(
                         "verification_incomplete",
                         ACTION_SERIES,
                     )
-                _promote_attempt_output(
-                    store, episode_n, output_attempt_id, repaired
-                )
+                try:
+                    _promote_attempt_output(
+                        store, episode_n, output_attempt_id, repaired
+                    )
+                except PromotionRefusedError as exc:
+                    return promotion_refused_stop(exc)
                 continue
 
             is_legacy_output = (
@@ -5338,9 +5385,12 @@ async def podcast_series(
                             next_step=_attempt_next_step(caps),
                         )
                     raise
-                _promote_attempt_output(
-                    store, episode_n, active_attempt_id, result
-                )
+                try:
+                    _promote_attempt_output(
+                        store, episode_n, active_attempt_id, result
+                    )
+                except PromotionRefusedError as exc:
+                    return promotion_refused_stop(exc)
                 run_results.append(result)
                 continue
 
