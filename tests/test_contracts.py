@@ -253,6 +253,35 @@ def test_generation_kickoff_refuses_by_raising():
     assert "raise ArtifactFeatureUnavailableError" in parse_src
 
 
+async def test_conftest_rate_limit_fake_matches_the_user_displayable_producer():
+    """`RateLimitError` 有兩個生產者(round2 獨立複審 V-B),`REFUSED_WITHOUT_DISPATCH`
+    的『伺服器沒建出 task』契約只保證其中一個:decoder 把伺服器回應裡的
+    `USER_DISPLAYABLE_ERROR` 解碼成例外時,附帶 `rpc_code="USER_DISPLAYABLE_ERROR"`
+    (`_web/wire/decoder.py::extract_rpc_result`)。另一個生產者(transport 層的 HTTP
+    429,`_web/transport/executor.py`)`rpc_code=None`——請求已經送達才被限流打回來,
+    上游自己的 `with_rate_limit_retry` 對它也是原地重送,判別特徵只有 `rpc_code`
+    可靠。
+
+    這裡釘兩件事:①decoder 那條分支確實建出 `rpc_code="USER_DISPLAYABLE_ERROR"`
+    的例外;②`tests/conftest.py` 的 `refuse_first`(整套 failover 測試共用的假件)
+    預設拒絕形狀要跟它同型——在這條測試補上之前,fake 的 `rpc_code` 是 `None`,
+    兩種生產者都不像,整套測試驗的其實是 decoder 產不出的形狀。
+    """
+    import inspect as _inspect
+
+    from conftest import FakeClient, refuse_first
+    from notebooklm._web.wire.decoder import extract_rpc_result
+
+    decoder_src = _inspect.getsource(extract_rpc_result)
+    assert 'rpc_code="USER_DISPLAYABLE_ERROR"' in decoder_src
+
+    client = FakeClient()
+    refuse_first(client, "generate_audio", [], fail_first_n=1)
+    with pytest.raises(Exception) as excinfo:
+        await client.artifacts.generate_audio("nb-1")
+    assert getattr(excinfo.value, "rpc_code", None) == "USER_DISPLAYABLE_ERROR"
+
+
 def test_audio_enum_members():
     assert AudioFormat.DEEP_DIVE == 1 and AudioFormat.DEBATE == 4
     assert AudioLength.SHORT == 1 and AudioLength.DEFAULT == 2 and AudioLength.LONG == 3
@@ -745,6 +774,29 @@ def test_research_task_and_source_fields():
     assert {ResearchStatus.COMPLETED, ResearchStatus.IN_PROGRESS,
             ResearchStatus.FAILED, ResearchStatus.NOT_FOUND} <= set(ResearchStatus)
     assert ResearchSource(url="u", title="t").is_report is False
+
+
+def test_web_research_neutralizes_not_found_into_no_research():
+    """`tools_research._explain_no_research`(:78 附近的 `"no_research" not in
+    str(exc)` 判準)承重於上游 `WebResearchAPI._wait_observed_status` 這條私有
+    覆寫:它把 `NOT_FOUND` 中和成 `NO_RESEARCH`,所以「換帳號輪詢到逾時」與
+    「這個 task 根本沒被 NOT_FOUND 找到過」在 wait 的錯誤訊息裡長得一樣,都只看
+    得到 `no_research` 字樣(round2 獨立複審 V-D)。上面
+    `test_research_task_and_source_fields` 只釘了 enum 成員存在,沒釘這個中和
+    行為——round2 的獨立審查一開始就是漏看這條覆寫才誤判成 REFUTED。
+
+    **這條紅了,正確的反應是重新檢查
+    `tools_research._explain_no_research` 的判準(目前是字串比對
+    `"no_research" in str(exc)`),不是刪掉這條測試**——上游若改了中和邏輯或
+    拿掉這條覆寫,那個判準就可能跟著失準或失去意義。
+    """
+    import inspect as _inspect
+
+    from notebooklm._web.research import WebResearchAPI
+
+    src = _inspect.getsource(WebResearchAPI._wait_observed_status)
+    assert "ResearchStatus.NOT_FOUND" in src
+    assert "return ResearchStatus.NO_RESEARCH" in src
 
 
 def test_console_script_name_does_not_collide_with_upstream():

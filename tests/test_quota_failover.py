@@ -10,6 +10,7 @@
 import json
 
 import pytest
+from notebooklm.exceptions import RateLimitError
 
 from conftest import bouncing_rotate_client, refuse_first
 
@@ -707,4 +708,73 @@ async def test_tried_guard_does_not_leave_a_phantom_failover_record(
     failovers = [e for e in attempt["errors"] if e["phase"] == "dispatch_failover"]
     assert [(f["from_account"], f["to_account"]) for f in failovers] == [("a@x", "b@x")], (
         "只有一次換帳號真的發生過;b@x -> a@x 那次從未生效,不該留下稽核紀錄"
+    )
+
+
+class _RefusedStatus:
+    """0.7.x 風格的拒絕形狀:不 raise,回 `task_id="", is_failed=True`。"""
+
+    task_id = ""
+    is_failed = True
+    status = "failed"
+    error = "每日配額已用盡"
+    error_code = "RateLimitError"
+
+
+async def _dispatch_that_raises(client):
+    raise RateLimitError("每日配額已用盡")
+
+
+async def _dispatch_that_returns_refused_status(client):
+    return _RefusedStatus()
+
+
+@pytest.mark.parametrize(
+    "dispatch_fn",
+    [_dispatch_that_raises, _dispatch_that_returns_refused_status],
+    ids=["0.8.0-raises", "0.7.x-status"],
+)
+async def test_record_failure_still_marks_terminal_state_before_reraising(
+    fake_client, tmp_path, monkeypatch, dispatch_fn
+):
+    """`rotate_for_quota`(`_failover.py`)先 `runtime.rotate_client()` 再
+    `record(...)`:record 拋非 `ManifestPostCommitError` 的例外(這裡用 `OSError`
+    模擬磁碟滿)時,冷卻與游標已經生效,但『換帳號』從未真正稽核成功。修法之前這個
+    新例外會直接穿出 `dispatch_with_failover`,連 `_mark(on_clean_refusal, …)` 都被
+    跳過——attempt 就卡在 `dispatching`,沒有任何終態。
+
+    兩個呼叫點(REFUSED_WITHOUT_DISPATCH 的 raise 分支、0.7.x status 分支)各自要包,
+    只補一個是 AGENTS.md 反覆點名的『補一半』,所以這裡對兩條分支各跑一次
+    (`dispatch_fn` 參數化)。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    store = p.ManifestStore(str(manifest_path))
+    attempt_id = p._create_audio_attempt(
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        language="en",
+        audio_format=None,
+        audio_length=None,
+    )
+    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+
+    def record_blows_up(*args, **kwargs):
+        raise OSError("disk full (ENOSPC)")
+
+    monkeypatch.setattr(p, "_record_dispatch_failover", record_blows_up)
+    monkeypatch.setattr(
+        runtime, "rotate_client", lambda refused=None, skip=frozenset(): "b@x"
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        await p._dispatch_audio_with_failover(
+            store, 1, attempt_id, dispatch_fn,
+            account="a@x", client=fake_client,
+        )
+
+    attempt = _attempts(manifest_path)[0]
+    assert attempt["dispatch"]["status"] == "not_accepted", (
+        "record() 寫入失敗不准讓終態 callback 被跳過——attempt 不能卡在 dispatching"
     )

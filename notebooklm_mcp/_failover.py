@@ -36,14 +36,29 @@ from ._status import ensure_started
 
 # 生成 kickoff 的例外裡,**契約上保證「伺服器沒有建出任何 task」**的那幾種。
 # notebooklm-py 0.8.0(ADR-0019 / #1342)把同步拒絕從「回傳 status='failed'」改成
-# raise:`RateLimitError` 是伺服器的 USER_DISPLAYABLE_ERROR 拒絕(配額/限流),
-# `ArtifactFeatureUnavailableError` 來自 `_parse_generation_result` 的
-# 「a missing id means no task was created」。兩者都等同 0.7.x 的 not_accepted。
+# raise:`ArtifactFeatureUnavailableError` 來自 `_parse_generation_result` 的
+# 「a missing id means no task was created」,契約保證乾淨。
+#
+# `RateLimitError` **不是只有一個生產者**(round2 獨立複審 V-B 修正過的認知,
+# 原本這裡誤把它寫成單一形狀):
+#   - decoder 把伺服器回應裡的 `USER_DISPLAYABLE_ERROR` 解碼成例外時,附帶
+#     `rpc_code="USER_DISPLAYABLE_ERROR"`(`_web/wire/decoder.py::extract_rpc_result`)
+#     ——這是契約講死「沒建出 task」的那一種,`test_contracts.py` 有 `getsource` 鎖住;
+#   - transport 層的 HTTP 429(`_web/transport/executor.py`)`rpc_code=None`——請求
+#     **已經送到伺服器**才被限流打回來,上游自己的
+#     `notebooklm.artifacts.with_rate_limit_retry` 對這種形狀也是原地重送
+#     (docstring 明寫「retrying on a raised RateLimitError」),不特別區分來源。
+# 這個 tuple 目前**兩種都當成乾淨拒絕、rotate 帳號重送**——這是**已知的取捨,不是
+# 誤判修好了**:唯一可靠的判別特徵是 `rpc_code`(`retry_after`/`__cause__` 都不可靠,
+# 沒有 `Retry-After` header 時 `retry_after` 也是 `None`);429 那條理論上換帳號可能
+# 是錯的解藥(限流通常綁 IP/host,不綁帳號,換帳號等於讓 N 個帳號輪流撞同一個限流
+# 器),但要動這條分類需要先跑一輪真帳號 pool 驗收,本輪刻意只把認知寫對、不改行為。
 #
 # **刻意不收 `RPCError` / `DecodingError` / 網路錯誤 / CancelledError**:那些都可能
 # 發生在伺服器已經受理之後,歸成 not_accepted 會讓呼叫端直接重生 → 重複 artifact +
 # 重燒配額。兩種誤判的代價不對稱——把拒絕誤判成 unknown 只是多跑一次撈不到東西的
-# 對帳(便宜),把已受理誤判成拒絕是真的損失,所以這個集合只放契約講死的那兩種。
+# 對帳(便宜),把已受理誤判成拒絕是真的損失,所以這個集合只放契約講死的那兩種
+# (而 `RateLimitError` 目前寬鬆到含 429 那個次要來源,見上)。
 REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
 
 #: 寫一筆「A 拒絕 → 改用 B 重送」的稽核紀錄。`(reason, from_account, to_account)`。
@@ -175,7 +190,19 @@ async def dispatch_with_failover(
         except REFUSED_WITHOUT_DISPATCH as exc:
             # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
             # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」。
-            rotated = rotate_for_quota(record_failover, exc, account, tried)
+            try:
+                rotated = rotate_for_quota(record_failover, exc, account, tried)
+            except Exception:
+                # record() 本身寫入失敗(非 ManifestPostCommitError,例如磁碟滿)——
+                # `runtime.rotate_client()` 在 `rotate_for_quota` 裡已經先跑,冷卻與
+                # 游標都已生效,但「換帳號」這件事從未真正稽核成功。若讓這個新例外
+                # 直接穿出去,下面的 `_mark(on_clean_refusal, …)` 就會被跳過,attempt
+                # 停在 `dispatching` 沒有任何終態(下一次 reconcile 才會發現,而不是
+                # 這裡就講清楚)。終態要標成**原本的拒絕原因**(`exc`)——比照 `_mark`
+                # 自己的取捨,寫檔真的沒成功比配額被拒更值得讓呼叫端知道,所以原樣
+                # 往外拋這個寫入失敗,不是原本的 `exc`。
+                _mark(on_clean_refusal, exc, account)
+                raise
             if rotated is not None:
                 account, client = rotated
                 if account:
@@ -218,7 +245,13 @@ async def dispatch_with_failover(
                 # 這個形狀在上游可達。rotate 重送在這個形狀下會產生第二顆 artifact。
                 _mark(on_acceptance_unknown, status, account)
                 raise
-            rotated = rotate_for_quota(record_failover, status, account, tried)
+            try:
+                rotated = rotate_for_quota(record_failover, status, account, tried)
+            except Exception:
+                # 0.7.x status 分支的孿生保護——理由與上面 REFUSED_WITHOUT_DISPATCH
+                # 那個 except 完全相同,只有一處只補一個分支就是「補一半」。
+                _mark(on_clean_refusal, status, account)
+                raise
             if rotated is not None:
                 account, client = rotated
                 if account:

@@ -42,9 +42,12 @@ class FakeArtifacts:
         # error path preserves the concrete type instead of reconstructing it.
         self.wait_exc = None
         self._wait_count = 0
-        # When True, generate_audio returns a FAILED status (task_id="",
-        # is_failed=True) — models a rate-limit/quota/refusal that the SDK reports
-        # via status rather than by raising.
+        # 0.7.x 風格:generate_audio 回一個 FAILED status(task_id="", is_failed=True)
+        # 而不 raise。**0.8.0 起同步拒絕改成 raise**(ADR-0019 / #1342,見
+        # test_contracts.py::test_generation_kickoff_refuses_by_raising)——這個旋鈕
+        # 模擬的形狀在真實 SDK 已經不會發生,保留純為對稱(ensure_started 仍防這個
+        # 分支,萬一舊契約回來也接得住;比照 retry_failed 的 retry_exc/fail_generate
+        # 但書寫法)。
         self.fail_generate = False
         # When True, wait_for_completion RETURNS a failed status (is_failed=True)
         # instead of raising — models the real 0.3.4 behaviour where generation
@@ -194,8 +197,14 @@ class FakeArtifacts:
         for artifact in self.artifacts:
             if artifact.id == artifact_id:
                 artifact.title = new_title
-                break
-        return None
+                return None
+        # 0.8.0 起兩種 return_object 模式都做存在性檢查(#1362),查不到就 raise ——
+        # 這裡原本回 None,是 0.7.x 的短路行為,與實裝 `_web/artifacts.py` 的
+        # `WebArtifactsAPI.rename` 不同形(見 test_contracts.py 的
+        # test_rename_false_no_longer_short_circuits)。
+        from notebooklm.exceptions import ArtifactNotFoundError
+
+        raise ArtifactNotFoundError(artifact_id)
 
     async def generate_slide_deck(self, notebook_id, source_ids=None, language="en",
                                   instructions=None, slide_format=None, slide_length=None):
@@ -363,7 +372,13 @@ class FakeSources:
         for s in self.sources:
             if s["id"] == source_id:
                 s["title"] = new_title
-        return None
+                return None
+        # 0.8.0 起兩種 return_object 模式都做存在性檢查(#1362),查不到就 raise ——
+        # 與實裝 `_web/sources/__init__.py` 的 `WebSourcesAPI.rename` 同形
+        # (見 test_contracts.py 的 test_rename_false_no_longer_short_circuits)。
+        from notebooklm.exceptions import SourceNotFoundError
+
+        raise SourceNotFoundError(source_id)
 
     async def list(self, notebook_id):
         self.calls.append(("list", dict(notebook_id=notebook_id)))
@@ -699,7 +714,14 @@ def refuse_first(client, method_name, calls, fail_first_n, exc=None):
     async def flaky(*args, **kwargs):
         calls.append(runtime.active_account())
         if len(calls) <= fail_first_n:
-            raise exc or RateLimitError("每日配額已用盡")
+            # rpc_code="USER_DISPLAYABLE_ERROR":真實 0.8.2 只有 decoder 的這條分支
+            # 契約保證「沒建出 task」(`_web/wire/decoder.py::extract_rpc_result`)。
+            # 這裡原本不帶 rpc_code(None),而 RateLimitError 還有另一個生產者——
+            # transport 層的 HTTP 429,同樣 rpc_code=None——兩種都不像時,整套
+            # failover 測試驗的其實是 decoder 產不出的形狀(round2 獨立複審 V-B)。
+            raise exc or RateLimitError(
+                "每日配額已用盡", rpc_code="USER_DISPLAYABLE_ERROR"
+            )
         return await original(*args, **kwargs)
 
     setattr(client.artifacts, method_name, flaky)

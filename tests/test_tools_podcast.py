@@ -1,4 +1,5 @@
 import pytest
+from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import tools_podcast as p
 
@@ -262,7 +263,13 @@ async def test_podcast_episode_rejects_non_positive_episode_n(fake_client, tmp_p
 
 async def test_resume_finishes_episode_without_regenerating(fake_client, tmp_path):
     """podcast_episode_resume 拿既有 artifact_id 續完後半段:等完成→命名→下載→
-    自上傳回錄,回傳與正常生成相同形狀的 dict,但**完全不呼叫 generate_audio**。"""
+    自上傳回錄,回傳與正常生成相同形狀的 dict,但**完全不呼叫 generate_audio**。
+
+    fake `rename` 0.8.2 起對查無 id 的 artifact raise(見 test_rename_not_found.py)
+    ——resume 的前提是這顆 artifact 已經在遠端存在,所以先 seed。"""
+    fake_client.artifacts.seed_artifact(
+        "art-xyz", kind=ArtifactType.AUDIO, title="Audio Overview"
+    )
     out = await p.podcast_episode_resume(
         "nb-1", episode_n=2, title="實戰篇", artifact_id="art-xyz", output_dir=str(tmp_path)
     )

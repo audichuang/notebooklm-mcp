@@ -393,7 +393,13 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                     # 而人看不出要去重登哪一個帳號。實測就是這個形狀。
                     try:
                         client = await stack.enter_async_context(
-                            NotebookLMClient.from_storage(path=str(path), allow_headless=False)
+                            # backend="web" 顯式傳,不靠 _INLINE_AUTH_ENV_OVERRIDES 刪
+                            # env 那條路(理由見上方 _BACKEND_ENV 的註解):shell 裡若有
+                            # NOTEBOOKLM_BACKEND=android,SDK docstring 講明 explicit 勝
+                            # 過 env,只有這裡沒傳過才會被讀到。
+                            NotebookLMClient.from_storage(
+                                path=str(path), allow_headless=False, backend="web"
+                            )
                         )
                     except Exception as exc:
                         raise RuntimeError(
@@ -408,7 +414,11 @@ async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
                 # 沒有 inline_auth 時則是本機 storage_state,rotation 寫回本機檔案即可。
                 # 顯式關閉 0.8.1 的 L3 headless re-auth;也與刪除同名 env 的護欄互補。
                 client = await stack.enter_async_context(
-                    NotebookLMClient.from_storage(allow_headless=False)
+                    # 這條分支涵蓋登入機的本機 storage_state,不受 inline auth 的 env
+                    # override 保護(_INLINE_AUTH_ENV_OVERRIDES 只在 inline_auth 為真時
+                    # 生效)——顯式傳 backend="web" 才不會被 shell 裡的
+                    # NOTEBOOKLM_BACKEND=android 讀走,同上面多帳號分支同一個理由。
+                    NotebookLMClient.from_storage(allow_headless=False, backend="web")
                 )
                 pool.append((await _account_label(client, 1), client))
                 diagnostics.append(_slot_diagnostic(1, creds[0] if creds else None))

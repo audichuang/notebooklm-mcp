@@ -82,6 +82,14 @@ async def test_ask_passes_scope_and_returns_refs(fake_client):
     assert out["references"][0] == {"source_id": "src-1", "citation_number": 1, "cited_text": "引用片段"}
 
 
+async def test_ask_rejects_an_empty_source_ids_list(fake_client):
+    """空清單語意未定(上游 `_chat.py` 只判 `is None`,`[]` 會變成零來源請求)——
+    比照 `generate_audio` 一樣送進 `to_source_ids`,在打 RPC 之前退。"""
+    with pytest.raises(ValueError, match="omit it to use every source"):
+        await t.chat_ask("nb-1", "重點?", source_ids=[])
+    assert not fake_client.chat.calls
+
+
 async def test_source_list(fake_client):
     fake_client.sources.seed("EP01 心法篇", "原文一")
     out = await t.source_list("nb-1")
@@ -198,8 +206,13 @@ async def test_source_add_file_fails_loud_when_title_does_not_land(fake_client, 
         await t.source_add_file("nb-123", str(f), title="EP03 進階篇")
 
 
-async def test_artifact_rename_is_fire_and_forget(fake_client):
-    """artifact_rename 工具同樣必須顯式 return_object=False。"""
+async def test_artifact_rename_asks_for_no_object(fake_client):
+    """artifact_rename 工具同樣必須顯式 return_object=False。
+
+    改名(原 test_artifact_rename_is_fire_and_forget):0.8.0 起
+    return_object=False **不再是**fire-and-forget(#1362,兩種模式都做存在性檢查,
+    查不到就 raise)——名字講的是這件事現在不成立,斷言本身沒變(仍是驗
+    return_object 有沒有傳 False)。"""
     fake_client.artifacts.seed_artifact("task-123")
     await t.artifact_rename("nb-123", "task-123", "EP01 心法篇")
     call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "rename")

@@ -67,6 +67,33 @@ EXPECTED_NOT_OPEN_WORLD = {
     "episode_set_publication_state",
 }
 
+# **這是現況,不是決策。** `_names_with()` 的 `if ann is not None` 會把完全沒標
+# annotations 的工具直接濾掉——四份 EXPECTED_* 清單因此測不到「加一支忘記標
+# annotations 的新工具」(突變驗證過:加一支全綠)。這份清單記錄的是**今天**還沒
+# 標的工具,列在這裡只是為了讓下面的嚴格斷言能通過,**不是說它們不需要標**;
+# 名字要從這裡刪掉,不是把下面那條 assert 弱化或刪掉。多數住在
+# `tools_podcast.py` / `tools_artifacts.py`(這輪工作包的範圍外)——另一個平行的
+# 工作包若先幫其中一支補上 annotations,這條測試會紅(斷言比對不上),那時候的
+# 修法是把那個名字從這裡刪掉,不是回頭放寬 assert。
+_NOT_YET_ANNOTATED = {
+    "artifact_download_audio",
+    "artifact_download_report",
+    "artifact_download_slides",
+    "artifact_rename",
+    "artifact_retry_failed",
+    "artifact_revise_slide",
+    "chat_ask",
+    "episode_set_description",
+    "notebook_create",
+    "notebook_share_with_pool",
+    "podcast_attempt_adopt",
+    "podcast_episode_reconcile",
+    "podcast_episode_resume",
+    "source_add_file",
+    "source_add_text",
+    "source_add_url",
+}
+
 
 async def _annotations_by_name() -> dict[str, object]:
     tools = await app.mcp.list_tools()
@@ -108,6 +135,16 @@ async def test_explicit_not_open_world_matches_approved_list():
         if ann is not None and getattr(ann, "openWorldHint", None) is False
     }
     assert explicit_false == EXPECTED_NOT_OPEN_WORLD
+
+
+async def test_every_tool_has_explicit_annotations_or_is_whitelisted():
+    """F7:`_names_with()` 的 `if ann is not None` 濾掉完全沒標 annotations 的工具
+    ——加一支忘記標的新工具,四份 EXPECTED_* 清單全部比對不到它,測試全綠
+    (突變驗證過)。刻意不標的工具要列進 `_NOT_YET_ANNOTATED`,不是刪掉下面這條
+    assert 或把它弱化。"""
+    annotations = await _annotations_by_name()
+    unannotated = {name for name, ann in annotations.items() if ann is None}
+    assert unannotated == _NOT_YET_ANNOTATED
 
 
 async def test_destructive_and_idempotent_hints_only_on_non_read_only_tools():
