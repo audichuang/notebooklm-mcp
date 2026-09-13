@@ -2456,7 +2456,9 @@ async def _assert_source_cleanup_done(
 
     sources = await client.sources.list(notebook_id)
     live = {getattr(source, "id", None) for source in sources}
-    violations = [
+    # T5(P3):這一份是「已確定身分的 pending 義務」違規,不受下面 CAS 修剪影響
+    # (那道修剪只管 `discovered`——見下方 `_settle_cleanup_state` 呼叫後的重算)。
+    pending_violations = [
         (ep_n, source_id) for ep_n, source_id in pending_here if source_id in live
     ]
 
@@ -2483,7 +2485,14 @@ async def _assert_source_cleanup_done(
             continue
         if candidates:
             discovered.setdefault(ep_n, []).extend(candidates)
-            violations.extend((ep_n, source_id) for source_id in candidates)
+            # T5(P3):**不在這裡就併進最終 violations** —— `_settle_cleanup_state`
+            # 撞 CAS 衝突時會重驗 ownership、就地修剪 `discovered`(await 期間別的
+            # finalizer 可能剛把某個候選 claim 成它自己的合法 continuity source,
+            # 那筆就不再是孤兒)。若在這裡先併進一份定案的 `violations`,修剪只影響
+            # `discovered`、不影響這份副本,回傳的錯誤訊息會繼續點名一筆已經被
+            # 合法認領的 source,叫呼叫端去 `source_delete` 它。violations 的最終
+            # 內容改到 `_settle_cleanup_state` 之後、單一位置,從(可能已修剪的)
+            # `discovered` 重算。
         elif window_closed:
             settled_attempt_ids.add(unresolved_attempt_id)
         else:
@@ -2530,6 +2539,14 @@ async def _assert_source_cleanup_done(
             checked_absent_by_episode=checked_absent_by_episode,
             notebook_id=notebook_id,
         )
+
+    # T5(P3):**單一位置**,用 CAS 衝突處置之後(可能已修剪)的 `discovered` 重算
+    # 最終要回報的 violations——`_settle_cleanup_state` 撞衝突時會就地修剪
+    # `discovered`(見上方呼叫點),這裡讀到的一定是修剪後的結果,不會把已被別的
+    # finalizer 合法認領的 source 也點名進錯誤訊息。
+    violations = list(pending_violations)
+    for ep_n, source_ids in discovered.items():
+        violations.extend((ep_n, source_id) for source_id in source_ids)
 
     if violations:
         details = ", ".join(f"episode {ep_n}: {sid}" for ep_n, sid in violations)

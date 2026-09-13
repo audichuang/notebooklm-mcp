@@ -12,6 +12,7 @@ in-flight finalizer、還是任何把指標寫回去的 writer。
 import asyncio
 import copy
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -2449,6 +2450,103 @@ async def test_concurrent_zero_and_positive_reconciliation_never_forgets_the_orp
     await slow_task                         # 停住的那邊才寫 → 撞上 CAS
 
     assert orphan in _pending_ids(manifest_path), "orphan 已經從 manifest 完全消失"
+
+
+async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_violation(
+    fake_client, tmp_path, monkeypatch
+):
+    """T5(P3,`scratchpad/verify-A1/r1_violations_cas.py` 的重現):CAS 衝突後
+    `violations` 沒跟著 `discovered` 一起修剪。
+
+    `if violations:` raise 的清單是在 `_settle_cleanup_state` 修剪 `discovered`
+    **之前**算的;gate 停在 `sources.list` 的 await 上時,另一個真正在跑的
+    finalizer(EP02)合法認領了這筆孤兒之後,重算後的 manifest 是對的(沒把它
+    記成待刪),但錯誤訊息卻還點名這筆已被合法認領的 source,叫呼叫端去
+    `source_delete` 一筆不該刪的東西。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    _age_the_dispatch_window(manifest_path, attempt_id)
+    upload = _upload(manifest_path, attempt_id)
+    orphan = fake_client.sources._add(
+        upload["expected_title"],
+        kind="media",
+        created_at=datetime.fromisoformat(upload["dispatched_at"]) + timedelta(minutes=1),
+    )
+    # EP02 是「另一個真正在跑的 finalizer」——它稍後要在 gate 停住的 await 期間
+    # 合法認領這筆孤兒。直接手搭它的 attempt(而不是真的呼叫 `podcast_episode`
+    # 跑第二集):真的跑會讓 EP02 自己 dispatch 前的 precondition 檢查(同一本
+    # notebook 共用一道閘)撞見 EP01 尚未結案的清理義務,兩者的時序糾纏在一起
+    # 反而測不準這支測試真正要驗的那個競態。這裡只需要「一顆屬於別集、已經
+    # finalize 完成的 attempt」讓 `claim` 有東西可以寫。
+    ep2_attempt_id = str(uuid.uuid4())
+
+    def _inject_ep2(manifest):
+        manifest["episodes"].append(
+            {
+                "episode": 2,
+                "title": "實戰篇",
+                "label": "EP02 實戰篇",
+                "notebook_id": "nb-1",
+                "active_attempt_id": ep2_attempt_id,
+                "output_attempt_id": ep2_attempt_id,
+                "attempts": [
+                    {
+                        "attempt_id": ep2_attempt_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "notebook_id": "nb-1",
+                        "episode": 2,
+                        "title": "實戰篇",
+                        "brief_sha256": None,
+                        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+                        "dispatch": {"status": "accepted", "artifact_ids_before": []},
+                        "remote": {"artifact_id": "task-ep2", "status": "completed"},
+                        "finalize": p.new_finalize_state(),
+                        "errors": [],
+                    }
+                ],
+            }
+        )
+
+    ManifestStore(manifest_path).update(_inject_ep2)
+    seen = await fake_client.sources.list("nb-1")
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    gate_task = asyncio.create_task(
+        p._assert_source_cleanup_done(
+            _gate_client(seen, entered=entered, release=release),
+            ManifestStore(manifest_path),
+            "nb-1",
+            1,
+        )
+    )
+    await entered.wait()  # gate 已讀 revision R,停在 sources.list 的 await 上
+
+    def claim(manifest):
+        for row in manifest["episodes"]:
+            for candidate_attempt in row.get("attempts", []):
+                if candidate_attempt.get("attempt_id") == ep2_attempt_id:
+                    candidate_attempt["finalize"]["feedback_source_upload"][
+                        "source_id"
+                    ] = orphan
+
+    ManifestStore(manifest_path).update(claim)
+    release.set()
+
+    try:
+        await gate_task
+        raised_message = None
+    except ValueError as exc:
+        raised_message = str(exc)
+
+    if raised_message is not None:
+        assert orphan not in raised_message, (
+            "已被 EP02 合法認領的 source 不該被點名要求 source_delete"
+        )
+    # manifest 對(沒把已被認領的 source 記成待刪)—— 這是 `_settle_cleanup_state`
+    # 既有的正確行為,這支測試只補回傳訊息那一半沒被驗到的地方。
+    assert orphan not in _pending_ids(manifest_path)
 
 
 async def test_blocked_gate_does_not_bump_the_revision(fake_client, tmp_path, monkeypatch):
