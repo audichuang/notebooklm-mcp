@@ -89,7 +89,7 @@ Expected: no traceback and no auth error. Stdio may exit when stdin closes.
 Generate a show cover:
 
 ```bash
-notebooklm-cover --output cover.jpg --line Agentic --line 工程 --tag "~/.claude/" --subtitle "NotebookLM podcast" --byline audichuang
+notebooklm-cover --show --output cover.jpg --show-name Audicast --tagline "NotebookLM podcast" --byline audichuang
 ```
 
 Generate per-episode covers from `series_manifest.json` and write absolute `cover_path` values back into the manifest:
