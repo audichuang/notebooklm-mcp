@@ -381,16 +381,21 @@ def _legacy_manifest_with_adopted_source(
 async def test_legacy_source_is_not_carried_to_a_different_artifact(
     fake_client, tmp_path
 ):
-    """T4(P1,Codex 獨立審查實跑驗證):flat v1 legacy 集(只有 episode 級硬證據,
-    沒有 attempts)可以被 `podcast_episode_resume(artifact_id=<不同的 artifact>)`
-    無審計地換掉——`_ensure_resume_attempt` 新建分支過去只查
-    `output_attempt_id is not None`,沒查 episode 級的 `has_hard_output_evidence`,
-    於是換一個完全不相干的 artifact 也能建出替代 attempt,把舊的 feedback source
-    悄悄換掉,沒有 retract、沒有 tombstone、沒有稽核紀錄。
+    """T4(P1,Codex 獨立審查實跑驗證;落點經第二輪迴歸測試糾正):flat v1 legacy 集
+    (只有 episode 級硬證據,沒有 attempts)可以被
+    `podcast_episode_resume(artifact_id=<不同的 artifact>)` 無審計地換掉。
 
-    正確出路是 retract amendment (2)(見 `podcast_attempt_retract` 附近的長註解):
-    先 resume 到**同一顆**合法 artifact(下一支測試鎖著這條路仍然放行),建出一顆
-    可以被 retract 的 attempt,再走 retract → source_delete → 用新 artifact 重生。
+    守門**不擋在 `_ensure_resume_attempt` 的新建分支**:那正是 retract amendment
+    (2)(見 `podcast_attempt_retract` 附近的長註解——「是修復出口非授權」)刻意留的
+    修復出口,`test_series_failover.py::
+    test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`(唯讀
+    迴歸)直接呼叫 `_ensure_resume_attempt` 驗證這條路必須放行。真正未經審計的動作
+    不是「建出候選」,是「候選未經 retract 就悄悄變成正式 output」——守門移到
+    `_promote_attempt_output`(episode 級投影欄位唯一的寫入點)。finalize 仍會照
+    常下載、上傳回錄 source(這些副作用在 retract amendment (2) 的修復流程裡本來
+    就會發生在被 retract 的候選身上),但 episode 級欄位必須維持原封不動,而且
+    這顆候選 attempt 本身仍然可以被合法 retract 掉——這才是「有出口」而不是單純
+    「欄位沒被動」。
     """
     manifest_path = tmp_path / "series_manifest.json"
     mp3_path = tmp_path / "legacy-ep01.mp3"
@@ -405,7 +410,6 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
             created_at=datetime.now(timezone.utc),
         )
     )
-    source_boundary = len(fake_client.sources.calls)
 
     with pytest.raises(ValueError, match="legacy-artifact"):
         await p.podcast_episode_resume(
@@ -417,13 +421,40 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
             manifest_path=str(manifest_path),
         )
 
-    # 拒收必須發生在任何遠端副作用之前——沒有新的 add_file、episode 級欄位一個字
-    # 都沒動。
-    assert fake_client.sources.calls[source_boundary:] == []
+    # episode 級投影欄位一個字都沒被換掉——候選建立、finalize 都不是問題,promotion
+    # 才是唯一被攔下的動作。
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert stored["episodes"][0]["artifact_id"] == "legacy-artifact"
-    assert stored["episodes"][0]["feedback_source_id"] == old_source_id
-    assert stored["episodes"][0].get("attempts", []) == []
+    episode = stored["episodes"][0]
+    assert episode["artifact_id"] == "legacy-artifact"
+    assert episode["feedback_source_id"] == old_source_id
+    assert "output_attempt_id" not in episode
+
+    # 這顆候選 attempt 仍然存在、仍然可以走 retract amendment (2) 的修復出口——
+    # 「有出口」才是驗收標準,不是只驗欄位沒被動。
+    candidate_attempt_id = episode["active_attempt_id"]
+    assert candidate_attempt_id
+    candidate = next(
+        a for a in episode["attempts"] if a["attempt_id"] == candidate_attempt_id
+    )
+    assert candidate["remote"]["artifact_id"] == "replacement-artifact"
+
+    retracted = await p.podcast_attempt_retract(
+        manifest_path=str(manifest_path),
+        episode_n=1,
+        attempt_id=candidate_attempt_id,
+        reason="接錯 artifact,作廢重灌",
+    )
+
+    assert retracted["observed_state"] == "retracted"
+    assert old_source_id in retracted.get("stale_source_ids", [])
+    # legacy 硬證據跟著一起清掉——不清掉,重生時 has_hard_output_evidence 會擋出
+    # 另一個死路(與 test_series_failover.py 那支唯讀迴歸的驗收標準一致)。
+    stored_after_retract = json.loads(manifest_path.read_text(encoding="utf-8"))
+    episode_after_retract = stored_after_retract["episodes"][0]
+    assert "artifact_id" not in episode_after_retract
+    assert "mp3_path" not in episode_after_retract
+    assert "output_attempt_id" not in episode_after_retract
+    assert "active_attempt_id" not in episode_after_retract
 
 
 async def test_legacy_output_resume_to_the_same_artifact_still_succeeds(

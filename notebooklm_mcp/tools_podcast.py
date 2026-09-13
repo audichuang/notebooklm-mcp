@@ -1230,40 +1230,21 @@ def _ensure_resume_attempt(
                 f"{output_attempt_id!r}; retract it (podcast_attempt_retract) and "
                 "delete the stale feedback source before resuming another artifact"
             )
-        # T4(P1,Codex 獨立審查實跑驗證):上面那道只擋得住**已經是 attempt-based**
-        # 的 durable output(`output_attempt_id` 有值)。flat v1 legacy 集(v0.5.0 前
-        # 直接掛在 episode 上的 artifact_id/mp3_path 等,沒有 attempts、也從沒有
-        # output_attempt_id 可查)完全繞過上面那道——這正是 retract amendment (2)
-        # 描述的缺口(`output_attempt_id` 是 None,但 episode 已有
-        # `has_hard_output_evidence`)。這裡補上同一件事的 legacy 版本:episode 級
-        # 已有硬證據,而這次 resume 指名的 artifact 跟證據上記的不是同一顆,就是在
-        # **無審計**地把它換掉(沒有 retract、沒有 tombstone)。合法出路同樣是 retract
-        # amendment (2):先 resume 到**同一顆**合法 artifact 建出可以被 retract 的
-        # attempt,retract 之後 episode 級欄位會被一併 pop 掉,才輪得到新 artifact。
-        # **resume 到同一顆必須繼續放行**——那是唯一能把這種 legacy episode 帶進
-        # 可審計流程的入口(T5 的 legacy_audio_missing 停點也靠它)。
-        # **只在 `legacy_artifact_id` 真的記著一顆具體 artifact 時才擋**:硬證據也可能
-        # 只靠 `mp3_path`/`published_at`(手工整理的節目、從沒記過 artifact_id)——這種
-        # episode 沒有「原本綁的是哪一顆」可言,resume 指名任何 artifact 都是**第一次**
-        # 建立那個連結,不是換掉已知的一顆(唯讀迴歸測試
-        # `test_legacy_partial_output_isolated_before_explicit_resume_promotion` 鎖著
-        # 這個形狀仍要放行)。
+        # T4(P1,Codex 獨立審查實跑驗證;後續由第二輪迴歸測試糾正落點):flat v1
+        # legacy 集(episode 級 artifact_id/mp3_path,沒有 attempts、也沒有
+        # output_attempt_id 可查)資訊上就是 retract amendment (2) 描述的那個缺口——
+        # `output_attempt_id` 是 None,但 episode 已有 `has_hard_output_evidence`。
+        # **這裡不擋**:`test_series_failover.py::
+        # test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`
+        # (唯讀迴歸)直接呼叫本函式,刻意用不同 artifact_id 建一顆「錯誤候選」
+        # attempt,目的就是之後拿它去 retract——amendment (2) 原始註解自己寫明
+        # 「是修復出口非授權」:新建分支繞過 has_hard_output_evidence guard 是
+        # **設計內**的修復入口,不是漏洞。真正未經審計的動作不是「建出候選」,是
+        # 「讓候選**未經 retract 就悄悄變成正式 output**」——那個攔截點在
+        # `_promote_attempt_output`(episode 級投影欄位唯一的寫入點),攔在那裡
+        # 才不會把這條唯一的修復出口一起關掉。這裡仍要算出 `legacy_artifact_id`——
+        # 下面判斷「resume 是否指名同一顆合法 artifact」(T5 沿用舊 source 的條件)要用。
         legacy_artifact_id = episode.get("artifact_id") or episode.get("task_id")
-        if (
-            legacy_artifact_id
-            and has_hard_output_evidence(episode)
-            and legacy_artifact_id != artifact_id
-        ):
-            raise ValueError(
-                f"episode {episode_n} already has legacy output evidence bound to "
-                f"artifact {legacy_artifact_id!r}; resuming a different artifact "
-                f"{artifact_id!r} would silently replace it without an audit "
-                "trail. First podcast_episode_resume to the existing "
-                f"{legacy_artifact_id!r} (that succeeds and creates a retractable "
-                "attempt), then podcast_attempt_retract it, source_delete the "
-                "stale feedback source it returns, and only then regenerate or "
-                "resume the new artifact."
-            )
         active_attempt_id = episode.get("active_attempt_id")
         if active_attempt_id:
             # 同 `_create_audio_attempt` 那句的修正:對 `prepared`/`not_accepted`
@@ -1295,8 +1276,8 @@ def _ensure_resume_attempt(
         attempt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         finalize = new_finalize_state()
-        # legacy_artifact_id 已經在函式開頭算過(T4 的硬證據守門要用它),這裡不再
-        # 重算第二份。
+        # legacy_artifact_id 已經在上面算過(判斷「是否同一顆合法 artifact」要用),
+        # 這裡不再重算第二份。
         adopted_source_id = episode.get("feedback_source_id")
         adopted_at = episode.get("feedback_source_adopted_at")
         if (
@@ -2025,6 +2006,40 @@ def _promote_attempt_output(
             raise ValueError(
                 f"episode {episode_n} output is owned by "
                 f"{episode['output_attempt_id']!r}; refusing to promote {attempt_id!r}"
+            )
+        # T4(P1,經迴歸測試糾正落點):上面那道只擋得住**已經是 attempt-based**的
+        # durable output。flat v1 legacy 集(episode 級 artifact_id/mp3_path,從沒有
+        # output_attempt_id 可查)完全繞過上面那道——這正是 retract amendment (2)
+        # 描述的缺口。原本把這道擋放在 `_ensure_resume_attempt` 的新建分支,結果連
+        # amendment (2) 自己的修復出口(先用不同 artifact 建一顆 candidate、之後
+        # retract 掉它)都被一起關掉了(`test_series_failover.py::
+        # test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`
+        # 唯讀迴歸抓到)——建立候選不是問題,**未經 retract 就悄悄變成正式 output**
+        # 才是。promotion 是 episode 級投影欄位唯一的寫入點,擋在這裡才是對症下藥。
+        # **resume 到同一顆合法 artifact 必須繼續放行**(`legacy_artifact_id ==
+        # output["artifact_id"]` 時不擋)——那是把這種 legacy episode 帶進可審計
+        # 流程的唯一入口(T5 的 legacy_audio_missing 停點也靠它)。**只在
+        # `legacy_artifact_id` 真的記著一顆具體 artifact 時才擋**:硬證據也可能只靠
+        # `mp3_path`/`published_at`(手工整理的節目、從沒記過 artifact_id)——這種
+        # episode 沒有「原本綁的是哪一顆」可言,promote 任何 artifact 都是**第一次**
+        # 建立那個連結,不是換掉已知的一顆(唯讀迴歸測試
+        # `test_legacy_partial_output_isolated_before_explicit_resume_promotion`
+        # 鎖著這個形狀仍要放行)。
+        legacy_artifact_id = episode.get("artifact_id") or episode.get("task_id")
+        if (
+            episode.get("output_attempt_id") is None
+            and legacy_artifact_id
+            and has_hard_output_evidence(episode)
+            and legacy_artifact_id != output["artifact_id"]
+        ):
+            caps = _attempt_capabilities(episode, attempt, attempt_id)
+            raise ValueError(
+                f"episode {episode_n} already has legacy output evidence bound to "
+                f"artifact {legacy_artifact_id!r}; promoting attempt {attempt_id!r} "
+                f"(artifact {output['artifact_id']!r}) would silently replace it "
+                "without an audit trail. " + _retract_hint(caps) + " retract pops "
+                "the legacy projection along with the stale feedback source, and "
+                "only then may the new artifact become the output."
             )
         attempt["remote"]["status"] = "completed"
         attempt["remote"]["observed_at"] = datetime.now(timezone.utc).isoformat()
