@@ -674,6 +674,44 @@ def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
     assert "podcast_episode_reconcile" not in step, step
 
 
+def test_window_closed_narrative_reaches_the_assertion_on_exactly_fifteen_cases():
+    """T11(測試債):上面那支參數化測試掛了 600 格(`ALL_CASES`),但三層 skip
+    (dispatch 不在可對帳集合、更高優先序分支先接手、歷史紀錄分支)吸收掉了
+    絕大多數——只有 15 格真的跑到最後兩條斷言。這本身不是問題(skip 條件都有
+    各自的理由),但代表：**優先序的回歸如果剛好把某一格從「會走到斷言」變成
+    「被前面的 skip 條件吸收」,測試套件看到的是 0 failed,不是紅。**(突變實測:
+    把 `_TERMINAL_REMOTE` 拿掉一項,`test_window_closed_narrative_…` 的 skip
+    數量與 pass 數量都會變,但這個變化本身不會被任何斷言擋下——它只會讓某些格
+    從「執行斷言」變成「被 skip」或反過來,而 parametrize 的 skip 不算 failure。)
+
+    這支非參數化的 meta 測試把「真的跑到斷言的格數」釘死:複製同一套 skip 條件
+    但用 `continue` 取代 `pytest.skip`,數出真正執行到底的格數,斷言等於 15。
+    這個數字一變,不管是往上(某個 skip 條件變鬆)還是往下(變嚴),都代表上面
+    那支測試的覆蓋範圍動了,要重新確認是不是故意的。
+    """
+    reached = 0
+    for dispatch, remote, role, shape in ALL_CASES:
+        if dispatch not in p._RECONCILABLE_DISPATCH_STATES:
+            continue
+        episode, attempt = _case(dispatch, remote, role, shape)
+        caps = p._attempt_capabilities(
+            episode, attempt, "att-me", reconciliation_window_closed=True
+        )
+        if (
+            caps["can_resend"]
+            or caps["is_output"]
+            or caps["authorization_basis"] == "settled"
+            or caps["can_resume"]
+            or caps["authorization_basis"] == "output_owner"
+        ):
+            continue
+        if not caps["is_active"] and not caps["is_output"]:
+            continue
+        reached += 1
+
+    assert reached == 15
+
+
 @pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
 def test_the_default_reconciliation_window_state_is_unevaluated_not_open(
     dispatch, remote, role, shape
