@@ -1,8 +1,11 @@
 """PR5：整季工具從 durable attempt state 安全續跑。"""
 
 import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
+from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import tools_podcast as p
 
@@ -818,3 +821,140 @@ async def test_series_retract_of_a_middle_episode_with_a_stuck_attempt_offers_re
     assert [
         c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
     ][generate_boundary:] == [], "重生前必須停下,不准對 EP02 重新 dispatch"
+
+
+async def test_legacy_audio_missing_hands_off_to_adopt_when_not_yet_adopted(
+    fake_client, tmp_path
+):
+    """T5(P1,`scratchpad/verify-G/g2_legacy_audio_missing.py`):`legacy_audio_missing`
+    停點過去無條件交棒 `podcast_episode_resume`,但 `_ensure_resume_attempt` 的 seed
+    條件(把回錄 source 的身分接回來、不重複上傳)要求 `feedback_source_adopted_at`
+    ——只有 `podcast_attempt_adopt` 會寫這個人工標記(`_promote_attempt_output` 明講
+    不寫)。真實的 flat v1 manifest(從沒跑過 adopt,只是 episode 級 `feedback_source_id`
+    剛好記著)照做走壞的那支:resume 把它當全新 upload,同名 source 再上傳一次。
+
+    這裡改成:`feedback_source_adopted_at` 不存在時交棒 `podcast_attempt_adopt`
+    (series 已經用 id+label 對帳驗過這筆 source,`feedback_source_id` 直接帶出);
+    存在時才交棒 resume(下一支測試鎖住這條路徑不受影響)。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    mp3_path = tmp_path / "gone-ep01.mp3"
+    source_id = fake_client.sources._add("EP01 心法篇", kind="media")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "title": "心法篇",
+                        "artifact_id": "legacy-artifact",
+                        "mp3_path": str(mp3_path),  # 本機檔案不存在
+                        "published_at": "Fri, 25 Jul 2026 00:00:00 +0800",
+                        "feedback_source_id": source_id,
+                        # 刻意不帶 feedback_source_adopted_at——從沒跑過 adopt 的
+                        # 真實 legacy manifest 就長這樣。
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client.artifacts.artifacts.append(
+        SimpleNamespace(
+            id="legacy-artifact",
+            title="EP01 心法篇",
+            kind=ArtifactType.AUDIO,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    add_file_boundary = len(
+        [c for c in fake_client.sources.calls if c[0] == "add_file"]
+    )
+
+    stopped = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert stopped["complete"] is False
+    assert stopped["observed_state"] == "legacy_audio_missing"
+    assert stopped["safe_next_action"] == "podcast_attempt_adopt"
+    assert stopped["feedback_source_id"] == source_id
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path),
+        episode_n=1,
+        feedback_source_id=stopped["feedback_source_id"],
+    )
+    resumed = await p.podcast_episode_resume(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        artifact_id="legacy-artifact",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+
+    assert adopted["feedback_source_id"] == source_id
+    assert resumed["feedback_source_id"] == source_id
+    assert (
+        len([c for c in fake_client.sources.calls if c[0] == "add_file"])
+        - add_file_boundary
+        == 0
+    ), "照公開回傳做下去不准第二次上傳同名回錄"
+    assert [
+        s["title"] for s in fake_client.sources.sources if s["kind"] == "media"
+    ].count("EP01 心法篇") == 1
+
+
+async def test_legacy_audio_missing_hands_off_to_resume_when_already_adopted(
+    fake_client, tmp_path
+):
+    """T5:已經跑過 adopt(`feedback_source_adopted_at` 存在)時,原本的交棒對象
+    `podcast_episode_resume` 必須繼續放行——這條是既有
+    `test_legacy_missing_audio_resumes_without_duplicate_adopted_source` 鎖住的路,
+    這裡只是同一份不變式換個角度驗一次(series 停點本身,不是走到 resume 之後)。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    mp3_path = tmp_path / "gone-ep01.mp3"
+    source_id = fake_client.sources._add("EP01 心法篇", kind="media")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "title": "心法篇",
+                        "artifact_id": "legacy-artifact",
+                        "mp3_path": str(mp3_path),
+                        "published_at": "Fri, 25 Jul 2026 00:00:00 +0800",
+                        "feedback_source_id": source_id,
+                        "feedback_source_adopted_at": "2026-07-25T00:00:00+00:00",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_client.artifacts.artifacts.append(
+        SimpleNamespace(
+            id="legacy-artifact",
+            title="EP01 心法篇",
+            kind=ArtifactType.AUDIO,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+    stopped = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert stopped["safe_next_action"] == "podcast_episode_resume"
+    assert stopped["artifact_id"] == "legacy-artifact"

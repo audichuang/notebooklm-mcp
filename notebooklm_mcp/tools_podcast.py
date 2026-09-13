@@ -4811,12 +4811,49 @@ async def podcast_series(
                             f"episode {episode_n} local audio is missing and "
                             "no legacy artifact_id can restore it"
                         )
+                    # T5(P1,`scratchpad/verify-G/g2_legacy_audio_missing.py`):交棒
+                    # resume 之前,`_ensure_resume_attempt` 的 seed 條件(把這筆
+                    # source 的身分接回來、不重複上傳)要求
+                    # `feedback_source_adopted_at` 也存在——只有
+                    # `podcast_attempt_adopt` 會寫這個人工標記
+                    # (`_promote_attempt_output` 明講不寫)。真實的 flat v1
+                    # manifest(從沒跑過 adopt,只是 episode 級 `feedback_source_id`
+                    # 剛好記著)沒有這個標記,照做 resume 會把它當全新 upload,
+                    # 對同名 source 重複 add_file 一次。source_verified=True 在
+                    # 上面已經用 id+label 對帳驗過這筆 source 有效,所以先明確
+                    # `podcast_attempt_adopt`(帶 feedback_source_id,寫上標記)
+                    # 就是安全的續集入口;adopt 完之後再由它自己的 caps 導向
+                    # resume(見 T2)。**不能改弱 seed 條件本身**——語意是
+                    # 「這筆 source 的身分經過明確確認」,不是「manifest 剛好有這個
+                    # 欄位」。
+                    adopted_at = episode.get("feedback_source_adopted_at")
+                    if isinstance(adopted_at, str) and adopted_at:
+                        return partial(
+                            episode_n,
+                            None,
+                            "legacy_audio_missing",
+                            ACTION_RESUME,
+                            artifact_id=legacy_artifact_id,
+                        )
                     return partial(
                         episode_n,
                         None,
                         "legacy_audio_missing",
-                        ACTION_RESUME,
+                        ACTION_ADOPT,
+                        feedback_source_id=legacy_source_id,
                         artifact_id=legacy_artifact_id,
+                        next_step=(
+                            f"這筆回錄 source({legacy_source_id!r})已經對帳驗證過,"
+                            "但這一集還沒有明確 adopt 過(缺 "
+                            "feedback_source_adopted_at)——直接 resume 會把它當成"
+                            "全新 upload,對同名 source 重複上傳一次。先呼叫 "
+                            f"{ACTION_ADOPT}(manifest_path=..., episode_n={episode_n}, "
+                            f"feedback_source_id={legacy_source_id!r}) 明確綁定"
+                            f"(不要傳 artifact_id——這裡的 artifact_id 只是告訴你"
+                            "這一集對應哪顆音檔,adopt 認的是 feedback_source_id),"
+                            f"adopt 完再照它回傳的 safe_next_action 續跑(通常是 "
+                            f"{ACTION_RESUME},帶回上面同一個 artifact_id)。"
+                        ),
                     )
 
                 return partial(
