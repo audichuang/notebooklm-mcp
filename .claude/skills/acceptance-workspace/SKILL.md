@@ -150,7 +150,10 @@ brief 要含:這一輪的 scope 與**不做什麼**、結果寫進 `FINDINGS.md`
    (把修正改回舊行為，確認測試真的會紅) —— 否則下一輪要再燒一次配額發現同一件事。
 2. 未結案的前提原樣記進程式碼或 AGENTS.md 並標明結案方式，讓下一個人知道它還沒結案。
 3. FINDINGS 收進 `docs/acceptance-v<版本>-findings.md`，劇本加「已執行」標記指向它。
-4. 修正若**碰到 runtime code**，發一個新 patch 版並照 AGENTS.md §Release Pin Sites 改六處。
+4. 修正若**碰到 runtime code**，發一個新 patch 版 —— 照 `docs/release-checklist.md`
+   §Release Pin Sites，**只改一處版本號**（`pyproject.toml`，再跑 `uv lock` 帶上 `uv.lock`）。
+   🔴 **發版後才修的東西，不再發一版就等於沒出貨** —— 消費端裝的是 tag，而 `latest` 只跟
+   最高 semver；修正 push 上 master 不會讓任何機器拿到（v0.9.27 就是為這件事發的）。
 
 ## 這個 repo 的既有材料
 
