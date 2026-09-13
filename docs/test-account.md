@@ -39,7 +39,7 @@ bash scripts/setup-test-config.sh          # 寫進 notebooklm/stg
 
 ```bash
 cd /home/user/research/audiskill/notebooklm-mcp
-uv pip install -e ".[login]" && uv run playwright install chromium   # 僅登入機需要,已完成
+uv sync --extra dev --extra login && uv run playwright install chromium   # 僅登入機需要,已完成
 uv run notebooklm profile create test                                # 已完成
 uv run notebooklm -p test login     # 瀏覽器開啟 → 用「測試用」Google 帳號登入
                                     # 看到 NotebookLM 首頁才按 ENTER
