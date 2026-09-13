@@ -559,6 +559,39 @@ async def test_first_mp3_download_is_not_left_private(fake_client, tmp_path):
     assert stat.S_IMODE(os.stat(out["mp3_path"]).st_mode) == 0o644
 
 
+async def test_mp3_download_tolerates_directory_fsync_being_unsupported(
+    fake_client, tmp_path, monkeypatch
+):
+    """post-commit 的目錄 fsync 只是額外的 crash-durability,在不支援目錄 fsync
+    的 mount(NAS/overlay,回 EINVAL/ENOTSUP)上不能讓「檔案已經 replace 成功」被
+    誤判成整個下載失敗——否則 resume 只認 status=="completed",永遠卡在同一行
+    重下載(docs/gotchas-files.md)。"""
+    import errno
+    import os
+
+    from notebooklm_mcp import audio_finalize
+
+    def unsupported_fsync(path):
+        raise OSError(errno.EINVAL, "fsync not supported on this mount")
+
+    monkeypatch.setattr(audio_finalize, "_fsync_parent", unsupported_fsync)
+
+    manifest_path = tmp_path / "series_manifest.json"
+    out = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+
+    assert os.path.exists(out["mp3_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    download = manifest["episodes"][0]["attempts"][0]["finalize"]["download"]
+    assert download["status"] == "completed"
+
+
 async def test_interrupted_mp3_download_leaves_no_partial_file(fake_client, tmp_path):
     """失敗的 .part temp 沒清理會隨每次重試累積;要跟 _atomic.download_atomically 一樣
     在 except 分支清掉(清理失敗不得蓋掉原例外)。"""
