@@ -6,6 +6,151 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.28 — 多 agent 稽核一輪:59 條候選、反駁式驗證後修掉 5 條 P1、11 條 P2,補回 8 條假綠的測試
+
+### 這一輪怎麼做的(方法本身是這版最該記的東西)
+
+第一輪 **9 支獨立審查者**(Claude 8 支按檔案分區 + Codex 1 支只看 attempt 狀態機),互不餵結論、
+不准讀 CHANGELOG(免得被上一版的「已反駁」帶著走)。交出 59 條候選(58 條不重複)、15 條 P1。
+第二輪 **9 支反駁式驗證者**,每條先攻擊(路徑可達嗎?前置狀態公開 API 建得出來嗎?文件是否已載明為刻意取捨?)
+攻不下才最小重現;測試品質那批用 worktree **突變驗證**(把宣稱沒被守住的實作弄壞、跑測試看紅不紅)。
+結果:15 條 P1 只有 8 條以原評等站住,19 條下修、17 條整條推翻或歸入已載明,**2 條證據比原報告更硬**
+(feed 身分、tag→latest)。實作由 Sonnet 在五個 worktree 分支各自 TDD、每任務一 commit,主迴圈逐支讀 diff 後合併。
+裁決全文與各輪原始回報收在 `docs/acceptance-v0.9.28-audit.md`(從 session 暫存目錄搬進版控)。
+
+三個值得寫進 playbook 的信號:**不同模型家族看到的東西幾乎不重疊**(Codex 7 條有 6 條 Claude 八支都沒提,
+兩條 P1 都站住);**Claude 內部的獨立收斂才是「一定是真的」的信號**(adopt 手寫分支兩支各自提);
+**第一輪的評等不要直接進 CHANGELOG**(與 playbook 第 5 條「子 agent 回報的數字是階段值」同型)。
+
+### P1(程式碼)—— 五條,全部有最小重現
+
+**retract 中段集後,工具自己的 `next_step` 叫你用 `podcast_series` 重生,而 series 會把後面各集的回錄讀進那一集。**
+`_regeneration_entry_point` 對 series 形狀回 `podcast_series`,series 對沒 output 的集一律 `_run_episode(source_ids=None)`,
+dispatch 當下 notebook 含 EP03 的回錄 → EP02 重生完 `complete=True` 零訊號。`design-notes` 的安全論證「往前跑時筆記本只有
+≤ 當集來源」在這裡失效;skill 寫「回頭重生走 `podcast_episode`」,工具卻說 series。修法落在 **series 每集迴圈頂端**
+(caps 只拿單一 row,看不到 sibling 的 output 證據):「本集無 output 且存在更大集號有 output 的列」→ 新停點
+`observed_state="later_episode_has_output"`,`safe_next_action` 是 `podcast_episode`(指名 `source_ids`)或先
+`podcast_attempt_retract`(已有 attempt 會被 re-arm / supersede 時)。這個位置同時涵蓋全新一集、`not_accepted` re-arm、
+`failed`/`removed` supersede 三條會重新 dispatch 的路。
+
+**flat v1 legacy 集可被 `podcast_episode_resume(artifact_id=B)` 無審計換掉 artifact,舊回錄 source 成孤兒。**(Codex)
+`_ensure_resume_attempt` 新建分支只查 `output_attempt_id is not None`,legacy 集沒這個欄位就整組繞過;
+`tests/test_reliability_followups.py` 那支測試把「換成功」當背景、沒鎖它。**兩層守門**:建立當下 fail-fast
+(B≠A 就拒,零遠端副作用 —— 對稱於 attempt-based 集早就有的「retract it first」),promote 時再擋一次(defense-in-depth,
+手改 manifest 才到得了)。resume 到**同一顆** A 永遠放行 —— 那是把 legacy 集接進可審計流程的唯一入口。
+`test_series_failover.py` 那支靠「用不同 artifact 建候選」造前置狀態的 retract 測試改成直接寫 fixture。
+
+**`legacy_audio_missing` 停點交棒 `podcast_episode_resume`,照做會第二次上傳同名回錄、忘掉原本的 S1。**(Codex)
+seed 條件要 `feedback_source_adopted_at`,而只有 `podcast_attempt_adopt` 會寫它 —— 真實的 flat v1 manifest 從沒跑過 adopt。
+停點改成:沒有標記 → 先 `podcast_attempt_adopt`(帶 `feedback_source_id`,不傳 artifact_id),adopt 完由它自己的 caps
+導向 resume;有標記 → 維持 resume。**不弱化 seed 條件**(語意是「身分經明確確認」,不是「欄位剛好在」)。
+
+**feed 身分(`show_id` × `PODCAST_TOKEN_SALT`)沒有機器圍籬,同一份 manifest 可無警告發到另一條 feed。**
+`publish_series` 拿 `show_id or saved_show["show_id"]` 不比對既存值、`:823` 直接覆寫、整支只有一個 GET 是 `/healthz`
+(零 read-back)。實跑:第二次換 `show_id` → 8 個檔全 PUT 到新 token 目錄、manifest 被覆寫、回傳零提及舊身分 ——
+而且錯誤自我延續(之後每次滾動加集都落新 feed,manifest 不記舊身分)。salt 漂移分支零痕跡。ADR-0013 那句「目錄名與 README
+只擋得住讀過它們的人」逐字適用。修法:`manifest["show"]["feed_identity_sha256"] = sha256(token)`(**存雜湊不存 token**,
+manifest 可能進 podcast-lab 版控;一條比對同時蓋 show_id 與 salt 兩個分支),不符就 fail-closed、零 PUT、不覆寫;
+缺席 = legacy,照發並寫入;刻意換身分照 ADR-0013 開新 manifest,或 `ManifestStore.update` 移除欄位再發(復活要被看見)。
+
+**tag → `latest` 之間沒有 CI 閘;v0.9.23 那次 `latest` 比 CI 綠燈早了 66 秒。**
+`ci.yml` 只對 master push 觸發,`retag-latest.yml` 收到 `v*.*.*` 就 force-push,無 `needs`。五次發版量出 retag 起跑 − CI 結束:
+v0.9.23 **−77s**、v0.9.24 +33s、v0.9.25 +349s、v0.9.26 +17s、v0.9.27 +27s —— 4 守 1 破,破的那次無人察覺,
+而且正是 tag 樹 lock/pyproject 不自洽的那版。branch protection 在免費方案設不了。修法:retag 前插一個 gate step
+**輪詢** `gh run list --workflow=ci.yml --commit <sha>`(tag 落地時 master 的 CI 可能還在跑,最多 25 分鐘),
+`conclusion=success` 才放行;`permissions` 加 `actions: read`(明列 permissions 後未列的預設是 none);
+發版 tag 是 annotated,`GITHUB_SHA` 先 `rev-parse ^{commit}` peel 一次。擋下時的救法寫在 workflow 註解。
+
+### P2
+
+- **`reconciliation_ambiguous` 的中央 caps 導向 `podcast_episode_resume`,而 resume 對同兩個候選只會再拋一次 → 自迴圈**;
+  `podcast_series` 對同一狀態手寫 adopt(兩入口矛盾)。這是 gotchas-attempt 那條紅線的**第十三次現形**,且鎖它的
+  `test_attempt_capabilities.py` 那支 fixture 根本沒填 `candidate_source_ids`,永遠綠(問錯問題的 tripwire)。
+  修法:caps 對「ambiguous 且候選非空」給 `ACTION_ADOPT` 並帶出 `candidate_source_ids`;刪掉 series 的手寫分支,
+  兩個 transient handler 也改走 caps。
+- **`podcast_attempt_adopt` 的 feedback-source 分支手寫 `ACTION_RESUME if needs_rename else ACTION_SERIES`**
+  (兩支審查者獨立收斂),與 caps 分岔、無 `next_step`、`needs_rename=True` 時回傳無 `artifact_id`,而且
+  `"complete": not needs_rename` 在 attempt 尚未 promote 時回 `true`(host 直接 publish 撞 `_ensure_local_mp3`)。
+  改成比照同一支工具的 artifact 分支在 mutate 內算 caps;`complete` = 這一集已有 promote 過的 output;
+  `source_cleanup_obligations` 每筆帶自己的 `notebook_id`(跟 retract 一樣,不再拿 adopt 當下的 notebook 回推)。
+- **已完成集的遠端 Studio artifact 被刪 → series 與 resume 都裸拋 `RuntimeError`**,無停點、不提 `start=N+1`(實測有效)
+  → 整季永卡。`audio_finalize` 改 raise 具名 `RemoteArtifactUnverifiableError`(RuntimeError 子類,既有 handler 不破),
+  series 翻成 `observed_state="output_unverifiable"`、`next_step` 帶逃生口;resume 給帶指引的錯誤訊息。
+  同一形狀的另一半:series 在 promote 撞到 `_promote_attempt_output` 三道守門時也是裸拋 → `promotion_refused` 停點。
+- **`prior_mp3_path` 與指名 `source_ids` 靜默互斥**:EP{n-1} 真的上傳、改名了,dispatch 不帶它,`ok=true`,那筆 source
+  成孤兒吃掉 ≤9 一格;skill 兩句話合起來正把 host 推向這個組合。`_run_episode` 在任何副作用之前 fail-closed。
+- **隱藏目錄繞過多節目容器偵測**(ADR-0012 事故同形):`base/showA/…` + `base/.archive/showB/series_manifest.json` →
+  `others=[]`,showA 吃下 showB 的 bundle。刪掉 `_other_series_manifests` 那行 hidden-skip(`shows/` 底下隱藏目錄只有
+  `.venv*`);symlink / 不可讀目錄兩個子項被驗證推翻(執行端 `O_NOFOLLOW` / `O_RDONLY` 都擋)。
+- sidecar(`attempt-binding.json`)讀寫前重驗 bundle inode(load 到 binding 之間隔 `probe_auth` + 三趟 RPC)。
+- README / `auth-and-config` / `test-account` 四處教 AGENTS.md 明文禁止的 `uv pip install -e` → `uv sync --extra dev`。
+
+### 測試沒守住不變式的那幾條(突變全綠才算數)
+
+| 缺口 | 突變 | 補在 |
+|---|---|---|
+| `_promote_attempt_output` 的**回傳值**只有 `_run_episode` 一條被驗(v0.6.0 原姿勢) | resume / series 回傳 `published_at` 蓋成 2099 → 全綠 | `test_attempt_retract.py` |
+| mp3 下載的 post-commit 目錄 fsync 容忍零測試(四站點三有一無;NAS 上會永遠 finalize 不了) | errno 容忍改 `if True:` → 全綠 | `test_finalize_idempotency.py` |
+| `test_attempt_capabilities.py` 手抄 `_NEVER_DISPATCHED` / `_TERMINAL_REMOTE`(第三份拷貝) | 事實核對 | 改引用常數 |
+| `test_window_closed_narrative_…` 掛 600 格只 15 格跑到斷言,skip 條件讀 SUT 輸出 | 優先序改壞 → 597→612 skip、0 failed | 加 meta 斷言 |
+| `test_tool_annotations.py` 承諾「忘加 annotations 要紅」,無 annotations 的新工具全過 | 加 dummy tool → 全綠 | `assert all(ann is not None …)` + 白名單 |
+| bundle 換手 tripwire 靠 `patch(Path.is_dir)`,loader 零呼叫,`except ValueError: return` 在 with 內 → 恆真 | 拔掉成員檔 `O_NOFOLLOW` + inode 重驗 → 照綠 | 改掛第一次 `os.fstat` + `pytest.raises(match=)` |
+| fake `rename` 查無回 `None`,實裝 0.8.2 raise NotFound | — | conftest + `test_rename_not_found.py` |
+| conftest 的 fake `RateLimitError` 兩種生產者都不像(無 `rpc_code`) | — | 補 `rpc_code="USER_DISPLAYABLE_ERROR"` + contract test |
+
+另有 `_ensure_resume_attempt` claimed 分支標題閘、`_reset_attempt_for_resend` 四欄殘留、`check_skill_sync.py` 自身各補一支。
+
+### P3 裡值得記的幾條
+
+- **429 分類(v0.9.26「已反駁」的再審)**:事故敘事(第二顆 artifact / 雙燒)仍然不成立 —— 審查者引的三處上游證據
+  全屬別的 RPC 家族,而上游 `artifacts.with_rate_limit_retry` 對無 `rpc_code` 的 429 自己就原地重送。**但 v0.9.26 給的第一個
+  理由「429 被限流器擋在 handler 之前」是推測冒充查證**:`TransportRateLimited` 唯一生產路徑是收到 HTTP 429 回應之後。
+  真正成立的一半是契約敘述超出證據:`_failover.py` 把 `RateLimitError` 寫成單一生產者、`_run_episode` 硬寫「沒建 artifact、
+  不多燒配額」在 429 臂只是「幾乎必然」;且傳輸 429 綁 IP/host 不綁帳號,換帳號是錯的解藥。**本輪只把認知寫對、不改行為**
+  (動分類要先跑 pool 驗收),判別特徵只有 `rpc_code` 可靠。
+- `rotate_for_quota` 的 `record` 拋非 post-commit 例外(磁碟滿)時終態 callback 沒跑;兩個呼叫點一起包。
+- `NOTEBOOKLM_BACKEND` 護欄只掛在 inline auth;兩個 `from_storage` 顯式 `backend="web"`。
+- `itunes:category` 空字串照發且回寫黏住(`saved_show.get(...,"Technology")` 因 key 存在回 `''`)→ 只補 non-empty,不做白名單。
+- XML 非法字元 preflight 補集號;`episode_set_description` 寫入當下就驗。
+- `notebooklm-cover` 的 `--show-name` 拿掉 `"Audicast"` 預設(首發前 manifest 無 `show.show_title` 可對照,舊預設讓品牌
+  圍籬靜默放行);三種模式都要顯式傳或由 manifest 沿用。`build_index_html` 的第二份 EP 剝除 regex 收回 `naming.py`。
+- `chat_ask(source_ids=[])` 改走 `to_source_ids` 拒空(`source_search` 不動,上游明文 `[]` = 搜全部)。
+- `_run_episode` finalize 段 `except Exception` 補 `CancelledError`;`podcast_episode_resume` 補 `_validate_wait_timeout`。
+- 併發 finalizer 晚到的失敗只准從自己 claim 的 `dispatching` 降級;SIGKILL 殘留的 `.part` resume 時先清。
+- `ci.yml` `uv sync --locked`;`markdown>=3.5,<4`(唯一無上界的直接依賴);`setup-test-config.sh` 的 `sed` 行號腐化改 awk;
+  eval harness 的 `ln -sfn` 直通活 skill repo 改 `cp -r`、worktree 建立加 `flock`(README 推薦的平行迴圈冷啟動必撞)。
+- ADR-0010 v0.9.7 amendment「600s — chosen conservatively **above** that 26-minute observation」方向寫反(600 < 1560)。
+
+### 被推翻、免得下一輪再提
+
+- research `NOT_FOUND` 讓 `_explain_no_research` 失效:審查者漏看 `WebResearchAPI._wait_observed_status` 把 NOT_FOUND 中和成
+  NO_RESEARCH;v0.9.14 真帳號量到的就是 `no_research`。補了對該覆寫的 `getsource` tripwire。
+- `_TEXTLESS_BLOCK_KINDS` 只豁免 HORIZONTAL_RULE:IMAGE 是 CHANGELOG 明文的刻意擋;THOUGHT 與 CODE_BLOCK 上游同類,擋它是規則的正確套用。
+- gRPC 5 與 7 兩種命運:真帳號兩次量到 7;`rpc_code=5` 原樣拋是 v0.9.14 突變驗證過的判別力。
+- `naming` 對小寫 / 全形 / 雙前綴不剝:docstring「leave anything else」與既有測試「publish-gate problem, not naming」明文非目標。
+- `_atomic.prepared_replacement` 用路徑版 chmod:契約是 close(fd) 後把路徑交呼叫端寫,結構上拿不到 fd。
+- `dist/` 舊 wheel、AGENTS.md 漏列兩支腳本、sync check 觸發面(已載明留下一輪)。
+
+### 刻意延後(要走 pool 驗收或 ADR)
+
+- 429 對 transport 生產者不 rotate(見上)。
+- 目標集的 unresolved 清理義務屬舊 notebook 時 gate 放行(Codex #3):具名那半自己也是死路(搬到新本後義務無入口結案),
+  要連 discharge path 一起設計,不是補一個 fail-closed 了事。
+- `ManifestStore.update` 零變更仍 revision+1(冪等 retract 重呼撞掉別人的 discovery CAS;自愈,5 次重試)。
+- GitHub Actions 釘 SHA:與第一次啟用的 retag gate 不疊在同一版。
+
+### 契約變動(skill repo 已同步;`check_skill_sync.py` 新釘四個詞)
+
+`feed_identity_sha256`(manifest show 欄位)、`later_episode_has_output` / `output_unverifiable` / `promotion_refused`
+(series 停點)、caps 回傳新增 `candidate_source_ids`、adopt 回傳新增 `safe_next_attempt_id` / `safe_next_artifact_id` /
+`next_step`、`legacy_audio_missing` 未 adopt 時交棒 adopt、`prior_mp3_path` × `source_ids` 互斥、`category` 非空、
+`--show-name` 必填、`chat_ask` 拒 `[]`。工具 description 一字未加(payload 見下)。
+
+### 數字(在發版 commit 上重量)
+
+- 全套離線測試:__TESTS__。
+- `tools/list` payload:__PAYLOAD__(上限 40,000;description 這版沒動,差額是 annotations 白名單那類元資料)。
+
 ## v0.9.26 — 工具描述瘦身 39%:規則從事故敘事裡挖出來,順手撿到四條真缺陷
 
 ### 為什麼動描述:它是跨所有使用者的固定成本,而代價不出現在任何人的畫面上
