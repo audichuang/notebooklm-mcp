@@ -196,6 +196,81 @@ async def test_replacement_keeps_the_original_published_at_not_the_regeneration_
     assert returned["published_at"] == first_published_at
 
 
+async def test_resume_promotion_also_returns_the_original_published_at(
+    fake_client, tmp_path, monkeypatch
+):
+    """T9(測試債):`_promote_attempt_output` 的回傳值突變之前只有 `podcast_episode`
+    這一條路徑被驗到——`podcast_episode_resume`/`podcast_series`(兩處)都是
+    `_promote_attempt_output(...); return output`(或 `...; run_results.append
+    (output)`)同一個形狀,但沒有測試斷言它們的**回傳 dict**,只驗 manifest。
+    這支補 `podcast_episode_resume` 的出口:讓重生的第二次生成停在「finalize
+    未完成」(下載中斷),改由 `podcast_episode_resume` 接手完成 promote。
+    """
+    monkeypatch.setattr(audio_finalize, "datetime", _TickingDatetime)
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    first_published_at = before["published_at"]
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
+    await b.source_delete("nb-1", before["feedback_source_id"])
+
+    fake_client.artifacts.download_audio_exc = RuntimeError("模擬傳輸中斷")
+    with pytest.raises(RuntimeError):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief 2",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    fake_client.artifacts.download_audio_exc = None
+    stopped = _episode(manifest_path)
+    artifact_id = stopped["attempts"][-1]["remote"]["artifact_id"]
+
+    returned = await p.podcast_episode_resume(
+        "nb-1", episode_n=1, title=EP["title"], artifact_id=artifact_id,
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+
+    after = _episode(manifest_path)
+    assert after["published_at"] == first_published_at
+    assert returned["published_at"] == first_published_at
+
+
+async def test_series_promotion_also_returns_the_original_published_at(
+    fake_client, tmp_path, monkeypatch
+):
+    """T9(測試債):`podcast_series` 對「已有 active_attempt_id、尚未 promote」
+    這一集重新 finalize 後的 promote 呼叫點(與新集 dispatch 直接委派給
+    `_run_episode` 是不同的程式碼路徑——那條走的是 `_run_episode` 自己的
+    promote,已經被 `podcast_episode` 的既有測試驗過)也要驗回傳值,不能只驗
+    manifest。先讓重生的第二次生成停在「finalize 未完成」(下載中斷,
+    active_attempt_id 留著、output_attempt_id 仍是 None),series 對它重跑會
+    走這條 local promote 呼叫點。
+    """
+    monkeypatch.setattr(audio_finalize, "datetime", _TickingDatetime)
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    first_published_at = before["published_at"]
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
+    await b.source_delete("nb-1", before["feedback_source_id"])
+
+    fake_client.artifacts.download_audio_exc = RuntimeError("模擬傳輸中斷")
+    with pytest.raises(RuntimeError):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    fake_client.artifacts.download_audio_exc = None
+    stopped = _episode(manifest_path)
+    assert stopped.get("output_attempt_id") is None
+    assert stopped.get("active_attempt_id")
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": EP["title"], "brief": "修正後的 brief"}],
+        output_dir=str(tmp_path),
+    )
+
+    after = _episode(manifest_path)
+    assert after["published_at"] == first_published_at
+    assert out["episodes"][0]["published_at"] == first_published_at
+
+
 async def test_second_replacement_still_keeps_the_original_published_at(
     fake_client, tmp_path, monkeypatch
 ):
