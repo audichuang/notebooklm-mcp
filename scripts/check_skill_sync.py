@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 from notebooklm_mcp import app
@@ -170,8 +171,17 @@ REMOVED_CONTRACT_TERMS = (
 
 
 def _stale_terms(path: Path, terms: tuple[str, ...]) -> list[str]:
+    r"""已刪除的契約詞要用**整個識別字**比對,不是子字串。
+
+    `has_output` 是被移除的欄位,但 v0.9.28 新增的必填詞 `later_episode_has_output` 以它為
+    字尾 —— 裸 `term in text` 會把新詞誤判成「還在教舊欄位」,兩張表從此互相打架。
+    以 `\w` 為邊界(底線也算 `\w`),`later_episode_has_output` 不再命中 `has_output`。
+    """
     text = path.read_text(encoding="utf-8")
-    return [term for term in terms if term in text]
+    return [
+        term for term in terms
+        if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text)
+    ]
 
 
 async def main(
