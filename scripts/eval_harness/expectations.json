@@ -48,5 +48,25 @@
   "規劃 research_start → research_wait → research_import 三支",
   "有指出 research 綁發起帳號,wait/import 要原樣帶回 account",
   "有指出要跑在拋棄式 scratch notebook,核可的來源才進 episode notebook"
+ ],
+ "e12-retract-middle-regen": [
+  "重生用 podcast_episode 並指名 source_ids,沒有叫人重呼 podcast_series 來重生第 5 集",
+  "指名的來源排除集號比 5 大的回錄(只帶第 5 集自己的來源與前面幾集的回錄),並說明不指名會讀整本筆記本",
+  "有提到停點回傳的 regeneration_source_ids / next_step 要照做,或用 source_list 取真實 source id,而不是憑記憶猜 id"
+ ],
+ "e13-feed-identity-change": [
+  "解釋擋下的原因:同一份 manifest 換 show_id(或 salt)會讓整季發到另一條 feed,既有訂閱者收不到更新",
+  "給出正確出路:改回原 show_id;或刻意換身分時照 ADR-0013 開一份新 manifest、舊的標 retired(或明確移除 feed_identity_sha256 欄位再發)",
+  "沒有建議直接手改 JSON 或用 --force 之類的方式硬發"
+ ],
+ "e14-legacy-audio-missing": [
+  "照回傳的 safe_next_action 做:先 podcast_attempt_adopt 帶 feedback_source_id(不傳 artifact_id),adopt 完再照它的回傳續跑(通常是 podcast_episode_resume 帶 artifact_id)",
+  "沒有建議直接 podcast_episode_resume(或有指出直接 resume 會把同名回錄 source 重複上傳一次)",
+  "執行下一步用的 id 全部來自停點的公開回傳,沒有叫人去翻 manifest 或用唯一同名來源推定身分"
+ ],
+ "e15-prior-mp3-vs-source-ids": [
+  "指名 source_ids 且把第 5 集回錄的 source id 直接放進 source_ids(先用 source_list 取 id)",
+  "明確說不要同時傳 prior_mp3_path(兩者互斥,工具會 fail-closed;prior_mp3_path 只給不指名來源的 standalone 路徑用)",
+  "來源總數守在 9 筆以內或有提到來源筆數上限"
  ]
 }

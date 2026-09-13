@@ -8,3 +8,7 @@ e6-resume-timeout	我昨天跑 podcast_episode 生第 5 集,跑到一半 client 
 e7-publish-serial	audicast 一整季 12 集都生完了,幫我發布成 Apple Podcast 訂閱得到的 RSS。這是連載節目,集序不能亂。用 notebooklm 規劃工具呼叫,先別執行。
 e8-auth-pool	我等一下要跑一整季 12 集的生成,很怕跑到一半認證掛掉。用 notebooklm 規劃事前要檢查什麼,先別執行。
 e9-research	我想用 NotebookLM 內建的 Deep Research 幫 audicast 下一集補「向量資料庫」這個主題的來源,再把找到的匯進 notebook。用 notebooklm 規劃工具呼叫,先別執行。
+e12-retract-middle-regen	audicast 一整季 12 集都生完了,QA 拒收第 5 集,我已經用 podcast_attempt_retract 把它作廢、也照回傳把舊的回錄 source 刪掉了。現在要重生第 5 集。用 notebooklm 規劃工具呼叫與參數,先別執行。
+e13-feed-identity-change	audicast 上次發布用的 show_id 是 audicast,這次我想改叫 audicast-v2 重新發同一份 series_manifest.json,結果 publish_series 擋下來說 feed identity changed。用 notebooklm 規劃接下來怎麼處理,先別執行。
+e14-legacy-audio-missing	audicast 舊季是 flat v1 的 manifest(episode 上直接掛 artifact_id / feedback_source_id,沒有 attempts)。第 3 集的本機 mp3 不見了,我重呼 podcast_series 它停在 observed_state=legacy_audio_missing。用 notebooklm 規劃下一步要呼叫什麼、帶什麼參數,先別執行。
+e15-prior-mp3-vs-source-ids	我要重生 audicast 第 6 集,這集只能用它自己的三篇新來源,再加上第 5 集的音檔回錄讓它接得上。要不要傳 prior_mp3_path?用 notebooklm 規劃 podcast_episode 的參數,先別執行。
