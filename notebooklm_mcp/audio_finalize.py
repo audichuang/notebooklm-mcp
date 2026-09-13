@@ -665,11 +665,16 @@ async def finalize_attempt(
             replaced = True
         except Exception:
             def download_failed(_episode: dict, current: dict) -> None:
-                # temp_path 這裡就要清掉的檔案,寫回 None 才跟 download_completed 一致
-                # ——留舊路徑會讓稽核欄位說謊(它已經被下面的 finally unlink 掉了)。
-                current["finalize"]["download"].update(
-                    {"status": "failed", "temp_path": None}
-                )
+                # 只准從自己 claim 的 "dispatching" 降級:併發 finalizer 若已經把這顆
+                # checkpoint 寫成 "completed"(例如更快完成的另一個 process),這裡
+                # 遲到的失敗不能盲寫倒退——不比對就寫會把已驗證過的 completed 蓋回
+                # failed。temp_path 這裡就要清掉的檔案,寫回 None 才跟
+                # download_completed 一致——留舊路徑會讓稽核欄位說謊(它已經被下面
+                # 的 finally unlink 掉了)。
+                download_state = current["finalize"]["download"]
+                if download_state.get("status") != "dispatching":
+                    return
+                download_state.update({"status": "failed", "temp_path": None})
 
             _mutate(store, episode_n, attempt_id, download_failed)
             raise
@@ -777,9 +782,14 @@ async def finalize_attempt(
             # 被當成「上傳結果不明」處理。
             except (Exception, asyncio.CancelledError) as exc:
                 def upload_unknown(_episode: dict, current: dict) -> None:
-                    current["finalize"]["feedback_source_upload"][
-                        "status"
-                    ] = "acceptance_unknown"
+                    # 只准從自己 claim 的 "dispatching" 降級:併發 finalizer(或
+                    # `podcast_attempt_adopt`)若已經把這顆 checkpoint 寫成
+                    # "completed",這裡遲到的失敗不能盲寫倒退——不比對就寫會把
+                    # 已驗證過的 completed 蓋回 acceptance_unknown。
+                    upload_state = current["finalize"]["feedback_source_upload"]
+                    if upload_state.get("status") != "dispatching":
+                        return
+                    upload_state["status"] = "acceptance_unknown"
 
                 try:
                     _mutate(store, episode_n, attempt_id, upload_unknown)

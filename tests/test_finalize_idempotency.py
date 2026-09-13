@@ -285,6 +285,107 @@ async def test_concurrent_resume_only_one_caller_uploads_feedback_source(
     assert final["episodes"][0]["active_attempt_id"] == attempt_id
 
 
+async def test_late_failed_upload_does_not_regress_a_completed_checkpoint(
+    fake_client, tmp_path, monkeypatch
+):
+    """併發 finalizer 晚到的失敗不能盲寫倒退已驗證的 checkpoint。
+
+    排出的時序:這顆 attempt 的 upload 已經被別的路徑(例如另一個更快完成的
+    finalizer、或 `podcast_attempt_adopt`)寫成 `completed`、`source_id` 落盤;
+    這個 caller 自己 claim 的 `add_file` 呼叫這時候才收到遲到的例外。
+    `upload_unknown` 只准從自己 claim 的 `dispatching` 降級,當前 status 已經是
+    `completed` 就不該碰它——不然會把已驗證過的 checkpoint 盲寫倒退。
+    """
+    from notebooklm_mcp.manifest_store import ManifestStore
+
+    manifest_path = tmp_path / "series_manifest.json"
+
+    async def add_file_then_lose_race(notebook_id, file_path, **kwargs):
+        # 模擬「B 搶先完成」:在這個 caller 自己的例外浮現之前,manifest 上的
+        # upload 已經被寫成 completed。
+        def mark_completed_by_another_caller(manifest):
+            attempt = manifest["episodes"][0]["attempts"][0]
+            attempt["finalize"]["feedback_source_upload"].update(
+                {"status": "completed", "source_id": "src-adopted-by-b"}
+            )
+
+        ManifestStore(str(manifest_path)).update(mark_completed_by_another_caller)
+        raise TimeoutError("late upload response")
+
+    monkeypatch.setattr(
+        fake_client.sources, "add_file", add_file_then_lose_race
+    )
+
+    with pytest.raises(TimeoutError, match="late upload response"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    upload = stored["episodes"][0]["attempts"][0]["finalize"][
+        "feedback_source_upload"
+    ]
+    assert upload["status"] == "completed"
+    assert upload["source_id"] == "src-adopted-by-b"
+
+
+async def test_late_failed_download_does_not_regress_a_completed_checkpoint(
+    fake_client, tmp_path, monkeypatch
+):
+    """download 姊妹路徑同一顆紅線:遲到的下載失敗不能把已驗證完成的 checkpoint
+    改回 `failed`(`download_failed` 只准從自己 claim 的 `dispatching` 降級)。"""
+    from pathlib import Path
+
+    from notebooklm_mcp.manifest_store import ManifestStore
+
+    manifest_path = tmp_path / "series_manifest.json"
+    completed_mp3_path = tmp_path / "ep01.mp3"
+
+    async def download_then_lose_race(notebook_id, output_path, artifact_id=None):
+        # 模擬「B 搶先完成」:寫一份 partial bytes 到自己的 temp_path(finally 會清掉
+        # 它),但在例外浮現之前,manifest 上的 download 已經被寫成 completed。
+        Path(output_path).write_bytes(b"partial-from-a")
+
+        def mark_completed_by_another_caller(manifest):
+            attempt = manifest["episodes"][0]["attempts"][0]
+            attempt["finalize"]["download"].update(
+                {
+                    "status": "completed",
+                    "path": str(completed_mp3_path),
+                    "bytes": len(b"already-good-bytes"),
+                    "sha256": "deadbeef",
+                    "temp_path": None,
+                }
+            )
+
+        ManifestStore(str(manifest_path)).update(mark_completed_by_another_caller)
+        raise ConnectionError("late download failure")
+
+    monkeypatch.setattr(
+        fake_client.artifacts, "download_audio", download_then_lose_race
+    )
+
+    with pytest.raises(ConnectionError, match="late download failure"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    download = stored["episodes"][0]["attempts"][0]["finalize"]["download"]
+    assert download["status"] == "completed"
+    assert download["path"] == str(completed_mp3_path)
+
+
 async def test_unpromoted_new_attempt_does_not_replace_prior_output_bytes(
     fake_client, tmp_path, monkeypatch
 ):
