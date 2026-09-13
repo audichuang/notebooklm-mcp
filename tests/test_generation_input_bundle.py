@@ -892,18 +892,26 @@ def test_post_publish_temp_cleanup_failure_keeps_the_binding(tmp_path, monkeypat
 # brief 燒配額。目錄深度不是安全邊界,所以圍籬改由 host 宣告;推不出唯一節目時 fail-closed。
 
 
-def _multi_show_container(tmp_path):
+def _multi_show_container(tmp_path, *, hidden=False):
     shows = tmp_path / "shows"
     (shows / "graphify").mkdir(parents=True)
-    (shows / "audicast" / "output").mkdir(parents=True)
-    (shows / "audicast" / "output" / "series_manifest.json").write_text("{}", encoding="utf-8")
+    # hidden=True:sibling manifest 搬進隱藏目錄(退役節目常見形狀是「搬進看不見的
+    # 資料夾」,不是刪掉——一次 `mv shows/old shows/.old` 就是這裡)。
+    sibling_show = ".archive/audicast" if hidden else "audicast"
+    (shows / sibling_show / "output").mkdir(parents=True)
+    (shows / sibling_show / "output" / "series_manifest.json").write_text(
+        "{}", encoding="utf-8"
+    )
     return shows
 
 
-def test_multi_show_container_is_refused_without_workspace_root(tmp_path):
+@pytest.mark.parametrize("hidden", [False, True])
+def test_multi_show_container_is_refused_without_workspace_root(tmp_path, hidden):
     """祖父目錄裡還有別的 series_manifest.json = 多節目容器 → 沒宣告 workspace_root 就拒,
-    而且要在讀任何 bundle bytes 之前拒(別節目的 bundle 路徑合法、檔案都在,靠圍籬才擋得住)。"""
-    shows = _multi_show_container(tmp_path)
+    而且要在讀任何 bundle bytes 之前拒(別節目的 bundle 路徑合法、檔案都在,靠圍籬才擋得住)。
+    隱藏目錄(如 `.archive/`)裡的 sibling manifest 一樣要被抓到——曾經被跳過,等於幫
+    `base/showA/…` + `base/.archive/showB/series_manifest.json` 這種佈局開一個後門。"""
+    shows = _multi_show_container(tmp_path, hidden=hidden)
     foreign, _ = _write_bundle(shows / "audicast")
 
     with pytest.raises(ValueError, match="workspace_root"):

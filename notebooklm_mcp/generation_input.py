@@ -213,11 +213,16 @@ def _discard(path: Path) -> None:
 def _other_series_manifests(workspace: Path, manifest: Path) -> list[Path]:
     """Every ``series_manifest.json`` under ``workspace`` except ``manifest`` itself.
 
-    不限深度、不跟 symlink、跳過隱藏目錄(``.venv`` / ``.git``)。寫死 glob 深度就是下一個
-    「寫死 ``manifest/``」——對現在的佈局成立、對下一季的佈局不成立。"""
+    不限深度、不跟 symlink。寫死 glob 深度就是下一個「寫死 ``manifest/``」——對現在的
+    佈局成立、對下一季的佈局不成立。**不跳過隱藏目錄**:曾經跳過(理由是排除
+    ``.venv``/``.git`` 這類雜訊),但這條圍籬的職責是「找出所有 series_manifest.json」,
+    不是「找出乾淨的目錄樹」——跳過隱藏目錄等於幫攻擊面開一個後門:
+    ``base/showA/…`` 與 ``base/.archive/showB/series_manifest.json`` 並存時,舊寫法回傳
+    ``others=[]``,showA 的 workspace 推導會靜默吃下 showB 的 bundle(ADR-0012 那次事故
+    的同形狀)。podcast-lab 的 ``shows/`` 底下唯一的隱藏目錄是 ``.venv*``,不會有套件在
+    裡面 ship ``series_manifest.json``,所以拿掉這個排除不會誤傷真實佈局。"""
     others: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         if "series_manifest.json" in filenames:
             found = Path(dirpath, "series_manifest.json")
             if found.resolve(strict=False) != manifest:
