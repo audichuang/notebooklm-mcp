@@ -519,7 +519,30 @@ async def publish_series(
     explicit = show_cfg["explicit"]
     notebook_id = show_cfg["notebook_id"]
 
-    identity.validate_show_id(show_id)
+    # token = HMAC(salt, show_id) 已經同時內含這兩個分支(identity.make_token 內部會先
+    # validate_show_id,故不再另外呼叫)。sha256(token) 存成
+    # manifest["show"]["feed_identity_sha256"]——**存雜湊不存 token**,manifest 可能被
+    # host 放進 podcast-lab 的版控,token 是 feed URL 的秘密成分。一條比對同時擋「show_id
+    # 打錯」與「PODCAST_TOKEN_SALT 漂移」兩個分支:同一份 manifest 換身分沒有警告的話,
+    # 整季會無聲落到一條新 feed,既有訂閱者收不到任何更新,而錯誤還會自我延續(下次滾動
+    # 加集繼續發去新 feed)。缺席 = legacy manifest,照發並在下面寫回;要刻意換身分,
+    # 照 ADR-0013 開新 manifest、舊的標 retired,或用 ManifestStore.update 把這個欄位
+    # 移除再發(復活要被看見,不是自動發生)。
+    token = identity.make_token(show_id, salt)
+    feed_identity_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    saved_identity = saved_show.get("feed_identity_sha256")
+    if saved_identity is not None and saved_identity != feed_identity_sha256:
+        raise ValueError(
+            f"feed identity changed(manifest {manifest_path}):show_id 或 "
+            "PODCAST_TOKEN_SALT 與上一次發布這份 manifest 時不同——照發會讓整季無警告"
+            "落到一條新 feed,既有訂閱者收不到任何更新。若是打錯,把 show_id / "
+            "PODCAST_TOKEN_SALT 改回原值;若是刻意換身分,照 ADR-0013 開一份新 manifest、"
+            "把舊的標 retired,或用 ManifestStore.update 把 "
+            "manifest['show']['feed_identity_sha256'] 移除再發(復活要被看見,不是自動"
+            "發生)。"
+        )
+    show_cfg["feed_identity_sha256"] = feed_identity_sha256
+
     # **值域驗證要在任何遠端副作用之前。** 打錯的 itunes_type 若拖到渲染才擋,前面的
     # artwork/media PUT 已經送出去了(而 feed.xml 是最後一個 PUT),呼叫端會拿到「發布
     # 失敗」但遠端其實留下了一半的檔案。渲染邊界那份是把關,這裡是 fail-fast。
@@ -536,7 +559,7 @@ async def publish_series(
     art_ext = "jpg" if art_info["format"] == "JPEG" else "png"
     artwork_file = f"artwork-{hashlib.sha256(art_bytes).hexdigest()[:8]}.{art_ext}"
 
-    token = identity.make_token(show_id, salt)
+    # token 已在上面算過(feed identity 圍籬與這裡是同一顆值,不重算)。
 
     # deferred = 稽核上刻意不公開(例如 QA 五次拒收、attempt 全撤回)。必須留在 manifest
     # 當 audit,但不能擋整季重發、也不能被 leftover 本機 mp3 偷偷送上 feed

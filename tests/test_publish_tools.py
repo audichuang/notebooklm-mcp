@@ -3,6 +3,7 @@ faked via httpx.MockTransport injected through the tools_publish._make_client se
 (monkeypatched) — zero real sockets, zero NAS mount, zero NotebookLM calls (every
 episode here already has a local mp3_path, so _ensure_local_mp3's re-download
 branch, which needs fake_client, is never exercised)."""
+import hashlib
 import json
 import os
 import shutil
@@ -335,6 +336,97 @@ async def test_publish_explicit_param_overrides_manifest_show(env, tmp_path, art
     assert show2["title"] == "改名後"
     saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
     assert saved["show_title"] == "改名後"          # 覆蓋值也回寫,下次沿用
+
+
+# ---- P1-4:feed 身分(show_id × PODCAST_TOKEN_SALT)沒有機器圍籬 --------------------
+# token = HMAC(salt, show_id) 已經內含這兩個分支;sha256(token) 存成
+# manifest["show"]["feed_identity_sha256"](存雜湊不存 token —— manifest 可能進
+# podcast-lab 的版控),一條比對同時擋「show_id 打錯」與「PODCAST_TOKEN_SALT 漂移」。
+
+def _identity_hash(show_id, salt):
+    return hashlib.sha256(identity.make_token(show_id, salt).encode("utf-8")).hexdigest()
+
+
+async def test_publish_first_ever_publish_stores_feed_identity_hash(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """legacy manifest(無 `show` 鍵,從未發布過)照發,這次發布把身分指紋寫回去,
+    之後才擋得住換身分。"""
+    _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)          # 無 manifest["show"]
+    await _publish(manifest, artwork_png)                # show_id="ai-news"(_show_kwargs 預設)
+    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    assert saved["feed_identity_sha256"] == _identity_hash("ai-news", "s3cret")
+
+
+async def test_publish_refuses_show_id_change_on_same_manifest(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """同一份 manifest 換 show_id 沒有警告會讓整季無警告落到一條新 feed,既有訂閱者
+    收不到——這裡測 show_id 打錯/刻意換的那一半。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png)
+    first_count = len(captured)
+    assert first_count == 8   # 2 mp3 + 2 cover + artwork + show.json + feed.xml + index.html
+
+    with pytest.raises(ValueError, match="feed identity"):
+        await _publish(manifest, artwork_png, show_id="ai-news-v2")
+
+    assert len(captured) == first_count       # 第二次零 PUT
+    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    assert saved["show_id"] == "ai-news"      # manifest 沒被覆寫
+
+
+async def test_publish_refuses_salt_change_on_same_manifest(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """同 show_id、salt 漂移(換 Doppler 環境等)一樣要擋——salt 分支原本零痕跡。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png)
+    captured.clear()
+
+    monkeypatch.setenv("PODCAST_TOKEN_SALT", "s3cret-dev")
+    with pytest.raises(ValueError, match="feed identity"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
+async def test_publish_same_identity_republish_is_fine(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """同 show_id、同 salt 重發(滾動加集的日常情況)不受這道閘影響。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png)
+    first_hash = json.loads(open(manifest, encoding="utf-8").read())["show"]["feed_identity_sha256"]
+
+    await _publish(manifest, artwork_png)
+    second_hash = json.loads(open(manifest, encoding="utf-8").read())["show"]["feed_identity_sha256"]
+    assert first_hash == second_hash == _identity_hash("ai-news", "s3cret")
+    assert len(captured) == 16   # 兩次都成功,各 8 個 PUT
+
+
+async def test_publish_allows_identity_change_after_removing_feed_identity_hash(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """拿掉 `feed_identity_sha256` 欄位 = 顯式承認要換身分(復活要被看見,不是自動發生)
+    ——之後才准換 show_id 重發。"""
+    from notebooklm_mcp.manifest_store import ManifestStore
+
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    await _publish(manifest, artwork_png)                 # show_id="ai-news"
+
+    ManifestStore(manifest).update(lambda m: m["show"].pop("feed_identity_sha256", None))
+
+    captured.clear()
+    res = await _publish(manifest, artwork_png, show_id="ai-news-v2")
+    assert res["token"] == identity.make_token("ai-news-v2", "s3cret")
+    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    assert saved["show_id"] == "ai-news-v2"
+    assert saved["feed_identity_sha256"] == _identity_hash("ai-news-v2", "s3cret")
 
 
 async def test_publish_return_includes_duration(env, tmp_path, artwork_png, monkeypatch):
