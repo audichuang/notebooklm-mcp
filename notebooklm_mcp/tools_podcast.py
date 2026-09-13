@@ -29,6 +29,7 @@ from ._sources import (
 from ._status import TerminalGenerationError, ensure_completed
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
+    RemoteArtifactUnverifiableError,
     claimed_source_ids,
     finalize_attempt,
     has_durable_output_evidence,
@@ -366,6 +367,14 @@ def _attempt_capabilities(
     feedback_upload_status = (
         attempt.get("finalize", {}).get("feedback_source_upload", {})
     ).get("status")
+    # T1:候選一律來自 `unresolved_upload`(`_reconcile_source_upload` 寫入的同一份
+    # checkpoint),非空即代表狀態是 `reconciliation_ambiguous`(該函式把「有候選」與
+    # 「狀態設成 ambiguous」綁在同一次 mutate 裡,兩者不會分岔)。
+    feedback_upload_candidates = (
+        list(unresolved_upload.get("candidate_source_ids") or [])
+        if unresolved_upload is not None
+        else []
+    )
 
     never_dispatched = dispatch_status in _NEVER_DISPATCHED
     remote_terminal = remote_status in _TERMINAL_REMOTE
@@ -492,11 +501,20 @@ def _attempt_capabilities(
         # 歷史紀錄那格必須先判(上一個分支):一顆已被取代的 attempt 就算 upload 卡在
         # unresolved,能動的也不是它——教人 resume 一顆歷史 attempt 會被 output guard
         # 擋掉,又是一句「在它自己產生的狀態下不可執行」的指引。
-        safe_next_action = (
-            ACTION_RESUME
-            if can_resume
-            else ACTION_RECONCILE if can_reconcile else None
-        )
+        #
+        # T1(第十三次現形):`reconciliation_ambiguous` 且候選非空時,resume 對同兩個
+        # 候選只會再拋一次同一個 ambiguous(`_reconcile_source_upload` 重新算出一模一樣
+        # 的 candidates),零前進——候選是 server 對帳算出來、呼叫端無法重建的身分,
+        # 下一步是明確擇一 `podcast_attempt_adopt`,不是繼續 resume/reconcile 撞牆。
+        # 候選為空(還沒撈到、或已經對帳成單一 id 落盤)時維持原判準。
+        if feedback_upload_candidates:
+            safe_next_action = ACTION_ADOPT
+        else:
+            safe_next_action = (
+                ACTION_RESUME
+                if can_resume
+                else ACTION_RECONCILE if can_reconcile else None
+            )
     elif is_output:
         safe_next_action = ACTION_RETRACT
     elif basis == "output_owner":
@@ -553,6 +571,10 @@ def _attempt_capabilities(
         "needs_abandon_flag": basis is None and is_active,
         "feedback_upload_unresolved": feedback_upload_unresolved,
         "feedback_upload_status": feedback_upload_status,
+        # T1(紅線⑫):`ACTION_ADOPT` 認的身分是候選 source id,不是 attempt_id/
+        # artifact_id——`_safe_next_target` 那組欄位裝不下它,所以另開一個永遠存在的
+        # 欄位(空清單 = 沒有候選要選),呼叫端不必去猜也不必翻 manifest。
+        "candidate_source_ids": feedback_upload_candidates,
         "can_resend": can_resend,
         "can_resume": can_resume,
         "can_reconcile": can_reconcile,
@@ -721,11 +743,19 @@ def _attempt_next_step(caps: dict) -> str:
         # 只是把「先續完」排在前面:遠端可能已經多出一筆 media,續完是唯一能把它的
         # 身分認回來的路;真要作廢就照 `_retract_hint()` 走旗標,義務會留在 tombstone。
         action = caps["safe_next_action"]
-        recovery = (
-            f"原呼叫中斷的話用 {action} 接續,它會把那筆 source 的身分對回來。"
-            if action is not None
-            else "先讓目前的 finalize 結案。"
-        )
+        if action == ACTION_ADOPT:
+            # T1:候選已經是 server 對帳算出來的具體 id(`caps["candidate_source_ids"]`),
+            # 「resume 會把身分對回來」這句話在這裡是假的——resume 對同兩個候選只會
+            # 再拋一次同一個 reconciliation_ambiguous,零前進。改教明確擇一。
+            recovery = (
+                f"候選在 candidate_source_ids(逐字是 {caps['candidate_source_ids']!r}),"
+                f"用 {ACTION_ADOPT} 擇一綁定——resume 對同樣的候選只會再拋一次同一個 "
+                "reconciliation_ambiguous,零前進。"
+            )
+        elif action is not None:
+            recovery = f"原呼叫中斷的話用 {action} 接續,它會把那筆 source 的身分對回來。"
+        else:
+            recovery = "先讓目前的 finalize 結案。"
         return (
             f"回錄 source 已經送出但 source_id 還沒落盤(upload 停在 "
             f"{caps['feedback_upload_status']!r}):" + recovery + _retract_hint(caps)
@@ -1200,6 +1230,21 @@ def _ensure_resume_attempt(
                 f"{output_attempt_id!r}; retract it (podcast_attempt_retract) and "
                 "delete the stale feedback source before resuming another artifact"
             )
+        # T4(P1,Codex 獨立審查實跑驗證;後續由第二輪迴歸測試糾正落點):flat v1
+        # legacy 集(episode 級 artifact_id/mp3_path,沒有 attempts、也沒有
+        # output_attempt_id 可查)資訊上就是 retract amendment (2) 描述的那個缺口——
+        # `output_attempt_id` 是 None,但 episode 已有 `has_hard_output_evidence`。
+        # **這裡不擋**:`test_series_failover.py::
+        # test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`
+        # (唯讀迴歸)直接呼叫本函式,刻意用不同 artifact_id 建一顆「錯誤候選」
+        # attempt,目的就是之後拿它去 retract——amendment (2) 原始註解自己寫明
+        # 「是修復出口非授權」:新建分支繞過 has_hard_output_evidence guard 是
+        # **設計內**的修復入口,不是漏洞。真正未經審計的動作不是「建出候選」,是
+        # 「讓候選**未經 retract 就悄悄變成正式 output**」——那個攔截點在
+        # `_promote_attempt_output`(episode 級投影欄位唯一的寫入點),攔在那裡
+        # 才不會把這條唯一的修復出口一起關掉。這裡仍要算出 `legacy_artifact_id`——
+        # 下面判斷「resume 是否指名同一顆合法 artifact」(T5 沿用舊 source 的條件)要用。
+        legacy_artifact_id = episode.get("artifact_id") or episode.get("task_id")
         active_attempt_id = episode.get("active_attempt_id")
         if active_attempt_id:
             # 同 `_create_audio_attempt` 那句的修正:對 `prepared`/`not_accepted`
@@ -1231,9 +1276,8 @@ def _ensure_resume_attempt(
         attempt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         finalize = new_finalize_state()
-        legacy_artifact_id = (
-            episode.get("artifact_id") or episode.get("task_id")
-        )
+        # legacy_artifact_id 已經在上面算過(判斷「是否同一顆合法 artifact」要用),
+        # 這裡不再重算第二份。
         adopted_source_id = episode.get("feedback_source_id")
         adopted_at = episode.get("feedback_source_adopted_at")
         if (
@@ -1575,6 +1619,30 @@ def _series_will_redispatch(attempt: dict) -> bool:
     dispatch_status = (attempt.get("dispatch") or {}).get("status")
     remote_status = (attempt.get("remote") or {}).get("status")
     return dispatch_status in _NEVER_DISPATCHED or remote_status in _TERMINAL_REMOTE
+
+
+def _later_episode_has_output(snapshot: dict, episode_n: int) -> bool:
+    """`manifest` 裡有沒有一列 `episode > episode_n` 已經有 output。
+
+    T3:retract 中段集之後重生時,`podcast_series` 若對這一集重新 dispatch(全新
+    一集／not_accepted re-arm／failed-removed supersede,見 `_series_will_redispatch`
+    的三種狀態),不指名來源就是讀整本筆記本——後面集數已經產出的回錄音檔會洩進
+    這一集。**這個判斷 `_attempt_capabilities` 給不出來**:它只拿單一
+    episode/attempt,看不到 sibling episode 的證據,跨集的事實只能在 series 這一層
+    的迴圈頂端算。`has_hard_output_evidence`(不是更寬鬆的
+    `has_durable_output_evidence`)才對——後者連 `retracted_attempt_ids` 都算數,
+    retract 恰恰不會清掉這個欄位,用它來判斷「後面集數有沒有 output」會把「後面那集
+    自己也曾經被 retract 過」誤判成「有 output」。
+    """
+    return any(
+        isinstance(row.get("episode"), int)
+        and row["episode"] > episode_n
+        and (
+            row.get("output_attempt_id") is not None
+            or has_hard_output_evidence(row)
+        )
+        for row in snapshot.get("episodes", [])
+    )
 
 
 # 形狀是 series 生得出來的、只有這次呼叫的參數對不上。**這不是 attempt 狀態問題**,
@@ -1938,6 +2006,40 @@ def _promote_attempt_output(
             raise ValueError(
                 f"episode {episode_n} output is owned by "
                 f"{episode['output_attempt_id']!r}; refusing to promote {attempt_id!r}"
+            )
+        # T4(P1,經迴歸測試糾正落點):上面那道只擋得住**已經是 attempt-based**的
+        # durable output。flat v1 legacy 集(episode 級 artifact_id/mp3_path,從沒有
+        # output_attempt_id 可查)完全繞過上面那道——這正是 retract amendment (2)
+        # 描述的缺口。原本把這道擋放在 `_ensure_resume_attempt` 的新建分支,結果連
+        # amendment (2) 自己的修復出口(先用不同 artifact 建一顆 candidate、之後
+        # retract 掉它)都被一起關掉了(`test_series_failover.py::
+        # test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`
+        # 唯讀迴歸抓到)——建立候選不是問題,**未經 retract 就悄悄變成正式 output**
+        # 才是。promotion 是 episode 級投影欄位唯一的寫入點,擋在這裡才是對症下藥。
+        # **resume 到同一顆合法 artifact 必須繼續放行**(`legacy_artifact_id ==
+        # output["artifact_id"]` 時不擋)——那是把這種 legacy episode 帶進可審計
+        # 流程的唯一入口(T5 的 legacy_audio_missing 停點也靠它)。**只在
+        # `legacy_artifact_id` 真的記著一顆具體 artifact 時才擋**:硬證據也可能只靠
+        # `mp3_path`/`published_at`(手工整理的節目、從沒記過 artifact_id)——這種
+        # episode 沒有「原本綁的是哪一顆」可言,promote 任何 artifact 都是**第一次**
+        # 建立那個連結,不是換掉已知的一顆(唯讀迴歸測試
+        # `test_legacy_partial_output_isolated_before_explicit_resume_promotion`
+        # 鎖著這個形狀仍要放行)。
+        legacy_artifact_id = episode.get("artifact_id") or episode.get("task_id")
+        if (
+            episode.get("output_attempt_id") is None
+            and legacy_artifact_id
+            and has_hard_output_evidence(episode)
+            and legacy_artifact_id != output["artifact_id"]
+        ):
+            caps = _attempt_capabilities(episode, attempt, attempt_id)
+            raise ValueError(
+                f"episode {episode_n} already has legacy output evidence bound to "
+                f"artifact {legacy_artifact_id!r}; promoting attempt {attempt_id!r} "
+                f"(artifact {output['artifact_id']!r}) would silently replace it "
+                "without an audit trail. " + _retract_hint(caps) + " retract pops "
+                "the legacy projection along with the stale feedback source, and "
+                "only then may the new artifact become the output."
             )
         attempt["remote"]["status"] = "completed"
         attempt["remote"]["observed_at"] = datetime.now(timezone.utc).isoformat()
@@ -3286,14 +3388,43 @@ async def podcast_episode_resume(
             title=title,
             artifact_id=artifact_id.strip(),
         )
-        output = await finalize_attempt(
-            client,
-            store,
-            episode_n=episode_n,
-            attempt_id=attempt_id,
-            output_dir=output_dir,
-            wait_timeout=wait_timeout,
-        )
+        try:
+            output = await finalize_attempt(
+                client,
+                store,
+                episode_n=episode_n,
+                attempt_id=attempt_id,
+                output_dir=output_dir,
+                wait_timeout=wait_timeout,
+            )
+        except RemoteArtifactUnverifiableError as exc:
+            # T6:resume 路徑接住同一個具名例外,給結構化錯誤訊息而不是裸拋一句沒有
+            # 下一步的話。**不能用 `_attempt_next_step(caps)` 整句**——這顆 attempt
+            # 若還沒 promote(`is_output=False`),caps 的 `can_resume` 分支會教
+            # 「先 podcast_episode_resume 續完」,而那正是剛失敗的呼叫,對自己產生
+            # 的狀態不可執行(gotchas-attempt.md 紅線①)。改用
+            # `_retract_hint(caps) + caps["regeneration_hint"]`——這兩塊只講
+            # retract 與重生時要注意什麼,不論 is_output 真假都不會指回 resume 自己。
+            try:
+                current = store.read()
+                stopped_episode, stopped_attempt = _attempt_record(
+                    current, episode_n, attempt_id, allow_retracted=True
+                )
+                caps = _attempt_capabilities(
+                    stopped_episode,
+                    stopped_attempt,
+                    attempt_id,
+                    post_retract=bool(stopped_attempt.get("retraction")),
+                )
+                guidance = _retract_hint(caps) + caps["regeneration_hint"]
+            except Exception as state_error:
+                guidance = (
+                    f"無法計算最新狀態({state_error});先確認 manifest_path="
+                    f"{manifest_path!r} 裡 episode {episode_n} 的 attempt "
+                    f"{attempt_id!r} 目前的狀態。"
+                )
+            exc.args = (f"{exc}\n{guidance}",)
+            raise
         _promote_attempt_output(store, episode_n, attempt_id, output)
         return output
 
@@ -3732,7 +3863,16 @@ async def podcast_attempt_adopt(
                     return True
         return False
 
-    def adopt_source(manifest: dict) -> list[str]:
+    def adopt_source(manifest: dict) -> tuple[list[str], dict | None, bool]:
+        """回傳 `(stale_source_ids, caps, complete)`。
+
+        T2:`caps` 是 legacy 路徑(`attempt_id is None`,沒有 attempt 可問)時的
+        `None`——那條路只是把下一集的續集身分接回來,不動這一集自己的 finalize
+        狀態,`complete` 直接沿用既有硬證據。其餘路徑在 mutate **內部**算
+        `_attempt_capabilities`(比照同一支工具的 artifact 分支),讓外層只組欄位、
+        不用手寫 `ACTION_RESUME if needs_rename else ACTION_SERIES` 這種與 caps
+        對不上的猜測。
+        """
         current_episode = next(
             row
             for row in manifest["episodes"]
@@ -3770,7 +3910,7 @@ async def podcast_attempt_adopt(
             current_episode["feedback_source_adopted_at"] = now
             # 被取代的舊 id 只記進歷史還不夠——同名重複 source 從此沒人記得,故也排進
             # 清理義務,讓下一次生成前的 gate 逼刪(見 `_queue_pending_source_cleanup`)。
-            return _queue_pending_source_cleanup(
+            stale = _queue_pending_source_cleanup(
                 current_episode,
                 [previous] if isinstance(previous, str) else [],
                 exclude=feedback_source_id,
@@ -3778,6 +3918,7 @@ async def podcast_attempt_adopt(
                 # 當下的 default —— adopt 認的就是這個 notebook 裡的 source。
                 notebook_id=notebook_id,
             )
+            return stale, None, has_durable_output_evidence(current_episode)
 
         assert current_attempt is not None
         if not _attempt_can_adopt_source(current_attempt):
@@ -3827,24 +3968,39 @@ async def podcast_attempt_adopt(
             )
         else:
             rename.update({"status": "completed", "adopted_at": now})
-        return _queue_pending_source_cleanup(
+        stale = _queue_pending_source_cleanup(
             current_episode,
             [*stale_candidates, previous] if isinstance(previous, str) else stale_candidates,
             exclude=feedback_source_id,
             notebook_id=notebook_id,
         )
+        caps = _attempt_capabilities(current_episode, current, attempt_id)
+        return stale, caps, has_durable_output_evidence(current_episode)
 
-    _, stale_source_ids = store.update(adopt_source)
+    _, (stale_source_ids, caps, complete) = store.update(adopt_source)
     result = {
-        "complete": not needs_rename,
+        # T2:「complete」問的是「這一集有沒有已經 promote 過的 output」,不是
+        # 「這次呼叫還需不需要 rename」——舊版 `not needs_rename` 在 attempt 還沒
+        # promote 時一樣回 True,host 據此直接 publish_series 會撞
+        # `_ensure_local_mp3` 缺 mp3_path/artifact_id。legacy 路徑(`caps is None`)
+        # 進來的前提就是既有硬證據,這裡沿用 mutate 內算好的真值,不是重新假設。
+        "complete": complete,
         "episode_n": episode_n,
         "attempt_id": attempt_id,
         "feedback_source_id": feedback_source_id,
         "observed_state": (
             "accepted" if needs_rename else "continuity_verified"
         ),
-        "safe_next_action": ACTION_RESUME if needs_rename else ACTION_SERIES,
+        "safe_next_action": caps["safe_next_action"] if caps is not None else ACTION_SERIES,
     }
+    if caps is not None:
+        # T2:`safe_next_artifact_id` 是 resume 真正要傳的那個參數(resume 認
+        # artifact_id,不是 attempt_id)——舊版回傳漏了它,`needs_rename=True` 時
+        # 呼叫端讀得到 `safe_next_action="podcast_episode_resume"` 卻沒有可以帶
+        # 進去的 artifact_id,只能去翻 manifest(違反自足性紅線)。
+        result["safe_next_attempt_id"] = caps["safe_next_attempt_id"]
+        result["safe_next_artifact_id"] = caps["safe_next_artifact_id"]
+        result["next_step"] = _attempt_next_step(caps)
     if stale_source_ids:
         result["stale_source_ids"] = stale_source_ids
         # **同一個義務的另一個入口也要自足。** retract 那邊補了結構化義務,adopt 這邊
@@ -3855,6 +4011,20 @@ async def podcast_attempt_adopt(
             for source_id in stale_source_ids
         ]
         result["safe_next_action"] = ACTION_SOURCE_DELETE
+        # T2:override 之後 `next_step`(若有)仍講著 caps 的原始建議(resume／retract
+        # ……),與新的 `safe_next_action=source_delete` 互相矛盾——這正是紅線①要擋的
+        # 「兩個欄位對同一個狀態指不同工具」。清理句子必須排在最前面:
+        # `_assert_source_cleanup_done` 同一道閘擋生成也擋 resume,所以「先刪」與
+        # 「刪完之後 caps 教的那句」是同一個順序關係,不是互斥的兩個答案。
+        cleanup_sentence = (
+            "先把這幾筆 source_delete 掉:"
+            + "、".join(
+                f"source_delete(notebook_id={notebook_id!r}, source_id={sid!r})"
+                for sid in stale_source_ids
+            )
+            + "。"
+        )
+        result["next_step"] = cleanup_sentence + result.get("next_step", "")
     return result
 
 
@@ -4525,6 +4695,67 @@ async def podcast_series(
             None,
         )
 
+        # T3(P1,`scratchpad/verify-A1/r2_series_retract.py`):retract 中段集之後,
+        # 這一集(還)沒有 output,但整季稍後的集數已經有——series 對它接下來要做的
+        # 一定是重新 dispatch(全新一集 / not_accepted re-arm / failed-removed
+        # supersede,`_series_will_redispatch()` 涵蓋的正是這三種),而 series 生不出
+        # 帶 `source_ids` 的 settings,不指名就是讀整本筆記本,把後面集數的回錄音檔
+        # 洩進這一集。**這一格 caps 修不了**——`_attempt_capabilities` 只拿單一
+        # attempt/episode,看不到 sibling episode 的 output 證據,跨集判斷只能留在
+        # series 這一層。
+        if episode is not None:
+            episode_has_output = episode.get(
+                "output_attempt_id"
+            ) is not None or has_hard_output_evidence(episode)
+            active_attempt_id_for_leak_check = episode.get("active_attempt_id")
+        else:
+            episode_has_output = False
+            active_attempt_id_for_leak_check = None
+        if not episode_has_output:
+            if active_attempt_id_for_leak_check is None:
+                # 全新一集(或全部 attempt 都已是歷史紀錄):下一步必然是全新 dispatch。
+                about_to_redispatch = True
+                leak_action = ACTION_EPISODE
+            else:
+                _, attempt_for_leak_check = _attempt_record(
+                    snapshot, episode_n, active_attempt_id_for_leak_check
+                )
+                about_to_redispatch = _series_will_redispatch(attempt_for_leak_check)
+                # 已有 active attempt 時 `podcast_episode(source_ids=...)` 是死路
+                # ——`_create_audio_attempt` 的 `_is_resendable_same_request` 會判定
+                # settings 不同(series 建的 attempt 沒有 source_ids)而拒收
+                # 「already has durable active attempt」。純本機的 retract 才是唯一
+                # 打得通的出口:作廢它之後再用 podcast_episode 指名來源重生。
+                leak_action = ACTION_RETRACT
+            if about_to_redispatch and _later_episode_has_output(
+                snapshot, episode_n
+            ):
+                if leak_action == ACTION_EPISODE:
+                    next_step = (
+                        f"episode {episode_n} 之後已經有集數產出正式輸出——這一集"
+                        "還沒有 attempt,series 對它的下一步是全新 dispatch,不指名"
+                        "來源就是讀整本筆記本,會把後面集數的回錄音檔洩進這一集。"
+                        f"改用 {ACTION_EPISODE}(..., source_ids=[...]) 指名這一集"
+                        "自己的來源(以及需要的回錄音檔)生成。"
+                    )
+                else:
+                    next_step = (
+                        f"episode {episode_n} 之後已經有集數產出正式輸出——這一集"
+                        "現有的 attempt 即將被 series 重新 dispatch(not_accepted "
+                        "re-arm 或 failed/removed supersede),不指名來源一樣是讀"
+                        f"整本筆記本。先 {ACTION_RETRACT}(純本機,不需要 "
+                        "abandon_in_flight)作廢它,再用 "
+                        f"{ACTION_EPISODE}(..., source_ids=[...]) 指名來源重生;"
+                        f"**不要**改呼 {ACTION_SERIES},它一樣會讀整本筆記本。"
+                    )
+                return partial(
+                    episode_n,
+                    active_attempt_id_for_leak_check,
+                    "later_episode_has_output",
+                    leak_action,
+                    next_step=next_step,
+                )
+
         if episode is not None:
             output_attempt_id = episode.get("output_attempt_id")
             if output_attempt_id is not None:
@@ -4548,6 +4779,34 @@ async def podcast_series(
                         attempt_id=output_attempt_id,
                         output_dir=output_dir,
                         wait_timeout=wait_timeout,
+                    )
+                except RemoteArtifactUnverifiableError:
+                    # T6(P2,`scratchpad/verify-A2/07_artifact_gone.py`):已完成集的
+                    # 正式輸出在遠端被刪掉(或改名到面目全非)之後,drift 複驗撞到
+                    # 這個具名例外——過去是裸 `RuntimeError`,連 `safe_next_action`
+                    # 都沒有,already-succeeded 的 `run_results` 整批跟著呼叫端的
+                    # 自動化一起炸掉,整季永久卡死。翻成結構化 partial:這顆是
+                    # is_output,caps 給的是 `podcast_attempt_retract`(免旗標,純
+                    # 本機);`next_step` 額外提 `start=` 逃生口——這一集卡住不代表
+                    # 後面的集數也走不下去。新契約詞:
+                    # `observed_state="output_unverifiable"`。
+                    current = store.read()
+                    current_episode, stopped_attempt = _attempt_record(
+                        current, episode_n, output_attempt_id
+                    )
+                    caps = _attempt_capabilities(
+                        current_episode, stopped_attempt, output_attempt_id
+                    )
+                    return partial(
+                        episode_n,
+                        output_attempt_id,
+                        "output_unverifiable",
+                        caps["safe_next_action"],
+                        next_step=(
+                            _attempt_next_step(caps)
+                            + f" 這一集卡住不影響其他集:用 start={episode_n + 1} "
+                            "可以先跳過它、讓後面的集數繼續推進。"
+                        ),
                     )
                 except RuntimeError:
                     current = store.read()
@@ -4625,12 +4884,49 @@ async def podcast_series(
                             f"episode {episode_n} local audio is missing and "
                             "no legacy artifact_id can restore it"
                         )
+                    # T5(P1,`scratchpad/verify-G/g2_legacy_audio_missing.py`):交棒
+                    # resume 之前,`_ensure_resume_attempt` 的 seed 條件(把這筆
+                    # source 的身分接回來、不重複上傳)要求
+                    # `feedback_source_adopted_at` 也存在——只有
+                    # `podcast_attempt_adopt` 會寫這個人工標記
+                    # (`_promote_attempt_output` 明講不寫)。真實的 flat v1
+                    # manifest(從沒跑過 adopt,只是 episode 級 `feedback_source_id`
+                    # 剛好記著)沒有這個標記,照做 resume 會把它當全新 upload,
+                    # 對同名 source 重複 add_file 一次。source_verified=True 在
+                    # 上面已經用 id+label 對帳驗過這筆 source 有效,所以先明確
+                    # `podcast_attempt_adopt`(帶 feedback_source_id,寫上標記)
+                    # 就是安全的續集入口;adopt 完之後再由它自己的 caps 導向
+                    # resume(見 T2)。**不能改弱 seed 條件本身**——語意是
+                    # 「這筆 source 的身分經過明確確認」,不是「manifest 剛好有這個
+                    # 欄位」。
+                    adopted_at = episode.get("feedback_source_adopted_at")
+                    if isinstance(adopted_at, str) and adopted_at:
+                        return partial(
+                            episode_n,
+                            None,
+                            "legacy_audio_missing",
+                            ACTION_RESUME,
+                            artifact_id=legacy_artifact_id,
+                        )
                     return partial(
                         episode_n,
                         None,
                         "legacy_audio_missing",
-                        ACTION_RESUME,
+                        ACTION_ADOPT,
+                        feedback_source_id=legacy_source_id,
                         artifact_id=legacy_artifact_id,
+                        next_step=(
+                            f"這筆回錄 source({legacy_source_id!r})已經對帳驗證過,"
+                            "但這一集還沒有明確 adopt 過(缺 "
+                            "feedback_source_adopted_at)——直接 resume 會把它當成"
+                            "全新 upload,對同名 source 重複上傳一次。先呼叫 "
+                            f"{ACTION_ADOPT}(manifest_path=..., episode_n={episode_n}, "
+                            f"feedback_source_id={legacy_source_id!r}) 明確綁定"
+                            f"(不要傳 artifact_id——這裡的 artifact_id 只是告訴你"
+                            "這一集對應哪顆音檔,adopt 認的是 feedback_source_id),"
+                            f"adopt 完再照它回傳的 safe_next_action 續跑(通常是 "
+                            f"{ACTION_RESUME},帶回上面同一個 artifact_id)。"
+                        ),
                     )
 
                 return partial(
@@ -4963,20 +5259,34 @@ async def podcast_series(
                     )
                 except _TRANSIENT_TRANSPORT_ERRORS:
                     current = store.read()
-                    _, stopped_attempt = _attempt_record(
+                    current_episode, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
                     )
                     upload_state = stopped_attempt.get("finalize", {}).get(
                         "feedback_source_upload", {}
                     ).get("status")
-                    observed = (
-                        upload_state
-                        if upload_state in (
-                            "acceptance_unknown",
-                            "reconciliation_ambiguous",
+                    # T1:三種 unresolved upload 狀態一律走 caps(單一事實來源),不再
+                    # 各自手寫 ACTION_SERIES——`acceptance_unknown` 之前寫死 series,
+                    # 但 caps 算出的 resume 才是這個狀態真正走得通的路(can_resume 為
+                    # 真,續完 finalize 不必整季重跑);`reconciliation_ambiguous`
+                    # 之前不帶候選,現在由 caps 一併帶出。remote_status 的 fallback
+                    # (這三種以外的狀態)維持原樣,不擴大改動範圍。
+                    if upload_state in (
+                        "acceptance_unknown",
+                        "reconciliation_ambiguous",
+                    ):
+                        caps = _attempt_capabilities(
+                            current_episode, stopped_attempt, active_attempt_id
                         )
-                        else stopped_attempt["remote"]["status"]
-                    )
+                        return partial(
+                            episode_n,
+                            active_attempt_id,
+                            upload_state,
+                            caps["safe_next_action"],
+                            candidate_source_ids=caps["candidate_source_ids"],
+                            next_step=_attempt_next_step(caps),
+                        )
+                    observed = stopped_attempt["remote"]["status"]
                     return partial(
                         episode_n,
                         active_attempt_id,
@@ -4985,45 +5295,29 @@ async def podcast_series(
                     )
                 except RuntimeError:
                     current = store.read()
-                    _, stopped_attempt = _attempt_record(
+                    current_episode, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
                     )
-                    upload = stopped_attempt.get("finalize", {}).get(
+                    upload_state = stopped_attempt.get("finalize", {}).get(
                         "feedback_source_upload", {}
-                    )
-                    upload_state = upload.get("status")
+                    ).get("status")
+                    # T1:刪掉手寫的 `ACTION_ADOPT if ambiguous else ACTION_SERIES`
+                    # ——中央 caps 現在就會給正確答案(ambiguous+候選非空 → adopt,
+                    # 且候選 / next_step 都由 caps 一併帶出),不必在呼叫點另組一份。
                     if upload_state in (
                         "acceptance_unknown",
                         "reconciliation_ambiguous",
                     ):
-                        action = (
-                            ACTION_ADOPT
-                            if upload_state == "reconciliation_ambiguous"
-                            else ACTION_SERIES
-                        )
-                        # P1(Codex 獨立審查實跑驗證,同一根因第十二次現形):action 是
-                        # `podcast_attempt_adopt` 時,那支工具必填 `feedback_source_id`
-                        # 或 `artifact_id`(見它的 docstring「provide exactly one」)——
-                        # 只回動作名沒有候選身分,呼叫端讀公開回傳完全執行不了這句指引。
-                        # 候選清單本來就存在 manifest 的
-                        # `finalize.feedback_source_upload.candidate_source_ids`
-                        # （`_reconcile_source_upload` 寫入），跟 `candidate_artifact_ids`
-                        # 是同一個家族，一併帶出。
-                        extra = (
-                            {
-                                "candidate_source_ids": upload.get(
-                                    "candidate_source_ids", []
-                                )
-                            }
-                            if upload_state == "reconciliation_ambiguous"
-                            else {}
+                        caps = _attempt_capabilities(
+                            current_episode, stopped_attempt, active_attempt_id
                         )
                         return partial(
                             episode_n,
                             active_attempt_id,
                             upload_state,
-                            action,
-                            **extra,
+                            caps["safe_next_action"],
+                            candidate_source_ids=caps["candidate_source_ids"],
+                            next_step=_attempt_next_step(caps),
                         )
                     raise
                 _promote_attempt_output(
@@ -5109,34 +5403,34 @@ async def podcast_series(
         except _TRANSIENT_TRANSPORT_ERRORS:
             current = store.read()
             attempt_id = _active_attempt_or_reraise(current, episode_n)
-            _, stopped_attempt = _attempt_record(
+            current_episode, stopped_attempt = _attempt_record(
                 current, episode_n, attempt_id
             )
             if stopped_attempt["remote"].get("artifact_id") is None:
+                # 這一格是「artifact 都還沒接受」——與回錄 source 上傳無關,維持原判準。
                 observed = stopped_attempt["dispatch"]["status"]
-            else:
-                upload_state = stopped_attempt.get("finalize", {}).get(
-                    "feedback_source_upload", {}
-                ).get("status")
-                observed = (
-                    upload_state
-                    if upload_state in (
-                        "acceptance_unknown",
-                        "reconciliation_ambiguous",
-                    )
-                    else stopped_attempt["remote"]["status"]
+                needs_artifact_reconcile = observed == "acceptance_unknown"
+                action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
+                return partial(episode_n, attempt_id, observed, action)
+            upload_state = stopped_attempt.get("finalize", {}).get(
+                "feedback_source_upload", {}
+            ).get("status")
+            # T1:回錄 source 上傳卡在這三種 unresolved 狀態時走 caps,理由與上面
+            # active-attempt 分支那兩個 handler 相同(單一事實來源、候選一併帶出)。
+            if upload_state in ("acceptance_unknown", "reconciliation_ambiguous"):
+                caps = _attempt_capabilities(
+                    current_episode, stopped_attempt, attempt_id
                 )
-            needs_artifact_reconcile = (
-                stopped_attempt["remote"].get("artifact_id") is None
-                and observed == "acceptance_unknown"
-            )
-            action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
-            return partial(
-                episode_n,
-                attempt_id,
-                observed,
-                action,
-            )
+                return partial(
+                    episode_n,
+                    attempt_id,
+                    upload_state,
+                    caps["safe_next_action"],
+                    candidate_source_ids=caps["candidate_source_ids"],
+                    next_step=_attempt_next_step(caps),
+                )
+            observed = stopped_attempt["remote"]["status"]
+            return partial(episode_n, attempt_id, observed, ACTION_SERIES)
         run_results.append(result)
 
     return {
