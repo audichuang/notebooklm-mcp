@@ -175,7 +175,19 @@ async def dispatch_with_failover(
         except REFUSED_WITHOUT_DISPATCH as exc:
             # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
             # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」。
-            rotated = rotate_for_quota(record_failover, exc, account, tried)
+            try:
+                rotated = rotate_for_quota(record_failover, exc, account, tried)
+            except Exception:
+                # record() 本身寫入失敗(非 ManifestPostCommitError,例如磁碟滿)——
+                # `runtime.rotate_client()` 在 `rotate_for_quota` 裡已經先跑,冷卻與
+                # 游標都已生效,但「換帳號」這件事從未真正稽核成功。若讓這個新例外
+                # 直接穿出去,下面的 `_mark(on_clean_refusal, …)` 就會被跳過,attempt
+                # 停在 `dispatching` 沒有任何終態(下一次 reconcile 才會發現,而不是
+                # 這裡就講清楚)。終態要標成**原本的拒絕原因**(`exc`)——比照 `_mark`
+                # 自己的取捨,寫檔真的沒成功比配額被拒更值得讓呼叫端知道,所以原樣
+                # 往外拋這個寫入失敗,不是原本的 `exc`。
+                _mark(on_clean_refusal, exc, account)
+                raise
             if rotated is not None:
                 account, client = rotated
                 if account:
@@ -218,7 +230,13 @@ async def dispatch_with_failover(
                 # 這個形狀在上游可達。rotate 重送在這個形狀下會產生第二顆 artifact。
                 _mark(on_acceptance_unknown, status, account)
                 raise
-            rotated = rotate_for_quota(record_failover, status, account, tried)
+            try:
+                rotated = rotate_for_quota(record_failover, status, account, tried)
+            except Exception:
+                # 0.7.x status 分支的孿生保護——理由與上面 REFUSED_WITHOUT_DISPATCH
+                # 那個 except 完全相同,只有一處只補一個分支就是「補一半」。
+                _mark(on_clean_refusal, status, account)
+                raise
             if rotated is not None:
                 account, client = rotated
                 if account:
