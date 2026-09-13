@@ -29,6 +29,7 @@ from ._sources import (
 from ._status import TerminalGenerationError, ensure_completed
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
+    RemoteArtifactUnverifiableError,
     claimed_source_ids,
     finalize_attempt,
     has_durable_output_evidence,
@@ -3372,14 +3373,43 @@ async def podcast_episode_resume(
             title=title,
             artifact_id=artifact_id.strip(),
         )
-        output = await finalize_attempt(
-            client,
-            store,
-            episode_n=episode_n,
-            attempt_id=attempt_id,
-            output_dir=output_dir,
-            wait_timeout=wait_timeout,
-        )
+        try:
+            output = await finalize_attempt(
+                client,
+                store,
+                episode_n=episode_n,
+                attempt_id=attempt_id,
+                output_dir=output_dir,
+                wait_timeout=wait_timeout,
+            )
+        except RemoteArtifactUnverifiableError as exc:
+            # T6:resume 路徑接住同一個具名例外,給結構化錯誤訊息而不是裸拋一句沒有
+            # 下一步的話。**不能用 `_attempt_next_step(caps)` 整句**——這顆 attempt
+            # 若還沒 promote(`is_output=False`),caps 的 `can_resume` 分支會教
+            # 「先 podcast_episode_resume 續完」,而那正是剛失敗的呼叫,對自己產生
+            # 的狀態不可執行(gotchas-attempt.md 紅線①)。改用
+            # `_retract_hint(caps) + caps["regeneration_hint"]`——這兩塊只講
+            # retract 與重生時要注意什麼,不論 is_output 真假都不會指回 resume 自己。
+            try:
+                current = store.read()
+                stopped_episode, stopped_attempt = _attempt_record(
+                    current, episode_n, attempt_id, allow_retracted=True
+                )
+                caps = _attempt_capabilities(
+                    stopped_episode,
+                    stopped_attempt,
+                    attempt_id,
+                    post_retract=bool(stopped_attempt.get("retraction")),
+                )
+                guidance = _retract_hint(caps) + caps["regeneration_hint"]
+            except Exception as state_error:
+                guidance = (
+                    f"無法計算最新狀態({state_error});先確認 manifest_path="
+                    f"{manifest_path!r} 裡 episode {episode_n} 的 attempt "
+                    f"{attempt_id!r} 目前的狀態。"
+                )
+            exc.args = (f"{exc}\n{guidance}",)
+            raise
         _promote_attempt_output(store, episode_n, attempt_id, output)
         return output
 
@@ -4734,6 +4764,34 @@ async def podcast_series(
                         attempt_id=output_attempt_id,
                         output_dir=output_dir,
                         wait_timeout=wait_timeout,
+                    )
+                except RemoteArtifactUnverifiableError:
+                    # T6(P2,`scratchpad/verify-A2/07_artifact_gone.py`):已完成集的
+                    # 正式輸出在遠端被刪掉(或改名到面目全非)之後,drift 複驗撞到
+                    # 這個具名例外——過去是裸 `RuntimeError`,連 `safe_next_action`
+                    # 都沒有,already-succeeded 的 `run_results` 整批跟著呼叫端的
+                    # 自動化一起炸掉,整季永久卡死。翻成結構化 partial:這顆是
+                    # is_output,caps 給的是 `podcast_attempt_retract`(免旗標,純
+                    # 本機);`next_step` 額外提 `start=` 逃生口——這一集卡住不代表
+                    # 後面的集數也走不下去。新契約詞:
+                    # `observed_state="output_unverifiable"`。
+                    current = store.read()
+                    current_episode, stopped_attempt = _attempt_record(
+                        current, episode_n, output_attempt_id
+                    )
+                    caps = _attempt_capabilities(
+                        current_episode, stopped_attempt, output_attempt_id
+                    )
+                    return partial(
+                        episode_n,
+                        output_attempt_id,
+                        "output_unverifiable",
+                        caps["safe_next_action"],
+                        next_step=(
+                            _attempt_next_step(caps)
+                            + f" 這一集卡住不影響其他集:用 start={episode_n + 1} "
+                            "可以先跳過它、讓後面的集數繼續推進。"
+                        ),
                     )
                 except RuntimeError:
                     current = store.read()

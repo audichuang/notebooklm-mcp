@@ -433,6 +433,27 @@ async def _feedback_source_verified(
     return len(matches) == 1
 
 
+class RemoteArtifactUnverifiableError(RuntimeError):
+    """遠端 artifact 列表裡驗不到這顆 id(不是唯一命中)——可能已被刪除,或改名到
+    面目全非。`_artifact_title_state` 回傳 `None` 時,`finalize_attempt` 下面就是
+    raise 它的地方。
+
+    是 RuntimeError 的子類(比照 `_status.TerminalGenerationError` 的模式),既有
+    `except RuntimeError` / `pytest.raises(RuntimeError)` 不必逐一改;`artifact_id`
+    / `attempt_id` 讓呼叫端(`tools_podcast.py`)翻成結構化停點時不必重新剖析錯誤
+    字串。T6 之前這裡是裸 `RuntimeError`,已完成集的正式輸出被刪掉後,series 與
+    resume 都會把它原樣裸拋出去,呼叫端拿不到任何 `safe_next_action` 或
+    `start=` 逃生口,整季永久卡死。
+    """
+
+    def __init__(self, artifact_id: str, attempt_id: str) -> None:
+        super().__init__(
+            f"artifact {artifact_id!r} cannot be verified in the remote list"
+        )
+        self.artifact_id = artifact_id
+        self.attempt_id = attempt_id
+
+
 async def _artifact_title_state(
     client: object,
     notebook_id: str,
@@ -572,9 +593,11 @@ async def finalize_attempt(
         client, notebook_id, artifact_id, label
     )
     if artifact_title_state is None:
-        raise RuntimeError(
-            f"artifact {artifact_id!r} cannot be verified in the remote list"
-        )
+        # T6:具名例外(比照 `_status.TerminalGenerationError` 的模式——RuntimeError
+        # 子類,既有 `except RuntimeError`/`pytest.raises(RuntimeError)` 不必改)。
+        # 呼叫端(`tools_podcast.py`)翻成結構化停點時要用到 `artifact_id`/
+        # `attempt_id`,帶在例外物件上就不必重新剖析錯誤字串。
+        raise RemoteArtifactUnverifiableError(artifact_id, attempt_id)
 
     if artifact_title_state is True and rename["status"] != "completed":
         def adopt_rename(_episode: dict, current: dict) -> None:

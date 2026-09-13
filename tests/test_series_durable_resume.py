@@ -958,3 +958,79 @@ async def test_legacy_audio_missing_hands_off_to_resume_when_already_adopted(
 
     assert stopped["safe_next_action"] == "podcast_episode_resume"
     assert stopped["artifact_id"] == "legacy-artifact"
+
+
+async def test_series_reports_a_deleted_remote_artifact_as_a_structured_stop(
+    fake_client, tmp_path
+):
+    """T6(P2,`scratchpad/verify-A2/07_artifact_gone.py`):已完成集的正式輸出
+    在遠端被刪掉(source 還在)之後,series 對它的 drift 複驗過去裸拋
+    `RuntimeError("artifact ... cannot be verified in the remote list")`
+    ——沒有 `safe_next_action`、沒有 `start=` 逃生口,already-succeeded 的
+    `run_results` 整批連同呼叫端的自動化一起炸掉,整季永久卡死(即使
+    `start=N+1` 原本就能跳過)。
+
+    修法:audio_finalize.py 改拋具名 `RemoteArtifactUnverifiableError`
+    (RuntimeError 子類),series 的 output_attempt_id 分支接住它翻成結構化
+    `partial(...)`——新契約詞 `observed_state="output_unverifiable"`,
+    `safe_next_action` 走 caps(這裡是 output attempt,caps 給
+    `podcast_attempt_retract`),`next_step` 額外提 `start=` 逃生口。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    eps = EPS3[:2]
+    first = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
+    assert first["complete"] is True
+
+    fake_client.artifacts.artifacts = [
+        row for row in fake_client.artifacts.artifacts if row.title != "EP01 心法篇"
+    ]
+    generate_boundary = len(
+        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
+    )
+
+    out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 1
+    assert out["observed_state"] == "output_unverifiable"
+    assert out["safe_next_action"] == "podcast_attempt_retract"
+    assert "next_step" in out and "start=" in out["next_step"]
+    assert [
+        c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
+    ][generate_boundary:] == [], "不准對這一集重新 dispatch"
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["output_attempt_id"] is not None, (
+        "還沒 retract,既有 output 指標不能被動到"
+    )
+
+
+async def test_resume_reports_a_deleted_remote_artifact_with_actionable_guidance(
+    fake_client, tmp_path
+):
+    """T6:resume 路徑的同一個例外也要接住並給結構化錯誤訊息(不是裸拋一句沒有
+    下一步的話)。既有 `test_completed_fast_path_rejects_missing_remote_artifact`
+    鎖住例外仍是 RuntimeError 且訊息前綴不變,這裡額外驗證附加的 next_step 指向
+    retract,**不指回 resume 自己**(那正是剛失敗的呼叫,教它是死路)。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    fake_client.artifacts.artifacts.clear()
+
+    with pytest.raises(RuntimeError, match="artifact.*cannot be verified") as excinfo:
+        await p.podcast_episode_resume(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            artifact_id=first["artifact_id"],
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    message = str(excinfo.value)
+    assert "podcast_attempt_retract" in message
+    assert "podcast_episode_resume" not in message
