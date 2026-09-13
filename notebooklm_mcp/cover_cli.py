@@ -161,7 +161,11 @@ def main() -> None:
     ap.add_argument("--show", action="store_true", help="產節目(show 層)品牌封面")
     ap.add_argument("--output", default=None, help="輸出路徑(.jpg);單集/節目模式必填")
     ap.add_argument("--output-dir", default=None, help="批次模式輸出目錄")
-    ap.add_argument("--show-name", default="Audicast", help="節目名(封面 wordmark)")
+    # 沒有預設值:曾經的 "Audicast" 永遠 truthy,首發前 manifest 還沒有 show.show_title
+    # 可對照時,guard 會靜默放行「Audicast」品牌——使用者從未確認過這就是 Audicast 節目
+    # (見下面 `if args.manifest` 分支的 ap.error)。
+    ap.add_argument("--show-name", default=None, help="節目名(封面 wordmark);批次模式"
+                    "可省略以沿用 manifest['show']['show_title'],兩者皆無則報錯")
     ap.add_argument("--title", default="", help="單集標題(單集一次性模式)")
     ap.add_argument("--tagline", default="", help="節目封面副標(--show 模式)")
     ap.add_argument("--byline", default="", help="署名")
@@ -197,8 +201,18 @@ def main() -> None:
         except ValueError as e:
             ap.error(str(e))
 
-        show_name = args.show_name or manifest.get("title") or "Audicast"
+        # `manifest.get("title")` 是死碼:schema v2 從沒有頂層 "title" 這個欄位,身分
+        # 一律在 manifest["show"]["show_title"](由 publish_series 寫入)。舊 fallback
+        # 因此永遠落回硬寫的 "Audicast" default——首發前(manifest 還沒有 "show" 鍵)
+        # 兩邊都沒有值可對照,guard 就這樣被静默放行,使用者從沒被問過這是不是 Audicast
+        # 節目。**兩者皆無就明確報錯**,不再猜。
         manifest_show_title = (manifest.get("show") or {}).get("show_title")
+        show_name = args.show_name or manifest_show_title
+        if not show_name:
+            ap.error(
+                "需要 --show-name:manifest 尚無 show.show_title(還沒發布過),"
+                "無從判斷節目名稱,首次生成封面前請顯式傳 --show-name"
+            )
         _guard_audicast_branding([show_name, manifest_show_title],
                                  args.allow_audicast_branding)
         out_dir = args.output_dir or os.path.dirname(os.path.abspath(args.manifest))
