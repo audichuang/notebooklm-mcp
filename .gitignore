@@ -21,7 +21,13 @@ captured_rpcs/
 .worktrees/
 .worktree/
 .sisyphus/
-.claude/
+# `.claude/*` 而不是 `.claude/`:git 不會進入被排除的**目錄**,寫成 `.claude/` 時底下的
+# `!` 一律失效(實測 staged 不進去)。
+.claude/*
+# skills/ 要進版控:acceptance-workspace 這支實作的是 AGENTS.md §Conventions 的驗收紀律,
+# 不進版控就不會過 review、也沒人看得到它跟規則漂開 —— v0.9.27 之後實際發生過(規則改成
+# headless 自己跑,而 skill 還在教「把啟動 prompt 貼給使用者」,是獨立驗證 session 抓到的)。
+!.claude/skills/
 
 # Project-scoped MCP registration is per-machine and carries NO secrets (auth is
 # injected by Doppler). Create it via `claude mcp add` or by hand — see README.

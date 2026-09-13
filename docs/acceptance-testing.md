@@ -213,10 +213,20 @@ v0.7.0 把配額拒絕從「回傳 failed status」改成「拋例外」。離�
 
 ---
 
-## 交棒給新 session
+## 驗收怎麼跑(不要交一段提示詞給使用者)
 
-工作區備好之後,給使用者一段可直接貼的提示詞。要點只有四個:讀 `CLAUDE.md` 與 `README.md`、
-配額順序、撞到配額要完整記錄、**發布前先問**。加上一條驗收紀律:
+**自己跑**:`doppler run -p notebooklm -c dev -- claude -p --model sonnet …`,跑完自己清
+測試產物。**只有不可逆的才停下來問**:發布到公網 feed、刪既有 notebook/source、動到別人
+已訂閱得到的東西。規則正本在 [AGENTS.md](../AGENTS.md) §Conventions。
+
+> ⚠️ 這一節以前寫的是「給使用者一段可直接貼的提示詞」。那個做法已經退役 —— headless
+> 每題約 $0.2,跑得起 n 次取平均與盲評,而交 prompt 只跑得到一次、拿不到數字、改一次
+> 就要再麻煩人一次。`.claude/skills/acceptance-workspace`(含它的 template)已一併改成
+> headless,而且**取消 gitignore 進了版控** —— 它實作的就是這條紀律,不進版控就沒人看得到
+> 它跟規則漂開,而那正是這次被獨立驗證 session 抓到的。
+
+要點只有四個:讀 `CLAUDE.md` 與 `README.md`、配額順序、撞到配額要完整記錄、**發布前先問**。
+加上一條驗收紀律:
 
 > 每一項寫下**實際觀察到什麼**,不要寫「應該沒問題」。工具回傳值與 manifest 落地內容是
 > **兩個出口**,兩邊都要各自貼出來對照。
