@@ -169,35 +169,38 @@ def test_schema_version_boolean_is_rejected(target, tmp_path):
 
 
 def test_bundle_directory_swap_cannot_redirect_frozen_reads(tmp_path):
+    """目錄在讀取途中被搬走、原地換成指到別處的 symlink:loader 全程用 fd(`os.open`/
+    `os.fstat`/`os.read`),`Path.is_dir` 從沒被呼叫過——舊寫法 patch 那裡等於沒掛上換手,
+    `except ValueError: return` 又讓「沒換手也沒拒絕」照樣算過,是個恆真的 tripwire。
+    改掛 loader 真的會呼叫的第一個點:`_read_frozen_bundle_files` 釘住目錄 inode 那次
+    `os.fstat`——換手發生在「已經拿到 fd」之後,證明後續讀取走的是釘住的舊目錄
+    (拿不到攻擊者的內容),而後面比對路徑當前 inode 的最終檢查必須抓到並拒絕。"""
     manifest = tmp_path / "manifest" / "series_manifest.json"
-    bundle, trusted_brief = _write_bundle(tmp_path, brief="trusted inside\n")
+    bundle, _ = _write_bundle(tmp_path, brief="trusted inside\n")
     outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
     outside_root.mkdir()
     outside_bundle, _ = _write_bundle(outside_root, brief="attacker outside\n")
     held = tmp_path / "held-original"
-    original_is_dir = Path.is_dir
+    real_fstat = os.fstat
     swapped = False
 
-    def swap_after_check(path):
+    def swap_after_pin(fd):
         nonlocal swapped
-        result = original_is_dir(path)
-        if path == bundle and not swapped:
+        result = real_fstat(fd)
+        if not swapped:
             swapped = True
             bundle.rename(held)
             bundle.symlink_to(outside_bundle, target_is_directory=True)
         return result
 
     try:
-        with patch.object(Path, "is_dir", swap_after_check):
-            try:
-                prepared = load_frozen_generation_input(
+        with patch("notebooklm_mcp.generation_input.os.fstat", side_effect=swap_after_pin):
+            with pytest.raises(ValueError, match="changed or became a symlink"):
+                load_frozen_generation_input(
                     manifest_path=manifest,
                     input_bundle_path=bundle.relative_to(tmp_path),
                     episode_n=1,
                 )
-            except ValueError:
-                return
-        assert prepared["brief"] == trusted_brief
     finally:
         shutil.rmtree(outside_root, ignore_errors=True)
 
