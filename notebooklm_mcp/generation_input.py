@@ -36,8 +36,15 @@ _COVERAGE_ROW_KEYS = {
 }
 
 
-def _read_frozen_bundle_files(workspace: Path, relative: Path) -> dict[str, bytes]:
-    """Pin the bundle inode and read regular children without following symlinks."""
+def _read_frozen_bundle_files(
+    workspace: Path, relative: Path
+) -> tuple[dict[str, bytes], tuple[int, int]]:
+    """Pin the bundle inode and read regular children without following symlinks.
+
+    回傳的第二個值是釘住那一刻的 ``(st_dev, st_ino)``——呼叫端(``load_frozen_generation_input``)
+    把它原樣塞進 ``prepared``,供之後的 sidecar 讀寫(``write_attempt_binding`` /
+    ``read_attempt_binding``)在**自己動筆之前**重新比對一次,見那兩支函式開頭的說明。
+    """
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory_fd = os.open(workspace, directory_flags)
     try:
@@ -66,7 +73,7 @@ def _read_frozen_bundle_files(workspace: Path, relative: Path) -> dict[str, byte
             or current.st_ino != pinned.st_ino
         ):
             raise ValueError("input bundle changed or became a symlink while reading")
-        return loaded
+        return loaded, (pinned.st_dev, pinned.st_ino)
     except OSError as error:
         # 三個 containment 規則共用這一句,刻意不從 errno 反推是哪一條:O_NOFOLLOW 對成員
         # 檔案回 ELOOP,但加上 O_DIRECTORY 之後對 symlink 目錄回的是 ENOTDIR,而 ENOTDIR
@@ -281,7 +288,7 @@ def load_frozen_generation_input(
         raise ValueError("input_bundle_path must be a confined relative path")
     bundle = workspace / raw_bundle
     relative = raw_bundle
-    frozen_files = _read_frozen_bundle_files(workspace, relative)
+    frozen_files, bundle_inode = _read_frozen_bundle_files(workspace, relative)
     request_bytes = frozen_files["generation-request.json"]
     request = _strict_json(request_bytes, "generation-request.json")
     expected_keys = {
@@ -356,6 +363,10 @@ def load_frozen_generation_input(
     return {
         "brief": brief,
         "bundle": bundle,
+        # sidecar 讀寫前的 containment 重驗用(見 write_attempt_binding /
+        # read_attempt_binding 開頭的說明);不進 record_base,不落地到任何 JSON——
+        # 純本機 (st_dev, st_ino),跨機器無意義。
+        "bundle_inode": bundle_inode,
         "episode_id": request["episode_id"],
         "frozen_at": request["frozen_at"],
         "record_base": {
@@ -369,9 +380,27 @@ def load_frozen_generation_input(
     }
 
 
+def _reverify_bundle_containment(prepared: dict[str, Any]) -> None:
+    """Re-check the bundle directory against the inode pinned at load time.
+
+    `load_frozen_generation_input` → sidecar 讀寫之間隔著 `probe_auth` 加三趟遠端 RPC,
+    是秒級的視窗;`_read_frozen_bundle_files` 當時釘住的 `(st_dev, st_ino)` 到這裡還沒
+    被重新確認過。窗口內攻擊面邊際價值趨近於零(能在窗內把 bundle 換掉的人,在 load
+    之前就能換掉整顆自洽的 bundle),但重驗幾乎零成本,而不驗的殘留失敗形狀是
+    「binding 綁錯目錄、稽核紀錄說謊」——即使不會讓錯的 brief 被送出(brief 已經從
+    釘住的舊 inode 讀出),也值得補上這一道。
+    """
+    current = os.lstat(prepared["bundle"])
+    if (current.st_dev, current.st_ino) != prepared["bundle_inode"]:
+        raise ValueError(
+            "input bundle changed or became a symlink since the frozen input was read"
+        )
+
+
 def write_attempt_binding(
     prepared: dict[str, Any], *, attempt_id: str
 ) -> tuple[dict[str, Any], bytes]:
+    _reverify_bundle_containment(prepared)
     bundle = prepared["bundle"]
     record_base = prepared["record_base"]
     bound_at = datetime.now(timezone.utc)
@@ -448,6 +477,7 @@ def read_attempt_binding(
     prepared: dict[str, Any],
 ) -> tuple[str, dict[str, Any], bytes] | None:
     """Read back a previously persisted binding for safe local retry."""
+    _reverify_bundle_containment(prepared)
     path = prepared["bundle"] / "attempt-binding.json"
     if not path.exists():
         return None

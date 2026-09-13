@@ -205,6 +205,36 @@ def test_bundle_directory_swap_cannot_redirect_frozen_reads(tmp_path):
         shutil.rmtree(outside_root, ignore_errors=True)
 
 
+def test_sidecar_reverifies_bundle_containment_before_writing_or_reading(tmp_path):
+    """load 到 sidecar 落筆之間隔著 probe_auth + 三趟遠端 RPC,是秒級視窗——bundle 目錄
+    如果在這段期間被搬走、換成指向別處的 symlink,write_attempt_binding /
+    read_attempt_binding 都必須在動筆(或讀回既有綁定)前就擋下,不能把 binding 綁進
+    一顆已經不是當初 load 那顆的目錄(見 _reverify_bundle_containment)。"""
+    from notebooklm_mcp.generation_input import read_attempt_binding, write_attempt_binding
+
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, _ = _write_bundle(tmp_path)
+    prepared = load_frozen_generation_input(
+        manifest_path=manifest,
+        input_bundle_path=bundle.relative_to(tmp_path),
+        episode_n=1,
+    )
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_root.mkdir()
+    outside_bundle, _ = _write_bundle(outside_root)
+    held = tmp_path / "held-original"
+    try:
+        bundle.rename(held)
+        bundle.symlink_to(outside_bundle, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="changed or became a symlink"):
+            write_attempt_binding(prepared, attempt_id="a1")
+        with pytest.raises(ValueError, match="changed or became a symlink"):
+            read_attempt_binding(prepared)
+    finally:
+        shutil.rmtree(outside_root, ignore_errors=True)
+
+
 @pytest.mark.parametrize(
     ("key", "data", "message"),
     [
@@ -764,8 +794,12 @@ async def test_rebinding_the_same_bundle_reuses_the_attempt(fake_client, tmp_pat
 def _prepared(tmp_path):
     bundle = tmp_path / "bundle"
     bundle.mkdir()
+    stat_result = os.lstat(bundle)
     return {
         "bundle": bundle,
+        # write/read_attempt_binding 開頭都會重驗這個(見 _reverify_bundle_containment);
+        # 這裡就是 load_frozen_generation_input 真的會塞的同一個 (st_dev, st_ino) 形狀。
+        "bundle_inode": (stat_result.st_dev, stat_result.st_ino),
         "episode_id": "ep01",
         # binding 的 bound_at 不得早於 request 的 frozen_at,所以 helper 得給一個過去的
         # 凍結時刻(load_frozen_generation_input 也是這樣把它塞進 prepared 的)。
