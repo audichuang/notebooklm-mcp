@@ -715,3 +715,106 @@ async def test_attempt_backed_adopt_needing_rename_directs_via_caps(
     assert "podcast_episode_resume" in adopted["next_step"]
     assert adopted["safe_next_attempt_id"] == attempt_id
     assert adopted["safe_next_artifact_id"] == "task-123"
+
+
+async def test_series_retract_of_a_middle_episode_does_not_regenerate_reading_the_whole_notebook(
+    fake_client, tmp_path
+):
+    """T3(P1,`scratchpad/verify-A1/r2_series_retract.py` 的序列):整季跑完 →
+    retract 中段集(EP02)→ 刪完 stale source → 照 safe_next_action 重呼
+    podcast_series。舊行為:EP02 沒有 output,`_regeneration_entry_point` 對 series
+    自己建的 settings 回 `ACTION_SERIES`,series 就對 EP02 全新一集 dispatch——不指名
+    來源 = 讀整本筆記本,把 EP03 的回錄音檔洩進 EP02。
+
+    修法落點:每集迴圈頂端、`_assert_source_cleanup_done` 之後,一旦發現「本集無
+    output,但存在 episode > n 已有 output 的列」就停下,回 `podcast_episode`
+    (不指名來源會靜默讀整本筆記本,這裡改成明講要指名)。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.seed("整季講義")
+
+    first = await p.podcast_series(
+        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1
+    )
+    assert first["complete"] is True
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ep2 = next(row for row in stored["episodes"] if row["episode"] == 2)
+    ep2_attempt_id = ep2["output_attempt_id"]
+
+    retracted = await p.podcast_attempt_retract(
+        str(manifest_path), 2, ep2_attempt_id, reason="QA 拒收 EP02"
+    )
+    for obligation in retracted["source_cleanup_obligations"]:
+        await fake_client.sources.delete(
+            obligation["notebook_id"], obligation["source_id"]
+        )
+
+    generate_boundary = len(
+        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
+    )
+
+    out = await p.podcast_series(
+        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1
+    )
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 2
+    assert out["observed_state"] == "later_episode_has_output"
+    assert out["safe_next_action"] == "podcast_episode"
+    assert "next_step" in out and "source_ids" in out["next_step"]
+    assert [
+        c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
+    ][generate_boundary:] == [], "重生前必須停下,不准對 EP02 重新 dispatch"
+
+
+async def test_series_retract_of_a_middle_episode_with_a_stuck_attempt_offers_retract_not_series(
+    fake_client, tmp_path
+):
+    """T3:同一道守門也要涵蓋「EP02 有一顆卡住、即將被 series 重新 dispatch 的
+    attempt」(not_accepted re-arm / failed-removed supersede,不只是全新一集這條
+    路)。這裡用 not_accepted 構造:直接對 EP02 dispatch 一次(先建出 active
+    attempt),失敗留下 not_accepted;之後 EP03 才單獨補上 output。這種形狀下
+    `podcast_episode` 對已有 active attempt 的 EP02 是死路(會撞
+    `_create_audio_attempt` 的「already has durable active attempt」),所以這一格
+    改教 `podcast_attempt_retract`(純本機、免旗標),retract 之後再用
+    `podcast_episode(..., source_ids=[...])` 指名重生。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.seed("整季講義")
+    fake_client.artifacts.fail_generate = True
+
+    stopped_ep2 = await p.podcast_series(
+        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2
+    )
+    assert stopped_ep2["complete"] is False
+    fake_client.artifacts.fail_generate = False
+
+    await p.podcast_episode(
+        "nb-1",
+        episode_n=3,
+        title=EPS3[2]["title"],
+        brief=EPS3[2]["brief"],
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+        source_ids=[fake_client.sources.sources[0]["id"]],
+    )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ep2 = next(row for row in stored["episodes"] if row["episode"] == 2)
+    assert ep2["attempts"][0]["dispatch"]["status"] == "not_accepted"
+
+    generate_boundary = len(
+        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
+    )
+
+    out = await p.podcast_series(
+        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2
+    )
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 2
+    assert out["observed_state"] == "later_episode_has_output"
+    assert out["safe_next_action"] == "podcast_attempt_retract"
+    assert "next_step" in out and "podcast_episode" in out["next_step"]
+    assert [
+        c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
+    ][generate_boundary:] == [], "重生前必須停下,不准對 EP02 重新 dispatch"

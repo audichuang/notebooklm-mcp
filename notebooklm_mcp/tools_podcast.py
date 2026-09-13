@@ -1606,6 +1606,30 @@ def _series_will_redispatch(attempt: dict) -> bool:
     return dispatch_status in _NEVER_DISPATCHED or remote_status in _TERMINAL_REMOTE
 
 
+def _later_episode_has_output(snapshot: dict, episode_n: int) -> bool:
+    """`manifest` 裡有沒有一列 `episode > episode_n` 已經有 output。
+
+    T3:retract 中段集之後重生時,`podcast_series` 若對這一集重新 dispatch(全新
+    一集／not_accepted re-arm／failed-removed supersede,見 `_series_will_redispatch`
+    的三種狀態),不指名來源就是讀整本筆記本——後面集數已經產出的回錄音檔會洩進
+    這一集。**這個判斷 `_attempt_capabilities` 給不出來**:它只拿單一
+    episode/attempt,看不到 sibling episode 的證據,跨集的事實只能在 series 這一層
+    的迴圈頂端算。`has_hard_output_evidence`(不是更寬鬆的
+    `has_durable_output_evidence`)才對——後者連 `retracted_attempt_ids` 都算數,
+    retract 恰恰不會清掉這個欄位,用它來判斷「後面集數有沒有 output」會把「後面那集
+    自己也曾經被 retract 過」誤判成「有 output」。
+    """
+    return any(
+        isinstance(row.get("episode"), int)
+        and row["episode"] > episode_n
+        and (
+            row.get("output_attempt_id") is not None
+            or has_hard_output_evidence(row)
+        )
+        for row in snapshot.get("episodes", [])
+    )
+
+
 # 形狀是 series 生得出來的、只有這次呼叫的參數對不上。**這不是 attempt 狀態問題**,
 # 所以不從 `_attempt_capabilities()` 取(它在這一格會算出 `podcast_series`,貼上去等於
 # 叫人拿同一組參數撞回同一道牆)。守門的例外訊息與認證停點的 `next_step` 共用這一份,
@@ -4592,6 +4616,67 @@ async def podcast_series(
             ),
             None,
         )
+
+        # T3(P1,`scratchpad/verify-A1/r2_series_retract.py`):retract 中段集之後,
+        # 這一集(還)沒有 output,但整季稍後的集數已經有——series 對它接下來要做的
+        # 一定是重新 dispatch(全新一集 / not_accepted re-arm / failed-removed
+        # supersede,`_series_will_redispatch()` 涵蓋的正是這三種),而 series 生不出
+        # 帶 `source_ids` 的 settings,不指名就是讀整本筆記本,把後面集數的回錄音檔
+        # 洩進這一集。**這一格 caps 修不了**——`_attempt_capabilities` 只拿單一
+        # attempt/episode,看不到 sibling episode 的 output 證據,跨集判斷只能留在
+        # series 這一層。
+        if episode is not None:
+            episode_has_output = episode.get(
+                "output_attempt_id"
+            ) is not None or has_hard_output_evidence(episode)
+            active_attempt_id_for_leak_check = episode.get("active_attempt_id")
+        else:
+            episode_has_output = False
+            active_attempt_id_for_leak_check = None
+        if not episode_has_output:
+            if active_attempt_id_for_leak_check is None:
+                # 全新一集(或全部 attempt 都已是歷史紀錄):下一步必然是全新 dispatch。
+                about_to_redispatch = True
+                leak_action = ACTION_EPISODE
+            else:
+                _, attempt_for_leak_check = _attempt_record(
+                    snapshot, episode_n, active_attempt_id_for_leak_check
+                )
+                about_to_redispatch = _series_will_redispatch(attempt_for_leak_check)
+                # 已有 active attempt 時 `podcast_episode(source_ids=...)` 是死路
+                # ——`_create_audio_attempt` 的 `_is_resendable_same_request` 會判定
+                # settings 不同(series 建的 attempt 沒有 source_ids)而拒收
+                # 「already has durable active attempt」。純本機的 retract 才是唯一
+                # 打得通的出口:作廢它之後再用 podcast_episode 指名來源重生。
+                leak_action = ACTION_RETRACT
+            if about_to_redispatch and _later_episode_has_output(
+                snapshot, episode_n
+            ):
+                if leak_action == ACTION_EPISODE:
+                    next_step = (
+                        f"episode {episode_n} 之後已經有集數產出正式輸出——這一集"
+                        "還沒有 attempt,series 對它的下一步是全新 dispatch,不指名"
+                        "來源就是讀整本筆記本,會把後面集數的回錄音檔洩進這一集。"
+                        f"改用 {ACTION_EPISODE}(..., source_ids=[...]) 指名這一集"
+                        "自己的來源(以及需要的回錄音檔)生成。"
+                    )
+                else:
+                    next_step = (
+                        f"episode {episode_n} 之後已經有集數產出正式輸出——這一集"
+                        "現有的 attempt 即將被 series 重新 dispatch(not_accepted "
+                        "re-arm 或 failed/removed supersede),不指名來源一樣是讀"
+                        f"整本筆記本。先 {ACTION_RETRACT}(純本機,不需要 "
+                        "abandon_in_flight)作廢它,再用 "
+                        f"{ACTION_EPISODE}(..., source_ids=[...]) 指名來源重生;"
+                        f"**不要**改呼 {ACTION_SERIES},它一樣會讀整本筆記本。"
+                    )
+                return partial(
+                    episode_n,
+                    active_attempt_id_for_leak_check,
+                    "later_episode_has_output",
+                    leak_action,
+                    next_step=next_step,
+                )
 
         if episode is not None:
             output_attempt_id = episode.get("output_attempt_id")
