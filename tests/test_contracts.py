@@ -776,6 +776,29 @@ def test_research_task_and_source_fields():
     assert ResearchSource(url="u", title="t").is_report is False
 
 
+def test_web_research_neutralizes_not_found_into_no_research():
+    """`tools_research._explain_no_research`(:78 附近的 `"no_research" not in
+    str(exc)` 判準)承重於上游 `WebResearchAPI._wait_observed_status` 這條私有
+    覆寫:它把 `NOT_FOUND` 中和成 `NO_RESEARCH`,所以「換帳號輪詢到逾時」與
+    「這個 task 根本沒被 NOT_FOUND 找到過」在 wait 的錯誤訊息裡長得一樣,都只看
+    得到 `no_research` 字樣(round2 獨立複審 V-D)。上面
+    `test_research_task_and_source_fields` 只釘了 enum 成員存在,沒釘這個中和
+    行為——round2 的獨立審查一開始就是漏看這條覆寫才誤判成 REFUTED。
+
+    **這條紅了,正確的反應是重新檢查
+    `tools_research._explain_no_research` 的判準(目前是字串比對
+    `"no_research" in str(exc)`),不是刪掉這條測試**——上游若改了中和邏輯或
+    拿掉這條覆寫,那個判準就可能跟著失準或失去意義。
+    """
+    import inspect as _inspect
+
+    from notebooklm._web.research import WebResearchAPI
+
+    src = _inspect.getsource(WebResearchAPI._wait_observed_status)
+    assert "ResearchStatus.NOT_FOUND" in src
+    assert "return ResearchStatus.NO_RESEARCH" in src
+
+
 def test_console_script_name_does_not_collide_with_upstream():
     """我們的 server 命令必須是 `nblm-mcp`,**不能**叫 `notebooklm-mcp`。
 
