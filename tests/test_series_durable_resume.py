@@ -618,3 +618,100 @@ async def test_series_transient_error_during_ambiguous_reconciliation_directs_vi
     assert out["safe_next_action"] == "podcast_attempt_adopt"
     assert out["candidate_source_ids"] == candidates
     assert "next_step" in out
+
+
+async def test_attempt_backed_adopt_with_matching_title_directs_via_caps(
+    fake_client, tmp_path
+):
+    """T2:`needs_rename=False`(候選標題已經對)時,`safe_next_action` 必須跟 caps
+    一致——舊版寫死 `podcast_series`,但 finalize 還沒 promote 成 output,照做 host
+    直接 publish 會撞 `_ensure_local_mp3`(缺 mp3_path/artifact_id)。caps 給的是
+    `podcast_episode_resume`(續完 finalize),而且要帶得出 resume 需要的 artifact_id
+    ——舊版回傳完全沒有 `next_step`/`safe_next_artifact_id` 這兩個欄位。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.add_file_exc_after_create = TimeoutError(
+        "upload response lost"
+    )
+    with pytest.raises(TimeoutError, match="upload response lost"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+    fake_client.sources.add_file_exc_after_create = None
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    attempt_id = stored["episodes"][0]["active_attempt_id"]
+    # 候選一開始就用正確的標題建立——不必經過 reconciliation_ambiguous 那條
+    # rename-required 的路,直接驗「標題已經對」這一格。
+    replacement = fake_client.sources._add("EP01 心法篇", kind="media")
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        feedback_source_id=replacement,
+    )
+
+    assert adopted["observed_state"] == "continuity_verified"
+    assert adopted["complete"] is False
+    assert adopted["safe_next_action"] == "podcast_episode_resume"
+    assert "next_step" in adopted and adopted["next_step"]
+    assert adopted["safe_next_attempt_id"] == attempt_id
+    assert adopted["safe_next_artifact_id"] == "task-123"
+    assert "stale_source_ids" not in adopted
+
+
+async def test_attempt_backed_adopt_needing_rename_directs_via_caps(
+    fake_client, tmp_path
+):
+    """T2:`needs_rename=True` 只能經由 ambiguity 擇一放行(guard 逼的),而 ambiguous
+    定義上至少兩個候選——擇一之後**必然**剩下未選中的同名候選要清,所以
+    `safe_next_action` 會被 stale-source 覆寫成 `source_delete`。這正是 T2 的另一個
+    修復點:覆寫之後 `next_step` 不能只講清理、把 caps 原本的建議(resume)吃掉
+    ——那會變成兩個欄位對同一個狀態指不同工具(紅線①)。清理句子必須**排在前面**、
+    caps 的話接在後面,兩者都要看得到。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.add_file_exc_after_create = TimeoutError(
+        "upload response lost"
+    )
+    with pytest.raises(TimeoutError, match="upload response lost"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+    fake_client.sources.add_file_exc_after_create = None
+    # 補一筆同名(以檔名為準,未 rename 過)的候選,湊出 reconciliation_ambiguous。
+    fake_client.sources._add("ep01.mp3", kind="media")
+    stopped = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+    assert stopped["observed_state"] == "reconciliation_ambiguous"
+    attempt_id = stopped["attempt_id"]
+    candidate = stopped["candidate_source_ids"][0]
+
+    adopted = await p.podcast_attempt_adopt(
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        feedback_source_id=candidate,
+    )
+
+    assert adopted["observed_state"] == "accepted"
+    assert adopted["complete"] is False
+    assert adopted["stale_source_ids"], "未選中的同名候選必須進清理義務"
+    assert adopted["safe_next_action"] == "source_delete"
+    assert "next_step" in adopted and adopted["next_step"]
+    assert "source_delete" in adopted["next_step"]
+    # caps 原本教的續完 finalize 不能被覆寫掉——先刪、刪完之後照這句做。
+    assert "podcast_episode_resume" in adopted["next_step"]
+    assert adopted["safe_next_attempt_id"] == attempt_id
+    assert adopted["safe_next_artifact_id"] == "task-123"

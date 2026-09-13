@@ -3761,7 +3761,16 @@ async def podcast_attempt_adopt(
                     return True
         return False
 
-    def adopt_source(manifest: dict) -> list[str]:
+    def adopt_source(manifest: dict) -> tuple[list[str], dict | None, bool]:
+        """回傳 `(stale_source_ids, caps, complete)`。
+
+        T2:`caps` 是 legacy 路徑(`attempt_id is None`,沒有 attempt 可問)時的
+        `None`——那條路只是把下一集的續集身分接回來,不動這一集自己的 finalize
+        狀態,`complete` 直接沿用既有硬證據。其餘路徑在 mutate **內部**算
+        `_attempt_capabilities`(比照同一支工具的 artifact 分支),讓外層只組欄位、
+        不用手寫 `ACTION_RESUME if needs_rename else ACTION_SERIES` 這種與 caps
+        對不上的猜測。
+        """
         current_episode = next(
             row
             for row in manifest["episodes"]
@@ -3799,7 +3808,7 @@ async def podcast_attempt_adopt(
             current_episode["feedback_source_adopted_at"] = now
             # 被取代的舊 id 只記進歷史還不夠——同名重複 source 從此沒人記得,故也排進
             # 清理義務,讓下一次生成前的 gate 逼刪(見 `_queue_pending_source_cleanup`)。
-            return _queue_pending_source_cleanup(
+            stale = _queue_pending_source_cleanup(
                 current_episode,
                 [previous] if isinstance(previous, str) else [],
                 exclude=feedback_source_id,
@@ -3807,6 +3816,7 @@ async def podcast_attempt_adopt(
                 # 當下的 default —— adopt 認的就是這個 notebook 裡的 source。
                 notebook_id=notebook_id,
             )
+            return stale, None, has_durable_output_evidence(current_episode)
 
         assert current_attempt is not None
         if not _attempt_can_adopt_source(current_attempt):
@@ -3856,24 +3866,39 @@ async def podcast_attempt_adopt(
             )
         else:
             rename.update({"status": "completed", "adopted_at": now})
-        return _queue_pending_source_cleanup(
+        stale = _queue_pending_source_cleanup(
             current_episode,
             [*stale_candidates, previous] if isinstance(previous, str) else stale_candidates,
             exclude=feedback_source_id,
             notebook_id=notebook_id,
         )
+        caps = _attempt_capabilities(current_episode, current, attempt_id)
+        return stale, caps, has_durable_output_evidence(current_episode)
 
-    _, stale_source_ids = store.update(adopt_source)
+    _, (stale_source_ids, caps, complete) = store.update(adopt_source)
     result = {
-        "complete": not needs_rename,
+        # T2:「complete」問的是「這一集有沒有已經 promote 過的 output」,不是
+        # 「這次呼叫還需不需要 rename」——舊版 `not needs_rename` 在 attempt 還沒
+        # promote 時一樣回 True,host 據此直接 publish_series 會撞
+        # `_ensure_local_mp3` 缺 mp3_path/artifact_id。legacy 路徑(`caps is None`)
+        # 進來的前提就是既有硬證據,這裡沿用 mutate 內算好的真值,不是重新假設。
+        "complete": complete,
         "episode_n": episode_n,
         "attempt_id": attempt_id,
         "feedback_source_id": feedback_source_id,
         "observed_state": (
             "accepted" if needs_rename else "continuity_verified"
         ),
-        "safe_next_action": ACTION_RESUME if needs_rename else ACTION_SERIES,
+        "safe_next_action": caps["safe_next_action"] if caps is not None else ACTION_SERIES,
     }
+    if caps is not None:
+        # T2:`safe_next_artifact_id` 是 resume 真正要傳的那個參數(resume 認
+        # artifact_id,不是 attempt_id)——舊版回傳漏了它,`needs_rename=True` 時
+        # 呼叫端讀得到 `safe_next_action="podcast_episode_resume"` 卻沒有可以帶
+        # 進去的 artifact_id,只能去翻 manifest(違反自足性紅線)。
+        result["safe_next_attempt_id"] = caps["safe_next_attempt_id"]
+        result["safe_next_artifact_id"] = caps["safe_next_artifact_id"]
+        result["next_step"] = _attempt_next_step(caps)
     if stale_source_ids:
         result["stale_source_ids"] = stale_source_ids
         # **同一個義務的另一個入口也要自足。** retract 那邊補了結構化義務,adopt 這邊
@@ -3884,6 +3909,20 @@ async def podcast_attempt_adopt(
             for source_id in stale_source_ids
         ]
         result["safe_next_action"] = ACTION_SOURCE_DELETE
+        # T2:override 之後 `next_step`(若有)仍講著 caps 的原始建議(resume／retract
+        # ……),與新的 `safe_next_action=source_delete` 互相矛盾——這正是紅線①要擋的
+        # 「兩個欄位對同一個狀態指不同工具」。清理句子必須排在最前面:
+        # `_assert_source_cleanup_done` 同一道閘擋生成也擋 resume,所以「先刪」與
+        # 「刪完之後 caps 教的那句」是同一個順序關係,不是互斥的兩個答案。
+        cleanup_sentence = (
+            "先把這幾筆 source_delete 掉:"
+            + "、".join(
+                f"source_delete(notebook_id={notebook_id!r}, source_id={sid!r})"
+                for sid in stale_source_ids
+            )
+            + "。"
+        )
+        result["next_step"] = cleanup_sentence + result.get("next_step", "")
     return result
 
 
