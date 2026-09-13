@@ -336,7 +336,7 @@ def load_frozen_generation_input(
             not isinstance(record, dict)
             or set(record) != {"path", "sha256", "bytes"}
             or record.get("path") != filename
-            or not isinstance(record.get("bytes"), int)
+            or type(record.get("bytes")) is not int
             or not isinstance(record.get("sha256"), str)
         ):
             raise ValueError(f"generation request {key} record is invalid")

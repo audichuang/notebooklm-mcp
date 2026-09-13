@@ -168,6 +168,29 @@ def test_schema_version_boolean_is_rejected(target, tmp_path):
         )
 
 
+def test_bytes_record_boolean_is_rejected_even_for_a_one_byte_brief(tmp_path):
+    """`isinstance(x, int)` 對 `bool` 也成立,`record["bytes"] = True` 原本只有在 brief
+    剛好 1 byte 時才會巧合通過(`len(data) == True` 因為 `True == 1`),另兩個成員必為
+    合法 JSON、不可能只有 1 byte,所以只有這一種形狀踩得到。改用 `type(x) is not int`
+    (與 schema_version 同慣用法)之後,不論長度都要拒。"""
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, _ = _write_bundle(tmp_path, brief="x")
+    request_path = bundle / "generation-request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["files"]["runtime_brief"]["bytes"] == 1
+    request["files"]["runtime_brief"]["bytes"] = True
+    request_path.write_text(
+        json.dumps(request, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="record is invalid"):
+        load_frozen_generation_input(
+            manifest_path=manifest,
+            input_bundle_path=bundle.relative_to(tmp_path),
+            episode_n=1,
+        )
+
+
 def test_bundle_directory_swap_cannot_redirect_frozen_reads(tmp_path):
     """目錄在讀取途中被搬走、原地換成指到別處的 symlink:loader 全程用 fd(`os.open`/
     `os.fstat`/`os.read`),`Path.is_dir` 從沒被呼叫過——舊寫法 patch 那裡等於沒掛上換手,
