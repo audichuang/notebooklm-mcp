@@ -437,6 +437,12 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
         a for a in episode["attempts"] if a["attempt_id"] == candidate_attempt_id
     )
     assert candidate["remote"]["artifact_id"] == "replacement-artifact"
+    # finalize 真的跑完了(下載+回錄上傳),不是被擋在 promote 之前的半成品——
+    # 守門要攔的是「完整跑完之後的最後一步」,不是提早卡在下載階段。
+    assert candidate["finalize"]["download"]["status"] == "completed"
+    orphan_source_id = candidate["finalize"]["feedback_source_upload"]["source_id"]
+    assert isinstance(orphan_source_id, str) and orphan_source_id
+    assert orphan_source_id != old_source_id
 
     retracted = await p.podcast_attempt_retract(
         manifest_path=str(manifest_path),
@@ -447,6 +453,9 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
 
     assert retracted["observed_state"] == "retracted"
     assert old_source_id in retracted.get("stale_source_ids", [])
+    # 修復出口不能只清掉舊 source——finalize 期間新上傳、從沒被任何人認領過的那筆
+    # 回錄 source(孤兒)也要一起進清理義務,否則它會永遠留在雲端沒人記得。
+    assert orphan_source_id in retracted.get("stale_source_ids", [])
     # legacy 硬證據跟著一起清掉——不清掉,重生時 has_hard_output_evidence 會擋出
     # 另一個死路(與 test_series_failover.py 那支唯讀迴歸的驗收標準一致)。
     stored_after_retract = json.loads(manifest_path.read_text(encoding="utf-8"))
