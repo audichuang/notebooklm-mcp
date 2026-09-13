@@ -1230,21 +1230,31 @@ def _ensure_resume_attempt(
                 f"{output_attempt_id!r}; retract it (podcast_attempt_retract) and "
                 "delete the stale feedback source before resuming another artifact"
             )
-        # T4(P1,Codex 獨立審查實跑驗證;後續由第二輪迴歸測試糾正落點):flat v1
-        # legacy 集(episode 級 artifact_id/mp3_path,沒有 attempts、也沒有
-        # output_attempt_id 可查)資訊上就是 retract amendment (2) 描述的那個缺口——
-        # `output_attempt_id` 是 None,但 episode 已有 `has_hard_output_evidence`。
-        # **這裡不擋**:`test_series_failover.py::
-        # test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`
-        # (唯讀迴歸)直接呼叫本函式,刻意用不同 artifact_id 建一顆「錯誤候選」
-        # attempt,目的就是之後拿它去 retract——amendment (2) 原始註解自己寫明
-        # 「是修復出口非授權」:新建分支繞過 has_hard_output_evidence guard 是
-        # **設計內**的修復入口,不是漏洞。真正未經審計的動作不是「建出候選」,是
-        # 「讓候選**未經 retract 就悄悄變成正式 output**」——那個攔截點在
-        # `_promote_attempt_output`(episode 級投影欄位唯一的寫入點),攔在那裡
-        # 才不會把這條唯一的修復出口一起關掉。這裡仍要算出 `legacy_artifact_id`——
-        # 下面判斷「resume 是否指名同一顆合法 artifact」(T5 沿用舊 source 的條件)要用。
+        # T2(wp-a2,P1 的另一半):flat v1 legacy 集(episode 級 artifact_id/
+        # mp3_path,沒有 attempts、也沒有 output_attempt_id 可查)resume 到**不同**
+        # artifact 現在兩層守門:這裡 fail-fast(打錯 id 連 rename/download/回錄
+        # 上傳三個遠端副作用都不發生),`_promote_attempt_output` 仍保留同一道檢查
+        # 當 defense-in-depth(万一有第三條建立路徑繞過這裡)。**同一顆合法 artifact
+        # 永遠放行**——那是唯一能幫 legacy 集建出可 retract attempt 的路(retract
+        # amendment (2),`legacy_audio_missing` 停點靠它)。要換掉現有輸出:先
+        # resume(合法 artifact)讓它變成 attempt,再 `podcast_attempt_retract`,
+        # 才能重生或 resume 別的 artifact——不准跳過這一步直接 resume(別的 artifact)。
         legacy_artifact_id = episode.get("artifact_id") or episode.get("task_id")
+        if (
+            legacy_artifact_id
+            and has_hard_output_evidence(episode)
+            and legacy_artifact_id != artifact_id
+        ):
+            raise ValueError(
+                f"episode {episode_n} has legacy output evidence bound to artifact "
+                f"{legacy_artifact_id!r}; to bring it into the auditable attempt flow, "
+                f"call podcast_episode_resume(artifact_id={legacy_artifact_id!r}) — "
+                "resuming the SAME artifact is always allowed (the "
+                "legacy_audio_missing stop depends on it). To replace the output: "
+                f"resume(artifact_id={legacy_artifact_id!r}) to turn it into an "
+                "attempt, then podcast_attempt_retract it, then regenerate — do not "
+                "resume a different artifact directly"
+            )
         active_attempt_id = episode.get("active_attempt_id")
         if active_attempt_id:
             # 同 `_create_audio_attempt` 那句的修正:對 `prepared`/`not_accepted`
@@ -2007,16 +2017,13 @@ def _promote_attempt_output(
                 f"episode {episode_n} output is owned by "
                 f"{episode['output_attempt_id']!r}; refusing to promote {attempt_id!r}"
             )
-        # T4(P1,經迴歸測試糾正落點):上面那道只擋得住**已經是 attempt-based**的
-        # durable output。flat v1 legacy 集(episode 級 artifact_id/mp3_path,從沒有
-        # output_attempt_id 可查)完全繞過上面那道——這正是 retract amendment (2)
-        # 描述的缺口。原本把這道擋放在 `_ensure_resume_attempt` 的新建分支,結果連
-        # amendment (2) 自己的修復出口(先用不同 artifact 建一顆 candidate、之後
-        # retract 掉它)都被一起關掉了(`test_series_failover.py::
-        # test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`
-        # 唯讀迴歸抓到)——建立候選不是問題,**未經 retract 就悄悄變成正式 output**
-        # 才是。promotion 是 episode 級投影欄位唯一的寫入點,擋在這裡才是對症下藥。
-        # **resume 到同一顆合法 artifact 必須繼續放行**(`legacy_artifact_id ==
+        # T2(wp-a2)更新:這道現在是**第二層 defense-in-depth**,不是唯一擋點——
+        # `_ensure_resume_attempt` 的新建分支已經對同一個條件 fail-fast(打錯
+        # artifact_id 連 rename/download/回錄上傳三個遠端副作用都不會發生)。這裡
+        # 留著是防第三條建立路徑繞過那道守門(例如 `_ensure_resume_attempt` 的
+        # claimed 分支重用既有 attempt 時),promotion 仍是 episode 級投影欄位
+        # 唯一的寫入點,是最後一道防線。**resume 到同一顆合法 artifact 必須繼續
+        # 放行**(`legacy_artifact_id ==
         # output["artifact_id"]` 時不擋)——那是把這種 legacy episode 帶進可審計
         # 流程的唯一入口(T5 的 legacy_audio_missing 停點也靠它)。**只在
         # `legacy_artifact_id` 真的記著一顆具體 artifact 時才擋**:硬證據也可能只靠
