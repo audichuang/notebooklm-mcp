@@ -269,6 +269,11 @@ def main() -> None:
     if args.show:
         if not args.output:
             ap.error("--show 模式需要 --output")
+        if not args.show_name:
+            # 這裡沒有 manifest 可對照身分(不像批次模式還能沿用 show.show_title)——
+            # default 改 None 之後,沒傳就必須明確報錯,不能讓 None 靜默流進 _render
+            # 被印成字面 "None"。
+            ap.error("--show 模式需要 --show-name")
         _guard_audicast_branding([args.show_name], args.allow_audicast_branding)
         hue = args.hue if args.hue is not None else _SHOW_HUE
         info = _render(_load_template("cover_show.html"), {
@@ -283,6 +288,8 @@ def main() -> None:
     # 3) 單集一次性
     if not (args.output and args.episode and args.title):
         ap.error("單集模式需要 --output --episode --title(或改用 --manifest / --show)")
+    if not args.show_name:
+        ap.error("單集模式需要 --show-name")
     _guard_audicast_branding([args.show_name], args.allow_audicast_branding)
     import re
 

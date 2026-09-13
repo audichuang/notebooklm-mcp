@@ -329,3 +329,29 @@ def test_guard_batch_requires_explicit_show_name_before_first_publish(
         cover_cli.main()
     assert exc.value.code == 2
     assert "--show-name" in capsys.readouterr().err
+
+
+def test_show_mode_requires_explicit_show_name(monkeypatch, tmp_path, capsys):
+    """`--show` 模式沒有 manifest 可對照身分,`--show-name` default 改 None 之後不能
+    讓 `None` 靜默流進 `_render` 被印成字面 "None"——沒傳就該明確報錯。"""
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--show", "--output", str(tmp_path / "cover.jpg"),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cover_cli.main()
+    assert exc.value.code == 2
+    assert "--show-name" in capsys.readouterr().err
+
+
+def test_single_episode_mode_requires_explicit_show_name(monkeypatch, tmp_path, capsys):
+    """單集一次性模式同理:`docs/gotchas-publish.md` 記載的用法本來就沒帶
+    `--show-name`(只有 `--output --episode --title`),default 改 None 後這條路徑
+    一樣不能讓 `None` 靜默流進封面。"""
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--output", str(tmp_path / "ep05.jpg"),
+        "--episode", "EP05", "--title", "本集標題",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cover_cli.main()
+    assert exc.value.code == 2
+    assert "--show-name" in capsys.readouterr().err
