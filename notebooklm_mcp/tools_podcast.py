@@ -2817,11 +2817,20 @@ async def _run_episode(
         # 持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。docstring 承諾「依錯誤中的
         # attempt_id 續跑」,兩個分支都要兌現。
         if store is not None:
+            # T8:`_REFUSED_WITHOUT_DISPATCH` 有兩個生產者(見 `_failover.py` 模組
+            # docstring),「沒有建立任何 artifact」對它們的確定性不一樣——
+            # decoder 的 `USER_DISPLAYABLE_ERROR` 是契約講死沒建出 task;transport
+            # 層 429(`rpc_code=None`)只是請求已送達伺服器才被限流打回來,**幾乎
+            # 必然**沒建出 task,不是硬保證。措辭如實反映這個差異,行為不變(續跑
+            # 建議仍是同一句)。
             exc.args = (
-                f"{exc}\n伺服器拒絕了這次生成,**沒有**建立任何 artifact"
-                f"(attempt_id={attempt_id!r},已標記 not_accepted)。"
-                "配額/限流回復後,用**完全相同的參數**重呼 podcast_episode 即可沿用"
-                "同一個 attempt 重送——不會新建 attempt、也不會多燒一次配額。",
+                f"{exc}\n伺服器拒絕了這次生成(attempt_id={attempt_id!r},已標記 "
+                "not_accepted)。契約保證沒有建立任何 artifact 的是 "
+                "ArtifactFeatureUnavailableError;RateLimitError 的傳輸層 429 拒絕"
+                "只是幾乎必然沒有建立(請求已送達伺服器才被限流打回來,理論上不"
+                "排除極端情況伺服器已受理但回應遺失)。配額/限流回復後,用"
+                "**完全相同的參數**重呼 podcast_episode 即可沿用同一個 attempt "
+                "重送——不會新建 attempt。",
             )
         raise
     except (Exception, asyncio.CancelledError) as exc:
