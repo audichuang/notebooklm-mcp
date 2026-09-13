@@ -209,3 +209,23 @@ def test_index_html_strips_serial_ep_prefix_from_title_display_only():
     # RSS 不受影響:item title 仍是完整命名
     xml = feed.build_feed_xml(show, BASE)
     assert "EP01. 心法篇" in xml
+
+
+def test_index_html_delegates_ep_prefix_strip_to_naming(monkeypatch):
+    """`naming.py` docstring 說自己是「the only place that derives one from the
+    other」——`build_index_html` 不該自己另外維護一份 `EP{n}` 剝除 regex。改成呼叫
+    `naming.bare_episode_title`,用 monkeypatch 證明真的呼叫到、且回傳值真的被採用
+    (上一支測試只鎖行為,鎖不住「是不是同一份實作」)。"""
+    calls = []
+
+    def fake_bare(n, title):
+        calls.append((n, title))
+        return "SENTINEL"
+
+    monkeypatch.setattr(feed, "bare_episode_title", fake_bare)
+    show = {**SHOW, "episodes": {
+        "1": {**SHOW["episodes"]["1"], "title": "EP01. 心法篇"},
+    }}
+    html = feed.build_index_html(show, BASE)
+    assert calls == [(1, "EP01. 心法篇")]
+    assert "EP01 — SENTINEL" in html
