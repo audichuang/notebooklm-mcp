@@ -386,6 +386,36 @@ async def test_no_credentials_at_all_is_still_the_local_storage_path(monkeypatch
         assert app.os.environ["NOTEBOOKLM_HEADLESS_REAUTH"] == "1"
 
 
+async def test_non_inline_path_pins_backend_to_web_even_if_env_says_otherwise(
+    monkeypatch,
+):
+    """非 inline(登入機讀本機 storage_state)路徑也要顯式釘住 `backend="web"`。
+
+    `_INLINE_AUTH_ENV_OVERRIDES` 只在 inline 模式清掉 `NOTEBOOKLM_BACKEND`
+    (app.py 開頭的註解自己講的理由與 inline 無關:0.8.2 起 `from_storage()` 沒傳
+    `backend=` 就讀這個 env,`"android"` 會換成 master-token + gRPC 傳輸層,而我們的
+    憑證是 cookie snapshot,兩者不相容)——但非 inline 分支的
+    `from_storage(allow_headless=False)` 從沒傳過 `backend=`,shell 裡設了這個 env
+    就會被讀到。SDK docstring:explicit 勝過 env,兩個呼叫點都該顯式傳
+    `backend="web"`,不能只靠刪 env 這條路。
+    """
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON", raising=False)
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON_2", raising=False)
+    monkeypatch.setenv("NOTEBOOKLM_BACKEND", "android")
+    captured: dict = {}
+
+    def fake(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeClientCM()
+
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", fake)
+
+    async with app._lifespan(app.mcp):
+        pass
+
+    assert captured.get("backend") == "web"
+
+
 async def test_inline_auth_suppresses_the_refresh_command(monkeypatch):
     """`NOTEBOOKLM_REFRESH_CMD` 在 inline(Doppler)模式必須被壓掉。
 
@@ -470,7 +500,10 @@ async def test_from_storage_disables_headless_reauth_explicitly(monkeypatch):
     monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON_2")
     async with app._lifespan(app.mcp):
         pass
-    assert calls == [{"allow_headless": False}]
+    # backend="web" 顯式釘住(R3-P3-2):shell 裡若有 NOTEBOOKLM_BACKEND=android,
+    # 這條分支從沒傳過 backend= 就會被那個 env 讀走——見
+    # test_non_inline_path_pins_backend_to_web_even_if_env_says_otherwise。
+    assert calls == [{"allow_headless": False, "backend": "web"}]
 
 
 async def test_empty_base_credential_fails_loud(monkeypatch):
