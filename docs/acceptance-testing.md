@@ -48,6 +48,42 @@ agent)只有 skill 文件 + 工具回傳的訊息。**驗收要驗的正是那�
 
 ---
 
+## headless 驗「呼叫端讀得到什麼」(v0.9.26 建立,不碰帳號)
+
+上面那五類要真帳號。但還有一整類以前沒有便宜的驗法:**呼叫端看到的那一面到底教對了沒**
+—— 工具描述、`_INSTRUCTIONS`、skill 文字改完,routing 會不會變差?以前只能交一份 prompt
+給人開 session 跑一次,拿不到數字也不能重跑。
+
+現在用 `claude -p --model sonnet` + **dry-run stub server** 自己跑:stub 直接從
+`notebooklm_mcp.app.mcp` 讀回**真實** schema,但 `call_tool` 只記錄參數並回一句 DRY RUN。
+受測 agent 看到的描述與正式 server 逐字相同,而**零帳號風險、零配額**。每題約 $0.2,
+所以跑得起「每題 n 次取平均 + 盲評 + 每次改完重跑」。v0.9.26 實跑:10 題 × 2 次 × 新舊兩臂,
+turns -25.5%、cache_creation -30.5%,盲評 57/60 → 58/60。
+
+舊版那一臂**從 git worktree 起跑**(`git worktree add --detach <dir> <舊 commit>`),
+stub 的 `NBLM_REPO` 指過去 —— 不要靠記憶描述舊版長怎樣。
+
+### 三個會讓數字說謊的坑(都實際踩過)
+
+1. **`total_cost_usd` 不是受測 agent 的成本。** 它含受測 agent 自己 spawn 出去的 subagent
+   (v0.9.26 實際出現 haiku-4.5 與 fable-5.1,後者佔原始總成本 **61%**),而「這次跑有沒有
+   spawn」基本上是擲硬幣 —— 同一臂同一題兩次可以差 7.7 倍。**先讀 `modelUsage` 拆解、只取
+   主迴圈那個模型**,不要直接用 `total_cost_usd`。`num_turns` 與 `cache_creation` 只反映
+   主迴圈,不受影響。
+2. **受測目錄裡不能有答案。** skill repo 的 `evals/evals.json` 裡就是題目與 expectations,
+   而 harness 若整包 symlink skill 目錄進受測 box,等於把答案發給受測者。**只連
+   `SKILL.md` 與 `references/`,跳過 `evals/`。** 同理,受測的 cwd 要是空目錄 —— 早期版本
+   把 harness 與結果放在同一層,agent 掃到之後一次回答了全部十題。
+3. **stub 不轉發 protocol 層 instructions。** 它自己建 `Server(...)`,只代理 `list_tools`
+   —— 實測 stub 送 0 字元、正式 server 送 1,271。所以**改 `_INSTRUCTIONS` 的效果這套量不到**,
+   別拿 eval 分數替它背書(v0.9.26 就誤以為量到了)。
+
+### 真帳號驗收也自己跑
+
+同一套換成 `doppler run -p notebooklm -c dev -- claude -p --model sonnet …` 就能對真帳號跑,
+**不必交 prompt 給人**。前提是工作根 AGENTS.md 那條:自己清得掉的測試資料不必問,但跑完要清;
+**不可逆的動作**(發布到公網 feed、刪既有 notebook/source)一律先問。
+
 ## 工作區長什麼樣
 
 ```

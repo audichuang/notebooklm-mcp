@@ -11,7 +11,13 @@
 
 MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/home/user/research/audi-skill/notebooklm/SKILL.md` 的工具表與 `/home/user/research/audi-skill/notebooklm/references/tool-reference.md`。
 
-新增、移除或改名工具時,commit message 要明講 skill repo 是否已同步;若尚未同步,不要 push MCP release tag。若本 repo 已落地 CI hard check,PR 必須等該檢查綠燈後才能 tag release。
+新增、移除或改名工具時,commit message 要明講 skill repo 是否已同步;若尚未同步,不要 push MCP release tag。
+
+⚠️ **這道 CI 檢查只掛在本 repo 的 push 上,skill repo 那側沒有任何 workflow** —— 所以
+**改完 skill repo 要自己回來跑一次** `uv run python scripts/check_skill_sync.py`。
+2026-09-05 到 09-13 之間它就是這樣斷了 8 天:破壞來自 skill repo 的 commit,而那八天本 repo
+一次 CI 都沒觸發(不是「跑了而且綠」)。一道只在被守的兩個 repo 之一上觸發的守門,對另一側
+等於不存在。若本 repo 已落地 CI hard check,PR 必須等該檢查綠燈後才能 tag release。
 
 **推送順序:先推 audi-skill、再推本 repo**(v0.2.9 教訓):CI 的 sync check 會 clone
 **遠端** audi-skill 來驗——skill 只同步在本機、還沒推,MCP 先推就 CI 紅(missing 新工具名)。
@@ -24,6 +30,11 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
 1. `pyproject.toml` 的 `version`(正本)
 2. `uv.lock` 裡本套件的 `version` —— bump 之後跑一次 `uv lock`,**與 pyproject 同一個 release commit**。
    v0.9.23、v0.9.24 都是事後才用 chore commit 補(`uv run` 會自動重同步 lock 並弄髒 working tree)。
+
+🔴 **發版之後才修的東西,不再發一版就等於沒出貨。** 消費端裝的是 **tag**,而
+`scripts/retag-latest.sh` 把 `latest` 指到**最高的 semver**——所以修正 push 上 master、
+CI 全綠、`latest` 還是紋風不動地指著那個有 bug 的版本。v0.9.27 就是為這件事而發的:
+v0.9.26 的修正在 master 躺著,而四台機器裝到的全是壞的。**retag 救不了,只能再發一版。**
 
 `vMAJOR.MINOR.PATCH` tag 是不可變錨點;`latest` 是 CI 維護的移動指針。
 推上 `vX.Y.Z` 之後 `.github/workflows/retag-latest.yml` 跑
@@ -49,6 +60,9 @@ MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/ho
    (v0.9.24 實際踩到:沒 peel 就誤判成「指針沒動」)。沒動就 `gh workflow run retag-latest.yml`,
    或本機 `bash scripts/retag-latest.sh --push`。
 2. 用 `@latest` 真的裝一次再收工 —— v0.7.0 的撞名就是這一步才發現的。
+   ⚠️ **驗實裝要 `cd` 到中性目錄**(`/tmp` 之類)並印出 `module.__file__` 確認路徑:
+   Python 把 cwd 排在 `sys.path` 最前面,在 repo 目錄下跑 tool venv 的 python 會載到
+   **repo 副本**,行為看起來全對(v0.9.27 實際差點據此誤判成「已修好」)。
    **「裝完」要驗版本號,不能只看它印 `Installed 2 executables`**:uv 的 git cache
    對移動 tag 不敏感,`--force` 也可能裝成舊 SHA(v0.8.1 實測是 cache 壞掉裝成舊版)。
    收工前跑
