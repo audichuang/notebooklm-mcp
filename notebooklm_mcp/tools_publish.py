@@ -672,19 +672,18 @@ async def publish_series(
     # **只驗真的會投影進 feed.xml 的欄位**,而且在第一個 PUT 之前:manifest 內部欄位
     # (brief、錯誤訊息、本機路徑)刻意不管 —— 那些不會進 XML,拿它們擋發布是誤殺。
     # `build_feed_xml` 在它自己的公開邊界會再驗一次(這裡是 preflight,那裡是把關)。
+    # show 層欄位一次驗完(不屬於任何一集,沒有集號可報)。
     feed_mod.validate_xml_text((
-        base_url,
-        show_title,
-        show_description,
-        author,
-        owner_name,
-        owner_email,
-        category,
-        [
-            (ep["title"], ep["description"], ep.get("published_at"))
-            for ep in manifest_eps
-        ],
+        base_url, show_title, show_description, author, owner_name, owner_email, category,
     ))
+    # 每一集各自驗、訊息包上集號 —— 原本攤平成一個 tuple 的單一呼叫,45 集的季度只知道
+    # 「壞在某個地方」,同一支工具其他五處 guard(title/cover/description 等)都帶集號,
+    # 這裡漏了。
+    for ep in manifest_eps:
+        try:
+            feed_mod.validate_xml_text((ep["title"], ep["description"], ep.get("published_at")))
+        except ValueError as exc:
+            raise ValueError(f"episode {ep['episode']}: {exc}") from exc
 
     # 用單次 run 專屬的 staging 目錄裝重抓的 mp3(見 _ensure_local_mp3):
     # os.replace 換的是目的路徑本身,symlink 攻擊面在最終路徑,不在暫存目錄的檔案

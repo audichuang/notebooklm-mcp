@@ -17,6 +17,7 @@ from .languages import resolve_language
 from .app import mcp
 from ._text import strip_citations as _strip_citations, strip_inline_emphasis
 from .manifest_store import ManifestStore
+from .publish import feed as feed_mod
 from .publish import notes_html
 # 白名單的正本在 publish/state.py(那個模組的 docstring 解釋為什麼不能放 tools_publish)。
 from .publish.state import WITHHELD_PUBLICATION_STATES
@@ -189,6 +190,11 @@ async def episode_set_description(
     # docstring 自己宣告「錯誤在寫入當下就爆」,那就要真的做到(chat_ask 產的 notes 來自
     # 可被 prompt injection 的外部文章,這不是理論風險)。
     notes_html.render_episode_notes_html(desc, [])
+    # render_episode_notes_html 只管 HTML 標籤/屬性允許清單,不管純文字字元——
+    # U+000C 這類 XML 1.0 表達不了的字元會被它放行,一路寫進 manifest,直到整季
+    # 生完、跑 publish_series 組 XML 那一刻才 fail-closed。這裡補上同一顆
+    # feed.validate_xml_text,讓它真的在寫入當下就爆(這支的 docstring 就是這樣宣告的)。
+    feed_mod.validate_xml_text(desc)
     _load_ep_and_write(manifest_path, episode_n, description=desc)
     return {"episode": episode_n, "description": desc, "stripped": strip_citations}
 

@@ -1637,6 +1637,29 @@ async def test_later_episode_notes_render_failure_uploads_nothing(env, tmp_path,
     assert captured == []            # EP01 一個 blob 都沒落地
 
 
+async def test_xml_forbidden_char_preflight_names_the_episode(
+    env, tmp_path, artwork_png, monkeypatch
+):
+    """`validate_xml_text` preflight(:642)原本是攤平成一個 tuple 的單一呼叫,壞在
+    哪一集完全報不出來——同一支工具其他五處 guard(title/cover/description 等)都帶
+    集號,這裡也該一樣。用第 2 集帶 XML 1.0 表達不了的字元(U+000C),訊息要指名
+    是第幾集。"""
+    captured = _install_mock(monkeypatch)
+    eps = []
+    for n in (1, 2):
+        title = f"第{n}集標題\x0c續" if n == 2 else f"第{n}集"
+        eps.append({
+            "episode": n, "title": title, "description": f"第{n}集重點整理。",
+            "mp3_path": _write_mp3(tmp_path, f"xmlchar{n}.mp3", f"audio-{n}".encode()),
+            "cover_path": _valid_cover(tmp_path, f"xmlchar{n}-cover.png"),
+        })
+    manifest = _manifest(tmp_path, eps, "xmlchar.json")
+
+    with pytest.raises(ValueError, match=r"episode 2:.*XML"):
+        await _publish(manifest, artwork_png)
+    assert captured == []
+
+
 async def test_defaults_are_fail_closed(env, tmp_path, artwork_png, monkeypatch):
     """鎖住「預設就是 fail-closed」本身。前一個測試兩附件齊備,預設翻成 False 也會綠,
     所以真正把預設值釘住的是這個:缺附件 + 完全不傳 require_*,必須擋。"""

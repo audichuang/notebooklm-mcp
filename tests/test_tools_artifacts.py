@@ -315,6 +315,19 @@ async def test_episode_set_description_rejects_unsafe_notes_at_write_time(tmp_pa
     assert "JavaScript" in ok["description"]
 
 
+async def test_episode_set_description_rejects_xml_forbidden_chars_at_write_time(tmp_path):
+    """U+000C 這類 XML 1.0 表達不了的字元,`render_episode_notes_html` 的標籤允許清單
+    掃不到(它只管 HTML 標籤/屬性,不管純文字字元)——會安穩寫進 manifest,直到整季
+    生完、跑 `publish_series` 組 XML 那一刻才 fail-closed。docstring 說「錯誤在寫入
+    當下就爆」,這裡補上同一顆 `feed.validate_xml_text` 讓它真的在寫入當下就爆。"""
+    m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
+    with pytest.raises(ValueError, match="XML"):
+        await a.episode_set_description(m, 1, "本集重點\x0c續完")
+    # 沒有半途寫入
+    data = json.loads(open(m, encoding="utf-8").read())
+    assert "description" not in data["episodes"][0]
+
+
 # ---- v0.9.18:episode_set_publication_state(deferred 的 set/clear lifecycle）------
 # 這支的存在理由是 lifecycle:publish_series 讀 publication_state,但在這一版之前沒有任何
 # 工具寫得動它,而 manifest 只由工具寫入的紀律不允許 host 手改 JSON —— 於是「解除」在受
