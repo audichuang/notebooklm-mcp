@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -572,6 +573,17 @@ def test_reset_attempt_for_resend_clears_the_stale_wait_timeout_promise():
     assert dispatch["dispatched_at"] is None
     assert dispatch["accepted_at"] is None
 
+    # T12(b,測試債):`remote.status` 這一欄已經有 4 支既有測試守著(各自透過
+    # `podcast_episode`/`podcast_series` 的重送流程間接驗到),但同一次 `.update()`
+    # 呼叫一起清掉的 `status_origin`/`observed_at`/`error`/`error_code` 這四欄
+    # 完全零斷言——這支 fixture 早就塞了舊值(見上面 `attempt["remote"]`),刪掉
+    # `_reset_attempt_for_resend` 清這四欄的程式碼也不會有任何測試變紅。
+    remote = attempt["remote"]
+    assert remote["status_origin"] is None, remote
+    assert remote["observed_at"] is None, remote
+    assert remote["error"] is None, remote
+    assert remote["error_code"] is None, remote
+
 
 @pytest.mark.parametrize("bad_wait_timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
 async def test_podcast_episode_rejects_a_bad_wait_timeout_before_any_dispatch(
@@ -1141,3 +1153,30 @@ async def test_generic_rpc_failure_stays_acceptance_unknown(fake_client, tmp_pat
         "attempts"
     ][0]
     assert attempt["dispatch"]["status"] == "acceptance_unknown"
+
+
+async def test_client_cancellation_during_finalize_still_offers_the_resume_call(
+    fake_client, tmp_path
+):
+    """T6:`_run_episode` finalize 段的 `except Exception as exc:` 收不到
+    `CancelledError`(它是 `BaseException` 的直接子類,不是 `Exception`)——client
+    在 finalize 期間(下載/上傳/rename 這段)被 cancel 時,姊妹 dispatch 段的
+    `except (Exception, asyncio.CancelledError) as exc:` 會附上完整的
+    `podcast_episode_resume` 續跑呼叫 + `next_step`,finalize 段卻讓它裸拋出去
+    ——artifact 明明已經在雲端生成完,呼叫端卻拿不到任何續跑指引。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.download_audio_exc = asyncio.CancelledError("client 60s timeout")
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    message = str(excinfo.value)
+    assert "podcast_episode_resume" in message

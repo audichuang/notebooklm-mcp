@@ -12,6 +12,8 @@ retract 的正主檔案 `test_attempt_retract.py` 不在允許清單裡,所以�
 - retract 對「已 accepted、從未 promote」的 attempt 沒有出路。
 """
 import json
+import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -688,6 +690,14 @@ async def test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted(
     retract——`test_attempt_retract.py::test_retract_refuses_an_attempt_that_is_not_
     the_durable_output` 鎖著):所以只在 episode 已有 legacy 硬證據時才放行,這正是
     上面那個「legacy 硬證據」前提存在的理由,不是可省的裝飾。
+
+    T5(P1 修復,wp-a2):這顆 candidate 的前置狀態**不再靠呼叫
+    `_ensure_resume_attempt(artifact_id="bad-artifact-1")` 產生**——那正是它現在
+    要 fail-fast 擋下的形狀(legacy 硬證據綁著別的 artifact,resume 指名第三顆會
+    先 rename/download/上傳三個遠端副作用才在 promote 被擋)。這支測試驗的是
+    **retract** 能不能作廢一顆「accepted、從未 promote」的候選,不是那條建立路徑,
+    所以前置狀態改成直接寫 manifest fixture(手搭一顆同形狀的 attempt),繞過建立
+    路徑本身,斷言不變。
     """
     manifest_path = tmp_path / "series_manifest.json"
     manifest_path.write_text(
@@ -712,13 +722,44 @@ async def test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted(
     )
 
     store = p.ManifestStore(str(manifest_path))
-    bad_attempt_id = p._ensure_resume_attempt(
-        store,
-        notebook_id="nb-1",
-        episode_n=1,
-        title="心法篇",
-        artifact_id="bad-artifact-1",
-    )
+    bad_attempt_id = str(uuid.uuid4())
+
+    def _inject_accepted_never_promoted_candidate(manifest: dict) -> None:
+        # 手搭與 `_ensure_resume_attempt` 新建分支同形狀的一筆(dispatch.status=
+        # "accepted"、remote.artifact_id 指向與 legacy 硬證據不同的第三顆
+        # artifact、未 promote),繞過現在會 fail-fast 擋下這個組合的建立路徑本身。
+        episode = manifest["episodes"][0]
+        now = datetime.now(timezone.utc).isoformat()
+        episode["attempts"].append(
+            {
+                "attempt_id": bad_attempt_id,
+                "created_at": now,
+                "notebook_id": "nb-1",
+                "episode": 1,
+                "title": "心法篇",
+                "brief_sha256": None,
+                "settings": {"origin": "explicit_resume"},
+                "dispatch": {
+                    "status": "accepted",
+                    "artifact_ids_before": [],
+                    "dispatched_at": None,
+                    "accepted_at": now,
+                },
+                "remote": {
+                    "artifact_id": "bad-artifact-1",
+                    "status": "pending",
+                    "status_origin": "caller_verified",
+                    "observed_at": now,
+                    "error": None,
+                    "error_code": None,
+                },
+                "finalize": p.new_finalize_state(),
+                "errors": [],
+            }
+        )
+        episode["active_attempt_id"] = bad_attempt_id
+
+    store.update(_inject_accepted_never_promoted_candidate)
 
     episode_before = _episode(manifest_path)
     assert episode_before["active_attempt_id"] == bad_attempt_id

@@ -12,6 +12,7 @@ in-flight finalizer、還是任何把指標寫回去的 writer。
 import asyncio
 import copy
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -193,6 +194,81 @@ async def test_replacement_keeps_the_original_published_at_not_the_regeneration_
     # (v0.6.0 實測:manifest 12:07:20、回傳值 12:16:39)。這就是本 repo 的頭號教訓
     # 「補一半等於沒補」,所以這條斷言必須跟著 manifest 那條一起在。
     assert returned["published_at"] == first_published_at
+
+
+async def test_resume_promotion_also_returns_the_original_published_at(
+    fake_client, tmp_path, monkeypatch
+):
+    """T9(測試債):`_promote_attempt_output` 的回傳值突變之前只有 `podcast_episode`
+    這一條路徑被驗到——`podcast_episode_resume`/`podcast_series`(兩處)都是
+    `_promote_attempt_output(...); return output`(或 `...; run_results.append
+    (output)`)同一個形狀,但沒有測試斷言它們的**回傳 dict**,只驗 manifest。
+    這支補 `podcast_episode_resume` 的出口:讓重生的第二次生成停在「finalize
+    未完成」(下載中斷),改由 `podcast_episode_resume` 接手完成 promote。
+    """
+    monkeypatch.setattr(audio_finalize, "datetime", _TickingDatetime)
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    first_published_at = before["published_at"]
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
+    await b.source_delete("nb-1", before["feedback_source_id"])
+
+    fake_client.artifacts.download_audio_exc = RuntimeError("模擬傳輸中斷")
+    with pytest.raises(RuntimeError):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief 2",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    fake_client.artifacts.download_audio_exc = None
+    stopped = _episode(manifest_path)
+    artifact_id = stopped["attempts"][-1]["remote"]["artifact_id"]
+
+    returned = await p.podcast_episode_resume(
+        "nb-1", episode_n=1, title=EP["title"], artifact_id=artifact_id,
+        output_dir=str(tmp_path), manifest_path=manifest_path,
+    )
+
+    after = _episode(manifest_path)
+    assert after["published_at"] == first_published_at
+    assert returned["published_at"] == first_published_at
+
+
+async def test_series_promotion_also_returns_the_original_published_at(
+    fake_client, tmp_path, monkeypatch
+):
+    """T9(測試債):`podcast_series` 對「已有 active_attempt_id、尚未 promote」
+    這一集重新 finalize 後的 promote 呼叫點(與新集 dispatch 直接委派給
+    `_run_episode` 是不同的程式碼路徑——那條走的是 `_run_episode` 自己的
+    promote,已經被 `podcast_episode` 的既有測試驗過)也要驗回傳值,不能只驗
+    manifest。先讓重生的第二次生成停在「finalize 未完成」(下載中斷,
+    active_attempt_id 留著、output_attempt_id 仍是 None),series 對它重跑會
+    走這條 local promote 呼叫點。
+    """
+    monkeypatch.setattr(audio_finalize, "datetime", _TickingDatetime)
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+    first_published_at = before["published_at"]
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
+    await b.source_delete("nb-1", before["feedback_source_id"])
+
+    fake_client.artifacts.download_audio_exc = RuntimeError("模擬傳輸中斷")
+    with pytest.raises(RuntimeError):
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
+            output_dir=str(tmp_path), manifest_path=manifest_path,
+        )
+    fake_client.artifacts.download_audio_exc = None
+    stopped = _episode(manifest_path)
+    assert stopped.get("output_attempt_id") is None
+    assert stopped.get("active_attempt_id")
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": EP["title"], "brief": "修正後的 brief"}],
+        output_dir=str(tmp_path),
+    )
+
+    after = _episode(manifest_path)
+    assert after["published_at"] == first_published_at
+    assert out["episodes"][0]["published_at"] == first_published_at
 
 
 async def test_second_replacement_still_keeps_the_original_published_at(
@@ -435,6 +511,59 @@ async def test_resume_cannot_rename_the_episode(fake_client, tmp_path):
             output_dir=str(tmp_path), manifest_path=manifest_path,
         )
     assert _episode(manifest_path)["title"] == EP["title"]
+
+
+async def test_resume_claimed_branch_also_cannot_rename_the_episode(
+    fake_client, tmp_path
+):
+    """T12(a,測試債):`_ensure_resume_attempt` 有**兩個**建立/續接分支——`artifact_id`
+    已被某顆既有 attempt 認領時走 claimed 分支,否則走新建分支。`test_resume_
+    cannot_rename_the_episode` 用一顆從沒被任何 attempt 認領過的 artifact_id,
+    只守得住新建分支自己的標題閘;claimed 分支另有一份獨立的程式碼做同一件事
+    (`episode.get("title") != title`),把它刪掉全綠——沒有任何測試會紅。
+
+    手搭一顆 `attempt.title="X"` 但 `episode.title="Y"` 的 manifest(claimed 分支
+    唯讀這兩個欄位;正常流程建立時兩者是同一個值不會分岔,這裡刻意手改出分岔,
+    單獨驗這道閘擋不擋),用 `title="X"` 呼叫 resume(先過 `attempt.get("title")
+    != title` 那道,才會走到 episode 級這一道)。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "title": "Y",
+                        "attempts": [
+                            {
+                                "attempt_id": "att-1",
+                                "notebook_id": "nb-1",
+                                "episode": 1,
+                                "title": "X",
+                                "dispatch": {"status": "accepted"},
+                                "remote": {
+                                    "artifact_id": "art-claimed",
+                                    "status": "pending",
+                                },
+                                "finalize": p.new_finalize_state(),
+                                "errors": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="title does not match the manifest"):
+        await p.podcast_episode_resume(
+            "nb-1", episode_n=1, title="X", artifact_id="art-claimed",
+            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        )
 
 
 async def test_adopt_cannot_rewrite_a_retracted_attempt(fake_client, tmp_path):
@@ -2451,6 +2580,103 @@ async def test_concurrent_zero_and_positive_reconciliation_never_forgets_the_orp
     assert orphan in _pending_ids(manifest_path), "orphan 已經從 manifest 完全消失"
 
 
+async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_violation(
+    fake_client, tmp_path, monkeypatch
+):
+    """T5(P3,`scratchpad/verify-A1/r1_violations_cas.py` 的重現):CAS 衝突後
+    `violations` 沒跟著 `discovered` 一起修剪。
+
+    `if violations:` raise 的清單是在 `_settle_cleanup_state` 修剪 `discovered`
+    **之前**算的;gate 停在 `sources.list` 的 await 上時,另一個真正在跑的
+    finalizer(EP02)合法認領了這筆孤兒之後,重算後的 manifest 是對的(沒把它
+    記成待刪),但錯誤訊息卻還點名這筆已被合法認領的 source,叫呼叫端去
+    `source_delete` 一筆不該刪的東西。
+    """
+    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+        fake_client, tmp_path, monkeypatch
+    )
+    _age_the_dispatch_window(manifest_path, attempt_id)
+    upload = _upload(manifest_path, attempt_id)
+    orphan = fake_client.sources._add(
+        upload["expected_title"],
+        kind="media",
+        created_at=datetime.fromisoformat(upload["dispatched_at"]) + timedelta(minutes=1),
+    )
+    # EP02 是「另一個真正在跑的 finalizer」——它稍後要在 gate 停住的 await 期間
+    # 合法認領這筆孤兒。直接手搭它的 attempt(而不是真的呼叫 `podcast_episode`
+    # 跑第二集):真的跑會讓 EP02 自己 dispatch 前的 precondition 檢查(同一本
+    # notebook 共用一道閘)撞見 EP01 尚未結案的清理義務,兩者的時序糾纏在一起
+    # 反而測不準這支測試真正要驗的那個競態。這裡只需要「一顆屬於別集、已經
+    # finalize 完成的 attempt」讓 `claim` 有東西可以寫。
+    ep2_attempt_id = str(uuid.uuid4())
+
+    def _inject_ep2(manifest):
+        manifest["episodes"].append(
+            {
+                "episode": 2,
+                "title": "實戰篇",
+                "label": "EP02 實戰篇",
+                "notebook_id": "nb-1",
+                "active_attempt_id": ep2_attempt_id,
+                "output_attempt_id": ep2_attempt_id,
+                "attempts": [
+                    {
+                        "attempt_id": ep2_attempt_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "notebook_id": "nb-1",
+                        "episode": 2,
+                        "title": "實戰篇",
+                        "brief_sha256": None,
+                        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
+                        "dispatch": {"status": "accepted", "artifact_ids_before": []},
+                        "remote": {"artifact_id": "task-ep2", "status": "completed"},
+                        "finalize": p.new_finalize_state(),
+                        "errors": [],
+                    }
+                ],
+            }
+        )
+
+    ManifestStore(manifest_path).update(_inject_ep2)
+    seen = await fake_client.sources.list("nb-1")
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    gate_task = asyncio.create_task(
+        p._assert_source_cleanup_done(
+            _gate_client(seen, entered=entered, release=release),
+            ManifestStore(manifest_path),
+            "nb-1",
+            1,
+        )
+    )
+    await entered.wait()  # gate 已讀 revision R,停在 sources.list 的 await 上
+
+    def claim(manifest):
+        for row in manifest["episodes"]:
+            for candidate_attempt in row.get("attempts", []):
+                if candidate_attempt.get("attempt_id") == ep2_attempt_id:
+                    candidate_attempt["finalize"]["feedback_source_upload"][
+                        "source_id"
+                    ] = orphan
+
+    ManifestStore(manifest_path).update(claim)
+    release.set()
+
+    try:
+        await gate_task
+        raised_message = None
+    except ValueError as exc:
+        raised_message = str(exc)
+
+    if raised_message is not None:
+        assert orphan not in raised_message, (
+            "已被 EP02 合法認領的 source 不該被點名要求 source_delete"
+        )
+    # manifest 對(沒把已被認領的 source 記成待刪)—— 這是 `_settle_cleanup_state`
+    # 既有的正確行為,這支測試只補回傳訊息那一半沒被驗到的地方。
+    assert orphan not in _pending_ids(manifest_path)
+
+
 async def test_blocked_gate_does_not_bump_the_revision(fake_client, tmp_path, monkeypatch):
     """只是來查一下、什麼都沒改的路徑不准寫盤(盲審 P2)。
 
@@ -2492,6 +2718,48 @@ async def test_adopt_also_returns_both_source_delete_arguments(fake_client, tmp_
     assert adopted["stale_source_ids"] == [old_source_id]
     assert adopted["source_cleanup_obligations"] == [
         {"source_id": old_source_id, "notebook_id": "nb-1"}
+    ]
+
+
+async def test_adopt_does_not_relabel_a_preexisting_obligations_notebook(
+    fake_client, tmp_path
+):
+    """T4(P3):`_queue_pending_source_cleanup` 回 `list[str]` 丟身分,adopt 組
+    `source_cleanup_obligations` 時每筆都填「這次 adopt 的 notebook」——如果這
+    一集本來就有一筆屬於**別本** notebook 的未結案義務(例如上一次在別本筆記本
+    retract 留下的孤兒),adopt 會把它的身分改寫成這次 adopt 的 notebook,
+    `source_delete` 就會打去錯的 notebook。
+
+    修法:`source_cleanup_obligations` 改由 `_cleanup_obligations(current_episode,
+    fallback_notebook=notebook_id)` 組——每筆讀回自己實際記錄的 notebook_id,只
+    在真的沒身分(legacy 純字串)時才 fallback 到這次的 notebook_id。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+
+    def _inject_stale_obligation_from_another_notebook(manifest):
+        episode = manifest["episodes"][0]
+        episode.setdefault("pending_source_cleanup", []).append(
+            {"source_id": "S-old", "notebook_id": "nb-old"}
+        )
+
+    ManifestStore(manifest_path).update(_inject_stale_obligation_from_another_notebook)
+
+    old_source_id = before["feedback_source_id"]
+    replacement = fake_client.sources._add(before["label"], kind="media")
+
+    adopted = await p.podcast_attempt_adopt(
+        manifest_path,
+        1,
+        before["output_attempt_id"],
+        feedback_source_id=replacement,
+    )
+
+    assert set(adopted["stale_source_ids"]) == {old_source_id, "S-old"}
+    assert {"source_id": "S-old", "notebook_id": "nb-old"} in adopted[
+        "source_cleanup_obligations"
+    ], "既有義務的身分被 adopt 這次的 notebook 蓋掉了"
+    assert {"source_id": old_source_id, "notebook_id": "nb-1"} in adopted[
+        "source_cleanup_obligations"
     ]
 
 

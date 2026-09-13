@@ -381,21 +381,17 @@ def _legacy_manifest_with_adopted_source(
 async def test_legacy_source_is_not_carried_to_a_different_artifact(
     fake_client, tmp_path
 ):
-    """T4(P1,Codex 獨立審查實跑驗證;落點經第二輪迴歸測試糾正):flat v1 legacy 集
-    (只有 episode 級硬證據,沒有 attempts)可以被
-    `podcast_episode_resume(artifact_id=<不同的 artifact>)` 無審計地換掉。
+    """T2(P1 的另一半,wp-a2):flat v1 legacy 集(只有 episode 級硬證據,沒有
+    attempts)resume 到**不同**的 artifact 現在在 `_ensure_resume_attempt` 的
+    新建分支就 fail-fast——不再讓它先 rename 遠端 artifact、下載、把 mp3 上傳成
+    同名回錄 source **三個遠端副作用**都跑完,才在 `_promote_attempt_output`
+    (wp-a1 的落點,defense-in-depth 仍保留)被擋。對一個打錯 `artifact_id` 的
+    呼叫,舊行為會留下三個遠端副作用與一筆清理義務;新行為是**打錯就打錯,一個
+    副作用都不發生**。
 
-    守門**不擋在 `_ensure_resume_attempt` 的新建分支**:那正是 retract amendment
-    (2)(見 `podcast_attempt_retract` 附近的長註解——「是修復出口非授權」)刻意留的
-    修復出口,`test_series_failover.py::
-    test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted`(唯讀
-    迴歸)直接呼叫 `_ensure_resume_attempt` 驗證這條路必須放行。真正未經審計的動作
-    不是「建出候選」,是「候選未經 retract 就悄悄變成正式 output」——守門移到
-    `_promote_attempt_output`(episode 級投影欄位唯一的寫入點)。finalize 仍會照
-    常下載、上傳回錄 source(這些副作用在 retract amendment (2) 的修復流程裡本來
-    就會發生在被 retract 的候選身上),但 episode 級欄位必須維持原封不動,而且
-    這顆候選 attempt 本身仍然可以被合法 retract 掉——這才是「有出口」而不是單純
-    「欄位沒被動」。
+    resume 到**同一顆** legacy artifact 仍要繼續放行(下一支測試)——那是唯一能
+    幫這種 flat v1 episode 建出可 retract attempt 的路(retract amendment (2),
+    `legacy_audio_missing` 停點靠它)。
     """
     manifest_path = tmp_path / "series_manifest.json"
     mp3_path = tmp_path / "legacy-ep01.mp3"
@@ -421,49 +417,18 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
             manifest_path=str(manifest_path),
         )
 
-    # episode 級投影欄位一個字都沒被換掉——候選建立、finalize 都不是問題,promotion
-    # 才是唯一被攔下的動作。
+    # fail-fast:不 rename、不 download、不上傳回錄——一個遠端副作用都不該發生。
+    assert fake_client.artifacts.calls == []
+    assert fake_client.sources.calls == []
+
+    # episode 級投影欄位一個字都沒被換掉,也沒有半成品候選 attempt 留下。
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     episode = stored["episodes"][0]
     assert episode["artifact_id"] == "legacy-artifact"
     assert episode["feedback_source_id"] == old_source_id
     assert "output_attempt_id" not in episode
-
-    # 這顆候選 attempt 仍然存在、仍然可以走 retract amendment (2) 的修復出口——
-    # 「有出口」才是驗收標準,不是只驗欄位沒被動。
-    candidate_attempt_id = episode["active_attempt_id"]
-    assert candidate_attempt_id
-    candidate = next(
-        a for a in episode["attempts"] if a["attempt_id"] == candidate_attempt_id
-    )
-    assert candidate["remote"]["artifact_id"] == "replacement-artifact"
-    # finalize 真的跑完了(下載+回錄上傳),不是被擋在 promote 之前的半成品——
-    # 守門要攔的是「完整跑完之後的最後一步」,不是提早卡在下載階段。
-    assert candidate["finalize"]["download"]["status"] == "completed"
-    orphan_source_id = candidate["finalize"]["feedback_source_upload"]["source_id"]
-    assert isinstance(orphan_source_id, str) and orphan_source_id
-    assert orphan_source_id != old_source_id
-
-    retracted = await p.podcast_attempt_retract(
-        manifest_path=str(manifest_path),
-        episode_n=1,
-        attempt_id=candidate_attempt_id,
-        reason="接錯 artifact,作廢重灌",
-    )
-
-    assert retracted["observed_state"] == "retracted"
-    assert old_source_id in retracted.get("stale_source_ids", [])
-    # 修復出口不能只清掉舊 source——finalize 期間新上傳、從沒被任何人認領過的那筆
-    # 回錄 source(孤兒)也要一起進清理義務,否則它會永遠留在雲端沒人記得。
-    assert orphan_source_id in retracted.get("stale_source_ids", [])
-    # legacy 硬證據跟著一起清掉——不清掉,重生時 has_hard_output_evidence 會擋出
-    # 另一個死路(與 test_series_failover.py 那支唯讀迴歸的驗收標準一致)。
-    stored_after_retract = json.loads(manifest_path.read_text(encoding="utf-8"))
-    episode_after_retract = stored_after_retract["episodes"][0]
-    assert "artifact_id" not in episode_after_retract
-    assert "mp3_path" not in episode_after_retract
-    assert "output_attempt_id" not in episode_after_retract
-    assert "active_attempt_id" not in episode_after_retract
+    assert "active_attempt_id" not in episode
+    assert episode.get("attempts", []) == []
 
 
 async def test_legacy_output_resume_to_the_same_artifact_still_succeeds(

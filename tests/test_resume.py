@@ -83,3 +83,25 @@ async def test_series_rejects_invalid_start(fake_client, tmp_path):
         await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=2)
     # No generation happened for either invalid start.
     assert fake_client.artifacts.calls == []
+
+
+@pytest.mark.parametrize("bad_wait_timeout", [float("nan"), 0, -5])
+async def test_podcast_episode_resume_rejects_an_unsafe_wait_timeout(
+    fake_client, tmp_path, bad_wait_timeout
+):
+    """T7:`podcast_episode_resume` 是四個吃 `wait_timeout` 的公開入口裡唯一沒過
+    `_validate_wait_timeout` 的——`nan` 存進 `dispatch["wait_timeout"]` 後,
+    `timedelta(seconds=nan)` 會在往後**每一次**對帳時炸掉,那顆 attempt 永久對帳
+    不了;`0`/負數則直流 `wait_for_completion` 永不逾時。壞參數必須在任何遠端
+    副作用之前秒退。
+    """
+    with pytest.raises(ValueError, match="wait_timeout must be a finite number greater than zero"):
+        await p.podcast_episode_resume(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            artifact_id="art-1",
+            output_dir=str(tmp_path),
+            wait_timeout=bad_wait_timeout,
+        )
+    assert fake_client.artifacts.calls == []
