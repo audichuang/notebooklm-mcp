@@ -12,6 +12,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SKILL_SRC="${NBLM_SKILL_DIR:-$HOME/research/audi-skill/notebooklm}"
 WORK="${NBLM_EVAL_WORK:-${TMPDIR:-/tmp}/nblm-eval}"
+mkdir -p "$WORK"
 
 ARM="$1"; ID="$2"; PROMPT="$3"; N="${4:-1}"
 
@@ -19,17 +20,27 @@ if [ "$ARM" = "new" ]; then
   SRC="$REPO_ROOT"; SKILL="$SKILL_SRC"
 else
   SRC="$WORK/worktree-$ARM"
-  [ -d "$SRC" ] || git -C "$REPO_ROOT" worktree add -q --detach "$SRC" "$ARM" || exit 1
+  # README 推薦一次跑「兩臂 x n 次 x 全部 id」平行(見 README「三個坑」第四條):同一個
+  # $ARM 的所有平行呼叫都搶同一個 $SRC,`[ -d ] || git worktree add` 沒有互斥就是
+  # 9 個併發全撞 `fatal: already exists` → exit 1 → 9 個樣本消失。flock 序列化這一段,
+  # 鎖內再檢查一次(冪等):第一個贏家建好之後,其餘拿到鎖的都會看到 -d 已成立而跳過。
+  (
+    flock -x 200
+    [ -d "$SRC" ] || git -C "$REPO_ROOT" worktree add -q --detach "$SRC" "$ARM"
+  ) 200>"$WORK/worktree-$ARM.lock" || exit 1
   SKILL="$SKILL_SRC"   # 要比舊版 skill 就自己開 audi-skill 的 worktree 再用 NBLM_SKILL_DIR 指過來
 fi
 
 OUT="$WORK/results/$ARM"; mkdir -p "$OUT"
 # 🔴 受測 box 只放 SKILL.md 與 references/,**跳過 evals/** —— 那裡面就是題目與評分標準,
 #    整包連進來等於把答案發給受測者(v0.9.26 踩過)。cwd 也必須是空目錄。
+# 用 cp -r 而不是 symlink:受測 agent 帶 `--dangerously-skip-permissions`,對 box 裡
+# 任何一個檔案的寫入都是真的寫入 —— symlink 直通活的 skill working tree,實測 agent
+# 把答案「順手」寫回 SKILL.md,蓋掉正式檔案且 `rm -rf box` 救不回。複製一份是一次性成本。
 BOX="$WORK/box/$ARM-$ID-$N"; rm -rf "$BOX"; mkdir -p "$BOX/.claude/skills/notebooklm"
 for entry in "$SKILL"/*; do
   b="$(basename "$entry")"; [ "$b" = "evals" ] && continue
-  ln -sfn "$entry" "$BOX/.claude/skills/notebooklm/$b"
+  cp -r "$entry" "$BOX/.claude/skills/notebooklm/$b"
 done
 
 LOG="$OUT/$ID-$N.calls.jsonl"; : > "$LOG"

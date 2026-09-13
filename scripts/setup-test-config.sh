@@ -10,6 +10,7 @@
 # 用法:
 #   bash scripts/setup-test-config.sh              # 預設寫進 notebooklm/stg
 #   bash scripts/setup-test-config.sh --config qa  # 換一個 config 名字
+#   bash scripts/setup-test-config.sh --from dev2  # 換一個複製 NAS 連線資訊的來源 config(預設 dev)
 #
 # 冪等:重跑只會覆寫同樣的值;PODCAST_TOKEN_SALT 只在「尚未設定」時才產生,
 # 不會每次重跑都換掉(換 salt = 所有測試 feed 的 URL 全變)。
@@ -24,7 +25,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --config) TARGET_CONFIG="$2"; shift 2 ;;
     --from)   SOURCE_CONFIG="$2"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    # 動態印「開頭那整段註解」,不寫死行號(sync-auth.sh 已驗證的寫法)——舊寫法
+    # `sed -n '2,20p'` 會腐化:補幾行說明就會把範圍推出去,連程式碼一起印出來
+    # (實測跑到 :27 這行本身連同後面幾行 code 都被印出)。
+    -h|--help) awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *) echo "❌ 未知參數:$1"; exit 2 ;;
   esac
 done

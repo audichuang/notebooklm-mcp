@@ -161,8 +161,18 @@ def _stale_terms(path: Path, terms: tuple[str, ...]) -> list[str]:
     return [term for term in terms if term in text]
 
 
-async def main() -> int:
-    missing_files = [path for path in (SKILL_MD, TOOL_REFERENCE) if not path.exists()]
+async def main(
+    skill_md: Path | None = None, tool_reference: Path | None = None
+) -> int:
+    """跑 sync check;預設值不變(讀模組層算好的 SKILL_DIR)。
+
+    `skill_md` / `tool_reference` 只給測試用:餵假路徑進來驗證 missing-file /
+    missing-term 分支,不用真的改動 audi-skill 那份文件。
+    """
+    skill_md = skill_md if skill_md is not None else SKILL_MD
+    tool_reference = tool_reference if tool_reference is not None else TOOL_REFERENCE
+
+    missing_files = [path for path in (skill_md, tool_reference) if not path.exists()]
     if missing_files:
         for path in missing_files:
             print(f"missing skill file: {path}")
@@ -170,14 +180,14 @@ async def main() -> int:
 
     names = await _tool_names()
     failures: list[str] = []
-    for path in (SKILL_MD, TOOL_REFERENCE):
+    for path in (skill_md, tool_reference):
         missing = _missing(names, path)
         if missing:
             failures.append(f"{path}: missing {', '.join(missing)}")
 
     for path, terms in (
-        (TOOL_REFERENCE, REQUIRED_CONTRACT_TERMS),
-        (SKILL_MD, SKILL_MD_REQUIRED_TERMS),
+        (tool_reference, REQUIRED_CONTRACT_TERMS),
+        (skill_md, SKILL_MD_REQUIRED_TERMS),
     ):
         missing_terms = _missing_terms(path, terms)
         if missing_terms:
@@ -185,7 +195,7 @@ async def main() -> int:
                 f"{path}: missing contract term(s) {', '.join(missing_terms)}"
             )
 
-    for path in (SKILL_MD, TOOL_REFERENCE):
+    for path in (skill_md, tool_reference):
         stale = _stale_terms(path, REMOVED_CONTRACT_TERMS)
         if stale:
             failures.append(

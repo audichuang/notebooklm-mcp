@@ -31,3 +31,9 @@ v0.9.26 的實跑紀錄與結論見 [`../../docs/acceptance-v0.9.26-eval.md`](..
 2. **受測目錄裡不能有答案** —— `evals/` 不可連進 box(`run.sh` 已跳過),cwd 要是空目錄。
 3. **stub 不轉發 protocol 層 instructions** —— 所以這套**量不到 `_INSTRUCTIONS` 的效果**,
    別拿分數替它背書。
+4. **冷啟動平行 → worktree 競態掉樣本** —— 上面「兩臂各跑兩次」那段對同一個 `arm` 平行
+   丟進所有 `id`,而它們共用同一個 `$SRC`(`$WORK/worktree-$ARM`)。worktree 目錄還不存在
+   時,`[ -d ] || git worktree add` 沒有互斥:10 個併發只有 1 個建得成,其餘 9 個撞
+   `fatal: already exists` 直接 `exit 1`,那個臂的樣本數就少了 9 個。`run.sh` 已用
+   `flock` 序列化這一段;`grade.py` 印各臂樣本數(`n=`)並在兩臂 id 集合不同時警告 ——
+   但**先跑過一次讓 worktree 建好**(或確認 `n` 對齊)再信通過率,不然分數不可比較。

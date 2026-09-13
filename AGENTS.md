@@ -97,10 +97,10 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 |---|---|
 | research 三支工具 | [docs/gotchas-research.md](docs/gotchas-research.md) |
 | 發布 / 附件 / 封面 | [docs/gotchas-publish.md](docs/gotchas-publish.md) |
-| 多帳號 pool 的憑證 / lifespan / dispatch | [docs/gotchas-pool.md](docs/gotchas-pool.md) |
+| 多帳號 pool 的憑證 / lifespan / dispatch(`_cookies.py`) | [docs/gotchas-pool.md](docs/gotchas-pool.md) |
 | 直接呼叫 notebooklm-py(含文字/來源/probe 的行為差異) | [docs/gotchas-sdk.md](docs/gotchas-sdk.md) |
-| attempt 狀態機 / manifest / 清理義務 | [docs/gotchas-attempt.md](docs/gotchas-attempt.md) |
-| 寫檔 / 上傳來源 | [docs/gotchas-files.md](docs/gotchas-files.md) |
+| attempt 狀態機 / manifest / 清理義務(`manifest_store.py` / `audio_finalize.py`) | [docs/gotchas-attempt.md](docs/gotchas-attempt.md) |
+| 寫檔 / 上傳來源(`audio_finalize.py`) | [docs/gotchas-files.md](docs/gotchas-files.md) |
 
 ## Conventions
 

@@ -239,8 +239,17 @@ def _validate(manifest: Any, path: Path, *, on_write: bool = False) -> None:
                 raise ValueError(
                     f"manifest is corrupt: {pointer} does not reference this episode: {path}"
                 )
-            # 寫入時的最後一道背壩:任何 writer(含手改)把指標指回已作廢的 attempt
-            # 就是把被拒收的輸出復活,寧可讓那次寫入失敗。
+            # 這條檢查沒有掛 `on_write`:`read()` 也會經過 `_validate`,所以讀取端一樣會炸。
+            # 這是刻意的,不是漏寫 —— 正常流程(retract / tombstone / pop)保證指標與
+            # retraction 同一個 commit 落地,不會產生「指標指向 tombstone」這種形狀
+            # (git log -S 對三個關鍵字的搜尋只命中同一個 commit),唯一能造出這種形狀
+            # 的是手改 JSON,而它是手改的**唯一**守門 —— 讀寫兩端都驗,寧可連讀都炸,
+            # 也不要把被拒收的輸出讀出來當正常資料用。
+            # ⚠️ 若之後真要收窄成 on_write-only:今天擋 retracted 集上 feed 的其實是
+            # `tools_publish.py` 的 pop 與 `_mp3_provenance_gap` 這兩處,**不是**這裡
+            # (它們都不讀 `retraction` 欄位)——收窄的同一個 commit 必須先在
+            # `tools_publish._mp3_provenance_gap` 補上 `retraction` 判斷,否則手改的
+            # manifest 會被它撈到 tombstone、sha 卻相符,照樣放行上 feed。
             if value in retracted_ids:
                 raise ValueError(
                     f"manifest is corrupt: {pointer} points at retracted attempt {value}: {path}"

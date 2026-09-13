@@ -168,36 +168,92 @@ def test_schema_version_boolean_is_rejected(target, tmp_path):
         )
 
 
-def test_bundle_directory_swap_cannot_redirect_frozen_reads(tmp_path):
+def test_bytes_record_boolean_is_rejected_even_for_a_one_byte_brief(tmp_path):
+    """`isinstance(x, int)` 對 `bool` 也成立,`record["bytes"] = True` 原本只有在 brief
+    剛好 1 byte 時才會巧合通過(`len(data) == True` 因為 `True == 1`),另兩個成員必為
+    合法 JSON、不可能只有 1 byte,所以只有這一種形狀踩得到。改用 `type(x) is not int`
+    (與 schema_version 同慣用法)之後,不論長度都要拒。"""
     manifest = tmp_path / "manifest" / "series_manifest.json"
-    bundle, trusted_brief = _write_bundle(tmp_path, brief="trusted inside\n")
+    bundle, _ = _write_bundle(tmp_path, brief="x")
+    request_path = bundle / "generation-request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["files"]["runtime_brief"]["bytes"] == 1
+    request["files"]["runtime_brief"]["bytes"] = True
+    request_path.write_text(
+        json.dumps(request, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="record is invalid"):
+        load_frozen_generation_input(
+            manifest_path=manifest,
+            input_bundle_path=bundle.relative_to(tmp_path),
+            episode_n=1,
+        )
+
+
+def test_bundle_directory_swap_cannot_redirect_frozen_reads(tmp_path):
+    """目錄在讀取途中被搬走、原地換成指到別處的 symlink:loader 全程用 fd(`os.open`/
+    `os.fstat`/`os.read`),`Path.is_dir` 從沒被呼叫過——舊寫法 patch 那裡等於沒掛上換手,
+    `except ValueError: return` 又讓「沒換手也沒拒絕」照樣算過,是個恆真的 tripwire。
+    改掛 loader 真的會呼叫的第一個點:`_read_frozen_bundle_files` 釘住目錄 inode 那次
+    `os.fstat`——換手發生在「已經拿到 fd」之後,證明後續讀取走的是釘住的舊目錄
+    (拿不到攻擊者的內容),而後面比對路徑當前 inode 的最終檢查必須抓到並拒絕。"""
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, _ = _write_bundle(tmp_path, brief="trusted inside\n")
     outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
     outside_root.mkdir()
     outside_bundle, _ = _write_bundle(outside_root, brief="attacker outside\n")
     held = tmp_path / "held-original"
-    original_is_dir = Path.is_dir
+    real_fstat = os.fstat
     swapped = False
 
-    def swap_after_check(path):
+    def swap_after_pin(fd):
         nonlocal swapped
-        result = original_is_dir(path)
-        if path == bundle and not swapped:
+        result = real_fstat(fd)
+        if not swapped:
             swapped = True
             bundle.rename(held)
             bundle.symlink_to(outside_bundle, target_is_directory=True)
         return result
 
     try:
-        with patch.object(Path, "is_dir", swap_after_check):
-            try:
-                prepared = load_frozen_generation_input(
+        with patch("notebooklm_mcp.generation_input.os.fstat", side_effect=swap_after_pin):
+            with pytest.raises(ValueError, match="changed or became a symlink"):
+                load_frozen_generation_input(
                     manifest_path=manifest,
                     input_bundle_path=bundle.relative_to(tmp_path),
                     episode_n=1,
                 )
-            except ValueError:
-                return
-        assert prepared["brief"] == trusted_brief
+    finally:
+        shutil.rmtree(outside_root, ignore_errors=True)
+
+
+def test_sidecar_reverifies_bundle_containment_before_writing_or_reading(tmp_path):
+    """load 到 sidecar 落筆之間隔著 probe_auth + 三趟遠端 RPC,是秒級視窗——bundle 目錄
+    如果在這段期間被搬走、換成指向別處的 symlink,write_attempt_binding /
+    read_attempt_binding 都必須在動筆(或讀回既有綁定)前就擋下,不能把 binding 綁進
+    一顆已經不是當初 load 那顆的目錄(見 _reverify_bundle_containment)。"""
+    from notebooklm_mcp.generation_input import read_attempt_binding, write_attempt_binding
+
+    manifest = tmp_path / "manifest" / "series_manifest.json"
+    bundle, _ = _write_bundle(tmp_path)
+    prepared = load_frozen_generation_input(
+        manifest_path=manifest,
+        input_bundle_path=bundle.relative_to(tmp_path),
+        episode_n=1,
+    )
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_root.mkdir()
+    outside_bundle, _ = _write_bundle(outside_root)
+    held = tmp_path / "held-original"
+    try:
+        bundle.rename(held)
+        bundle.symlink_to(outside_bundle, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="changed or became a symlink"):
+            write_attempt_binding(prepared, attempt_id="a1")
+        with pytest.raises(ValueError, match="changed or became a symlink"):
+            read_attempt_binding(prepared)
     finally:
         shutil.rmtree(outside_root, ignore_errors=True)
 
@@ -761,8 +817,12 @@ async def test_rebinding_the_same_bundle_reuses_the_attempt(fake_client, tmp_pat
 def _prepared(tmp_path):
     bundle = tmp_path / "bundle"
     bundle.mkdir()
+    stat_result = os.lstat(bundle)
     return {
         "bundle": bundle,
+        # write/read_attempt_binding 開頭都會重驗這個(見 _reverify_bundle_containment);
+        # 這裡就是 load_frozen_generation_input 真的會塞的同一個 (st_dev, st_ino) 形狀。
+        "bundle_inode": (stat_result.st_dev, stat_result.st_ino),
         "episode_id": "ep01",
         # binding 的 bound_at 不得早於 request 的 frozen_at,所以 helper 得給一個過去的
         # 凍結時刻(load_frozen_generation_input 也是這樣把它塞進 prepared 的)。
@@ -892,18 +952,26 @@ def test_post_publish_temp_cleanup_failure_keeps_the_binding(tmp_path, monkeypat
 # brief 燒配額。目錄深度不是安全邊界,所以圍籬改由 host 宣告;推不出唯一節目時 fail-closed。
 
 
-def _multi_show_container(tmp_path):
+def _multi_show_container(tmp_path, *, hidden=False):
     shows = tmp_path / "shows"
     (shows / "graphify").mkdir(parents=True)
-    (shows / "audicast" / "output").mkdir(parents=True)
-    (shows / "audicast" / "output" / "series_manifest.json").write_text("{}", encoding="utf-8")
+    # hidden=True:sibling manifest 搬進隱藏目錄(退役節目常見形狀是「搬進看不見的
+    # 資料夾」,不是刪掉——一次 `mv shows/old shows/.old` 就是這裡)。
+    sibling_show = ".archive/audicast" if hidden else "audicast"
+    (shows / sibling_show / "output").mkdir(parents=True)
+    (shows / sibling_show / "output" / "series_manifest.json").write_text(
+        "{}", encoding="utf-8"
+    )
     return shows
 
 
-def test_multi_show_container_is_refused_without_workspace_root(tmp_path):
+@pytest.mark.parametrize("hidden", [False, True])
+def test_multi_show_container_is_refused_without_workspace_root(tmp_path, hidden):
     """祖父目錄裡還有別的 series_manifest.json = 多節目容器 → 沒宣告 workspace_root 就拒,
-    而且要在讀任何 bundle bytes 之前拒(別節目的 bundle 路徑合法、檔案都在,靠圍籬才擋得住)。"""
-    shows = _multi_show_container(tmp_path)
+    而且要在讀任何 bundle bytes 之前拒(別節目的 bundle 路徑合法、檔案都在,靠圍籬才擋得住)。
+    隱藏目錄(如 `.archive/`)裡的 sibling manifest 一樣要被抓到——曾經被跳過,等於幫
+    `base/showA/…` + `base/.archive/showB/series_manifest.json` 這種佈局開一個後門。"""
+    shows = _multi_show_container(tmp_path, hidden=hidden)
     foreign, _ = _write_bundle(shows / "audicast")
 
     with pytest.raises(ValueError, match="workspace_root"):

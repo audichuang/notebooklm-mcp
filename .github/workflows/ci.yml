@@ -28,7 +28,9 @@ jobs:
         run: uv python install 3.12
 
       - name: Install project
-        run: uv sync --extra dev
+        # --locked:lock 與 pyproject 不自洽就直接紅,而不是靜默重算 lock 再放行
+        # (v0.9.23 tag 樹曾經 pyproject 0.9.23 / lock 0.9.21 卻 CI 全綠)。
+        run: uv sync --locked --extra dev
 
       - name: Run pytest
         run: uv run pytest -q
