@@ -366,6 +366,14 @@ def _attempt_capabilities(
     feedback_upload_status = (
         attempt.get("finalize", {}).get("feedback_source_upload", {})
     ).get("status")
+    # T1:候選一律來自 `unresolved_upload`(`_reconcile_source_upload` 寫入的同一份
+    # checkpoint),非空即代表狀態是 `reconciliation_ambiguous`(該函式把「有候選」與
+    # 「狀態設成 ambiguous」綁在同一次 mutate 裡,兩者不會分岔)。
+    feedback_upload_candidates = (
+        list(unresolved_upload.get("candidate_source_ids") or [])
+        if unresolved_upload is not None
+        else []
+    )
 
     never_dispatched = dispatch_status in _NEVER_DISPATCHED
     remote_terminal = remote_status in _TERMINAL_REMOTE
@@ -492,11 +500,20 @@ def _attempt_capabilities(
         # 歷史紀錄那格必須先判(上一個分支):一顆已被取代的 attempt 就算 upload 卡在
         # unresolved,能動的也不是它——教人 resume 一顆歷史 attempt 會被 output guard
         # 擋掉,又是一句「在它自己產生的狀態下不可執行」的指引。
-        safe_next_action = (
-            ACTION_RESUME
-            if can_resume
-            else ACTION_RECONCILE if can_reconcile else None
-        )
+        #
+        # T1(第十三次現形):`reconciliation_ambiguous` 且候選非空時,resume 對同兩個
+        # 候選只會再拋一次同一個 ambiguous(`_reconcile_source_upload` 重新算出一模一樣
+        # 的 candidates),零前進——候選是 server 對帳算出來、呼叫端無法重建的身分,
+        # 下一步是明確擇一 `podcast_attempt_adopt`,不是繼續 resume/reconcile 撞牆。
+        # 候選為空(還沒撈到、或已經對帳成單一 id 落盤)時維持原判準。
+        if feedback_upload_candidates:
+            safe_next_action = ACTION_ADOPT
+        else:
+            safe_next_action = (
+                ACTION_RESUME
+                if can_resume
+                else ACTION_RECONCILE if can_reconcile else None
+            )
     elif is_output:
         safe_next_action = ACTION_RETRACT
     elif basis == "output_owner":
@@ -553,6 +570,10 @@ def _attempt_capabilities(
         "needs_abandon_flag": basis is None and is_active,
         "feedback_upload_unresolved": feedback_upload_unresolved,
         "feedback_upload_status": feedback_upload_status,
+        # T1(紅線⑫):`ACTION_ADOPT` 認的身分是候選 source id,不是 attempt_id/
+        # artifact_id——`_safe_next_target` 那組欄位裝不下它,所以另開一個永遠存在的
+        # 欄位(空清單 = 沒有候選要選),呼叫端不必去猜也不必翻 manifest。
+        "candidate_source_ids": feedback_upload_candidates,
         "can_resend": can_resend,
         "can_resume": can_resume,
         "can_reconcile": can_reconcile,
@@ -721,11 +742,19 @@ def _attempt_next_step(caps: dict) -> str:
         # 只是把「先續完」排在前面:遠端可能已經多出一筆 media,續完是唯一能把它的
         # 身分認回來的路;真要作廢就照 `_retract_hint()` 走旗標,義務會留在 tombstone。
         action = caps["safe_next_action"]
-        recovery = (
-            f"原呼叫中斷的話用 {action} 接續,它會把那筆 source 的身分對回來。"
-            if action is not None
-            else "先讓目前的 finalize 結案。"
-        )
+        if action == ACTION_ADOPT:
+            # T1:候選已經是 server 對帳算出來的具體 id(`caps["candidate_source_ids"]`),
+            # 「resume 會把身分對回來」這句話在這裡是假的——resume 對同兩個候選只會
+            # 再拋一次同一個 reconciliation_ambiguous,零前進。改教明確擇一。
+            recovery = (
+                f"候選在 candidate_source_ids(逐字是 {caps['candidate_source_ids']!r}),"
+                f"用 {ACTION_ADOPT} 擇一綁定——resume 對同樣的候選只會再拋一次同一個 "
+                "reconciliation_ambiguous,零前進。"
+            )
+        elif action is not None:
+            recovery = f"原呼叫中斷的話用 {action} 接續,它會把那筆 source 的身分對回來。"
+        else:
+            recovery = "先讓目前的 finalize 結案。"
         return (
             f"回錄 source 已經送出但 source_id 還沒落盤(upload 停在 "
             f"{caps['feedback_upload_status']!r}):" + recovery + _retract_hint(caps)
@@ -4963,20 +4992,34 @@ async def podcast_series(
                     )
                 except _TRANSIENT_TRANSPORT_ERRORS:
                     current = store.read()
-                    _, stopped_attempt = _attempt_record(
+                    current_episode, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
                     )
                     upload_state = stopped_attempt.get("finalize", {}).get(
                         "feedback_source_upload", {}
                     ).get("status")
-                    observed = (
-                        upload_state
-                        if upload_state in (
-                            "acceptance_unknown",
-                            "reconciliation_ambiguous",
+                    # T1:三種 unresolved upload 狀態一律走 caps(單一事實來源),不再
+                    # 各自手寫 ACTION_SERIES——`acceptance_unknown` 之前寫死 series,
+                    # 但 caps 算出的 resume 才是這個狀態真正走得通的路(can_resume 為
+                    # 真,續完 finalize 不必整季重跑);`reconciliation_ambiguous`
+                    # 之前不帶候選,現在由 caps 一併帶出。remote_status 的 fallback
+                    # (這三種以外的狀態)維持原樣,不擴大改動範圍。
+                    if upload_state in (
+                        "acceptance_unknown",
+                        "reconciliation_ambiguous",
+                    ):
+                        caps = _attempt_capabilities(
+                            current_episode, stopped_attempt, active_attempt_id
                         )
-                        else stopped_attempt["remote"]["status"]
-                    )
+                        return partial(
+                            episode_n,
+                            active_attempt_id,
+                            upload_state,
+                            caps["safe_next_action"],
+                            candidate_source_ids=caps["candidate_source_ids"],
+                            next_step=_attempt_next_step(caps),
+                        )
+                    observed = stopped_attempt["remote"]["status"]
                     return partial(
                         episode_n,
                         active_attempt_id,
@@ -4985,45 +5028,29 @@ async def podcast_series(
                     )
                 except RuntimeError:
                     current = store.read()
-                    _, stopped_attempt = _attempt_record(
+                    current_episode, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
                     )
-                    upload = stopped_attempt.get("finalize", {}).get(
+                    upload_state = stopped_attempt.get("finalize", {}).get(
                         "feedback_source_upload", {}
-                    )
-                    upload_state = upload.get("status")
+                    ).get("status")
+                    # T1:刪掉手寫的 `ACTION_ADOPT if ambiguous else ACTION_SERIES`
+                    # ——中央 caps 現在就會給正確答案(ambiguous+候選非空 → adopt,
+                    # 且候選 / next_step 都由 caps 一併帶出),不必在呼叫點另組一份。
                     if upload_state in (
                         "acceptance_unknown",
                         "reconciliation_ambiguous",
                     ):
-                        action = (
-                            ACTION_ADOPT
-                            if upload_state == "reconciliation_ambiguous"
-                            else ACTION_SERIES
-                        )
-                        # P1(Codex 獨立審查實跑驗證,同一根因第十二次現形):action 是
-                        # `podcast_attempt_adopt` 時,那支工具必填 `feedback_source_id`
-                        # 或 `artifact_id`(見它的 docstring「provide exactly one」)——
-                        # 只回動作名沒有候選身分,呼叫端讀公開回傳完全執行不了這句指引。
-                        # 候選清單本來就存在 manifest 的
-                        # `finalize.feedback_source_upload.candidate_source_ids`
-                        # （`_reconcile_source_upload` 寫入），跟 `candidate_artifact_ids`
-                        # 是同一個家族，一併帶出。
-                        extra = (
-                            {
-                                "candidate_source_ids": upload.get(
-                                    "candidate_source_ids", []
-                                )
-                            }
-                            if upload_state == "reconciliation_ambiguous"
-                            else {}
+                        caps = _attempt_capabilities(
+                            current_episode, stopped_attempt, active_attempt_id
                         )
                         return partial(
                             episode_n,
                             active_attempt_id,
                             upload_state,
-                            action,
-                            **extra,
+                            caps["safe_next_action"],
+                            candidate_source_ids=caps["candidate_source_ids"],
+                            next_step=_attempt_next_step(caps),
                         )
                     raise
                 _promote_attempt_output(
@@ -5109,34 +5136,34 @@ async def podcast_series(
         except _TRANSIENT_TRANSPORT_ERRORS:
             current = store.read()
             attempt_id = _active_attempt_or_reraise(current, episode_n)
-            _, stopped_attempt = _attempt_record(
+            current_episode, stopped_attempt = _attempt_record(
                 current, episode_n, attempt_id
             )
             if stopped_attempt["remote"].get("artifact_id") is None:
+                # 這一格是「artifact 都還沒接受」——與回錄 source 上傳無關,維持原判準。
                 observed = stopped_attempt["dispatch"]["status"]
-            else:
-                upload_state = stopped_attempt.get("finalize", {}).get(
-                    "feedback_source_upload", {}
-                ).get("status")
-                observed = (
-                    upload_state
-                    if upload_state in (
-                        "acceptance_unknown",
-                        "reconciliation_ambiguous",
-                    )
-                    else stopped_attempt["remote"]["status"]
+                needs_artifact_reconcile = observed == "acceptance_unknown"
+                action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
+                return partial(episode_n, attempt_id, observed, action)
+            upload_state = stopped_attempt.get("finalize", {}).get(
+                "feedback_source_upload", {}
+            ).get("status")
+            # T1:回錄 source 上傳卡在這三種 unresolved 狀態時走 caps,理由與上面
+            # active-attempt 分支那兩個 handler 相同(單一事實來源、候選一併帶出)。
+            if upload_state in ("acceptance_unknown", "reconciliation_ambiguous"):
+                caps = _attempt_capabilities(
+                    current_episode, stopped_attempt, attempt_id
                 )
-            needs_artifact_reconcile = (
-                stopped_attempt["remote"].get("artifact_id") is None
-                and observed == "acceptance_unknown"
-            )
-            action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
-            return partial(
-                episode_n,
-                attempt_id,
-                observed,
-                action,
-            )
+                return partial(
+                    episode_n,
+                    attempt_id,
+                    upload_state,
+                    caps["safe_next_action"],
+                    candidate_source_ids=caps["candidate_source_ids"],
+                    next_step=_attempt_next_step(caps),
+                )
+            observed = stopped_attempt["remote"]["status"]
+            return partial(episode_n, attempt_id, observed, ACTION_SERIES)
         run_results.append(result)
 
     return {

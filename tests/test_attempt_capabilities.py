@@ -163,22 +163,37 @@ def test_unresolved_feedback_upload_prefers_resume_but_never_blocks_retract(stat
 
     現在的處置:優先建議 resume(那是唯一能把 source 身分認回來的路),但顯式旗標
     穿得過去,義務改由 tombstone 上的 `source_cleanup_unresolved` 接手。
+
+    **T1(第十三次現形)**:`reconciliation_ambiguous` 是這三種狀態裡的例外——它已經
+    帶著 server 對帳算出來的具體候選(`candidate_source_ids`),resume 對同兩個候選
+    只會再拋一次同一個 ambiguous,零前進,所以這一格改教 `podcast_attempt_adopt`。
+    這支測試舊版對三種狀態餵同一份 fixture(`candidate_source_ids` 一律空),於是
+    ambiguous 那格鎖的答案(resume)其實是「問錯問題的 tripwire」——候選從未真的
+    存在過,fixture 造不出真實狀態就永遠綠。這裡改成 ambiguous 時真的填候選。
     """
     episode, attempt = _case("accepted", "completed", "active", "series")
-    attempt["finalize"] = {
-        "feedback_source_upload": {"status": status, "source_id": None}
-    }
+    upload = {"status": status, "source_id": None}
+    if status == "reconciliation_ambiguous":
+        upload["candidate_source_ids"] = ["src-a", "src-b"]
+    attempt["finalize"] = {"feedback_source_upload": upload}
 
     caps = p._attempt_capabilities(episode, attempt, "att-me")
 
     assert caps["feedback_upload_unresolved"] is True
     assert caps["feedback_upload_status"] == status
-    assert caps["safe_next_action"] == p.ACTION_RESUME
-    # 旗標出口必須還在 —— 這一條就是 F2 的回歸鎖。
-    assert caps["needs_abandon_flag"] is True
     step = p._attempt_next_step(caps)
+    if status == "reconciliation_ambiguous":
+        assert caps["safe_next_action"] == p.ACTION_ADOPT
+        assert caps["candidate_source_ids"] == ["src-a", "src-b"]
+        assert p.ACTION_ADOPT in step
+        assert "src-a" in step and "src-b" in step
+    else:
+        assert caps["safe_next_action"] == p.ACTION_RESUME
+        assert caps["candidate_source_ids"] == []
+        assert p.ACTION_RESUME in step
     assert "source_id 還沒落盤" in step
-    assert p.ACTION_RESUME in step
+    # 旗標出口必須還在 —— 這一條就是 F2 的回歸鎖,對三種狀態都成立。
+    assert caps["needs_abandon_flag"] is True
     assert "abandon_in_flight=true" in step
 
     # source_id 一落盤就不再 unresolved,回到既有的 stale_source_ids 路徑。

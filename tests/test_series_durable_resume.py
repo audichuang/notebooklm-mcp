@@ -542,3 +542,79 @@ async def test_series_raised_rate_limit_stops_as_not_accepted(fake_client, tmp_p
     attempt = stored["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "not_accepted"
     assert "每日配額已用盡" in attempt["remote"]["error"]
+
+
+async def test_new_episode_transient_error_during_unresolved_upload_directs_via_caps(
+    fake_client, tmp_path
+):
+    """T1:全新一集第一次 dispatch 時,回錄 source 上傳卡在 acceptance_unknown,途中又
+    撞 transient transport error——series 的「brand-new episode」分支那個
+    `_TRANSIENT_TRANSPORT_ERRORS` handler過去無條件回 `ACTION_SERIES`(整季重跑),
+    現在改走 caps:can_resume 為真時該教 `podcast_episode_resume` 續完 finalize,不是
+    重跑整季(V-A2 R2-P2b)。"""
+    fake_client.sources.add_file_exc_after_create = ConnectionError(
+        "network blip during feedback source upload"
+    )
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is False
+    assert out["observed_state"] == "acceptance_unknown"
+    assert out["safe_next_action"] == "podcast_episode_resume"
+    assert "next_step" in out
+    assert out["candidate_source_ids"] == []
+
+
+async def test_series_transient_error_during_ambiguous_reconciliation_directs_via_caps(
+    fake_client, tmp_path, monkeypatch
+):
+    """T1:已經停在 `reconciliation_ambiguous` 的 attempt,series 續跑時
+    `sources.list` 撞 transient transport error——active-attempt 分支的
+    `_TRANSIENT_TRANSPORT_ERRORS` handler 過去無條件回 `ACTION_SERIES` 且不帶候選,
+    現在改走 caps,答案與(不撞 transient error 時)`except RuntimeError:` 那格一致:
+    都是 `podcast_attempt_adopt` + 候選。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.add_file_exc_after_create = TimeoutError(
+        "upload response lost"
+    )
+    with pytest.raises(TimeoutError, match="upload response lost"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+    fake_client.sources.add_file_exc_after_create = None
+    fake_client.sources._add("ep01.mp3", kind="media")
+
+    stopped = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+    assert stopped["observed_state"] == "reconciliation_ambiguous"
+    candidates = stopped["candidate_source_ids"]
+    assert len(candidates) == 2
+
+    async def transport_failure(_notebook_id):
+        raise ConnectionError("network blip during reconciliation")
+
+    monkeypatch.setattr(fake_client.sources, "list", transport_failure)
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is False
+    assert out["observed_state"] == "reconciliation_ambiguous"
+    assert out["safe_next_action"] == "podcast_attempt_adopt"
+    assert out["candidate_source_ids"] == candidates
+    assert "next_step" in out
