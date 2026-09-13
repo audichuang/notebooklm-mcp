@@ -198,8 +198,13 @@ async def test_source_add_file_fails_loud_when_title_does_not_land(fake_client, 
         await t.source_add_file("nb-123", str(f), title="EP03 進階篇")
 
 
-async def test_artifact_rename_is_fire_and_forget(fake_client):
-    """artifact_rename 工具同樣必須顯式 return_object=False。"""
+async def test_artifact_rename_asks_for_no_object(fake_client):
+    """artifact_rename 工具同樣必須顯式 return_object=False。
+
+    改名(原 test_artifact_rename_is_fire_and_forget):0.8.0 起
+    return_object=False **不再是**fire-and-forget(#1362,兩種模式都做存在性檢查,
+    查不到就 raise)——名字講的是這件事現在不成立,斷言本身沒變(仍是驗
+    return_object 有沒有傳 False)。"""
     fake_client.artifacts.seed_artifact("task-123")
     await t.artifact_rename("nb-123", "task-123", "EP01 心法篇")
     call = next(c[1] for c in fake_client.artifacts.calls if c[0] == "rename")

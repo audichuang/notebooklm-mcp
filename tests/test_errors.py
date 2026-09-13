@@ -87,8 +87,10 @@ async def test_malformed_episodes_fail_fast_with_clear_error(fake_client, tmp_pa
 
 
 async def test_failed_generation_status_fails_fast(fake_client, tmp_path):
-    # SDK reports a failed/refused generation as a status (task_id="", is_failed=True),
-    # NOT by raising. The wrapper must detect that instead of proceeding with an empty id.
+    # 0.7.x 風格的拒絕形狀:status(task_id="", is_failed=True)而不 raise。**0.8.0
+    # 起同步拒絕改成 raise**(ADR-0019 / #1342,見
+    # test_contracts.py::test_generation_kickoff_refuses_by_raising)——這裡驗的是
+    # ensure_started 仍防得住這個舊分支(defense-in-depth),不是真實 SDK 現在的形狀。
     fake_client.artifacts.fail_generate = True
     with pytest.raises(RuntimeError, match="Generation failed"):
         await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))

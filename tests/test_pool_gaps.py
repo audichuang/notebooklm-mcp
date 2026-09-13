@@ -20,6 +20,7 @@ import os
 import pytest
 from conftest import FakeClient
 from notebooklm.exceptions import RateLimitError
+from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import runtime
 from notebooklm_mcp import tools_podcast as p
@@ -375,6 +376,12 @@ async def test_series_reconcile_keeps_its_pinned_client(fake_client, tmp_path):
 
 
 async def test_resume_pins_client_after_auth_probe(fake_client, tmp_path):
+    """fake `rename` 0.8.2 起對查無 id 的 artifact raise(見 test_rename_not_found.py)
+    ——resume 的前提是這顆 artifact 已經在遠端存在,所以先 seed 在 account A 上
+    (這支測試的重點正是「account B 全程沒被動過」,不能 seed 在 account_b)。"""
+    fake_client.artifacts.seed_artifact(
+        "art-1", kind=ArtifactType.AUDIO, title="Audio Overview"
+    )
     account_b = FakeClient()
     runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
     original = fake_client.notebooks.list
