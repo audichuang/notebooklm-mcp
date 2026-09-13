@@ -2495,6 +2495,48 @@ async def test_adopt_also_returns_both_source_delete_arguments(fake_client, tmp_
     ]
 
 
+async def test_adopt_does_not_relabel_a_preexisting_obligations_notebook(
+    fake_client, tmp_path
+):
+    """T4(P3):`_queue_pending_source_cleanup` 回 `list[str]` 丟身分,adopt 組
+    `source_cleanup_obligations` 時每筆都填「這次 adopt 的 notebook」——如果這
+    一集本來就有一筆屬於**別本** notebook 的未結案義務(例如上一次在別本筆記本
+    retract 留下的孤兒),adopt 會把它的身分改寫成這次 adopt 的 notebook,
+    `source_delete` 就會打去錯的 notebook。
+
+    修法:`source_cleanup_obligations` 改由 `_cleanup_obligations(current_episode,
+    fallback_notebook=notebook_id)` 組——每筆讀回自己實際記錄的 notebook_id,只
+    在真的沒身分(legacy 純字串)時才 fallback 到這次的 notebook_id。
+    """
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+
+    def _inject_stale_obligation_from_another_notebook(manifest):
+        episode = manifest["episodes"][0]
+        episode.setdefault("pending_source_cleanup", []).append(
+            {"source_id": "S-old", "notebook_id": "nb-old"}
+        )
+
+    ManifestStore(manifest_path).update(_inject_stale_obligation_from_another_notebook)
+
+    old_source_id = before["feedback_source_id"]
+    replacement = fake_client.sources._add(before["label"], kind="media")
+
+    adopted = await p.podcast_attempt_adopt(
+        manifest_path,
+        1,
+        before["output_attempt_id"],
+        feedback_source_id=replacement,
+    )
+
+    assert set(adopted["stale_source_ids"]) == {old_source_id, "S-old"}
+    assert {"source_id": "S-old", "notebook_id": "nb-old"} in adopted[
+        "source_cleanup_obligations"
+    ], "既有義務的身分被 adopt 這次的 notebook 蓋掉了"
+    assert {"source_id": old_source_id, "notebook_id": "nb-1"} in adopted[
+        "source_cleanup_obligations"
+    ]
+
+
 async def test_identity_unknown_obligation_never_prints_an_unexecutable_call(
     fake_client, tmp_path
 ):

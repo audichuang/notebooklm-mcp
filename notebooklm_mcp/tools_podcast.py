@@ -3959,7 +3959,14 @@ async def podcast_attempt_adopt(
                 # 當下的 default —— adopt 認的就是這個 notebook 裡的 source。
                 notebook_id=notebook_id,
             )
-            return stale, None, has_durable_output_evidence(current_episode)
+            # T4(P3):這裡不能拿 `notebook_id`(這次 adopt 的目標)去回推**全部**
+            # 未結案義務的身分——這一集可能還留著別本 notebook 的舊義務(例如上次在
+            # 別本筆記本 retract 留下的孤兒),`_cleanup_obligations` 逐筆讀回自己
+            # 實際記錄的身分,只在真的沒身分(legacy 純字串)時才 fallback。
+            obligations = _cleanup_obligations(
+                current_episode, fallback_notebook=notebook_id
+            )
+            return stale, None, has_durable_output_evidence(current_episode), obligations
 
         assert current_attempt is not None
         if not _attempt_can_adopt_source(current_attempt):
@@ -4015,10 +4022,15 @@ async def podcast_attempt_adopt(
             exclude=feedback_source_id,
             notebook_id=notebook_id,
         )
+        # T4(P3):同上一個分支——逐筆讀回自己的身分,不拿這次 adopt 的 notebook_id
+        # 回推全部。
+        obligations = _cleanup_obligations(
+            current_episode, fallback_notebook=notebook_id
+        )
         caps = _attempt_capabilities(current_episode, current, attempt_id)
-        return stale, caps, has_durable_output_evidence(current_episode)
+        return stale, caps, has_durable_output_evidence(current_episode), obligations
 
-    _, (stale_source_ids, caps, complete) = store.update(adopt_source)
+    _, (stale_source_ids, caps, complete, obligations) = store.update(adopt_source)
     result = {
         # T2:「complete」問的是「這一集有沒有已經 promote 過的 output」,不是
         # 「這次呼叫還需不需要 rename」——舊版 `not needs_rename` 在 attempt 還沒
@@ -4047,10 +4059,11 @@ async def podcast_attempt_adopt(
         # **同一個義務的另一個入口也要自足。** retract 那邊補了結構化義務,adopt 這邊
         # 沒補的話,呼叫端拿到 `safe_next_action="source_delete"` 卻只有 source_id ——
         # 而這支工具的參數表裡根本沒有 notebook_id,第二個參數無處可拿(補一半的又一例)。
-        result["source_cleanup_obligations"] = [
-            {"source_id": source_id, "notebook_id": notebook_id}
-            for source_id in stale_source_ids
-        ]
+        # T4(P3):身分逐筆讀回 mutate 內算好的 `obligations`(來自
+        # `_cleanup_obligations`),**不能**拿這次 adopt 的 `notebook_id` 對每一筆
+        # 都蓋一遍——這一集可能還留著別本 notebook 的舊義務,蓋掉等於指引呼叫端去
+        # 錯的 notebook 打 `source_delete`。
+        result["source_cleanup_obligations"] = obligations
         result["safe_next_action"] = ACTION_SOURCE_DELETE
         # T2:override 之後 `next_step`(若有)仍講著 caps 的原始建議(resume／retract
         # ……),與新的 `safe_next_action=source_delete` 互相矛盾——這正是紅線①要擋的
