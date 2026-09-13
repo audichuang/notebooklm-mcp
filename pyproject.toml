@@ -25,7 +25,10 @@ dependencies = [
     "mcp[cli]>=1.27,<2",
     "Pillow>=10,<12",
     "httpx>=0.27,<1",
-    "markdown>=3.5",
+    # 上界是硬需求,理由跟上面兩個依賴一樣(uv tool install git+… 不讀 uv.lock)——這支
+    # 之前漏了,是本檔唯一無上界的直接依賴。notes_html 拿它做半信任的 Markdown 渲染,
+    # 4.0 若改 extension 語意,允許清單可能靜默拒收,失敗形狀是「(某集)講義發不出去」。
+    "markdown>=3.5,<4",
     "mutagen>=1.47,<2",   # 把單集封面內嵌進 true MP3 的 ID3/APIC
 ]
 
