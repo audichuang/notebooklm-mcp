@@ -50,11 +50,22 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
         res = [r for r in ex.map(grade, files) if r]
     agg = collections.defaultdict(lambda: [0, 0])
-    for arm, _eid, p, t in res:
+    ids_by_arm = collections.defaultdict(set)
+    for arm, eid, p, t in res:
         agg[arm][0] += p
         agg[arm][1] += t
+        ids_by_arm[arm].add(eid)
     for arm, (p, t) in sorted(agg.items()):
-        print(f"{arm:<24}{p}/{t} = {100*p/t:.1f}%")
+        print(f"{arm:<24}{p}/{t} = {100*p/t:.1f}%  (n={len(ids_by_arm[arm])})")
+    # 兩臂樣本數不同代表某一臂掉了樣本(例如 run.sh 的 worktree 競態)——分數不可比較,
+    # 而且這個坑不會像 git 那樣大聲吼,只會讓通過率悄悄失真。
+    id_sets = list(ids_by_arm.values())
+    if len(id_sets) > 1 and any(s != id_sets[0] for s in id_sets[1:]):
+        print(
+            "WARNING: 各臂樣本 id 集合不同,分數不可比較 —— "
+            + ", ".join(f"{arm}={len(ids)}" for arm, ids in sorted(ids_by_arm.items())),
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
