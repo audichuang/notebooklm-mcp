@@ -573,6 +573,17 @@ def test_reset_attempt_for_resend_clears_the_stale_wait_timeout_promise():
     assert dispatch["dispatched_at"] is None
     assert dispatch["accepted_at"] is None
 
+    # T12(b,測試債):`remote.status` 這一欄已經有 4 支既有測試守著(各自透過
+    # `podcast_episode`/`podcast_series` 的重送流程間接驗到),但同一次 `.update()`
+    # 呼叫一起清掉的 `status_origin`/`observed_at`/`error`/`error_code` 這四欄
+    # 完全零斷言——這支 fixture 早就塞了舊值(見上面 `attempt["remote"]`),刪掉
+    # `_reset_attempt_for_resend` 清這四欄的程式碼也不會有任何測試變紅。
+    remote = attempt["remote"]
+    assert remote["status_origin"] is None, remote
+    assert remote["observed_at"] is None, remote
+    assert remote["error"] is None, remote
+    assert remote["error_code"] is None, remote
+
 
 @pytest.mark.parametrize("bad_wait_timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
 async def test_podcast_episode_rejects_a_bad_wait_timeout_before_any_dispatch(

@@ -513,6 +513,59 @@ async def test_resume_cannot_rename_the_episode(fake_client, tmp_path):
     assert _episode(manifest_path)["title"] == EP["title"]
 
 
+async def test_resume_claimed_branch_also_cannot_rename_the_episode(
+    fake_client, tmp_path
+):
+    """T12(a,測試債):`_ensure_resume_attempt` 有**兩個**建立/續接分支——`artifact_id`
+    已被某顆既有 attempt 認領時走 claimed 分支,否則走新建分支。`test_resume_
+    cannot_rename_the_episode` 用一顆從沒被任何 attempt 認領過的 artifact_id,
+    只守得住新建分支自己的標題閘;claimed 分支另有一份獨立的程式碼做同一件事
+    (`episode.get("title") != title`),把它刪掉全綠——沒有任何測試會紅。
+
+    手搭一顆 `attempt.title="X"` 但 `episode.title="Y"` 的 manifest(claimed 分支
+    唯讀這兩個欄位;正常流程建立時兩者是同一個值不會分岔,這裡刻意手改出分岔,
+    單獨驗這道閘擋不擋),用 `title="X"` 呼叫 resume(先過 `attempt.get("title")
+    != title` 那道,才會走到 episode 級這一道)。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 1,
+                        "title": "Y",
+                        "attempts": [
+                            {
+                                "attempt_id": "att-1",
+                                "notebook_id": "nb-1",
+                                "episode": 1,
+                                "title": "X",
+                                "dispatch": {"status": "accepted"},
+                                "remote": {
+                                    "artifact_id": "art-claimed",
+                                    "status": "pending",
+                                },
+                                "finalize": p.new_finalize_state(),
+                                "errors": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="title does not match the manifest"):
+        await p.podcast_episode_resume(
+            "nb-1", episode_n=1, title="X", artifact_id="art-claimed",
+            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        )
+
+
 async def test_adopt_cannot_rewrite_a_retracted_attempt(fake_client, tmp_path):
     """作廢的 attempt 是歷史紀錄:adopt 改寫它的 finalize source checkpoint,會讓已登記的
     清理義務指向錯的 source(刪了記錄那筆、真正的舊來源還在)。"""
