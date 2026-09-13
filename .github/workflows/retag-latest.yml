@@ -16,8 +16,12 @@ concurrency:
   cancel-in-progress: false
 
 # Repo default token is read-only; this job must move a tag.
+# actions:read is for the CI gate below (`gh run list`) — permissions: once
+# declared explicitly, anything left unlisted defaults to none, so this has to
+# be spelled out or that step 403s.
 permissions:
   contents: write
+  actions: read
 
 jobs:
   retag:
@@ -33,6 +37,40 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Wait for ci.yml to pass on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # tag 落地時,master 那次 push 觸發的 ci.yml 對同一個 commit 可能還在跑——
+          # 五次真實發版量到 4 次 retag 晚於 CI 綠燈、1 次早了 66 秒(v0.9.23,那次
+          # 剛好也是 lock/pyproject 不自洽的那版)。latest 是消費端唯一會裝到的指標,
+          # 不能指到一個 CI 還沒驗證、甚至會紅的 commit。
+          #
+          # 擋下時怎麼救:等 ci.yml 對這個 commit 真的綠了之後,`gh workflow run
+          # retag-latest.yml` 重跑一次;本機最後手段是 `bash scripts/retag-latest.sh --push`。
+          sha="${GITHUB_SHA}"
+          deadline=$(( $(date +%s) + 1500 ))   # 25 分鐘
+          while true; do
+            read -r run_status conclusion url < <(
+              gh run list --repo "${GITHUB_REPOSITORY}" --workflow=ci.yml --commit "$sha" \
+                --json status,conclusion,url \
+                --jq '(.[0] // {}) | "\(.status // "none") \(.conclusion // "none") \(.url // "none")"'
+            )
+            if [[ "$run_status" == "completed" ]]; then
+              if [[ "$conclusion" == "success" ]]; then
+                echo "ci.yml passed for $sha: $url"
+                break
+              fi
+              echo "::error::ci.yml did not pass for $sha (conclusion=$conclusion): $url"
+              exit 1
+            fi
+            if (( $(date +%s) > deadline )); then
+              echo "::error::timed out after 25m waiting for ci.yml on $sha (last seen: status=$run_status conclusion=$conclusion url=$url)"
+              exit 1
+            fi
+            sleep 30
+          done
 
       - name: Point latest at the newest release tag
         run: bash scripts/retag-latest.sh --push
