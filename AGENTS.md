@@ -109,12 +109,11 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
   跑的是 working tree 所以照樣全綠。派 agent 做多條修正時逐條做完逐條 commit;混在一起就寧可一個 commit。
   **commit 的內容 = 驗證過的內容,比 commit 粒度重要。**
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
-- **驗收分三層,看改動碰到什麼**(手段與三個會讓數字說謊的坑見 [docs/acceptance-testing.md](docs/acceptance-testing.md)):
-  沒碰遠端副作用 → 離線測試 + 用既有實測前提推導結案(`source_delete` 的清理義務、v0.9.2 的 owner 定位都是這樣結的),
-  **推導要逐條指出前提在哪次實測被證明**,不能只說「應該沒事」;
-  改到**呼叫端讀得到的那一面**(工具描述 / `_INSTRUCTIONS` / skill 文字)→ `claude -p --model sonnet` + dry-run stub
-  自己跑,零帳號風險、每題約 $0.2,所以要跑 n 次取平均並盲評,**不要交 prompt 叫人開 session**;
-  碰到 `generate` / `add_user` / `delete` 這類會在雲端留下東西的呼叫 → 真帳號跑(同樣自己跑,跑完清乾淨)。
+- **本 repo 的三條驗收線**(怎麼跑見工作根 §Cross-project rules;手段與三個會讓數字說謊的坑見
+  [docs/acceptance-testing.md](docs/acceptance-testing.md)):沒碰遠端副作用 → 離線測試 + 用既有實測前提推導結案
+  (`source_delete` 的清理義務、v0.9.2 的 owner 定位都是這樣結的),**推導要逐條指出前提在哪次實測被證明**,
+  不能只說「應該沒事」;改到**呼叫端讀得到的那一面**(工具描述 / `_INSTRUCTIONS` / skill 文字)→ dry-run stub;
+  碰到 `generate` / `add_user` / `delete` 這類會在雲端留下東西的呼叫 → 真帳號。
 - **tripwire 要驗「我們真的做得到什麼」,不是「上游宣告了什麼」。** v0.9.25 的 blocker:
   `test_every_sdk_enum_member_…` 問「每個 SDK enum 成員有沒有被交代」,於是「加進白名單」看起來
   就是讓它變綠的正解 —— 但 enum 是 backend-neutral、能力是 backend-specific,那個白名單開出一個
