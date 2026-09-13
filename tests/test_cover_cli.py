@@ -158,7 +158,7 @@ def test_render_failure_preserves_existing_output(tmp_path, monkeypatch):
     monkeypatch.setattr(cover_cli.subprocess, "run", fake_chrome)
     monkeypatch.setattr(cover_cli, "validate_artwork", reject_artwork)
     monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--show", "--output", str(output),
+        "notebooklm-cover", "--show", "--output", str(output), "--show-name", "Audicast",
     ])
 
     with pytest.raises(ValueError, match="invalid rendered artwork"):
@@ -196,7 +196,7 @@ def test_skip_existing_rebuilds_a_corrupt_cover_instead_of_trusting_it(
     monkeypatch.setattr(cover_cli.subprocess, "run", fake_chrome)
     monkeypatch.setattr(sys, "argv", [
         "notebooklm-cover", "--manifest", str(manifest),
-        "--output-dir", str(tmp_path), "--skip-existing",
+        "--output-dir", str(tmp_path), "--skip-existing", "--show-name", "Audicast",
     ])
 
     cover_cli.main()
@@ -227,7 +227,7 @@ def test_skip_existing_keeps_a_valid_cover_untouched(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cover_cli.subprocess, "run", explode)
     monkeypatch.setattr(sys, "argv", [
         "notebooklm-cover", "--manifest", str(manifest),
-        "--output-dir", str(tmp_path), "--skip-existing",
+        "--output-dir", str(tmp_path), "--skip-existing", "--show-name", "Audicast",
     ])
 
     cover_cli.main()
@@ -259,7 +259,7 @@ def test_skip_existing_does_not_need_chrome_when_every_cover_is_valid(
     monkeypatch.setattr(cover_cli, "_find_chrome", no_chrome_on_this_machine)
     monkeypatch.setattr(sys, "argv", [
         "notebooklm-cover", "--manifest", str(manifest),
-        "--output-dir", str(tmp_path), "--skip-existing",
+        "--output-dir", str(tmp_path), "--skip-existing", "--show-name", "Audicast",
     ])
 
     cover_cli.main()
@@ -298,8 +298,8 @@ def test_guard_opt_in_flag_allows_other_show(monkeypatch, tmp_path):
 
 
 def test_guard_batch_checks_manifest_show_title(monkeypatch, tmp_path):
-    """批次模式沒給 --show-name 時 wordmark 會填預設 Audicast,但 manifest 身分是別的節目
-    → 一樣拒絕(schema v2 的身分在 show.show_title)。"""
+    """批次模式沒給 --show-name 時 wordmark 會沿用 manifest 既有的 show.show_title
+    (別的節目名稱)→ 一樣拒絕(schema v2 的身分在 show.show_title)。"""
     man = tmp_path / "m.json"
     man.write_text(json.dumps({
         "show": {"show_title": "資料結構拆解室"},
@@ -310,3 +310,48 @@ def test_guard_batch_checks_manifest_show_title(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cover_cli.main()
     assert "Audicast 品牌" in str(exc.value)
+
+
+def test_guard_batch_requires_explicit_show_name_before_first_publish(
+    monkeypatch, tmp_path, capsys
+):
+    """首發前 manifest 還沒有 `show` 鍵(從未跑過 `publish_series`)——`--show-name`
+    default 曾經是永遠 truthy 的 `"Audicast"`,於是這個情境會靜默印出 Audicast 品牌
+    而使用者從未確認過這就是 Audicast 節目。改成 default=None 之後,兩者皆缺要明確
+    報錯,不能靜默印 Audicast。"""
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps({
+        "episodes": [{"episode": 1, "title": "甲集"}],   # 無 "show" 鍵
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--manifest", str(man), "--output-dir", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        cover_cli.main()
+    assert exc.value.code == 2
+    assert "--show-name" in capsys.readouterr().err
+
+
+def test_show_mode_requires_explicit_show_name(monkeypatch, tmp_path, capsys):
+    """`--show` 模式沒有 manifest 可對照身分,`--show-name` default 改 None 之後不能
+    讓 `None` 靜默流進 `_render` 被印成字面 "None"——沒傳就該明確報錯。"""
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--show", "--output", str(tmp_path / "cover.jpg"),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cover_cli.main()
+    assert exc.value.code == 2
+    assert "--show-name" in capsys.readouterr().err
+
+
+def test_single_episode_mode_requires_explicit_show_name(monkeypatch, tmp_path, capsys):
+    """單集一次性模式同理:`docs/gotchas-publish.md` 記載的用法本來就沒帶
+    `--show-name`(只有 `--output --episode --title`),default 改 None 後這條路徑
+    一樣不能讓 `None` 靜默流進封面。"""
+    monkeypatch.setattr(sys, "argv", [
+        "notebooklm-cover", "--output", str(tmp_path / "ep05.jpg"),
+        "--episode", "EP05", "--title", "本集標題",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cover_cli.main()
+    assert exc.value.code == 2
+    assert "--show-name" in capsys.readouterr().err

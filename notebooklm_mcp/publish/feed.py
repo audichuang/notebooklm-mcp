@@ -3,9 +3,9 @@ atom namespaces Apple Podcasts needs) and a minimal index.html for <link>.
 Pure function of (show, base_url): no I/O, no clock — fully deterministic."""
 from __future__ import annotations
 
-import re
 from xml.sax.saxutils import escape, quoteattr
 
+from ..naming import bare_episode_title
 from .rss_models import live_episodes
 
 _ITUNES = "http://www.itunes.com/dtds/podcast-1.0.dtd"
@@ -146,10 +146,11 @@ def build_feed_xml(show: dict, base_url: str) -> str:
 def build_index_html(show: dict, base_url: str) -> str:
     base = _feed_dir_url(base_url, show["token"])
     # 顯示層去重:serial 節目的 title 本來就帶「EP{NN}. 」前綴(命名鐵律,不在這裡碰),
-    # 這行自己又加一次 EP{NN} — 會顯示成「EP01 — EP01. 標題」。只剝掉等於本集集號的前綴;
-    # RSS item title / GUID / 檔名都不經過這個函式。
+    # 這行自己又加一次 EP{NN} — 會顯示成「EP01 — EP01. 標題」。剝前綴走 naming.py 那顆
+    # ——它的 docstring 自己宣告是「the only place that derives one from the other」,
+    # 這裡不該再維護第二份剝除 regex。RSS item title / GUID / 檔名都不經過這個函式。
     rows = "\n".join(
-        f"    <li>EP{n:02d} — {escape(re.sub(rf'^EP{n:02d}\.? +', '', ep['title']))} "
+        f"    <li>EP{n:02d} — {escape(bare_episode_title(n, ep['title']))} "
         f'(<a href={quoteattr(base + "/" + ep["media_file"])}>mp3</a>)</li>'
         for n, ep in live_episodes(show)
     )
