@@ -82,6 +82,14 @@ async def test_ask_passes_scope_and_returns_refs(fake_client):
     assert out["references"][0] == {"source_id": "src-1", "citation_number": 1, "cited_text": "引用片段"}
 
 
+async def test_ask_rejects_an_empty_source_ids_list(fake_client):
+    """空清單語意未定(上游 `_chat.py` 只判 `is None`,`[]` 會變成零來源請求)——
+    比照 `generate_audio` 一樣送進 `to_source_ids`,在打 RPC 之前退。"""
+    with pytest.raises(ValueError, match="omit it to use every source"):
+        await t.chat_ask("nb-1", "重點?", source_ids=[])
+    assert not fake_client.chat.calls
+
+
 async def test_source_list(fake_client):
     fake_client.sources.seed("EP01 心法篇", "原文一")
     out = await t.source_list("nb-1")

@@ -765,8 +765,13 @@ async def chat_ask(
     `strip_citations=True` 撞到上游解不出文字的 block(程式碼區塊等)會 raise —— 那些內容
     會**靜默消失**而剩下的句子仍通順,所以擋在這裡,訊息帶兩條出路。
     """
+    # `source_ids=[]` 直通 SDK 語意未定(`_chat.py` 只判 `is None`);比照
+    # generate_audio 送進既有的 to_source_ids 在打 RPC 之前退(空清單的拒絕訊息
+    # 「omit it to use every source」本來就對)。source_search 不走這條——上游
+    # 對它明文 `[]` = 搜全部,兩者語意不同,不能共用同一個守門。
+    selected = to_source_ids(source_ids)
     res = await runtime.get_client().chat.ask(
-        notebook_id, question, source_ids=source_ids, conversation_id=conversation_id
+        notebook_id, question, source_ids=selected, conversation_id=conversation_id
     )
     answer = res.answer
     if strip_citations:
