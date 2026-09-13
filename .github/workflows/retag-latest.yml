@@ -49,7 +49,9 @@ jobs:
           #
           # 擋下時怎麼救:等 ci.yml 對這個 commit 真的綠了之後,`gh workflow run
           # retag-latest.yml` 重跑一次;本機最後手段是 `bash scripts/retag-latest.sh --push`。
-          sha="${GITHUB_SHA}"
+          # 發版 tag 是 annotated(`git cat-file -t v0.9.27` → tag),GITHUB_SHA 在 tag push 事件
+          # 上可能是 tag 物件而不是 commit;peel 一次再拿去查 ci run,對 commit 是 no-op。
+          sha="$(git rev-parse "${GITHUB_SHA}^{commit}")"
           deadline=$(( $(date +%s) + 1500 ))   # 25 分鐘
           while true; do
             read -r run_status conclusion url < <(
