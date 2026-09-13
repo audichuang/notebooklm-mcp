@@ -2611,6 +2611,17 @@ async def _run_episode(
     resolved_audio_format = to_audio_format(audio_format)
     resolved_audio_length = to_audio_length(audio_length)
     selected_source_ids = to_source_ids(source_ids)
+    # P2:`prior_mp3_path` 會把上一集回錄真的上傳進筆記本、改名,但 dispatch 只帶
+    # `selected_source_ids`——那筆新上傳的 source 沒有任何 attempt 引用它,`ok=true`
+    # 回傳,變成無人認領的孤兒,吃掉 ≤9 上限裡的一格卻沒人記得。這是 `podcast_episode`
+    # 與 `podcast_series`(series 恆傳 `prior_mp3_path=None`,不受影響)唯一的交會點,
+    # 必須排在任何副作用(對帳 RPC、上傳)之前 fail-closed,不能等副作用發生後才發現。
+    if prior_mp3_path and selected_source_ids:
+        raise ValueError(
+            "prior_mp3_path 與指名 source_ids 不能同時提供:指名 `source_ids` 時"
+            "把上一集的回錄 source id 直接放進 `source_ids`,不要再傳 "
+            "`prior_mp3_path`;要靠 `prior_mp3_path` 自動上傳就不要指名"
+        )
     settings = _audio_settings(
         resolved_language, audio_format, audio_length, selected_source_ids
     )

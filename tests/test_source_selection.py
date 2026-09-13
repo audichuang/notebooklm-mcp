@@ -862,6 +862,35 @@ async def test_a_pending_prior_upload_counts_toward_the_limit(fake_client, tmp_p
     assert not fake_client.artifacts.calls
 
 
+async def test_prior_mp3_path_and_named_source_ids_are_mutually_exclusive(
+    fake_client, tmp_path
+):
+    """P2:`prior_mp3_path` 會把上一集的回錄真的上傳進筆記本、改名,但 dispatch 只帶
+    呼叫端指名的 `source_ids`——那筆新上傳的 source 沒有任何 attempt 引用它,
+    `ok=true` 回傳,那筆變成無人認領的孤兒,吃掉 ≤9 上限裡的一格卻沒人記得。
+
+    修法是 fail-closed:兩者同時非空就直接 raise,不讓这個組合有機會發生副作用。
+    """
+    _seed_sources(fake_client, 1)
+
+    with pytest.raises(
+        ValueError,
+        match="指名 `source_ids` 時把上一集的回錄 source id 直接放進 `source_ids`",
+    ):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=2,
+            title="心法篇",
+            brief="第二集",
+            output_dir=str(tmp_path),
+            prior_mp3_path=str(tmp_path / "ep01.mp3"),
+            source_ids=["src-1"],
+        )
+
+    assert not any(c[0] == "add_file" for c in fake_client.sources.calls)
+    assert not fake_client.artifacts.calls
+
+
 async def test_a_preflight_permission_error_still_becomes_a_structured_stop(
     fake_client, tmp_path, monkeypatch
 ):
