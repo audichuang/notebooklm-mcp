@@ -2123,9 +2123,10 @@ def _validate_wait_timeout(wait_timeout: float) -> None:
     """`wait_timeout` 從「這次呼叫想等多久」升級成**持久化的安全參數**
     (`_claim_prepared_dispatch` 把它存進 `dispatch["wait_timeout"]`)之後,它就是
     之後**每一次** reconcile 的候選篩選窗與關閉判斷窗判準——一個沒有信任邊界檢查的
-    呼叫端輸入,不該直接變成長期有效的安全設定。三個入口(`podcast_episode`／
-    `podcast_series`／`podcast_episode_reconcile`)都要同一句驗證,別各寫一份等著
-    漏一個(第四輪修復;只補一個正是 AGENTS.md 紀律①點名的病灶)。
+    呼叫端輸入,不該直接變成長期有效的安全設定。四個入口(`podcast_episode`／
+    `podcast_series`／`podcast_episode_reconcile`／`podcast_episode_resume`)都要
+    同一句驗證,別各寫一份等著漏一個(T7,wp-a2:`podcast_episode_resume` 是這四個
+    裡最後補上的一個,同樣的「只補一個」病灶在第四輪修復時就已經點名過)。
 
     `math.isfinite` 擋 `nan`/`inf`:光靠 `<= 0` 擋不住 `nan`(`nan <= 0` 恆為
     `False`,NaN 比較永遠不成立)。`nan` 存進 `dispatch["wait_timeout"]` 後,
@@ -3429,6 +3430,12 @@ async def podcast_episode_resume(
     _validate_episode_args(episode_n, title, None)
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("artifact_id 必填(從 durable attempt 或 reconcile 結果取得)")
+    # T7:四個吃 `wait_timeout` 的公開入口(podcast_episode／podcast_series／
+    # podcast_episode_reconcile／這裡)本該一律驗證,這支之前漏了——`nan` 存進
+    # `dispatch["wait_timeout"]`(見 `_claim_prepared_dispatch`)後,`timedelta
+    # (seconds=nan)` 會在往後每一次對帳時炸掉;`0`/負數則直流 `wait_for_completion`
+    # 永不逾時。見 `_validate_wait_timeout` docstring。
+    _validate_wait_timeout(wait_timeout)
     if manifest_path:
         _require_existing_manifest(
             manifest_path,
