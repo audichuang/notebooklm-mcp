@@ -631,6 +631,15 @@ async def finalize_attempt(
         )
     )
     if not download_complete:
+        # process 被 SIGKILL(不像取消,連 finally 都沒機會跑)後,checkpoint 上
+        # 還留著上一次的 temp_path;下面這行 mkstemp 會產生新路徑並覆寫掉它,舊檔
+        # 從此沒人記得清掉。resume 前先把它清掉——已經不在就當作沒事。
+        stale_temp_path = download.get("temp_path")
+        if isinstance(stale_temp_path, str) and stale_temp_path:
+            try:
+                os.unlink(stale_temp_path)
+            except FileNotFoundError:
+                pass
         fd, temp_path = tempfile.mkstemp(
             dir=output_dir, prefix=f".ep{episode_n:02d}.", suffix=".part"
         )

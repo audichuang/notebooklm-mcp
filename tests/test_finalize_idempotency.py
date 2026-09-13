@@ -630,6 +630,62 @@ async def test_completed_attempt_with_missing_mp3_only_redownloads(
     ] == []
 
 
+async def test_stale_temp_path_from_a_crashed_finalizer_is_cleaned_up_on_resume(
+    fake_client, tmp_path
+):
+    """process 被 SIGKILL(不像取消,連 `finally` 都沒機會跑)後,checkpoint 上
+    還指著一個殘留 `.part` 檔;下次 resume 直接 `mkstemp` 新路徑並覆寫 checkpoint,
+    舊檔從此沒人記得清掉。mkstemp 前要先清掉 checkpoint 上還在的舊 temp_path。"""
+    from notebooklm_mcp.manifest_store import ManifestStore
+
+    manifest_path = tmp_path / "series_manifest.json"
+    first = await p.podcast_episode(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+    mp3_path = tmp_path / "ep01.mp3"
+    mp3_path.unlink()
+
+    # 模擬 SIGKILL 留下的殘留檔:checkpoint 停在 dispatching,temp_path 指著它,
+    # 但真正的下載從沒完成過。
+    stale_temp_path = tmp_path / ".ep01.crashed.part"
+    stale_temp_path.write_bytes(b"orphaned by a killed process")
+
+    def rewind_to_crashed_download(manifest):
+        download = manifest["episodes"][0]["attempts"][0]["finalize"]["download"]
+        download.update(
+            {
+                "status": "dispatching",
+                "bytes": None,
+                "sha256": None,
+                "temp_path": str(stale_temp_path),
+            }
+        )
+
+    ManifestStore(str(manifest_path)).update(rewind_to_crashed_download)
+
+    resumed = await p.podcast_episode_resume(
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        artifact_id=first["artifact_id"],
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
+    )
+
+    assert resumed["attempt_id"] == first["attempt_id"]
+    assert not stale_temp_path.exists()
+    assert mp3_path.read_bytes() == fake_client.artifacts.download_audio_bytes
+    final = json.loads(manifest_path.read_text(encoding="utf-8"))
+    final_download = final["episodes"][0]["attempts"][0]["finalize"]["download"]
+    assert final_download["status"] == "completed"
+    assert final_download["temp_path"] is None
+
+
 async def test_cancelled_download_is_cleaned_up_without_being_marked_failed(
     fake_client, tmp_path
 ):
