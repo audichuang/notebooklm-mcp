@@ -1217,6 +1217,32 @@ def _ensure_resume_attempt(
         if episode is None:
             episode = {"episode": episode_n, "attempts": []}
             manifest["episodes"].append(episode)
+        # legacy_artifact_id 提前算(原本只在建 attempt 那段算):T4 的硬證據守門要
+        # 在 output_attempt_id 檢查之前就知道它,才判得出「resume 到的是不是同一顆」。
+        legacy_artifact_id = episode.get("artifact_id") or episode.get("task_id")
+        # T4(P1,Codex 獨立審查實跑驗證):flat v1 legacy 集(v0.5.0 前直接掛在
+        # episode 上的 artifact_id/mp3_path 等,沒有 attempts)只查
+        # `output_attempt_id is not None` 擋不住——這種集根本沒有 output_attempt_id
+        # 可查。`has_hard_output_evidence` 才是這裡真正要問的:episode 級已經有硬
+        # 證據,而這次 resume 指名的 artifact 跟證據上記的不是同一顆,就是在**無審計**
+        # 地把它換掉(沒有 retract、沒有 tombstone)。合法出路是 retract amendment
+        # (2)(見 `podcast_attempt_retract` 附近的長註解「(2) 是 legacy 證據存在……
+        # 這個 legacy 證據存在,結構上只有 `_ensure_resume_attempt` 的新建分支能繞過
+        # `has_hard_output_evidence` guard 造出來」):先 resume 到**同一顆**合法
+        # artifact 建出可以被 retract 的 attempt,retract 之後 episode 級欄位會被
+        # 一併 pop 掉,才輪得到新 artifact。**resume 到同一顆必須繼續放行**——那是
+        # 唯一能把這種 legacy episode 帶進可審計流程的入口。
+        if has_hard_output_evidence(episode) and legacy_artifact_id != artifact_id:
+            raise ValueError(
+                f"episode {episode_n} already has legacy output evidence bound to "
+                f"artifact {legacy_artifact_id!r}; resuming a different artifact "
+                f"{artifact_id!r} would silently replace it without an audit "
+                "trail. First podcast_episode_resume to the existing "
+                f"{legacy_artifact_id!r} (that succeeds and creates a retractable "
+                "attempt), then podcast_attempt_retract it, source_delete the "
+                "stale feedback source it returns, and only then regenerate or "
+                "resume the new artifact."
+            )
         # 已經有 durable output 時,不得為「另一個 artifact」開新 attempt。舊行為允許
         # (active == output 就放行),結果是:resume 把 B 下載、回錄上傳完,promotion 才
         # 因為 output 仍屬 A 而失敗,manifest 卡在 active=B／output=A —— retract A 被
@@ -1260,9 +1286,8 @@ def _ensure_resume_attempt(
         attempt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         finalize = new_finalize_state()
-        legacy_artifact_id = (
-            episode.get("artifact_id") or episode.get("task_id")
-        )
+        # legacy_artifact_id 已經在函式開頭算過(T4 的硬證據守門要用它),這裡不再
+        # 重算第二份。
         adopted_source_id = episode.get("feedback_source_id")
         adopted_at = episode.get("feedback_source_adopted_at")
         if (

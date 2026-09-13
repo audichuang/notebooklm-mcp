@@ -351,13 +351,9 @@ async def test_published_legacy_output_blocks_implicit_supersede_after_failed_re
     ) == generate_boundary
 
 
-async def test_legacy_source_is_not_carried_to_a_different_artifact(
-    fake_client, tmp_path
-):
-    manifest_path = tmp_path / "series_manifest.json"
-    mp3_path = tmp_path / "legacy-ep01.mp3"
-    mp3_path.write_bytes(b"legacy audio")
-    old_source_id = fake_client.sources._add("EP01 心法篇", kind="media")
+def _legacy_manifest_with_adopted_source(
+    manifest_path, mp3_path, old_source_id: str
+) -> None:
     manifest_path.write_text(
         json.dumps(
             {
@@ -380,6 +376,27 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
         ),
         encoding="utf-8",
     )
+
+
+async def test_legacy_source_is_not_carried_to_a_different_artifact(
+    fake_client, tmp_path
+):
+    """T4(P1,Codex 獨立審查實跑驗證):flat v1 legacy 集(只有 episode 級硬證據,
+    沒有 attempts)可以被 `podcast_episode_resume(artifact_id=<不同的 artifact>)`
+    無審計地換掉——`_ensure_resume_attempt` 新建分支過去只查
+    `output_attempt_id is not None`,沒查 episode 級的 `has_hard_output_evidence`,
+    於是換一個完全不相干的 artifact 也能建出替代 attempt,把舊的 feedback source
+    悄悄換掉,沒有 retract、沒有 tombstone、沒有稽核紀錄。
+
+    正確出路是 retract amendment (2)(見 `podcast_attempt_retract` 附近的長註解):
+    先 resume 到**同一顆**合法 artifact(下一支測試鎖著這條路仍然放行),建出一顆
+    可以被 retract 的 attempt,再走 retract → source_delete → 用新 artifact 重生。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    mp3_path = tmp_path / "legacy-ep01.mp3"
+    mp3_path.write_bytes(b"legacy audio")
+    old_source_id = fake_client.sources._add("EP01 心法篇", kind="media")
+    _legacy_manifest_with_adopted_source(manifest_path, mp3_path, old_source_id)
     fake_client.artifacts.artifacts.append(
         SimpleNamespace(
             id="replacement-artifact",
@@ -390,23 +407,61 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
     )
     source_boundary = len(fake_client.sources.calls)
 
+    with pytest.raises(ValueError, match="legacy-artifact"):
+        await p.podcast_episode_resume(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            artifact_id="replacement-artifact",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    # 拒收必須發生在任何遠端副作用之前——沒有新的 add_file、episode 級欄位一個字
+    # 都沒動。
+    assert fake_client.sources.calls[source_boundary:] == []
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["artifact_id"] == "legacy-artifact"
+    assert stored["episodes"][0]["feedback_source_id"] == old_source_id
+    assert stored["episodes"][0].get("attempts", []) == []
+
+
+async def test_legacy_output_resume_to_the_same_artifact_still_succeeds(
+    fake_client, tmp_path
+):
+    """T4 的放行閘:resume 到**同一顆** legacy artifact 必須繼續放行——這是唯一能
+    幫這種 flat v1 episode 建出可 retract attempt 的路(retract amendment (2)),
+    擋掉它會讓 legacy 集永遠無法被合法置換。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    mp3_path = tmp_path / "legacy-ep01.mp3"
+    mp3_path.write_bytes(b"legacy audio")
+    old_source_id = fake_client.sources._add("EP01 心法篇", kind="media")
+    _legacy_manifest_with_adopted_source(manifest_path, mp3_path, old_source_id)
+    fake_client.artifacts.artifacts.append(
+        SimpleNamespace(
+            id="legacy-artifact",
+            title="EP01 心法篇",
+            kind=ArtifactType.AUDIO,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    source_boundary = len(fake_client.sources.calls)
+
     resumed = await p.podcast_episode_resume(
         "nb-1",
         episode_n=1,
         title="心法篇",
-        artifact_id="replacement-artifact",
+        artifact_id="legacy-artifact",
         output_dir=str(tmp_path),
         manifest_path=str(manifest_path),
     )
 
-    assert resumed["feedback_source_id"] != old_source_id
-    assert len(
-        [
-            call
-            for call in fake_client.sources.calls[source_boundary:]
-            if call[0] == "add_file"
-        ]
-    ) == 1
+    assert resumed["feedback_source_id"] == old_source_id
+    assert [
+        call
+        for call in fake_client.sources.calls[source_boundary:]
+        if call[0] in {"add_file", "rename"}
+    ] == []
 
 
 async def test_ambiguous_uploaded_source_candidate_can_be_adopted_before_rename(
