@@ -548,6 +548,16 @@ async def publish_series(
     # 失敗」但遠端其實留下了一半的檔案。渲染邊界那份是把關,這裡是 fail-fast。
     itunes_type = feed_mod.normalize_itunes_type(show_cfg["itunes_type"])
     show_cfg["itunes_type"] = itunes_type
+    # `category=""` 原本能通過 `is not None` 檢查照發:回寫進 manifest 之後,下次
+    # `saved_show.get("category", "Technology")` 因為 key 本身存在(值是 ''),不會
+    # fallback 回預設值——空字串就此黏住,manifest 修不回去(得手動移除欄位)。只補
+    # non-empty,**不做 Apple 分類白名單**(那份清單會漂,維護負債高過它擋得住的錯)。
+    if not isinstance(category, str) or not category.strip():
+        raise ValueError(
+            f"category must be a non-empty string, got: {category!r} —— 空字串/純空白"
+            "回寫進 manifest['show']['category'] 之後會黏住(下次沿用時 key 存在,不會"
+            "退回預設 'Technology')"
+        )
     # Validate artwork up front (fail-fast before any upload). Extension follows
     # the real format so a JPEG is never served as .png. Content-address the filename
     # (artwork-<hash>.jpg) so a CHANGED show cover gets a NEW URL → bypasses the CDN

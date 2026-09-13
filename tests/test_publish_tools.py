@@ -1724,6 +1724,24 @@ async def test_bad_itunes_type_is_refused_before_any_put(
     assert captured == []
 
 
+# ---- category 空字串/全空白繞過 required 檢查,且回寫後黏住(key 存在就不退回預設) ----
+
+@pytest.mark.parametrize("bad_category", ["", "   "])
+async def test_blank_category_is_refused_before_any_put(
+    env, tmp_path, artwork_png, monkeypatch, bad_category
+):
+    """`category=""` 通過 `is not None` 檢查照發,回寫進 manifest 之後
+    `saved_show.get("category", "Technology")` 因 key 存在回 `''`,黏性 bug——
+    所以要在任何 PUT 之前擋、且不准回寫進 manifest。"""
+    captured = _install_mock(monkeypatch)
+    manifest = _two_episode_manifest(tmp_path)
+    with pytest.raises(ValueError, match="category"):
+        await _publish(manifest, artwork_png, category=bad_category)
+    assert captured == []
+    stored = json.loads(open(manifest, encoding="utf-8").read())
+    assert "show" not in stored     # 沒有任何一次成功發布,manifest 不該有 show 區塊
+
+
 async def test_explicit_itunes_type_overrides_the_persisted_one(
     env, tmp_path, artwork_png, monkeypatch
 ):
