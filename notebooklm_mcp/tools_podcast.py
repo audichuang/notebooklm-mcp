@@ -2882,7 +2882,14 @@ async def _run_episode(
         # 也救不回——原樣往上拋,不誤導成「可續跑」。用專屬型別而非 except RuntimeError,
         # 才不會把下載/命名步驟意外的 RuntimeError 也當成不可續跑。
         raise
-    except Exception as exc:
+    # T6:`CancelledError` 是 `BaseException` 的直接子類,不是 `Exception`——只
+    # `except Exception` 收不到它。姊妹的 dispatch 段(上面 `_dispatch_audio_with_
+    # failover` 那圈)已經是 `except (Exception, asyncio.CancelledError)`,這裡
+    # 沒有同步跟上:client 在 finalize(下載/回錄上傳/rename)期間被 cancel 時,
+    # 底下附上 `podcast_episode_resume` 續跑呼叫 + `next_step` 的整段邏輯全部被
+    # 跳過,例外裸拋出去——artifact 明明已在雲端生成完,呼叫端卻拿不到任何續跑
+    # 指引。
+    except (Exception, asyncio.CancelledError) as exc:
         # 其餘失敗(本地 wait 超時、下載中斷、網路斷)發生在生成之後,artifact 仍在雲端
         # 完好。就地改寫 exc.args 附上 artifact_id + 現成的 podcast_episode_resume 呼叫,
         # 再原樣 re-raise —— 保留原例外「型別與結構化欄位」(SDK 的 ArtifactTimeoutError

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -1141,3 +1142,30 @@ async def test_generic_rpc_failure_stays_acceptance_unknown(fake_client, tmp_pat
         "attempts"
     ][0]
     assert attempt["dispatch"]["status"] == "acceptance_unknown"
+
+
+async def test_client_cancellation_during_finalize_still_offers_the_resume_call(
+    fake_client, tmp_path
+):
+    """T6:`_run_episode` finalize 段的 `except Exception as exc:` 收不到
+    `CancelledError`(它是 `BaseException` 的直接子類,不是 `Exception`)——client
+    在 finalize 期間(下載/上傳/rename 這段)被 cancel 時,姊妹 dispatch 段的
+    `except (Exception, asyncio.CancelledError) as exc:` 會附上完整的
+    `podcast_episode_resume` 續跑呼叫 + `next_step`,finalize 段卻讓它裸拋出去
+    ——artifact 明明已經在雲端生成完,呼叫端卻拿不到任何續跑指引。
+    """
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.download_audio_exc = asyncio.CancelledError("client 60s timeout")
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    message = str(excinfo.value)
+    assert "podcast_episode_resume" in message
