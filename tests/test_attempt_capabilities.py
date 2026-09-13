@@ -451,10 +451,10 @@ def test_every_state_that_trips_the_source_guard_retracts_without_a_flag(
     「需要旗標」,訊息也會跟著改口),**只有這條會紅**。獨立複審就是用這個突變證明了
     純不變式測試的盲區:語意選擇錯了,自洽性看不出來。
     """
-    guard_trips = dispatch in ("prepared", "not_accepted") or remote in (
-        "failed",
-        "removed",
-    )
+    # T10(測試債):改引用具名常數而不是手抄一份 tuple——守門的觸發條件（`_NEVER_
+    # DISPATCHED`/`_TERMINAL_REMOTE`）哪天前移，這裡若還是手抄字面值就會靜默 skip
+    # 掉，不會紅。
+    guard_trips = dispatch in p._NEVER_DISPATCHED or remote in p._TERMINAL_REMOTE
     if not guard_trips:
         pytest.skip("這個狀態不會觸發來源守門")
     episode, attempt = _case(dispatch, remote, "active", "series")
@@ -646,10 +646,9 @@ def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
     這句話**不准提到 `podcast_episode_reconcile`**(那個工具名不准在窗關了之後
     出現在指引裡,跟核心不變式測試的 window_closed 斷言同一條紅線)。
     """
-    dispatch_states_that_can_reconcile = (
-        "dispatching", "acceptance_unknown", "reconciliation_ambiguous",
-    )
-    if dispatch not in dispatch_states_that_can_reconcile:
+    # T10(測試債):改引用 SUT 的具名常數，不再手抄一份 tuple —— 手抄的那份哪天
+    # 跟 `can_reconcile` 的判準前移／改了範圍，這裡會靜默變成 skip 而不是紅。
+    if dispatch not in p._RECONCILABLE_DISPATCH_STATES:
         pytest.skip("這個 dispatch 狀態走不到窗關閉分支")
     episode, attempt = _case(dispatch, remote, role, shape)
     caps = p._attempt_capabilities(

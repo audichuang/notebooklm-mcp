@@ -158,6 +158,14 @@ _SERIES_SETTINGS_KEYS = frozenset({"language", "audio_format", "audio_length"})
 _TERMINAL_REMOTE = frozenset({"failed", "removed"})
 # dispatch 從沒離開本機:契約保證伺服器沒建出 task(ADR-0010 紀律④的立論基礎)。
 _NEVER_DISPATCHED = frozenset({"prepared", "not_accepted"})
+# T10(測試債,wp-a2):`can_reconcile` 認的那三個「還可能對帳得到東西」的 dispatch
+# 狀態——原本以字面 tuple 散落在本模組三處(`can_reconcile` 本身、
+# `_attempt_next_step` 的窗關閉分支、`_unresolved_attempt_ids` 曾經另開的
+# `_UNRESOLVED_DISPATCH_STATUSES`)與 `test_attempt_capabilities.py` 的 skip
+# 白名單各抄一份;抽成具名常數讓它們共用同一份真相,別再各自維護一份等著漏改。
+_RECONCILABLE_DISPATCH_STATES = frozenset(
+    {"dispatching", "acceptance_unknown", "reconciliation_ambiguous"}
+)
 
 
 def _regeneration_entry_point(attempt: dict) -> str:
@@ -399,7 +407,7 @@ def _attempt_capabilities(
     can_resend = never_dispatched and not is_output
     can_resume = bool(remote.get("artifact_id")) and not is_output
     can_reconcile = (
-        dispatch_status in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous")
+        dispatch_status in _RECONCILABLE_DISPATCH_STATES
         and not reconciliation_window_closed
     )
     regeneration_entry = _regeneration_entry_point(attempt)
@@ -837,7 +845,7 @@ def _attempt_next_step(caps: dict) -> str:
             "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完)。"
             + retract_hint
         )
-    if caps["dispatch_status"] in ("dispatching", "acceptance_unknown", "reconciliation_ambiguous"):
+    if caps["dispatch_status"] in _RECONCILABLE_DISPATCH_STATES:
         # can_reconcile 在這裡已經是 False,而 dispatch_status 仍落在可對帳的集合裡,
         # 只可能是呼叫端傳了 `reconciliation_window_closed=True`(明確算過、窗真的
         # 關了——`None`/`False` 都會讓 can_reconcile 維持 True,走不到這裡)。把
@@ -3075,9 +3083,10 @@ async def podcast_episode(
 # `remote.artifact_id` 理論上恆為 None(見下面 `podcast_episode_reconcile` 開頭的
 # 一致性檢查:`remote_artifact_id is not None` 時 `dispatch_status` 必須是
 # `"accepted"`),這裡仍顯式檢查而不是只憑 dispatch_status 假設,防呆成本很低。
-_UNRESOLVED_DISPATCH_STATUSES = frozenset(
-    {"dispatching", "acceptance_unknown", "reconciliation_ambiguous"}
-)
+# T10(測試債,wp-a2):這裡原本自己另開一份同樣的 frozenset(`_UNRESOLVED_
+# DISPATCH_STATUSES`)——與 `can_reconcile` 判準「一致」這句話原本只是註解上的
+# 承諾,程式碼層級是兩份獨立字面值。改成共用模組層的 `_RECONCILABLE_DISPATCH_
+# STATES`(定義在 `_NEVER_DISPATCHED` 旁邊),別再各自維護一份。
 
 
 def _unresolved_attempt_ids(
@@ -3101,7 +3110,7 @@ def _unresolved_attempt_ids(
             if remote.get("artifact_id") is not None:
                 continue
             dispatch = attempt.get("dispatch") or {}
-            if dispatch.get("status") in _UNRESOLVED_DISPATCH_STATUSES:
+            if dispatch.get("status") in _RECONCILABLE_DISPATCH_STATES:
                 unresolved.append(attempt_id)
     return sorted(unresolved)
 
