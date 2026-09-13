@@ -1,0 +1,52 @@
+{
+ "e0-source-search": [
+  "計畫以 source_search 作為主要手段(而不是逐篇 source_fulltext 把全文讀回來)",
+  "沒有把 chat_ask 當成主要手段",
+  "有帶 notebook_id 與 query 參數"
+ ],
+ "e1-fulltext-contains": [
+  "計畫用 source_fulltext 並帶 contains 做精確子字串比對",
+  "有 max_chars=0 或等效的省 token 姿勢,不把全文讀回 context",
+  "沒有把 source_search 誤用在『這個詞有沒有出現』這種精確問題上"
+ ],
+ "e2-custom-report": [
+  "選 generate_report 且 report_format 設成 custom",
+  "有帶 custom_prompt 描述要的講義結構",
+  "沒有傳 concept_explanation 這個 report_format"
+ ],
+ "e3-notebook-not-found": [
+  "優先從 series_manifest.json 讀 notebook_id,而不是先打 notebook_list",
+  "有指出 notebook_list 不會列出『分享來但沒開過』的筆記本(假的找不到)",
+  "三條路都查不到時停下來問使用者,明確不建議 notebook_create 新的一本"
+ ],
+ "e4-retract-vs-unpublish": [
+  "選 episode_set_publication_state(留稽核但不進 feed),而不是 podcast_attempt_retract",
+  "有說明 retract 的語意是作廢並準備重生,與這題的需求不同",
+  "沒有建議手改 series_manifest.json"
+ ],
+ "e5-series-vs-episode": [
+  "選 podcast_episode 而不是 podcast_series",
+  "有帶 source_ids 指名這三篇來源",
+  "有指出來源筆數上限(<10 / ≤9)這條守門"
+ ],
+ "e6-resume-timeout": [
+  "以 podcast_episode_reconcile(或該集回傳的 safe_next_action)作為救援入口",
+  "明確說呼叫 timeout 不等於生成失敗",
+  "指出要照回傳的 safe_next_action / next_step 走,而不是自己用 artifact_list 挑"
+ ],
+ "e7-publish-serial": [
+  "選 publish_series 並把 itunes_type 傳成 serial",
+  "有指出每集標題要以 EP{NN}. 開頭且數字等於集號",
+  "有指出 published_at 要隨集號遞增(否則 preflight 會擋)"
+ ],
+ "e8-auth-pool": [
+  "auth_check 有帶 all_slots(指出預設只量作用中那一槽)",
+  "有提到既有 notebook 要 notebook_share_with_pool,否則 failover 會 permission denied",
+  "有提到把 host 的 MCP 工具逾時調長(MCP_TOOL_TIMEOUT)"
+ ],
+ "e9-research": [
+  "規劃 research_start → research_wait → research_import 三支",
+  "有指出 research 綁發起帳號,wait/import 要原樣帶回 account",
+  "有指出要跑在拋棄式 scratch notebook,核可的來源才進 episode notebook"
+ ]
+}

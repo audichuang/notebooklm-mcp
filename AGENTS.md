@@ -63,7 +63,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 | `_status.py` `_atomic.py` `_text.py` `runtime.py` `languages.py` `enums.py` | generation-status 防護 / 原子寫入 / 文字正規化 / client holder / 白名單 / enum 映射 | `_atomic` 見 [gotchas-files](docs/gotchas-files.md) |
 | `auth_probe.py` `auth_cli.py` `cover_cli.py` `assets/` | 認證預檢 / headless 建檔備援 / 封面 CLI + 凍結的 HTML template | 封面見 [gotchas-publish](docs/gotchas-publish.md) |
 | `tests/test_contracts.py` | 用 `inspect.signature` 鎖住 `notebooklm-py` 公開 API 的離線 tripwire | 對**實裝版本**跑,別信 `_research/` 的 HEAD clone。**讀 body 的 `getsource` 斷言一律對 `notebooklm._web.*`**——0.8.2 起公開 facade 是 ABC(另一半是 android backend),對 ABC 抓原始碼不會爆、只會靜默恆真;簽名斷言(`_params`)留在 facade |
-| `scripts/` | CI 硬檢查(`check_skill_sync.py`)、認證/測試環境腳本、`published_at` 的兩支一次性修復 | backfill = 重生漂移、reorder = 亂序生成造成的集序錯位;都 dry-run 預設、走 `ManifestStore` |
+| `scripts/` | CI 硬檢查(`check_skill_sync.py`)、認證/測試環境腳本、`published_at` 的兩支一次性修復、`eval_harness/`(routing eval:真 schema + dry-run stub,不碰帳號) | backfill = 重生漂移、reorder = 亂序生成造成的集序錯位;都 dry-run 預設、走 `ManifestStore` |
 
 **文件的分工**:[CHANGELOG](CHANGELOG.md) = 各版本改了什麼/為什麼/踩到什麼事故(**版本敘事只寫在那裡,不要回填進本檔**);
 [docs/adr/](docs/adr/) = 能力邊界決策(**砍掉已規劃的 scope 也要留一支** —— research namespace 曾因此隱形 38 集);
@@ -109,11 +109,22 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
   跑的是 working tree 所以照樣全綠。派 agent 做多條修正時逐條做完逐條 commit;混在一起就寧可一個 commit。
   **commit 的內容 = 驗證過的內容,比 commit 粒度重要。**
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
-- **本 repo 的三條驗收線**(怎麼跑見工作根 §Cross-project rules;手段與三個會讓數字說謊的坑見
-  [docs/acceptance-testing.md](docs/acceptance-testing.md)):沒碰遠端副作用 → 離線測試 + 用既有實測前提推導結案
-  (`source_delete` 的清理義務、v0.9.2 的 owner 定位都是這樣結的),**推導要逐條指出前提在哪次實測被證明**,
-  不能只說「應該沒事」;改到**呼叫端讀得到的那一面**(工具描述 / `_INSTRUCTIONS` / skill 文字)→ dry-run stub;
-  碰到 `generate` / `add_user` / `delete` 這類會在雲端留下東西的呼叫 → 真帳號。
+- **驗收分三層,而且三層都自己跑 —— 不要產出「可貼的啟動 prompt」叫使用者開 session。**
+  headless `claude -p --model sonnet` 每題約 $0.2,所以跑得起「每題 n 次取平均 + 盲評 + 每次改完重跑」;
+  交 prompt 只跑得到一次、拿不到數字,而且改一次就要再麻煩人一次。手段與**三個會讓數字說謊的坑**見
+  [docs/acceptance-testing.md](docs/acceptance-testing.md),實跑紀錄見
+  [docs/acceptance-v0.9.26-eval.md](docs/acceptance-v0.9.26-eval.md)。
+  1. **沒碰遠端副作用** → 離線測試 + 用既有實測前提推導結案(`source_delete` 的清理義務、v0.9.2 的 owner
+     定位都是這樣結的)。**推導要逐條指出前提在哪次實測被證明**,不能只說「應該沒事」。
+  2. **改到呼叫端讀得到的那一面**(工具描述 / `_INSTRUCTIONS` / skill 文字)→ `claude -p` + dry-run stub
+     (`scripts/eval_harness/`):供應**真實** schema 但不執行任何呼叫,零帳號風險、零配額。
+  3. **碰到 `generate` / `add_user` / `delete`** 這類會在雲端留下東西的呼叫 → 真帳號,同樣自己跑
+     (`doppler run -c dev -- claude -p …`),跑完自己清測試產物。**只有不可逆的才停下來問**:
+     發布到公網 feed、刪既有 notebook/source、動到別人已訂閱得到的東西。
+- 🔴 **「push 了」不等於「出貨了」。** 消費端裝的是 **tag**,而 `retag-latest.sh` 只把 `latest` 指到
+  **最高的 semver** —— 發版後才修的東西不再發一版,等於只修給自己看(v0.9.27 就是為這件事發的)。
+  收工前**從中性目錄**驗實裝的那一份並印 `module.__file__`:cwd 排在 `sys.path` 最前面,在 repo 目錄下
+  驗會載到 repo 副本,行為看起來全對。詳見 [docs/release-checklist.md](docs/release-checklist.md)。
 - **tripwire 要驗「我們真的做得到什麼」,不是「上游宣告了什麼」。** v0.9.25 的 blocker:
   `test_every_sdk_enum_member_…` 問「每個 SDK enum 成員有沒有被交代」,於是「加進白名單」看起來
   就是讓它變綠的正解 —— 但 enum 是 backend-neutral、能力是 backend-specific,那個白名單開出一個

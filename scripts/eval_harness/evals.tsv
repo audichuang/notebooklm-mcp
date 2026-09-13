@@ -1,0 +1,10 @@
+e0-source-search	我 notebook nb-audicast 裡有八篇來源,想知道哪幾段在講作者對 backpressure 的定義,不要把整篇全文倒給我。用 notebooklm 幫我規劃要呼叫哪些工具、參數是什麼,先不要真的執行。
+e1-fulltext-contains	我剛用 source_add_url 加了一篇 Medium 文章進 nb-audicast,想確認它的正文真的有被抓進去——文章裡一定會出現「反壓」跟「Little's Law」這兩個詞。用 notebooklm 規劃工具呼叫就好,先別執行。
+e2-custom-report	audicast 第 12 集我想產一份講義,但不要 study_guide 那種考前總複習的樣子,我要的是把核心概念一個一個講清楚的那種。manifest 在 ~/podcast/audicast/series_manifest.json。用 notebooklm 規劃工具呼叫,先別執行。
+e3-notebook-not-found	幫我在 audicast 這個 notebook 生第 20 集的 podcast。我只知道名字叫 audicast,不知道 id。用 notebooklm 規劃就好,先別執行。
+e4-retract-vs-unpublish	audicast 第 7 集我聽完覺得品質不行,不想讓它出現在 Apple Podcast 上,但我要留紀錄知道曾經生過。用 notebooklm 規劃工具呼叫,先別執行。
+e5-series-vs-episode	audicast 要生第 9 集,這集只能用我今天新加的那三篇來源,不要把前面幾集的回錄混進去。用 notebooklm 規劃工具呼叫,先別執行。
+e6-resume-timeout	我昨天跑 podcast_episode 生第 5 集,跑到一半 client timeout 斷了,現在不知道雲端到底生完沒。用 notebooklm 規劃怎麼救,先別執行。
+e7-publish-serial	audicast 一整季 12 集都生完了,幫我發布成 Apple Podcast 訂閱得到的 RSS。這是連載節目,集序不能亂。用 notebooklm 規劃工具呼叫,先別執行。
+e8-auth-pool	我等一下要跑一整季 12 集的生成,很怕跑到一半認證掛掉。用 notebooklm 規劃事前要檢查什麼,先別執行。
+e9-research	我想用 NotebookLM 內建的 Deep Research 幫 audicast 下一集補「向量資料庫」這個主題的來源,再把找到的匯進 notebook。用 notebooklm 規劃工具呼叫,先別執行。
