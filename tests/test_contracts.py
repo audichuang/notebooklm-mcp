@@ -1077,3 +1077,20 @@ async def test_real_sdk_polling_absence_feeds_wait_for_artifact_removed_verdict(
 
     with pytest.raises(TimeoutError):
         await wait_for_artifact(_artifacts(["pending", "not_found"]), "nb", "a1", timeout=1200.0)
+
+
+def test_every_artifact_wait_goes_through_wait_for_artifact():
+    """0.8.3 起上游不再合成 `removed`,只有 `_status.wait_for_artifact` 會把「整窗缺席」翻回
+    下架終態。任何地方直接呼叫 `artifacts.wait_for_completion`,那條路的配額下架就永遠到不了
+    終態(續跑無限重等)。紅了就改呼叫 `wait_for_artifact(client.artifacts, ...)`。"""
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parents[1] / "notebooklm_mcp"
+    offenders = [
+        f"{path.name}:{n}"
+        for path in sorted(pkg.rglob("*.py"))
+        if path.name != "_status.py"
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "artifacts.wait_for_completion(" in line
+    ]
+    assert not offenders, f"改走 _status.wait_for_artifact:{offenders}"
