@@ -53,7 +53,7 @@ _REPORT_FORMAT = {
     "custom": ReportFormat.CUSTOM,
     # ⚠️ **這份不等於 `ReportFormat` 的全部,而且不該等於。** `ReportFormat` 是
     # backend-neutral 的 enum,但能不能真的生出來是 **backend-specific** 的:web 的
-    # `_web.params.artifacts._STATIC_REPORT_CONFIGS` 只有三個靜態格式,
+    # `_web.params.artifacts.build_report_artifact_params` 只編得出三個靜態格式,
     # `CONCEPT_EXPLANATION` **只在 `_android` 有 dispatch config**,而我們釘在 web
     # (見 tests/test_contracts.py::test_default_backend_is_still_web)。
     # v0.9.25-rc 驗收 5.1 實測:傳它會拿到

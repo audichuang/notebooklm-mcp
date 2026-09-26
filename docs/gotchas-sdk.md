@@ -12,7 +12,7 @@
   對 ABC 抓原始碼**不會爆,只會靜默恆真**(`tests/test_contracts.py` 實際踩過)。
   🔴 **推論的方向也跟著變了:「SDK enum 有這個成員」不再等於「我們生得出來」。**
   enum(`ReportFormat` 等)是 backend-neutral,**dispatch config 是 backend-specific** ——
-  `_web.params.artifacts._STATIC_REPORT_CONFIGS` 只有三種靜態講義格式,第四種
+  `_web.params.artifacts.build_report_artifact_params` 只編得出三種靜態講義格式,第四種
   (`CONCEPT_EXPLANATION`)**只在 `_android` 有**。v0.9.25 一度照舊推理「白名單漏了成員」
   把它開放出去,結果是個必定 `Unsupported report format` 的死選項,真實驗收才擋下。
   **要開放某個 enum 值之前,先確認 web 的 dispatch table 收不收它**

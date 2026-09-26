@@ -63,7 +63,7 @@ _CALLS = {
     ],
     "notebooklm._notebooks:NotebooksAPI": ["create", "list", "get", "get_source_ids", "get_raw"],
     "notebooklm._chat:ChatAPI": ["ask"],
-    "notebooklm._research:ResearchAPI": ["start", "poll", "wait_for_completion", "import_sources_with_verification"],
+    "notebooklm._research:BaseResearchAPI": ["start", "poll", "wait_for_completion", "import_sources_with_verification"],
     "notebooklm._sharing:SharingAPI": ["get_status", "set_users", "add_user"],
     "notebooklm.client:NotebookLMClient": ["from_storage"],
 }

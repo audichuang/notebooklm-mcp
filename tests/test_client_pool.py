@@ -18,7 +18,7 @@ from notebooklm.auth import (
     NOTEBOOKLM_REFRESH_CMD_ENV,
     NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV,
 )
-from notebooklm._auth.headless_reauth import NOTEBOOKLM_HEADLESS_REAUTH_ENV
+from notebooklm._browser.headless_reauth import NOTEBOOKLM_HEADLESS_REAUTH_ENV
 from notebooklm_mcp import app, runtime
 
 

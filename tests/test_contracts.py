@@ -48,8 +48,11 @@ def test_default_backend_is_still_web():
     # 覆寫會靜默變成 no-op,而症狀是「某天 pool 整個換 backend」。
     from notebooklm_mcp.app import _BACKEND_ENV, _INLINE_AUTH_ENV_OVERRIDES
 
+    # 0.8.3 把讀環境變數那一行從 `_client_assembly` 搬到 `_client_options`(from_storage 的 normalizer)。
+    from notebooklm import _client_options
+
     assert f'os.environ.get("{_BACKEND_ENV}")' in _inspect.getsource(
-        _client_assembly
+        _client_options
     ), "SDK 讀的 backend 環境變數名改了,app 的 inline 覆寫要跟著改"
     assert _INLINE_AUTH_ENV_OVERRIDES[_BACKEND_ENV] is None
 
@@ -634,7 +637,9 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
     for requirement in notebooklm_requirements:
         assert Version("0.8.0") not in requirement.specifier
         assert Version("0.8.1") not in requirement.specifier
-        assert Version("0.8.2") in requirement.specifier
+        # 0.8.2 + 本版程式碼從沒測過(測試已改 import 0.8.3 的搬家位置),別讓消費端解析到它。
+        assert Version("0.8.2") not in requirement.specifier
+        assert Version("0.8.3") in requirement.specifier
 
 
 def test_rotation_lock_and_file_lock_semantics_that_app_lifespan_depends_on(tmp_path):
@@ -723,7 +728,9 @@ def test_research_api_surface():
     注意 `select_cited_sources` **不在** ResearchAPI 上——它是 notebooklm.research 的
     module-level 純函式(不打 RPC)。cited 判定因此是本地計算,MCP 只回事實標記,
     要不要 cited-only 由 host 決定(見 ADR-0008)。"""
-    from notebooklm._research import ResearchAPI
+    # 0.8.3 起 `_research` 只剩 facade ABC(`BaseResearchAPI`),web 實作在 `_web.research`;
+    # 簽名斷言照慣例釘在 facade。
+    from notebooklm._research import BaseResearchAPI as ResearchAPI
     from notebooklm.research import extract_report_urls, normalize_citation_url
 
     assert _params(ResearchAPI.start) == ["self", "notebook_id", "query", "source", "mode"]
@@ -826,7 +833,8 @@ def test_console_script_name_does_not_collide_with_upstream():
 
 def test_upstream_login_accepts_rebrand_host():
     """The pinned SDK's native login must accept Google's rebranded landing host."""
-    from notebooklm.cli.services.playwright_login import url_matches_base_host
+    # 0.8.3 從 cli.services.playwright_login 搬進 _browser.browser_capture。
+    from notebooklm._browser.browser_capture import url_matches_base_host
 
     assert url_matches_base_host("https://notebook.google.com/")
 
@@ -978,3 +986,4 @@ def test_source_search_inputs_are_validated_by_the_sdk_before_any_rpc():
 
     # 正常輸入:query 去頭尾空白、source_ids 去重且保序、limit 原樣。
     assert validate_search("  q  ", ["b", "a", "b"], 3) == ("q", ("b", "a"), 3)
+

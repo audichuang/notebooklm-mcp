@@ -72,15 +72,28 @@ def test_report_format_whitelist_matches_what_the_web_backend_can_dispatch():
     真正的不變式是**我們開放的每一個靜態格式,web 都生得出來** —— 這一條會攔下那次改動,
     而且反向也有用:上游哪天把某個格式加進 web 的表,這裡會告訴我們現在可以開放了。
 
-    `CUSTOM` 不在 `_STATIC_REPORT_CONFIGS` 裡是正常的 —— 它走 `custom_prompt`,
+    `CUSTOM` 不在靜態格式裡是正常的 —— 它走 `custom_prompt`,
     不是靜態模板,所以單獨排除。
     """
-    from notebooklm._web.params.artifacts import _STATIC_REPORT_CONFIGS
+    # 0.8.3 拿掉了 `_STATIC_REPORT_CONFIGS`(改走 creation policy),所以不再讀上游的表,
+    # 直接問 web 的 params builder 每個格式「編不編得出來」—— 那一支就是會丟
+    # `Unsupported report format` 的地方,驗的是我們真的做得到什麼。
+    from notebooklm._web.params.artifacts import build_report_artifact_params
     from notebooklm.types import ReportFormat
     from notebooklm_mcp.enums import _REPORT_FORMAT
 
+    def _web_can_build(fmt):
+        try:
+            build_report_artifact_params(
+                "nb", ["src"], report_format=fmt, language="en", custom_prompt=None, extra_instructions=None
+            )
+        except ValueError:
+            return False
+        return True
+
     exposed_static = {v for v in _REPORT_FORMAT.values() if v is not ReportFormat.CUSTOM}
-    dispatchable = set(_STATIC_REPORT_CONFIGS)
+    dispatchable = {f for f in ReportFormat if f is not ReportFormat.CUSTOM and _web_can_build(f)}
+    assert dispatchable, "builder 對每個格式都失敗 —— 探測本身壞了,不是白名單的問題"
 
     dead = exposed_static - dispatchable
     assert not dead, (
@@ -121,7 +134,7 @@ def test_every_sdk_enum_member_is_mapped_or_explicitly_declined():
     # 已知、刻意不開放的成員 → 值是「為什麼」。空 dict = 該 enum 全部開放。
     _DECLINED = {
         "ReportFormat": {
-            # web backend 的 `_STATIC_REPORT_CONFIGS` 沒有它(只在 _android),
+            # web backend 的 params builder 編不出它(只在 _android),
             # 而我們釘在 web。開放 = 死選項。實測訊息見上一條測試的 docstring。
             "CONCEPT_EXPLANATION": "web backend 沒有 dispatch config,只有 android 有",
         },
