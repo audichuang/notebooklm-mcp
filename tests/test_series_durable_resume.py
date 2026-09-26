@@ -1,5 +1,6 @@
 """PR5：整季工具從 durable attempt state 安全續跑。"""
 
+import copy
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -768,6 +769,44 @@ async def test_series_retract_of_a_middle_episode_does_not_regenerate_reading_th
     assert [
         c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
     ][generate_boundary:] == [], "重生前必須停下,不准對 EP02 重新 dispatch"
+
+
+async def test_series_blocks_earlier_dispatch_when_later_feedback_uploaded_but_not_promoted(
+    fake_client, tmp_path, monkeypatch
+):
+    """後集回錄已進 notebook、尚未 promote 時,前集也不可讀整本重生。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.seed("整季講義")
+
+    def crash_before_promotion(*_args):
+        raise RuntimeError("crash after feedback upload")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(p, "_promote_attempt_output", crash_before_promotion)
+        with pytest.raises(RuntimeError, match="crash after feedback upload"):
+            await p.podcast_episode(
+                "nb-1", episode_n=3, title=EPS3[2]["title"],
+                brief=EPS3[2]["brief"], output_dir=str(tmp_path),
+                manifest_path=str(manifest_path),
+            )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ep3 = next(row for row in stored["episodes"] if row["episode"] == 3)
+    assert ep3.get("output_attempt_id") is None
+    assert ep3["attempts"][0]["finalize"]["feedback_source_upload"]["source_id"]
+    uncertain = copy.deepcopy(stored)
+    uncertain_ep3 = next(row for row in uncertain["episodes"] if row["episode"] == 3)
+    upload = uncertain_ep3["attempts"][0]["finalize"]["feedback_source_upload"]
+    upload.update(status="acceptance_unknown", source_id=None)
+    assert p._later_episode_has_output(uncertain, 2, "nb-1")
+    uncertain_ep3["attempts"][0]["notebook_id"] = "another-notebook"
+    assert not p._later_episode_has_output(uncertain, 2, "nb-1")
+
+    generate_boundary = len(_generate_briefs(fake_client))
+    out = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2)
+    assert out["complete"] is False
+    assert out["observed_state"] == "later_episode_has_output"
+    assert len(_generate_briefs(fake_client)) == generate_boundary
 
 
 async def test_series_retract_of_a_middle_episode_with_a_stuck_attempt_offers_retract_not_series(

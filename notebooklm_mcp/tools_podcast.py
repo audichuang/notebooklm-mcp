@@ -1639,8 +1639,8 @@ def _series_will_redispatch(attempt: dict) -> bool:
     return dispatch_status in _NEVER_DISPATCHED or remote_status in _TERMINAL_REMOTE
 
 
-def _later_episode_has_output(snapshot: dict, episode_n: int) -> bool:
-    """`manifest` 裡有沒有一列 `episode > episode_n` 已經有 output。
+def _later_episode_has_output(snapshot: dict, episode_n: int, notebook_id: str) -> bool:
+    """後集是否已有正式 output，或同本 notebook 仍可能存在其回錄 source。
 
     T3:retract 中段集之後重生時,`podcast_series` 若對這一集重新 dispatch(全新
     一集／not_accepted re-arm／failed-removed supersede,見 `_series_will_redispatch`
@@ -1651,6 +1651,9 @@ def _later_episode_has_output(snapshot: dict, episode_n: int) -> bool:
     `has_durable_output_evidence`)才對——後者連 `retracted_attempt_ids` 都算數,
     retract 恰恰不會清掉這個欄位,用它來判斷「後面集數有沒有 output」會把「後面那集
     自己也曾經被 retract 過」誤判成「有 output」。
+
+    回錄 source 比正式 output 先落盤；未 promote 的 active attempt 也要算，否則
+    EP03 上傳回錄後中斷，EP02 重生會靜默讀到它。未確定結果的上傳同樣保守攔下。
     """
     return any(
         isinstance(row.get("episode"), int)
@@ -1658,6 +1661,16 @@ def _later_episode_has_output(snapshot: dict, episode_n: int) -> bool:
         and (
             row.get("output_attempt_id") is not None
             or has_hard_output_evidence(row)
+            or any(
+                attempt.get("attempt_id") == row.get("active_attempt_id")
+                and attempt.get("notebook_id") == notebook_id
+                and not attempt.get("retraction")
+                and (
+                    ((attempt.get("finalize") or {}).get("feedback_source_upload") or {}).get("source_id")
+                    or unresolved_upload_descriptor(attempt) is not None
+                )
+                for attempt in row.get("attempts", [])
+            )
         )
         for row in snapshot.get("episodes", [])
     )
@@ -4852,11 +4865,11 @@ async def podcast_series(
                 # 打得通的出口:作廢它之後再用 podcast_episode 指名來源重生。
                 leak_action = ACTION_RETRACT
             if about_to_redispatch and _later_episode_has_output(
-                snapshot, episode_n
+                snapshot, episode_n, notebook_id
             ):
                 if leak_action == ACTION_EPISODE:
                     next_step = (
-                        f"episode {episode_n} 之後已經有集數產出正式輸出——這一集"
+                        f"episode {episode_n} 之後已有集數產出正式輸出或上傳回錄——這一集"
                         "還沒有 attempt,series 對它的下一步是全新 dispatch,不指名"
                         "來源就是讀整本筆記本,會把後面集數的回錄音檔洩進這一集。"
                         f"改用 {ACTION_EPISODE}(..., source_ids=[...]) 指名這一集"
@@ -4864,7 +4877,7 @@ async def podcast_series(
                     )
                 else:
                     next_step = (
-                        f"episode {episode_n} 之後已經有集數產出正式輸出——這一集"
+                        f"episode {episode_n} 之後已有集數產出正式輸出或上傳回錄——這一集"
                         "現有的 attempt 即將被 series 重新 dispatch(not_accepted "
                         "re-arm 或 failed/removed supersede),不指名來源一樣是讀"
                         f"整本筆記本。先 {ACTION_RETRACT}(純本機,不需要 "
