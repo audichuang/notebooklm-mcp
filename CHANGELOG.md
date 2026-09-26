@@ -8,6 +8,32 @@
 
 ## v0.9.28 — 多 agent 稽核一輪:59 條候選、反駁式驗證後修掉 5 條 P1、11 條 P2,補回 8 條假綠的測試
 
+### notebooklm-py 0.8.3(同版加入,2026-09-26 上游發版當天)
+
+上游當天發 0.8.3,pin 是 `>=0.8.2,<0.9` —— 消費端重裝就會解析成「我方碼 + 0.8.3」這個沒測過的組合,
+所以不等下一版、併進 v0.9.28,**下界抬到 `>=0.8.3`**。先用兩個獨立 venv 跑 `compare_sdk_surface.py`,
+再派兩支 agent 分區逐支比對兩版原始碼(生成/配額 failover;認證池/來源/research/chat)。
+**cookie 紅線在 0.8.3 仍成立**:env 開關名稱與語意不變,冷啟動階梯只剩 headless 與 master-token 兩階,沒有新的重鑄路徑。
+
+- **tripwire 紅 5 條,全是模組搬家**(`_browser.headless_reauth`、`_client_options`、`BaseResearchAPI`、
+  `_browser.browser_capture`、`_STATIC_REPORT_CONFIGS` 移除)。報告格式那條改成實際呼叫 web 的 params builder
+  探測,不再讀上游私有表。
+- **行為改變 ①:送出後才撞的 429 不再換帳號重送。** 上游對這種形狀掛 `unconfirmed` 並聲明「never replayed」,
+  `_failover` 原本「上游也原地重送」的理由失效。現在走 acceptance_unknown(要先 reconcile)——**這是可見的生產行為改變**;
+  decoder 的配額拒絕與送出前讀取的 429 照舊換帳號。
+- **行為改變 ②:上游不再合成 `removed`**(#2432)。配額下架的集數會每次續跑等滿逾時又回 resume、永遠到不了終態。
+  `_status.wait_for_artifact` 在「整窗(>= 5 分鐘)從頭到尾只看過 not_found」時合成 removed,接回既有狀態機;
+  五個等待點全走它。判準比 0.8.2 的 10 秒嚴格上百倍。
+- `podcast_series` 對受理不明/送出後的 `RateLimitError` 曾 bare raise、丟掉前面各集結果 —— 改回結構化停點
+  (0.8.3 讓它多了兩個入口)。
+- 來源建立與 research 匯入**不再補送**(retry-unsafe write),結果不明時原樣 raise。`source_add_*` 與
+  `research_import` 的訊息補「先 source_list 對帳」+ 上游的候選清單;`research_import` 多回 `already_present`。
+- **沒改、刻意留著的**:chat 對 429/5xx 不再重試(副作用只是對話多一輪,host 重呼即可);
+  `from_storage(backend="web")` 在 0.8.3 發 DeprecationWarning(預設 filter 看不到,改 `ClientConfig`
+  有「不能傳 `request=`」的陷阱,1.0 前再處理);下載 401/403 改 raise `AuthError`(我們沒按型別攔,走泛用 resume 指引)。
+- **live 冒煙沒跑成**:dev 與 prd 共用的那份憑證已失效(0.9.27 + 0.8.2 對照組同樣在第一個 GET 被導去登入頁,
+  不是本版造成)。要等重登 + `sync-auth.sh` 後補跑。
+
 ### 這一輪怎麼做的(方法本身是這版最該記的東西)
 
 第一輪 **9 支獨立審查者**(Claude 8 支按檔案分區 + Codex 1 支只看 attempt 狀態機),互不餵結論、
