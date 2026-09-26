@@ -13,7 +13,12 @@ from mcp.types import ToolAnnotations
 from notebooklm.rpc.types import SharePermission
 
 from . import runtime
-from ._errors import NotebookAccessDenied, is_permission_denied, raise_if_access_denied
+from ._errors import (
+    NotebookAccessDenied,
+    is_permission_denied,
+    raise_if_access_denied,
+    reconcile_hint_if_unconfirmed,
+)
 from ._sources import (
     assert_source_count_is_safe,
     assert_sources_exist,
@@ -450,7 +455,8 @@ async def source_add_url(notebook_id: str, url: str, wait: bool = True) -> dict:
     落地驗證:`char_count` = 擷取字數,**0 代表疑似 paywall/空殼**並附 warning(該
     `source_delete` 掉、改抓全文用 `source_add_text`)。看回傳即完成對帳。"""
     client = runtime.get_client()
-    src = await client.sources.add_url(notebook_id, url, wait=wait, wait_timeout=600.0)
+    with reconcile_hint_if_unconfirmed(notebook_id):
+        src = await client.sources.add_url(notebook_id, url, wait=wait, wait_timeout=600.0)
     out = {"source_id": src.id}
     if wait:
         out.update(await _probe_extraction(client, notebook_id, src.id, is_file=False))
@@ -460,7 +466,10 @@ async def source_add_url(notebook_id: str, url: str, wait: bool = True) -> dict:
 @mcp.tool()
 async def source_add_text(notebook_id: str, title: str, content: str, wait: bool = True) -> dict:
     """Add plain text as a source."""
-    src = await runtime.get_client().sources.add_text(notebook_id, title, content, wait=wait, wait_timeout=600.0)
+    with reconcile_hint_if_unconfirmed(notebook_id):
+        src = await runtime.get_client().sources.add_text(
+            notebook_id, title, content, wait=wait, wait_timeout=600.0
+        )
     return {"source_id": src.id}
 
 
@@ -490,14 +499,15 @@ async def source_add_file(
             (file_path, None) if mime_type is not None       # 顯式宣告優先,不猜
             else await asyncio.to_thread(_as_uploadable_text, file_path, tmpdir)
         )
-        src = await client.sources.add_file(
-            notebook_id,
-            upload_path,
-            mime_type=mime_type,
-            wait=wait,
-            wait_timeout=600.0,
-            title=title,
-        )
+        with reconcile_hint_if_unconfirmed(notebook_id):
+            src = await client.sources.add_file(
+                notebook_id,
+                upload_path,
+                mime_type=mime_type,
+                wait=wait,
+                wait_timeout=600.0,
+                title=title,
+            )
     # 0.7.3 的 title= 內部是 add→rename,改名失敗只 log 不 raise(回傳舊 title)。
     # 命名是鐵律的一部分,靜默破功不可接受 → 後檢 fail-loud。
     if title is not None and getattr(src, "title", None) != title:

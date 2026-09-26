@@ -964,3 +964,31 @@ class TestSourceSearch:
 
         fake_client.sources.search_results = []
         assert await t.source_search("nb1", "X") == {"count": 0, "chunks": []}
+
+
+@pytest.mark.parametrize("tool", ["url", "text", "file"])
+async def test_source_add_unconfirmed_failure_says_reconcile_before_retry(
+    fake_client, tmp_path, tool
+):
+    """0.8.3 起上游對「已送出、結果不明」的來源建立**不再 probe/重送**,原樣 raise 並掛
+    `unconfirmed`。裸傳給 host 只看得到 NetworkError,照直覺重試 = 重複來源。三支共用同一段
+    指引(不各寫一份)。用 SDK 自己的 `mark_unconfirmed` 造例外。"""
+    from notebooklm._idempotency import mark_unconfirmed
+    from notebooklm.exceptions import NetworkError
+
+    async def lost(*args, **kwargs):
+        raise mark_unconfirmed(NetworkError("connection reset after send"))
+
+    setattr(fake_client.sources, f"add_{tool}", lost)
+    doc = tmp_path / "a.md"
+    doc.write_text("hello", encoding="utf-8")
+    call = {
+        "url": lambda: t.source_add_url("nb-1", "https://example.com"),
+        "text": lambda: t.source_add_text("nb-1", "t", "c"),
+        "file": lambda: t.source_add_file("nb-1", str(doc)),
+    }[tool]
+
+    with pytest.raises(NetworkError) as info:
+        await call()
+    assert "source_list" in str(info.value)
+    assert "nb-1" in str(info.value)

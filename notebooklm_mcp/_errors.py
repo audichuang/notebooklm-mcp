@@ -7,6 +7,8 @@ v0.9.0 真實驗收(Phase 9-1)之後 `tools_basic.notebook_share_with_pool` 也�
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from notebooklm.exceptions import ClientError
 from notebooklm.rpc.types import GrpcStatusCode, normalize_rpc_code
 
@@ -81,3 +83,25 @@ def is_permission_denied(exc: BaseException) -> bool:
     if not isinstance(exc, ClientError):
         return False
     return normalize_rpc_code(getattr(exc, "rpc_code", None)) == GrpcStatusCode.PERMISSION_DENIED
+
+
+@contextmanager
+def reconcile_hint_if_unconfirmed(notebook_id: str):
+    """來源建立「已送出、結果不明」時,在例外訊息補上「先對帳再重試」—— 這段話的唯一產地。
+
+    notebooklm-py 0.8.3 起來源建立不再 probe/重送(retry-unsafe write),傳輸在送出後斷掉
+    就原樣 raise 並掛 `unconfirmed`。型別與訊息跟普通網路錯誤一模一樣,host 照直覺重試
+    就多一筆重複來源。只改 `args`、原樣重拋,型別與 SDK 的結構化欄位都保留。
+    """
+    try:
+        yield
+    except Exception as exc:
+        if getattr(exc, "unconfirmed", False):
+            known = getattr(exc, "source_id", None)
+            exc.args = (
+                f"{exc}\n送出後結果不明:來源**可能已經建立**。先 "
+                f"source_list(notebook_id={notebook_id!r}) 對帳,確認沒有才重試 —— "
+                "直接重試可能產生重複來源。"
+                + (f" 上游回報的候選 source_id={known!r}。" if known else ""),
+            )
+        raise
