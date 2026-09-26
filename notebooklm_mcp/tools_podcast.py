@@ -4636,6 +4636,46 @@ async def podcast_series(
             **extra,
         }
 
+    def post_dispatch_stop(episode_n: int) -> dict:
+        """dispatch 之後(或受理不明)的暫時性失敗 → 結構化停點,**不裸拋**。
+
+        `_TRANSIENT_TRANSPORT_ERRORS` 與「`_run_episode` 拋出但 manifest 不是 not_accepted」
+        共用這一份:後者曾經 bare raise,把前面幾集的 run_results 整份丟掉(F-4 形狀)。
+        0.8.3 讓它更常發生 —— 送出後的 429 標成 acceptance_unknown,輪詢時 LIST_ARTIFACTS
+        的 RESOURCE_EXHAUSTED 也改成 raise `RateLimitError`。在 except 區塊內呼叫,
+        所以 `_active_attempt_or_reraise` 的 bare raise 仍重拋原例外。
+        """
+        current = store.read()
+        attempt_id = _active_attempt_or_reraise(current, episode_n)
+        current_episode, stopped_attempt = _attempt_record(
+            current, episode_n, attempt_id
+        )
+        if stopped_attempt["remote"].get("artifact_id") is None:
+            # 這一格是「artifact 都還沒接受」——與回錄 source 上傳無關,維持原判準。
+            observed = stopped_attempt["dispatch"]["status"]
+            needs_artifact_reconcile = observed == "acceptance_unknown"
+            action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
+            return partial(episode_n, attempt_id, observed, action)
+        upload_state = stopped_attempt.get("finalize", {}).get(
+            "feedback_source_upload", {}
+        ).get("status")
+        # T1:回錄 source 上傳卡在這三種 unresolved 狀態時走 caps,理由與上面
+        # active-attempt 分支那兩個 handler 相同(單一事實來源、候選一併帶出)。
+        if upload_state in ("acceptance_unknown", "reconciliation_ambiguous"):
+            caps = _attempt_capabilities(
+                current_episode, stopped_attempt, attempt_id
+            )
+            return partial(
+                episode_n,
+                attempt_id,
+                upload_state,
+                caps["safe_next_action"],
+                candidate_source_ids=caps["candidate_source_ids"],
+                next_step=_attempt_next_step(caps),
+            )
+        observed = stopped_attempt["remote"]["status"]
+        return partial(episode_n, attempt_id, observed, ACTION_SERIES)
+
     def promotion_refused_stop(exc: PromotionRefusedError) -> dict:
         """T3(wp-a2):`_promote_attempt_output` 的兩個呼叫點共用同一份轉換——
         `PromotionRefusedError` 收斂了三道 ValueError 守門(已 retract／owned-by-
@@ -5531,7 +5571,7 @@ async def podcast_series(
                 current, episode_n, attempt_id
             )
             if stopped_attempt["dispatch"]["status"] != "not_accepted":
-                raise
+                return post_dispatch_stop(episode_n)
             # 「等配額」與「notebook 沒分享給這個帳號」manifest 都寫 not_accepted,
             # 但呼叫端拿到的結構化停點要分得出來(見 `_classify_not_accepted_stop`)。
             observed_state, action, extra = _classify_not_accepted_stop(exc)
@@ -5543,36 +5583,7 @@ async def podcast_series(
                 **extra,
             )
         except _TRANSIENT_TRANSPORT_ERRORS:
-            current = store.read()
-            attempt_id = _active_attempt_or_reraise(current, episode_n)
-            current_episode, stopped_attempt = _attempt_record(
-                current, episode_n, attempt_id
-            )
-            if stopped_attempt["remote"].get("artifact_id") is None:
-                # 這一格是「artifact 都還沒接受」——與回錄 source 上傳無關,維持原判準。
-                observed = stopped_attempt["dispatch"]["status"]
-                needs_artifact_reconcile = observed == "acceptance_unknown"
-                action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
-                return partial(episode_n, attempt_id, observed, action)
-            upload_state = stopped_attempt.get("finalize", {}).get(
-                "feedback_source_upload", {}
-            ).get("status")
-            # T1:回錄 source 上傳卡在這三種 unresolved 狀態時走 caps,理由與上面
-            # active-attempt 分支那兩個 handler 相同(單一事實來源、候選一併帶出)。
-            if upload_state in ("acceptance_unknown", "reconciliation_ambiguous"):
-                caps = _attempt_capabilities(
-                    current_episode, stopped_attempt, attempt_id
-                )
-                return partial(
-                    episode_n,
-                    attempt_id,
-                    upload_state,
-                    caps["safe_next_action"],
-                    candidate_source_ids=caps["candidate_source_ids"],
-                    next_step=_attempt_next_step(caps),
-                )
-            observed = stopped_attempt["remote"]["status"]
-            return partial(episode_n, attempt_id, observed, ACTION_SERIES)
+            return post_dispatch_stop(episode_n)
         run_results.append(result)
 
     return {

@@ -794,3 +794,38 @@ async def test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted(
         manifest_path=str(manifest_path),
     )
     assert result["episode"] == 1
+
+
+async def test_series_unconfirmed_429_on_a_later_episode_keeps_prior_results(
+    fake_client, tmp_path
+):
+    """第 2 集 dispatch 撞到 0.8.3 標成 `unconfirmed` 的 429:failover 把它標成
+    acceptance_unknown 原樣拋。`podcast_series` 的 `_run_episode` handler 對
+    「不是 not_accepted」曾經 bare raise —— 第 1 集已完成的 run_results 整份丟掉(F-4 形狀)。
+    要回結構化停點、指向 reconcile。"""
+    from notebooklm._idempotency import mark_unconfirmed
+    from notebooklm.exceptions import RateLimitError
+
+    runtime.set_clients([("a@x", fake_client)])
+    ok_generate = fake_client.artifacts.generate_audio
+    calls = {"n": 0}
+
+    async def second_is_throttled(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise mark_unconfirmed(RateLimitError("429 Too Many Requests"))
+        return await ok_generate(*args, **kwargs)
+
+    fake_client.artifacts.generate_audio = second_is_throttled
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "1"}, {"title": "實戰篇", "brief": "2"}],
+        output_dir=str(tmp_path),
+        start=1,
+    )
+
+    assert out["complete"] is False
+    assert len(out["episodes"]) == 1, "第 1 集的結果不得因第 2 集的受理不明而丟掉"
+    assert out["observed_state"] == "acceptance_unknown"
+    assert out["safe_next_action"] == p.ACTION_RECONCILE
