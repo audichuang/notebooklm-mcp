@@ -829,3 +829,53 @@ async def test_series_unconfirmed_429_on_a_later_episode_keeps_prior_results(
     assert len(out["episodes"]) == 1, "第 1 集的結果不得因第 2 集的受理不明而丟掉"
     assert out["observed_state"] == "acceptance_unknown"
     assert out["safe_next_action"] == p.ACTION_RECONCILE
+
+
+async def test_series_rerun_polling_rate_limit_keeps_prior_results(fake_client, tmp_path):
+    """已受理、停在 pending 的第 2 集,重跑 series 時輪詢撞 `RateLimitError`(0.8.3 的輪詢
+    對 429 重試 3 次後原樣拋出;LIST_ARTIFACTS 的 RESOURCE_EXHAUSTED 也改成 raise)。
+    active-attempt 分支只收 transient/RuntimeError,曾經裸拋 —— 違反「預期內的停止用回傳值表達」。"""
+    from notebooklm.exceptions import RateLimitError
+
+    runtime.set_clients([("a@x", fake_client)])
+    episodes = [{"title": "心法篇", "brief": "1"}, {"title": "實戰篇", "brief": "2"}]
+    fake_client.artifacts.fail_wait_on = 2  # 第 2 集第一次等待逾時 → 停在 pending
+    first = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
+    assert first["complete"] is False and first["stopped_at_episode"] == 2
+
+    fake_client.artifacts.fail_wait_on = 3
+    fake_client.artifacts.wait_exc = RateLimitError("429 while polling")
+    out = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 2
+    assert out["safe_next_action"] == p.ACTION_SERIES  # 重跑同一組就好,artifact 仍在雲端
+
+
+async def test_series_reconcile_read_failure_returns_a_stop_not_a_raise(fake_client, tmp_path):
+    """受理不明的集數,series 重跑會先對帳(LIST_ARTIFACTS)。0.8.3 起那個讀取撞限流是
+    raise 而非空清單 —— 對帳沒改任何東西,要回停點指回 reconcile,不是裸拋。"""
+    from notebooklm._idempotency import mark_unconfirmed
+    from notebooklm.exceptions import RateLimitError
+
+    runtime.set_clients([("a@x", fake_client)])
+    ok_generate = fake_client.artifacts.generate_audio
+
+    async def throttled(*args, **kwargs):
+        raise mark_unconfirmed(RateLimitError("429 after send"))
+
+    fake_client.artifacts.generate_audio = throttled
+    episodes = [{"title": "心法篇", "brief": "1"}]
+    first = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
+    assert first["observed_state"] == "acceptance_unknown"
+
+    fake_client.artifacts.generate_audio = ok_generate
+
+    async def list_throttled(*args, **kwargs):
+        raise RateLimitError("RESOURCE_EXHAUSTED on LIST_ARTIFACTS")
+
+    fake_client.artifacts.list = list_throttled
+    out = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
+    assert out["complete"] is False
+    assert out["observed_state"] == "acceptance_unknown"
+    assert out["safe_next_action"] == p.ACTION_RECONCILE

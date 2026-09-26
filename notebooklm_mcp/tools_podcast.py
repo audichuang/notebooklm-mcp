@@ -16,7 +16,7 @@ from email.utils import format_datetime
 from mcp.types import ToolAnnotations
 # `RateLimitError` / `ArtifactFeatureUnavailableError` 的分類已隨 failover 迴圈移到
 # `_failover.py`(本檔只透過 `_REFUSED_WITHOUT_DISPATCH` 這個別名用它們)。
-from notebooklm.exceptions import NetworkError
+from notebooklm.exceptions import NetworkError, RateLimitError
 from notebooklm.types import ArtifactType
 
 from . import runtime
@@ -104,7 +104,11 @@ def _promised_reconciliation_window_seconds(dispatch: dict, wait_timeout: float)
 # 集合的定義與「為什麼刻意不長大」在 `_failover.py`(附件家族也走同一個迴圈,各留一份
 # 等於埋一顆「上游改了同步拒絕的例外型別、只有一處被改到」的地雷)。這裡只是 import 時
 # 改名成既有呼叫點與文件引用用的私有名,不再另外賦值一行。
-_TRANSIENT_TRANSPORT_ERRORS = (TimeoutError, ConnectionError, NetworkError)
+# dispatch **之後**(輪詢/下載/對帳/認證預檢)撞到的暫時性失敗。`RateLimitError` 在這裡:
+# 0.8.3 的輪詢對 429 重試 3 次後原樣拋出,LIST_ARTIFACTS 的 RESOURCE_EXHAUSTED 也從「空清單」
+# 改成 raise —— 都是「過一會再跑同一組」的形狀。dispatch 那一刻的 RateLimitError 由各分支
+# 更前面的 `_REFUSED_WITHOUT_DISPATCH` handler 先接走,不會落到這裡。
+_TRANSIENT_TRANSPORT_ERRORS = (TimeoutError, ConnectionError, NetworkError, RateLimitError)
 
 # `NotebookAccessDenied` / `is_permission_denied` 住在 `_errors.py`(v0.9.0 起
 # `tools_basic.notebook_share_with_pool` 也要判同一件事)。權限分類本身已經由
@@ -5385,14 +5389,21 @@ async def podcast_series(
                             f"episode {episode_n} attempt has no remote artifact "
                             f"in state {dispatch_state!r}"
                         )
-                    reconciled = await _podcast_episode_reconcile(
-                        client,
-                        manifest_path,
-                        episode_n=episode_n,
-                        attempt_id=active_attempt_id,
-                        wait_timeout=wait_timeout,
-                        auth_probed=True,
-                    )
+                    try:
+                        reconciled = await _podcast_episode_reconcile(
+                            client,
+                            manifest_path,
+                            episode_n=episode_n,
+                            attempt_id=active_attempt_id,
+                            wait_timeout=wait_timeout,
+                            auth_probed=True,
+                        )
+                    except _TRANSIENT_TRANSPORT_ERRORS:
+                        # 對帳本身只讀 LIST_ARTIFACTS;讀不到就什麼都沒改,狀態仍是受理不明。
+                        # 裸拋會丟掉前面各集結果(F-4 形狀),回停點讓呼叫端稍後再對帳。
+                        return partial(
+                            episode_n, active_attempt_id, dispatch_state, ACTION_RECONCILE
+                        )
                     if reconciled["observed_state"] != "accepted":
                         # P2:零候選那格的出路寫在 `next_step`(見
                         # `podcast_episode_reconcile` 的 F3 修法),那是逃離 self-loop
