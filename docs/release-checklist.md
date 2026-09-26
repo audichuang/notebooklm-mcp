@@ -37,9 +37,16 @@ CI 全綠、`latest` 還是紋風不動地指著那個有 bug 的版本。v0.9.2
 v0.9.26 的修正在 master 躺著,而四台機器裝到的全是壞的。**retag 救不了,只能再發一版。**
 
 `vMAJOR.MINOR.PATCH` tag 是不可變錨點;`latest` 是 CI 維護的移動指針。
-推上 `vX.Y.Z` 之後 `.github/workflows/retag-latest.yml` 跑
-`scripts/retag-latest.sh`,把 `latest` 指到**最高**的 semver 發版(不是剛推的那個,
+推上 `vX.Y.Z` 之後 `.github/workflows/retag-verified-latest.yml` 跑
+`scripts/retag-latest.sh`,把 `latest` 指到**已通過 CI 的最高** semver 發版(不是剛推的那個,
 所以誤推舊 tag 不會把指針往回拉)。預發版 `v0.9.20-rc1` 不算。
+
+🔴 **推 v0.9.28 tag 前的一次性遷移**:先把新 workflow 隨 master 推上去,再執行
+`gh workflow disable 337507291` 停用舊 `.github/workflows/retag-latest.yml` 的遠端 workflow ID;
+用 `gh workflow list --all` 確認舊的 disabled、新的 active,**確認前不要推 tag**。
+GitHub 對舊 tag 的 push 會執行該舊 commit 上的 workflow 版本;若舊 ID 仍 active,
+重推 v0.9.27 就能跑無 CI gate 的舊檔並把 `latest` 指到未驗新版。新檔名是為了讓舊 ID
+能永久停用,不與這版的 gate 共用身份。
 
 **skill 不是 pin 點。** `audi-skill/notebooklm` 的安裝指令在 `references/setup.md`,
 寫的是 `@latest`。打 tag、等 CI 移動指針之後,消費端重跑 setup 那段即跟上。
@@ -54,11 +61,12 @@ v0.9.26 的修正在 master 躺著,而四台機器裝到的全是壞的。**reta
 **tag 之前**:CI 綠(它含 wheel 的 `uv tool install` + `--help` 冒煙),
 **tag 之後**:
 
-1. 等 `retag-latest` workflow 綠。**`latest` 是 annotated tag**,`git ls-remote origin
+1. 等 `retag-verified-latest` workflow 綠。**`latest` 是 annotated tag**,`git ls-remote origin
    refs/tags/latest` 印的是 tag 物件的 SHA,永遠對不上 commit —— 要比 peeled 那行:
    `git ls-remote --tags origin | grep 'latest^{}'` 的 SHA 必須等於 `git rev-parse vX.Y.Z^{}`
-   (v0.9.24 實際踩到:沒 peel 就誤判成「指針沒動」)。沒動就 `gh workflow run retag-latest.yml`,
-   或本機 `bash scripts/retag-latest.sh --push`。
+   (v0.9.24 實際踩到:沒 peel 就誤判成「指針沒動」)。沒動先確認目標 commit 的 CI 綠,
+   再 `gh workflow run retag-verified-latest.yml`;腳本的 `--push` 必須同時帶已核對的
+   release tag 與 commit,不能不帶參數直接選最高 tag。
 2. 用 `@latest` 真的裝一次再收工 —— v0.7.0 的撞名就是這一步才發現的。
    ⚠️ **驗實裝要 `cd` 到中性目錄**(`/tmp` 之類)並印出 `module.__file__` 確認路徑:
    Python 把 cwd 排在 `sys.path` 最前面,在 repo 目錄下跑 tool venv 的 python 會載到

@@ -27,6 +27,11 @@ def test_retag_uses_the_commit_that_passed_ci_even_if_a_newer_tag_exists(tmp_pat
         commits.append(_git("rev-parse", "HEAD", cwd=work))
     _git("push", "-q", "origin", "--tags", cwd=work)
 
+    unchecked = subprocess.run(
+        ["bash", str(SCRIPT), "--push"], cwd=work, capture_output=True, text=True,
+    )
+    assert unchecked.returncode != 0, "直接 --push 不得跳過 CI 驗過的 commit"
+
     checked = subprocess.run(
         ["bash", str(SCRIPT), "--push", "v0.9.28", commits[0]],
         cwd=work, capture_output=True, text=True,

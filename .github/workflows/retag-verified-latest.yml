@@ -1,4 +1,4 @@
-name: retag-latest
+name: retag-verified-latest
 
 # Moving pointer for consumers (`uv tool install …@latest`).
 # Triggered by a release tag; also runnable by hand to repair a stale pointer.
@@ -47,8 +47,8 @@ jobs:
           # 剛好也是 lock/pyproject 不自洽的那版)。latest 是消費端唯一會裝到的指標,
           # 不能指到一個 CI 還沒驗證、甚至會紅的 commit。
           #
-          # 擋下時怎麼救:等 ci.yml 對這個 commit 真的綠了之後,`gh workflow run
-          # retag-latest.yml` 重跑一次;本機最後手段是 `bash scripts/retag-latest.sh --push`。
+          # 擋下時怎麼救:等 ci.yml 對目標 release commit 真的綠了之後,
+          # `gh workflow run retag-verified-latest.yml` 重跑一次。
           # push 事件的 GITHUB_SHA 可能是舊 tag；手動 workflow_dispatch 則是 master。
           # 真正要移動到的是目前最高 semver。先凍結 tag + commit,CI 與 retag 用同一顆。
           git fetch --tags --force origin

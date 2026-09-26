@@ -7,7 +7,6 @@
 #
 # Usage:
 #   bash scripts/retag-latest.sh          # update local tag only
-#   bash scripts/retag-latest.sh --push   # also force-push to origin
 #   bash scripts/retag-latest.sh --push vX.Y.Z CHECKED_COMMIT  # CI 驗過的固定目標
 set -euo pipefail
 
@@ -16,7 +15,7 @@ if [[ "${1:-}" == "--push" ]]; then
   push=1
   shift
 fi
-if [[ $# -ne 0 && $# -ne 2 ]]; then
+if [[ ( "$push" -eq 1 && $# -ne 2 ) || ( $# -ne 0 && $# -ne 2 ) ]]; then
   echo "usage: $0 [--push] [vX.Y.Z checked-commit]" >&2
   exit 2
 fi
