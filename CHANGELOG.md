@@ -156,6 +156,17 @@ v0.9.23 **−77s**、v0.9.24 +33s、v0.9.25 +349s、v0.9.26 +17s、v0.9.27 +27s 
   `httpx` logger 為 WARNING。prd `auth_check(all_slots=True)` 實測 5/5 可用,dev stdio
   `tools/list` 實測 37 支,`auth_check` 正常。這些是只讀檢查,不涵蓋生成與發布副作用。
 
+### 後續兩 agent 獨立複審(2026-09-26)
+
+- 後集回錄 source 在 finalize 上傳 checkpoint 後、episode output promote 前已進 notebook;
+  原本的 `later_episode_has_output` 只看 episode 級 output,前集重生仍會讀整本並混入後集。
+  守門補看同 notebook 後集 active attempt 的已知或結果未明上傳;FakeClient 模擬
+  promote 前 crash 的回歸測試先紅後綠。
+- `retag-latest` 原先驗的是觸發事件 SHA,實際腳本卻重選當下最高 semver;
+  連推 tag 或手動觸發時可把未通過 CI 的版本設為 `latest`。現在選定最高 tag 與 commit
+  後驗那顆 CI,腳本只移動到同一顆已驗 commit;隔離 git remote 測試先紅後綠。
+- skill 路由的封面 `--show-name` fallback 與 HTTP 第二 session 說明已對齊程式碼。
+
 ### 數字(在發版 commit 上重量)
 
 - 全套離線測試:__TESTS__。
