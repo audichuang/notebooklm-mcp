@@ -98,10 +98,16 @@ def reconcile_hint_if_unconfirmed(notebook_id: str):
     except Exception as exc:
         if getattr(exc, "unconfirmed", False):
             known = getattr(exc, "source_id", None)
+            candidates = [c for c in getattr(exc, "reconciliation_candidates", ()) or () if c]
+            if known and known not in candidates:
+                candidates.insert(0, known)
+            report = getattr(getattr(exc, "operation_metadata", None), "reconciliation", None)
+            unresolved = list(getattr(report, "unresolved_inputs", ()) or ())
             exc.args = (
                 f"{exc}\n送出後結果不明:來源**可能已經建立**。先 "
                 f"source_list(notebook_id={notebook_id!r}) 對帳,確認沒有才重試 —— "
                 "直接重試可能產生重複來源。"
-                + (f" 上游回報的候選 source_id={known!r}。" if known else ""),
+                + (f" 上游看到的候選 source_id:{candidates}。" if candidates else "")
+                + (f" 上游無法對上的輸入:{unresolved}。" if unresolved else ""),
             )
         raise

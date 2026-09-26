@@ -14,7 +14,10 @@
   `mode="deep"` 只支援 `source="web"`;`wait_for_completion` 對 timeout 丟
   `ResearchTimeoutError`(TimeoutError 子類),對 **FAILED 是回傳而非 raise** → 工具端自己擋。
   匯入一律走 `import_sources_with_verification`:`IMPORT_RESEARCH` 在 deep 負載下常超過 30 秒、
-  client 先 timeout 但伺服器已 commit,它用 source list 對帳只補送缺的那幾筆。
+  client 先 timeout 但伺服器已 commit。**0.8.3 起它不補送**:只 import 一次、輪詢看得到哪些,
+  然後一律 raise(掛 `unconfirmed` + 候選/未對上清單,由 `_errors.reconcile_hint_if_unconfirmed`
+  寫進訊息)。重呼前的 baseline 去重會把已在 notebook 的放進 `already_present`(工具有回);
+  報告條目沒 URL、去重擋不住,重呼前一定先 `source_list`。
 - **start 回的兩種 id 不能猜**:fast 用 `task_id` 輪詢;deep 的 `task_id` 是不可輪詢的
   sessionId,必須用 `report_id`。MCP 對外仍叫 `task_id`,但它是已按 mode 選好的 polling
   handle;deep 沒有 `report_id` 時 fail-loud,不能退回 sessionId 等到 timeout。

@@ -406,3 +406,52 @@ async def test_research_refuses_an_account_that_is_not_in_this_pool(fake_client,
         await call
     assert "a@x" in str(excinfo.value)           # 可用的有哪些要講出來
     assert fake_client.research.calls == []
+
+
+async def test_research_import_lost_response_names_candidates_instead_of_bare_failure(
+    fake_client,
+):
+    """0.8.3 起 IMPORT_RESEARCH 回應遺失**不再補送**:只 import 一次、輪詢看得到哪些,然後
+    一律 raise(掛 `unconfirmed` + reconciliation report)。deep 負載下這很常見 —— 裸拋等於
+    叫 host 重呼,而報告條目沒有 URL、上游去重擋不住,會重複匯入。"""
+    from notebooklm._idempotency import (
+        attach_reconciliation_report,
+        mark_unconfirmed,
+        reconciliation_report,
+    )
+    from notebooklm.exceptions import NetworkError
+
+    async def lost(*args, **kwargs):
+        exc = mark_unconfirmed(NetworkError("IMPORT_RESEARCH read timeout"))
+        attach_reconciliation_report(
+            exc,
+            reconciliation_report(["src-a"], ["https://b.example/spec"]),
+            operation="research.import_sources",
+        )
+        raise exc
+
+    fake_client.research.import_sources_with_verification = lost
+    with pytest.raises(NetworkError) as info:
+        await r.research_import(
+            "nb-1", "res-1", urls=["https://a.example/post", "https://b.example/spec"]
+        )
+    msg = str(info.value)
+    assert "source_list" in msg
+    assert "src-a" in msg
+    assert "https://b.example/spec" in msg
+
+
+async def test_research_import_reports_sources_that_were_already_present(fake_client):
+    """0.8.3 的重呼會先對 baseline 去重:已在 notebook 的回到 `.already_present`,
+    `imported` 是空的。只回 imported 的話,host 會以為「什麼都沒進去」。"""
+    from notebooklm._research_import import _ImportedResearchSources
+
+    fake_client.research.imported = []
+
+    async def rerun(*args, **kwargs):
+        return _ImportedResearchSources([], [{"id": "src-a", "title": "A"}])
+
+    fake_client.research.import_sources_with_verification = rerun
+    out = await r.research_import("nb-1", "res-1", urls=["https://a.example/post"])
+    assert out["imported"] == []
+    assert out["already_present"] == [{"source_id": "src-a", "title": "A"}]

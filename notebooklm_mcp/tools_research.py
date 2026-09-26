@@ -26,6 +26,7 @@ from notebooklm._research import _normalize_import_verification_url as _import_u
 from notebooklm.research import extract_report_urls, normalize_citation_url
 
 from . import runtime
+from ._errors import reconcile_hint_if_unconfirmed
 from .app import mcp
 
 
@@ -228,9 +229,10 @@ async def research_import(
     `source_add_url` 進 episode notebook,否則被否決的候選會污染來源集。
     ⚠️ 外層 timeout 砍掉本呼叫時伺服器可能已 commit,**別直接重呼**(會重複匯入),先用
     `source_list` 對帳。"""
-    # 走 SDK 的 import_sources_with_verification:IMPORT_RESEARCH 在 deep 負載下常常超過
-    # 30 秒、client 端先 timeout 但伺服器其實已經 commit,它用 source list 對帳只補送真的
-    # 沒進去的那幾筆,不盲目重送造成重複來源。
+    # 走 SDK 的 import_sources_with_verification:先對 baseline 去重(已在 notebook 的回到
+    # `already_present`)。IMPORT_RESEARCH 在 deep 負載下常常超過 30 秒、client 端先 timeout
+    # 但伺服器其實已經 commit —— 0.8.2 會對帳後補送缺的那幾筆;**0.8.3 起不補送**,輪詢完
+    # 一律 raise(`unconfirmed` + 候選/未對上清單)。報告條目沒有 URL,重呼時上游去重擋不住。
     task_id = _require(task_id, "task_id")
     # 空字串／非字串**不靜默丟掉**:那是呼叫端組清單時出了錯,吞掉會讓「我選了 5 筆」
     # 變成「進了 3 筆」而沒人發現。
@@ -312,13 +314,19 @@ async def research_import(
             )
         selected = [*report_entries, *selected]
 
-    imported = await client.research.import_sources_with_verification(
-        notebook_id, task_id, selected, max_elapsed=max_elapsed
-    )
+    with reconcile_hint_if_unconfirmed(notebook_id):
+        imported = await client.research.import_sources_with_verification(
+            notebook_id, task_id, selected, max_elapsed=max_elapsed
+        )
     return {
         "imported": [
             {"source_id": entry.get("id"), "title": entry.get("title")}
             for entry in imported
+        ],
+        # 重呼時上游先對 baseline 去重:已經在 notebook 裡的不再匯入、只從這裡回報。
+        "already_present": [
+            {"source_id": entry.get("id"), "title": entry.get("title")}
+            for entry in getattr(imported, "already_present", ())
         ],
         "requested": len(selected),
         # SDK 自己聲明回應可能少報幾筆(即使實際都匯入了);要精確對帳就看 source_list。
