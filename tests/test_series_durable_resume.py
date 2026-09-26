@@ -809,6 +809,40 @@ async def test_series_blocks_earlier_dispatch_when_later_feedback_uploaded_but_n
     assert len(_generate_briefs(fake_client)) == generate_boundary
 
 
+async def test_series_blocks_earlier_dispatch_when_legacy_later_feedback_was_adopted(
+    fake_client, tmp_path
+):
+    manifest_path = tmp_path / "series_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": 1, "notebook_id": "nb-1", "episodes": [{
+            "episode": 3, "notebook_id": "nb-1", "title": "收尾篇",
+            "label": "EP03 收尾篇", "attempts": [],
+        }],
+    }), encoding="utf-8")
+    fake_client.sources.seed("整季講義")
+    source_id = fake_client.sources._add("EP03 收尾篇", kind="media")
+    await p.podcast_attempt_adopt(str(manifest_path), 3, feedback_source_id=source_id)
+
+    boundary = len(_generate_briefs(fake_client))
+    out = await p.podcast_series("nb-1", episodes=EPS3[:2], output_dir=str(tmp_path), start=2)
+    assert out["complete"] is False
+    assert out["observed_state"] == "later_episode_has_output"
+    assert out["safe_next_action"] == "podcast_episode"
+    assert len(_generate_briefs(fake_client)) == boundary
+
+
+def test_later_output_in_another_notebook_does_not_block(tmp_path):
+    manifest_path = tmp_path / "series_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": 1, "notebook_id": "nb-1", "episodes": [{
+            "episode": 3, "notebook_id": "nb-2", "title": "收尾篇",
+            "artifact_id": "later-artifact",
+        }],
+    }), encoding="utf-8")
+    snapshot = p.ManifestStore(manifest_path).read()
+    assert not p._later_episode_has_output(snapshot, 2, "nb-1")
+
+
 async def test_series_retract_of_a_middle_episode_with_a_stuck_attempt_offers_retract_not_series(
     fake_client, tmp_path
 ):

@@ -1652,15 +1652,18 @@ def _later_episode_has_output(snapshot: dict, episode_n: int, notebook_id: str) 
     retract 恰恰不會清掉這個欄位,用它來判斷「後面集數有沒有 output」會把「後面那集
     自己也曾經被 retract 過」誤判成「有 output」。
 
-    回錄 source 比正式 output 先落盤；未 promote 的 active attempt 也要算，否則
-    EP03 上傳回錄後中斷，EP02 重生會靜默讀到它。未確定結果的上傳同樣保守攔下。
+    回錄 source 比正式 output 先落盤；未 promote 的 active attempt 與 legacy
+    adopt 的 episode 級 source 都要算，否則 EP03 回錄會混進 EP02。只看同本 notebook;
+    另一本筆記本的輸出不會污染這次生成。未確定結果的上傳同樣保守攔下。
     """
     return any(
         isinstance(row.get("episode"), int)
         and row["episode"] > episode_n
+        and (row.get("notebook_id") or snapshot.get("notebook_id")) == notebook_id
         and (
             row.get("output_attempt_id") is not None
             or has_hard_output_evidence(row)
+            or row.get("feedback_source_id")
             or any(
                 attempt.get("attempt_id") == row.get("active_attempt_id")
                 and attempt.get("notebook_id") == notebook_id
