@@ -146,6 +146,16 @@ v0.9.23 **−77s**、v0.9.24 +33s、v0.9.25 +349s、v0.9.26 +17s、v0.9.27 +27s 
 `next_step`、`legacy_audio_missing` 未 adopt 時交棒 adopt、`prior_mp3_path` × `source_ids` 互斥、`category` 非空、
 `--show-name` 必填、`chat_ask` 拒 `[]`。工具 description 一字未加(payload 見下)。
 
+### 依賴與 live 核查(2026-09-26)
+
+- `notebooklm-py` 最新正式版仍是 0.8.2,與我方 pin / lock 一致；`mcp` 2.x 與 Pillow 12.x
+  已發版,目前上界刻意擋住 major 升級。Markdown 的相容新版 3.11 與間接依賴已刷新 lock,
+  讓本地測試貼近下次消費端重裝的解析結果。
+- HTTP 第二個 session 原會覆寫全域 pool,現在於 lifespan 入口拒絕；第一個 session 保持可用。
+- 真帳號啟動暴露 `httpx` INFO 會把 Google 登入轉址的憑證參數寫入 stderr；server 入口改設
+  `httpx` logger 為 WARNING。prd `auth_check(all_slots=True)` 實測 5/5 可用,dev stdio
+  `tools/list` 實測 37 支,`auth_check` 正常。這些是只讀檢查,不涵蓋生成與發布副作用。
+
 ### 數字(在發版 commit 上重量)
 
 - 全套離線測試:__TESTS__。
