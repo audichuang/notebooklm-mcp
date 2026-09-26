@@ -31,6 +31,12 @@
 - **沒改、刻意留著的**:chat 對 429/5xx 不再重試(副作用只是對話多一輪,host 重呼即可);
   `from_storage(backend="web")` 在 0.8.3 發 DeprecationWarning(預設 filter 看不到,改 `ClientConfig`
   有「不能傳 `request=`」的陷阱,1.0 前再處理);下載 401/403 改 raise `AuthError`(我們沒按型別攔,走泛用 resume 指引)。
+- **成品複審(乾淨上下文,只看 diff)又抓到 3 條 P2,全是這一輪自己帶出來的**:`unconfirmed` 閘把契約乾淨的
+  `ArtifactFeatureUnavailableError`(0.8.3 對「有 row、id 為 null」也掛 unconfirmed)一起擋掉 → 只看 RateLimitError;
+  series 把 finalize 段的一般 RuntimeError 換成不帶原因的 partial → 只接拒絕型與受理不明;active-attempt 分支的輪詢
+  與對帳撞 `RateLimitError` 仍裸拋(只補了一條路徑)→ 併入 `_TRANSIENT_TRANSPORT_ERRORS`。每條先紅後綠。
+- **已知上限**:`wait_timeout < 300` 秒時 `wait_for_artifact` 永遠不判 removed(窗口太短不足以斷定下架),
+  配額下架的集數會一直回 pending/series。預設 1200 不受影響。
 - **live 冒煙沒跑成**:dev 與 prd 共用的那份憑證已失效(0.9.27 + 0.8.2 對照組同樣在第一個 GET 被導去登入頁,
   不是本版造成)。要等重登 + `sync-auth.sh` 後補跑。
 

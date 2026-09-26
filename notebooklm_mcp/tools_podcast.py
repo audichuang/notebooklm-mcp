@@ -39,7 +39,7 @@ from .audio_finalize import (
     unresolved_upload_descriptor,
     upload_dispatch_window_closed,
 )
-from ._errors import NotebookAccessDenied
+from ._errors import NotebookAccessDenied, reconcile_hint_if_unconfirmed
 from ._failover import (
     REFUSED_WITHOUT_DISPATCH as _REFUSED_WITHOUT_DISPATCH,
     describe_refusal,
@@ -2238,9 +2238,10 @@ async def _finalize_episode(
     #  - EVERY episode (including the last) ends up in Sources, name-matched to Studio.
     #  - the NEXT episode's generation automatically sees this source for continuity,
     #    so podcast_series needs no separate prior-upload step.
-    own_src = await client.sources.add_file(
-        notebook_id, mp3_path, mime_type="audio/mpeg", wait=True, wait_timeout=600.0
-    )
+    with reconcile_hint_if_unconfirmed(notebook_id):
+        own_src = await client.sources.add_file(
+            notebook_id, mp3_path, mime_type="audio/mpeg", wait=True, wait_timeout=600.0
+        )
     await client.sources.rename(notebook_id, own_src.id, label, return_object=False)
 
     return {
@@ -2785,13 +2786,14 @@ async def _run_episode(
     # this episode can recap it. In a full podcast_series this is unnecessary —
     # each episode self-uploads at the end (below), so the prior is already there.
     if prior_mp3_path:
-        prior_src = await client.sources.add_file(
-            notebook_id,
-            prior_mp3_path,
-            mime_type="audio/mpeg",
-            wait=True,
-            wait_timeout=600.0,
-        )
+        with reconcile_hint_if_unconfirmed(notebook_id):
+            prior_src = await client.sources.add_file(
+                notebook_id,
+                prior_mp3_path,
+                mime_type="audio/mpeg",
+                wait=True,
+                wait_timeout=600.0,
+            )
         await client.sources.rename(
             notebook_id, prior_src.id, f"EP{episode_n - 1:02d}", return_object=False
         )
