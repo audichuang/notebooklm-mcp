@@ -816,3 +816,30 @@ async def test_unconfirmed_rate_limit_after_dispatch_does_not_rotate(fake_client
     attempt = _attempts(manifest_path)[0]
     assert attempt["dispatch"]["status"] == "acceptance_unknown"
     assert not [e for e in attempt["errors"] if e["phase"] == "dispatch_failover"]
+
+
+async def test_unconfirmed_feature_unavailable_still_rotates(fake_client, tmp_path):
+    """反向鎖:0.8.3 對「回應有 row 但 id 是 null」的 `ArtifactFeatureUnavailableError`
+    也會掛 `unconfirmed`(transport 已 mark_dispatched、沒 record REJECTED),但 SDK 契約講死
+    「a missing id means no task was created」—— 那是乾淨拒絕,要照舊換帳號。
+    `unconfirmed` 閘只該縮小 `RateLimitError` 那一種。"""
+    from notebooklm._idempotency import mark_unconfirmed
+    from notebooklm.exceptions import ArtifactFeatureUnavailableError
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    calls: list = []
+    ok_generate = fake_client.artifacts.generate_audio
+
+    async def first_has_null_id(*args, **kwargs):
+        calls.append(runtime.active_account())
+        if len(calls) == 1:
+            raise mark_unconfirmed(ArtifactFeatureUnavailableError("audio"))
+        return await ok_generate(*args, **kwargs)
+
+    fake_client.artifacts.generate_audio = first_has_null_id
+    manifest_path = tmp_path / "series_manifest.json"
+    await p.podcast_episode(
+        "nb-1", episode_n=1, title="心法篇", brief="第一集",
+        output_dir=str(tmp_path), manifest_path=str(manifest_path),
+    )
+    assert calls == ["a@x", "b@x"]

@@ -189,11 +189,13 @@ async def dispatch_with_failover(
         try:
             status = await dispatch(client)
         except REFUSED_WITHOUT_DISPATCH as exc:
-            if getattr(exc, "unconfirmed", False):
+            if isinstance(exc, RateLimitError) and getattr(exc, "unconfirmed", False):
                 # 0.8.3 起上游對「已送出才被打回」的 429 掛 `unconfirmed`(commit 結果
                 # 未知),而且自己不再重送它。這不是乾淨拒絕 —— 伺服器可能已建出 task,
                 # 換帳號重送會多一顆 artifact + 多燒一份配額。0.8.2 沒有這個屬性,
-                # `getattr` 預設讓舊行為原樣保留。
+                # `getattr` 預設讓舊行為原樣保留。**只看 RateLimitError**:0.8.3 對「有 row、
+                # id 是 null」的 ArtifactFeatureUnavailableError 也會掛 unconfirmed(已送出、
+                # 沒 record),但契約講死它沒建出 task —— 那種照舊是乾淨拒絕、換帳號。
                 _mark(on_acceptance_unknown, exc, account)
                 raise
             # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
