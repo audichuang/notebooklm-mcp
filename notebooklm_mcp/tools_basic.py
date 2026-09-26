@@ -19,7 +19,7 @@ from ._sources import (
     assert_sources_exist,
     to_source_ids,
 )
-from ._status import ensure_completed, ensure_started
+from ._status import ensure_completed, ensure_started, wait_for_artifact
 from ._text import norm as _norm, strip_citations as _strip_citations, strip_inline_emphasis
 from .auth_probe import RELOGIN_HINT, _AuthProbeError, probe_auth
 from .enums import to_audio_format, to_audio_length
@@ -619,7 +619,7 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
 async def artifact_wait(notebook_id: str, task_id: str, timeout: float = 1200.0) -> dict:
     """Wait for a generation task to complete —— 傳 `generate_*` 回的 `task_id`,不是
     notebook_id。SDK 回 failed status 時這裡 raise(fail-closed)。"""
-    status = await runtime.get_client().artifacts.wait_for_completion(notebook_id, task_id, timeout=timeout)
+    status = await wait_for_artifact(runtime.get_client().artifacts, notebook_id, task_id, timeout=timeout)
     # Fail-closed: the SDK returns a FAILED status (not an exception) when generation
     # fails mid-poll; without this a failed wait would be reported as success.
     ensure_completed(status)

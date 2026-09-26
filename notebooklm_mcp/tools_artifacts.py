@@ -11,7 +11,7 @@ from . import runtime
 from ._atomic import download_atomically
 from ._failover import describe_refusal, dispatch_with_failover
 from ._sources import assert_sources_exist, to_source_ids
-from ._status import ensure_completed
+from ._status import ensure_completed, wait_for_artifact
 from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
 from .app import mcp
@@ -392,7 +392,7 @@ async def _finish_slides(
     的人看得出要另尋線索,比留著上一次的帳號好(那個值看起來是權威的,而它講的是別的成品)。
     provenance 與 `slides_pdf_path` **同一次 `update`**,理由見上方那段紀律。"""
     # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
-    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
+    final = await wait_for_artifact(client.artifacts, notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
 
     out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-slides.pdf")
@@ -584,7 +584,7 @@ async def _finish_report(
 ) -> dict:
     """生成之後的共用尾段(同 `_finish_slides`,`account` 的語意也同那裡)。"""
     # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
-    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
+    final = await wait_for_artifact(client.artifacts, notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
 
     out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-report.md")

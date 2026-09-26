@@ -1,7 +1,10 @@
+import json
+
 import pytest
 from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp._status import TerminalGenerationError
 
 
 async def test_series_serial_rss_title_does_not_double_the_studio_name(
@@ -311,6 +314,47 @@ async def test_resume_reports_removed_artifact(fake_client, tmp_path):
     with pytest.raises(RuntimeError, match="配額|removed"):
         await p.podcast_episode_resume("nb-1", 1, "心法篇", "art-1", str(tmp_path))
 
+
+
+def _absent_timeout(history, timeout=1200.0):
+    """0.8.3 的真實形狀:輪詢不再合成 `removed`,缺席一路等到 deadline 才 raise。"""
+    from notebooklm.exceptions import ArtifactPendingTimeoutError
+
+    return ArtifactPendingTimeoutError(
+        "nb-1", "task-123", timeout, last_status=history[-1], status_history=history
+    )
+
+
+async def test_whole_window_absence_is_reported_as_removed(fake_client, tmp_path):
+    """0.8.3 拿掉了「缺席 10 秒 → removed」(#2432)。整個等待窗口從頭到尾都查無此
+    artifact,才判定被伺服器下架 —— 回到既有的 removed 終態,不讓續跑無限重等。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.artifacts.fail_wait_on = 1
+    fake_client.artifacts.wait_exc = _absent_timeout(("not_found",))
+    with pytest.raises(TerminalGenerationError, match="配額|removed") as ei:
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="心法篇", brief="b",
+            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        )
+    assert "podcast_episode_resume" not in str(ei.value)
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
+    assert attempt["remote"]["status"] == "removed"
+
+
+@pytest.mark.parametrize(
+    "history, timeout",
+    [
+        (("pending", "not_found"), 1200.0),  # 看過它,只是最後不見 —— 可能是清單暫時漏列
+        (("not_found",), 60.0),  # 窗口太短,不足以斷定下架
+    ],
+)
+async def test_partial_absence_stays_resumable(fake_client, tmp_path, history, timeout):
+    fake_client.artifacts.fail_wait_on = 1
+    fake_client.artifacts.wait_exc = _absent_timeout(history, timeout)
+    with pytest.raises(TimeoutError) as ei:
+        await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path))
+    assert not isinstance(ei.value, TerminalGenerationError)
+    assert "podcast_episode_resume" in str(ei.value)
 
 async def test_episode_timeout_error_carries_artifact_id_for_resume(fake_client, tmp_path):
     """核心容錯:podcast_episode 在生成送出後 wait 超時,錯誤仍是 TimeoutError(既有

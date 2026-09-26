@@ -50,6 +50,10 @@
 - **`status="removed"` ≠ `is_failed`(0.6.0 起)**:被伺服器下架的 artifact(NOT_FOUND
   輪詢耗盡,通常是每日配額)回 `status="removed"` 且 `is_failed=False`(0.4.x 是合成
   `"failed"`)。`ensure_completed` 一併擋 `is_removed` 才不會把配額下架當成功放行。
+  **0.8.3 起上游不再合成 `removed`**(#2432:缺席只記錄、一路等到 deadline 才 raise
+  `ArtifactTimeoutError`)。`removed` 改由我們的 `_status.wait_for_artifact` 判:整窗(>= 5 分鐘)
+  從頭到尾只看過 `not_found` 才算。**所有 artifact 等待一律走它**,直接呼叫
+  `artifacts.wait_for_completion` = 配額下架永遠到不了終態、續跑無限重等。
 - `sources.add_file` 有 `title`(0.7.x),**但內部仍是 add→rename 兩步且改名失敗只 log 不
   raise** → podcast 流程維持顯式 add_file → rename 兩步(fail-loud);`source_add_file` 工具
   的 title= 有回傳後檢,未生效會 raise。

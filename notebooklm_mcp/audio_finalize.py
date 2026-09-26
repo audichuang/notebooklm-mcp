@@ -19,7 +19,7 @@ from notebooklm.types import ArtifactType
 
 from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE
 from ._atomic import fsync_parent as _fsync_parent
-from ._status import TerminalGenerationError, ensure_completed
+from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
 from .manifest_store import ManifestStore
 from .naming import episode_label
 
@@ -550,8 +550,8 @@ async def finalize_attempt(
             )
 
     if attempt["remote"].get("status") != "completed":
-        final = await client.artifacts.wait_for_completion(
-            notebook_id, artifact_id, timeout=wait_timeout
+        final = await wait_for_artifact(
+            client.artifacts, notebook_id, artifact_id, timeout=wait_timeout
         )
         try:
             ensure_completed(final)

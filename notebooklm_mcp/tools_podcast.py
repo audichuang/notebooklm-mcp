@@ -26,7 +26,7 @@ from ._sources import (
     assert_sources_exist,
     to_source_ids,
 )
-from ._status import TerminalGenerationError, ensure_completed
+from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
     RemoteArtifactUnverifiableError,
@@ -2208,7 +2208,7 @@ async def _finalize_episode(
     os.makedirs(output_dir, exist_ok=True)
     label = _episode_label(episode_n, title)
 
-    final = await client.artifacts.wait_for_completion(notebook_id, artifact_id, timeout=wait_timeout)
+    final = await wait_for_artifact(client.artifacts, notebook_id, artifact_id, timeout=wait_timeout)
     ensure_completed(final)
 
     # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so

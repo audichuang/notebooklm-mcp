@@ -1018,3 +1018,62 @@ async def test_create_artifact_transport_429_is_marked_unconfirmed_but_decoded_r
         )
     )
     assert decoded.unconfirmed is False
+
+
+async def test_real_sdk_polling_absence_feeds_wait_for_artifact_removed_verdict():
+    """`_status.wait_for_artifact` 靠 0.8.3 輪詢的兩個細節判「整窗缺席 = 下架」:逾時例外帶
+    `status_history`,缺席記成字串 `"not_found"`。這裡跑上游**真的**輪詢迴圈(假時鐘、
+    假 poll),不是 mock 我們自己想像的形狀。
+
+    紅了代表上游又改了缺席的回報方式:要嘛它自己回 `removed` 了(那就可以拆掉這個 helper),
+    要嘛欄位/字串改名(判準會靜默失效,配額下架又變成無限續跑)。
+    """
+    import asyncio
+    import contextlib
+
+    from notebooklm._artifact.polling import ArtifactPollingService
+    from notebooklm.types import GenerationStatus
+
+    from notebooklm_mcp._status import wait_for_artifact
+
+    class _Supervisor:
+        def assert_bound_loop(self):
+            pass
+
+        def register_drain_hook(self, *args, **kwargs):
+            pass
+
+        async def spawn_child(self, name, fn, **kwargs):
+            return asyncio.get_running_loop().create_task(fn())
+
+        @contextlib.asynccontextmanager
+        async def operation_scope(self, label):
+            yield None
+
+    def _artifacts(statuses):
+        clock = [0.0]
+
+        async def sleep(seconds):
+            clock[0] += seconds
+
+        async def poll(notebook_id, task_id):
+            status = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+            return GenerationStatus(task_id=task_id, status=status)
+
+        service = ArtifactPollingService(
+            supervisor=_Supervisor(), sleep=sleep, monotonic=lambda: clock[0]
+        )
+
+        class _Artifacts:
+            async def wait_for_completion(self, notebook_id, artifact_id, *, timeout):
+                return await service.wait_for_completion(
+                    notebook_id, artifact_id, timeout=timeout, poll_status=poll
+                )
+
+        return _Artifacts()
+
+    removed = await wait_for_artifact(_artifacts(["not_found"]), "nb", "a1", timeout=1200.0)
+    assert removed.is_removed
+
+    with pytest.raises(TimeoutError):
+        await wait_for_artifact(_artifacts(["pending", "not_found"]), "nb", "a1", timeout=1200.0)
