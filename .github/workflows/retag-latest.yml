@@ -38,7 +38,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Wait for ci.yml to pass on this commit
+      - name: Wait for ci.yml to pass on the release being retagged
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -49,9 +49,13 @@ jobs:
           #
           # 擋下時怎麼救:等 ci.yml 對這個 commit 真的綠了之後,`gh workflow run
           # retag-latest.yml` 重跑一次;本機最後手段是 `bash scripts/retag-latest.sh --push`。
-          # 發版 tag 是 annotated(`git cat-file -t v0.9.27` → tag),GITHUB_SHA 在 tag push 事件
-          # 上可能是 tag 物件而不是 commit;peel 一次再拿去查 ci run,對 commit 是 no-op。
-          sha="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          # push 事件的 GITHUB_SHA 可能是舊 tag；手動 workflow_dispatch 則是 master。
+          # 真正要移動到的是目前最高 semver。先凍結 tag + commit,CI 與 retag 用同一顆。
+          git fetch --tags --force origin
+          newest="$(git tag -l 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          sha="$(git rev-parse "${newest}^{commit}")"
+          echo "RETAG_TARGET_TAG=$newest" >> "$GITHUB_ENV"
+          echo "RETAG_TARGET_SHA=$sha" >> "$GITHUB_ENV"
           deadline=$(( $(date +%s) + 1500 ))   # 25 分鐘
           while true; do
             read -r run_status conclusion url < <(
@@ -75,4 +79,4 @@ jobs:
           done
 
       - name: Point latest at the newest release tag
-        run: bash scripts/retag-latest.sh --push
+        run: bash scripts/retag-latest.sh --push "$RETAG_TARGET_TAG" "$RETAG_TARGET_SHA"
