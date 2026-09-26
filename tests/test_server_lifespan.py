@@ -9,6 +9,8 @@
    notebooklm_mcp.server` (the __main__ double-import trap) — the MCP came up
    with ZERO tools. Tools now live on `notebooklm_mcp.app.mcp`; assert they're there.
 """
+import logging
+
 import pytest
 
 from notebooklm_mcp import app, runtime
@@ -90,6 +92,28 @@ async def test_lifespan_enters_from_storage_context(monkeypatch):
     # After exit the holder is cleared.
     with pytest.raises(RuntimeError):
         runtime.get_client()
+
+
+async def test_second_lifespan_cannot_replace_the_first_pool(monkeypatch):
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage)
+    async with app._lifespan(app.mcp):
+        first = runtime.get_client()
+        with pytest.raises(RuntimeError, match="另一個 MCP session"):
+            async with app._lifespan(app.mcp):
+                pass
+        assert runtime.get_client() is first
+    with pytest.raises(RuntimeError, match="not initialized"):
+        runtime.get_client()
+
+
+async def test_lifespan_suppresses_http_request_urls(monkeypatch, caplog):
+    httpx_logger = logging.getLogger("httpx")
+    monkeypatch.setattr(httpx_logger, "level", logging.INFO)
+    monkeypatch.setattr(app.NotebookLMClient, "from_storage", _fake_from_storage)
+    with caplog.at_level(logging.INFO):
+        async with app._lifespan(app.mcp):
+            httpx_logger.info("HTTP Request: GET https://example.test/?osidt=secret")
+    assert "osidt=secret" not in caplog.text
 
 
 async def test_mcp_exposes_expected_tools():

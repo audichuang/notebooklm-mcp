@@ -6,6 +6,8 @@ v0.9.0 / v0.9.7 amendment);本檔是**動 code 時的紅線與測試鎖**。
 
 **這一區的共同形狀:破功不會當場出錯。** cookie 被本 process 重鑄,是另外兩台 VM 下次啟動才掛;
 帳號記錯,是兩個帳號都成功所以事後查不出來。所以每條都配著「哪個測試紅了就代表這條路又開了」。
+server 啟動時把 `httpx` logger 設為 WARNING:登入轉址 URL 可能含短期憑證參數,
+INFO 級「HTTP Request」日誌會把它印進 stderr。
 
 ## 一、inline cookie 重鑄:一律關掉
 
@@ -132,26 +134,20 @@ server 在跑。要根治得換方向(例如把展開搬到 SIGTERM handler 裡)
   只有真的沒有 id 才算零副作用。已 dispatch 之後換帳號 = ADR-0009 禁止的改寫因果紀錄。
   `tests/test_pool_gaps.py`(經突變驗證)是這區最敏感的守門員。
 
-## ⚠️ `--transport streamable-http` 只能給**單一** client 用(v0.9.26 確認,未修)
+## ⚠️ `--transport streamable-http` 只能給**單一** client 用(v0.9.26 確認)
 
 pool 住在 `runtime` 的 **process 全域**(`_POOL` / `_ACTIVE` / `_COOLING`),而 stateful 的
-streamable-http **每個 session 各跑一次 `_lifespan`**。所以第二個 client 一 initialize,
-它的 `runtime.set_clients()` 就把 `_POOL` 換成自己那一份、`_ACTIVE` 歸零、`_COOLING` 清空
-—— 而第一個 session 可能正卡在一次數十分鐘的生成裡。更糟的是它斷線時的 `finally` 會清掉
-**現任** owner 裝的 pool,不是自己那份。
+streamable-http **每個 session 各跑一次 `_lifespan`**。第二個 session 現在會在進入
+pool 建構前直接拒絕,不會覆寫第一個 session 的 pool 或在斷線時清掉它。
 
 `runtime.py` 的模組 docstring 說「這裡沒有鎖,也不需要有」—— 那段推論的前提是
 **同一個 lifespan 內**的並行,對「兩個 lifespan」不成立。
 
 **現況的正確用法:HTTP 模式只給一個 client 的本機開發用。** 四台生產機全走 stdio
-(每個 client 自己一個 process,天然隔離),所以這條打不到生產路徑 —— 這也是它沒有在
-v0.9.26 一起修的原因:pool 生命週期是本 repo 疤最多的一區(ADR-0010 五條紅線),
-改它要開 acceptance-workspace 實跑,不能靠離線測試推導結案。
+(每個 client 自己一個 process,天然隔離)。
 
-修法草稿(留給下一輪):`set_clients()` 回一個 owner token,`_lifespan` 的 `finally` 改成
-`runtime.release(token)` —— 只有現任 owner 清得掉,非 owner 的 `set_clients()` 拒絕或退化成
-共用第一份 pool。真正一勞永逸是把 pool 放進 lifespan context 而非 module 全域,但那會動到
-46 個 `get_client()` 呼叫點。
+若以後要同一個 HTTP server 服務多個 client,需把 pool 放進 lifespan context 而非 module 全域,
+並改動所有 `get_client()` 呼叫點；目前沒有這個需求。
 
 > 從 `AGENTS.md` 外移(2026-08-16):內容一字未改,只是改成**按需載入** —— 三條都只在動
 > 憑證/lifespan/dispatch 時才用得到,而它們合計 59 行,占了主檔 §Gotchas 的四成。

@@ -21,6 +21,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from ._cookies import (
 )
 
 logger = logging.getLogger(__name__)
+_LIFESPAN_LOCK = threading.Lock()
 
 _AUTH_JSON_ENV = "NOTEBOOKLM_AUTH_JSON"
 _DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
@@ -303,6 +305,20 @@ def _slot_diagnostic(slot: int, cred: str | None) -> dict[str, object]:
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastMCP) -> AsyncIterator[None]:
+    # ponytail:全域 pool 一次只屬於一個 session；要支援多 client 才搬進 session context。
+    if not _LIFESPAN_LOCK.acquire(blocking=False):
+        raise RuntimeError("另一個 MCP session 正在使用此 server；HTTP 模式一次只能連一個 client")
+    try:
+        # httpx 的 INFO 會把 Google 登入轉址 URL 的 osidt 等憑證參數印進 stderr。
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        async with _lifespan_client_pool(_app):
+            yield
+    finally:
+        _LIFESPAN_LOCK.release()
+
+
+@contextlib.asynccontextmanager
+async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
     # notebooklm-py 0.8.x:from_storage() 是同步函式,回傳可直接 async with 的
     # context(0.4.x「coroutine 必須 await」慣用法已走入歷史)。
     # MCP 一律**不傳 keepalive=**,再加上下面這組 env override(理由見上)。
