@@ -48,11 +48,12 @@ from ._status import ensure_started
 #     **已經送到伺服器**才被限流打回來,上游自己的
 #     `notebooklm.artifacts.with_rate_limit_retry` 對這種形狀也是原地重送
 #     (docstring 明寫「retrying on a raised RateLimitError」),不特別區分來源。
-# 這個 tuple 目前**兩種都當成乾淨拒絕、rotate 帳號重送**——這是**已知的取捨,不是
-# 誤判修好了**:唯一可靠的判別特徵是 `rpc_code`(`retry_after`/`__cause__` 都不可靠,
-# 沒有 `Retry-After` header 時 `retry_after` 也是 `None`);429 那條理論上換帳號可能
-# 是錯的解藥(限流通常綁 IP/host,不綁帳號,換帳號等於讓 N 個帳號輪流撞同一個限流
-# 器),但要動這條分類需要先跑一輪真帳號 pool 驗收,本輪刻意只把認知寫對、不改行為。
+# 0.8.2 以前這個 tuple **兩種都當成乾淨拒絕、rotate 帳號重送**(已知取捨)。
+# **0.8.3 起上游自己分開了**:送出後才撞 429 的那種會被 `mark_unconfirmed` 掛上
+# `unconfirmed=True`(commit 結果未知),上游 `artifacts.py` 也明寫這種形狀「never
+# replayed」——上面「上游也原地重送」的理由不再成立。所以迴圈裡先看 `unconfirmed`:
+# 有標記就走 acceptance_unknown,**只縮小**准 rotate 的集合(紅線①的安全方向);
+# decoder 解出來的 `USER_DISPLAYABLE_ERROR` 與送出前的讀取 429 沒有標記,照舊 rotate。
 #
 # **刻意不收 `RPCError` / `DecodingError` / 網路錯誤 / CancelledError**:那些都可能
 # 發生在伺服器已經受理之後,歸成 not_accepted 會讓呼叫端直接重生 → 重複 artifact +
@@ -188,6 +189,13 @@ async def dispatch_with_failover(
         try:
             status = await dispatch(client)
         except REFUSED_WITHOUT_DISPATCH as exc:
+            if getattr(exc, "unconfirmed", False):
+                # 0.8.3 起上游對「已送出才被打回」的 429 掛 `unconfirmed`(commit 結果
+                # 未知),而且自己不再重送它。這不是乾淨拒絕 —— 伺服器可能已建出 task,
+                # 換帳號重送會多一顆 artifact + 多燒一份配額。0.8.2 沒有這個屬性,
+                # `getattr` 預設讓舊行為原樣保留。
+                _mark(on_acceptance_unknown, exc, account)
+                raise
             # 伺服器明確拒絕、沒有建出 task(0.8.0 起改成 raise;0.7.x 走下面的
             # ensure_started 分支)。這是**乾淨的終態**,不是「結果不明」。
             try:

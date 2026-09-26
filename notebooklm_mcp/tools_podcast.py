@@ -2836,27 +2836,6 @@ async def _run_episode(
             client=dispatch_client,
             notebook_id=notebook_id,
         )
-    except _REFUSED_WITHOUT_DISPATCH as exc:
-        # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經被
-        # 持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。docstring 承諾「依錯誤中的
-        # attempt_id 續跑」,兩個分支都要兌現。
-        if store is not None:
-            # T8:`_REFUSED_WITHOUT_DISPATCH` 有兩個生產者(見 `_failover.py` 模組
-            # docstring),「沒有建立任何 artifact」對它們的確定性不一樣——
-            # decoder 的 `USER_DISPLAYABLE_ERROR` 是契約講死沒建出 task;transport
-            # 層 429(`rpc_code=None`)只是請求已送達伺服器才被限流打回來,**幾乎
-            # 必然**沒建出 task,不是硬保證。措辭如實反映這個差異,行為不變(續跑
-            # 建議仍是同一句)。
-            exc.args = (
-                f"{exc}\n伺服器拒絕了這次生成(attempt_id={attempt_id!r},已標記 "
-                "not_accepted)。契約保證沒有建立任何 artifact 的是 "
-                "ArtifactFeatureUnavailableError;RateLimitError 的傳輸層 429 拒絕"
-                "只是幾乎必然沒有建立(請求已送達伺服器才被限流打回來,理論上不"
-                "排除極端情況伺服器已受理但回應遺失)。配額/限流回復後,用"
-                "**完全相同的參數**重呼 podcast_episode 即可沿用同一個 attempt "
-                "重送——不會新建 attempt。",
-            )
-        raise
     except (Exception, asyncio.CancelledError) as exc:
         # 是不是「乾淨的 not_accepted」不能只看例外型別:`RuntimeError` 既是
         # `ensure_started`/`NotebookAccessDenied` 判定的 not_accepted(訊息已經自帶
@@ -2876,10 +2855,27 @@ async def _run_episode(
             try:
                 current = store.read()
                 _, stopped_attempt = _attempt_record(current, episode_n, attempt_id)
-                unknown = stopped_attempt["dispatch"]["status"] != "not_accepted"
+                recorded = stopped_attempt["dispatch"]["status"]
             except Exception:
-                unknown = False
-            if unknown:
+                recorded = None
+            refused = isinstance(exc, _REFUSED_WITHOUT_DISPATCH) and (
+                recorded == "not_accepted"
+                or (recorded is None and not getattr(exc, "unconfirmed", False))
+            )
+            if refused:
+                # 裸拋的話呼叫端只看到 SDK 的「rate limit exceeded」,不知道 attempt 已經
+                # 被持久化、也不知道該怎麼續(v0.7.1 驗收 F-9)。**判準是 manifest,不是
+                # 例外型別**:0.8.3 起 `RateLimitError` 也可能帶 `unconfirmed`(送出後才
+                # 被 429 打回),`_failover` 把它標成 acceptance_unknown —— 這裡若照型別
+                # 貼「已標記 not_accepted」,訊息就跟 manifest 互相矛盾。
+                exc.args = (
+                    f"{exc}\n伺服器拒絕了這次生成(attempt_id={attempt_id!r},已標記 "
+                    "not_accepted),沒有建立任何 artifact(送出後結果不明的 429 會標成 "
+                    "acceptance_unknown,不會落在這裡)。配額/限流回復後,用"
+                    "**完全相同的參數**重呼 podcast_episode 即可沿用同一個 attempt "
+                    "重送——不會新建 attempt。",
+                )
+            elif recorded is not None and recorded != "not_accepted":
                 exc.args = (
                     f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
                     "先對帳，禁止直接重生："

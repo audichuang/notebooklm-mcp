@@ -987,3 +987,34 @@ def test_source_search_inputs_are_validated_by_the_sdk_before_any_rpc():
     # 正常輸入:query 去頭尾空白、source_ids 去重且保序、limit 原樣。
     assert validate_search("  q  ", ["b", "a", "b"], 3) == ("q", ("b", "a"), 3)
 
+
+async def test_create_artifact_transport_429_is_marked_unconfirmed_but_decoded_refusal_is_not():
+    """`_failover` 用 `unconfirmed` 分開兩種 `RateLimitError`:送出後才撞的 429 → 受理不明、
+    不換帳號;decoder 解出的 `USER_DISPLAYABLE_ERROR` → 乾淨拒絕、換帳號。
+
+    這條紅了代表上游改了標記方式:transport 那條沒標 = 我們又會換帳號重送一個可能已受理
+    的請求;decoded 那條被標 = 配額 failover 整個停擺。正確反應是重看 `_failover` 的分流,
+    不是改這裡的斷言。用上游包 CreateArtifact 的同一支 wrapper 實跑,不讀原始碼字串。
+    """
+    from notebooklm._idempotency import call_unconfirmed_on_transport_loss, mark_commit_state
+    from notebooklm.exceptions import RateLimitError
+    from notebooklm.outcomes import CommitState
+    from notebooklm.rpc import RPCMethod
+
+    async def _raised(make):
+        async def call():
+            raise make()
+
+        with pytest.raises(RateLimitError) as info:
+            await call_unconfirmed_on_transport_loss(call, method=RPCMethod.CREATE_ARTIFACT, what="x")
+        return info.value
+
+    transport = await _raised(lambda: RateLimitError("429 Too Many Requests"))
+    assert transport.unconfirmed is True
+
+    decoded = await _raised(
+        lambda: mark_commit_state(
+            RateLimitError("quota", rpc_code="USER_DISPLAYABLE_ERROR"), CommitState.REJECTED
+        )
+    )
+    assert decoded.unconfirmed is False

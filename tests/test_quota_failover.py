@@ -778,3 +778,41 @@ async def test_record_failure_still_marks_terminal_state_before_reraising(
     assert attempt["dispatch"]["status"] == "not_accepted", (
         "record() 寫入失敗不准讓終態 callback 被跳過——attempt 不能卡在 dispatching"
     )
+
+
+async def test_unconfirmed_rate_limit_after_dispatch_does_not_rotate(fake_client, tmp_path):
+    """0.8.3 起上游把「請求已送出才被 429 打回」標成 `unconfirmed`(commit 結果未知),
+    而且自己**不再重送**這個形狀。換帳號重送它 = 可能兩顆 artifact + 兩份配額,
+    所以要跟 RPCError 一樣走 acceptance_unknown,不是 not_accepted。
+
+    用 SDK 自己的 `mark_unconfirmed` 造例外 —— 驗的是上游真的會掛上去的那個標記。
+    """
+    from notebooklm._idempotency import mark_unconfirmed
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    calls: list = []
+
+    async def throttled_after_send(*args, **kwargs):
+        calls.append(runtime.active_account())
+        raise mark_unconfirmed(RateLimitError("429 Too Many Requests"))
+
+    fake_client.artifacts.generate_audio = throttled_after_send
+    manifest_path = tmp_path / "series_manifest.json"
+
+    with pytest.raises(RateLimitError) as info:
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+
+    assert calls == ["a@x"], "commit 結果未知的 429 不得換帳號重送"
+    # 訊息要跟 manifest 一致:叫人先對帳,不能說「已標記 not_accepted、直接重呼」。
+    assert "podcast_episode_reconcile" in str(info.value)
+    assert "not_accepted" not in str(info.value)
+    attempt = _attempts(manifest_path)[0]
+    assert attempt["dispatch"]["status"] == "acceptance_unknown"
+    assert not [e for e in attempt["errors"] if e["phase"] == "dispatch_failover"]
