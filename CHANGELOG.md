@@ -167,9 +167,20 @@ v0.9.23 **−77s**、v0.9.24 +33s、v0.9.25 +349s、v0.9.26 +17s、v0.9.27 +27s 
   後驗那顆 CI,腳本只移動到同一顆已驗 commit;隔離 git remote 測試先紅後綠。
 - skill 路由的封面 `--show-name` fallback 與 HTTP 第二 session 說明已對齊程式碼。
 
+### 成品複審(乾淨 context,只看最後成品)
+
+- legacy 後集以 `podcast_attempt_adopt` 認領回錄後,若只剩 `label` 等耐久證據、沒有正式
+  output/attempt,前集的 series 重生仍會讀到那筆後集 source。守門補看同 notebook 的
+  episode 級 `feedback_source_id`;混合 notebook 的後集正式輸出也改成不誤擋別本前集。
+  兩個有效 manifest 形狀各有先紅後綠的回歸測試。
+- GitHub 對舊 tag push 使用舊 commit 裡的 workflow;舊 `retag-latest.yml` 無 CI gate,
+  重推舊 tag 仍能把 `latest` 指向未驗的新 tag。新版改用新檔名,發版前**必須停用**遠端
+  舊 workflow ID 337507291;未完成前不可推 v0.9.28 tag。腳本 `--push` 現要求已核對的
+  release tag + commit,文件刪掉無參數的救援指令。
+
 ### 數字(發版候選 commit 上重量)
 
-- 全套離線測試:13,156 passed / 597 skipped(Python 3.12,lock 版依賴)。
+- 全套離線測試:13,158 passed / 597 skipped(Python 3.12,lock 版依賴)。
 - `tools/list` payload:37,340 字元(`ListToolsResult` 的 `json.dumps(ensure_ascii=False)`,上限 40,000)。
 
 ## v0.9.26 — 工具描述瘦身 39%:規則從事故敘事裡挖出來,順手撿到四條真缺陷
