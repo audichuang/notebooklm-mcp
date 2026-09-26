@@ -167,10 +167,10 @@ v0.9.23 **−77s**、v0.9.24 +33s、v0.9.25 +349s、v0.9.26 +17s、v0.9.27 +27s 
   後驗那顆 CI,腳本只移動到同一顆已驗 commit;隔離 git remote 測試先紅後綠。
 - skill 路由的封面 `--show-name` fallback 與 HTTP 第二 session 說明已對齊程式碼。
 
-### 數字(在發版 commit 上重量)
+### 數字(發版候選 commit 上重量)
 
-- 全套離線測試:__TESTS__。
-- `tools/list` payload:__PAYLOAD__(上限 40,000;description 這版沒動,差額是 annotations 白名單那類元資料)。
+- 全套離線測試:13,156 passed / 597 skipped(Python 3.12,lock 版依賴)。
+- `tools/list` payload:37,340 字元(`ListToolsResult` 的 `json.dumps(ensure_ascii=False)`,上限 40,000)。
 
 ## v0.9.26 — 工具描述瘦身 39%:規則從事故敘事裡挖出來,順手撿到四條真缺陷
 
