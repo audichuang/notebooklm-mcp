@@ -5581,8 +5581,14 @@ async def podcast_series(
             _, stopped_attempt = _attempt_record(
                 current, episode_n, attempt_id
             )
-            if stopped_attempt["dispatch"]["status"] != "not_accepted":
-                return post_dispatch_stop(episode_n)
+            recorded = stopped_attempt["dispatch"]["status"]
+            if recorded != "not_accepted":
+                # 只接「拒絕型例外」(送出後的 429、輪詢限流)與受理不明:其餘是 finalize 段的
+                # RuntimeError(下載/rename/驗證),`_run_episode` 已在訊息附上 resume 呼叫與
+                # caps 的 next_step —— 換成 partial 會把原因整段吞掉,照舊原樣拋。
+                if isinstance(exc, _REFUSED_WITHOUT_DISPATCH) or recorded == "acceptance_unknown":
+                    return post_dispatch_stop(episode_n)
+                raise
             # 「等配額」與「notebook 沒分享給這個帳號」manifest 都寫 not_accepted,
             # 但呼叫端拿到的結構化停點要分得出來(見 `_classify_not_accepted_stop`)。
             observed_state, action, extra = _classify_not_accepted_stop(exc)

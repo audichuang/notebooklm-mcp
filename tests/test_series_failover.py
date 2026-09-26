@@ -879,3 +879,19 @@ async def test_series_reconcile_read_failure_returns_a_stop_not_a_raise(fake_cli
     assert out["complete"] is False
     assert out["observed_state"] == "acceptance_unknown"
     assert out["safe_next_action"] == p.ACTION_RECONCILE
+
+
+async def test_series_post_dispatch_runtime_error_keeps_its_message(fake_client, tmp_path):
+    """反向鎖(成品複審 P2-2):finalize 階段的一般 RuntimeError(下載/rename/驗證失敗)
+    `_run_episode` 已附上 resume 呼叫與 caps 算出的 next_step。series 不可把它換成一個
+    不帶錯誤文字、手寫 ACTION_SERIES 的 partial —— 那會吞掉真正的原因。"""
+    runtime.set_clients([("a@x", fake_client)])
+    fake_client.artifacts.fail_wait_on = 2
+    fake_client.artifacts.wait_exc = RuntimeError("DETAIL-XYZ rename verification failed")
+    with pytest.raises(RuntimeError, match="DETAIL-XYZ"):
+        await p.podcast_series(
+            "nb-1",
+            episodes=[{"title": "心法篇", "brief": "1"}, {"title": "實戰篇", "brief": "2"}],
+            output_dir=str(tmp_path),
+            start=1,
+        )
