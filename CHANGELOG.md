@@ -37,8 +37,9 @@
   與對帳撞 `RateLimitError` 仍裸拋(只補了一條路徑)→ 併入 `_TRANSIENT_TRANSPORT_ERRORS`。每條先紅後綠。
 - **已知上限**:`wait_timeout < 300` 秒時 `wait_for_artifact` 永遠不判 removed(窗口太短不足以斷定下架),
   配額下架的集數會一直回 pending/series。預設 1200 不受影響。
-- **live 冒煙沒跑成**:dev 與 prd 共用的那份憑證已失效(0.9.27 + 0.8.2 對照組同樣在第一個 GET 被導去登入頁,
-  不是本版造成)。要等重登 + `sync-auth.sh` 後補跑。
+- **live 冒煙(打 tag 前補跑):dev 與 prd 都過**,prd 5 槽全 usable、37 支工具、`notebook_list` 正常。
+  中途一度誤判「共用憑證已失效」:其實是自寫的 MCP client 沒把 Doppler 注入的 env 傳給 server,
+  server 讀到本機舊 storage_state 才被導去登入頁(坑的寫法見 `docs/acceptance-testing.md` §真帳號驗收)。
 
 ### 這一輪怎麼做的(方法本身是這版最該記的東西)
 

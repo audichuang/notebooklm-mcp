@@ -41,13 +41,6 @@ v0.9.26 的修正在 master 躺著,而四台機器裝到的全是壞的。**reta
 `scripts/retag-latest.sh`,把 `latest` 指到**已通過 CI 的最高** semver 發版(不是剛推的那個,
 所以誤推舊 tag 不會把指針往回拉)。預發版 `v0.9.20-rc1` 不算。
 
-🔴 **推 v0.9.28 tag 前的一次性遷移**:先把新 workflow 隨 master 推上去,再執行
-`gh workflow disable 337507291` 停用舊 `.github/workflows/retag-latest.yml` 的遠端 workflow ID;
-用 `gh workflow list --all` 確認舊的 disabled、新的 active,**確認前不要推 tag**。
-GitHub 對舊 tag 的 push 會執行該舊 commit 上的 workflow 版本;若舊 ID 仍 active,
-重推 v0.9.27 就能跑無 CI gate 的舊檔並把 `latest` 指到未驗新版。新檔名是為了讓舊 ID
-能永久停用,不與這版的 gate 共用身份。
-
 **skill 不是 pin 點。** `audi-skill/notebooklm` 的安裝指令在 `references/setup.md`,
 寫的是 `@latest`。打 tag、等 CI 移動指針之後,消費端重跑 setup 那段即跟上。
 

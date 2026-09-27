@@ -84,6 +84,12 @@ stub 的 `NBLM_REPO` 指過去 —— 不要靠記憶描述舊版長怎樣。
 **不必交 prompt 給人**。前提是工作根 AGENTS.md 那條:自己清得掉的測試資料不必問,但跑完要清;
 **不可逆的動作**(發布到公網 feed、刪既有 notebook/source)一律先問。
 
+⚠️ **自寫 python MCP client 冒煙時,`StdioServerParameters` 一定要傳 `env=dict(os.environ)`。**
+SDK 預設只轉一小撮安全變數給子 process,`doppler run` 注入的 `NOTEBOOKLM_AUTH_JSON*` 全部被丟掉 ——
+server 於是改讀本機 `~/.notebooklm` 的舊 storage_state:單帳號分支、被導去登入頁,**看起來完全像
+憑證過期**(v0.9.28 發版為此誤判「生產憑證失效」、叫人重登)。判準:prd 冒煙的 `auth_check(all_slots=True)`
+槽位數要等於 Doppler 裡的 `NOTEBOOKLM_AUTH_JSON*` 數;只有 1 槽就是 env 沒進去,不是帳號壞了。
+
 ## 工作區長什麼樣
 
 ```
