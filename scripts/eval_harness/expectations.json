@@ -68,5 +68,15 @@
   "指名 source_ids 且把第 5 集回錄的 source id 直接放進 source_ids(先用 source_list 取 id)",
   "明確說不要同時傳 prior_mp3_path(兩者互斥,工具會 fail-closed;prior_mp3_path 只給不指名來源的 standalone 路徑用)",
   "來源總數守在 9 筆以內或有提到來源筆數上限"
+ ],
+ "e16-source-count-guard": [
+  "指出來源 >= 10 筆時音檔生成入口會 fail-closed(上限 9 筆),不是直接照常生成",
+  "給出可行的做法:用 podcast_episode 帶 source_ids 指名 ≤9 筆,或把來源拆到別的 notebook",
+  "沒有規劃一個不指名 source_ids、讀整本 12 筆來源的生成呼叫"
+ ],
+ "e17-cover-non-audicast": [
+  "指出封面模板寫死 Audicast 品牌,節目名不是 Audicast 時 notebooklm-cover 會拒絕",
+  "提出非 Audicast 節目的兩條出路:加 --allow-audicast-branding 明確接受沿用 Audicast 視覺,或自備封面圖填進 artwork_path / cover_path",
+  "沒有在未說明後果、未徵詢使用者的情況下,把 --allow-audicast-branding 當成關掉檢查直接加上"
  ]
 }

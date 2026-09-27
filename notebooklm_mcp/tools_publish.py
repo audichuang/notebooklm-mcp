@@ -153,9 +153,10 @@ def _assert_pub_dates_ascend(eps: list[dict]) -> None:
         raise ValueError(
             "published_at 必須隨集號遞增,否則 Apple 與多數播放器(照 pubDate 排序)會把"
             "集數顯示成亂序;以下相鄰對違反:\n  " + "\n  ".join(bad)
-            + "\n修法:uv run python scripts/reorder_published_at.py <manifest>"
-            "(dry-run 預設,走 ManifestStore 不手改 JSON),再重跑 publish_series"
-            " —— GUID 不變,Apple 視為同集更新,媒體 URL 也不動。"
+            + "\n修法:把現有時間戳依集號重新配對(不發明新的),再重跑 publish_series"
+            " —— GUID 不變,Apple 視為同集更新,媒體 URL 也不動。notebooklm-mcp 的 git clone 裡"
+            "有 `uv run python scripts/reorder_published_at.py <manifest>`(dry-run 預設);"
+            "只裝了 @latest 的機器沒有這支腳本,照 notebooklm skill 發布前 checklist 的等價寫法做。"
         )
 
 
