@@ -74,6 +74,8 @@ source = ["notebooklm_mcp"]
 
 [tool.coverage.report]
 precision = 2
+# 實測 91.54%(含 ffmpeg 路徑);只准往上調,紅了就補測試,只能靠 live 驗的路徑才加 pragma 並寫理由
+fail_under = 91
 
 [tool.ruff]
 target-version = "py312"

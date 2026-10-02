@@ -1,3 +1,5 @@
+import collections
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -932,3 +934,29 @@ def fake_client():
     runtime.set_client(client)
     yield client
     runtime.set_client(None)
+
+
+# CI-only (NBLM_STRICT_SKIPS=1): a test function whose every case skipped asserted nothing.
+# Red => the runner lacks a binary (install it) or a skip condition swallowed every parametrized
+# case (fix the test / check the SUT constant). Never pin skip counts instead.
+_outcomes: dict[str, set[str]] = collections.defaultdict(set)
+
+
+def pytest_runtest_logreport(report):
+    if report.when == "call" or (report.when == "setup" and report.skipped):
+        _outcomes[report.nodeid.split("[", 1)[0]].add(report.outcome)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    if os.environ.get("NBLM_STRICT_SKIPS") != "1":
+        return
+    dead = sorted(f for f, o in _outcomes.items() if o == {"skipped"})
+    if dead:
+        tr = session.config.pluginmanager.get_plugin("terminalreporter")
+        tr.write_line(
+            f"NBLM_STRICT_SKIPS: {len(dead)} test function(s) never ran an assertion:", red=True
+        )
+        for f in dead:
+            tr.write_line(f"  {f}")
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
