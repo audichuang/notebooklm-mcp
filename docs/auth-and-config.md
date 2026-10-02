@@ -14,7 +14,7 @@
 過期時在**有 GUI 的機器**重登再同步(無頭機跑不了 `notebooklm login`,缺 X server):
 
 ```bash
-uv sync --extra dev --extra login && uv run playwright install chromium   # 僅登入機需要
+uv sync --extra login && uv run playwright install chromium   # 僅登入機需要
 uv run notebooklm login                     # 開瀏覽器登入
 bash scripts/sync-auth.sh --config prd      # 推到 Doppler，所有 VM 下次啟動即生效
 #   ⚠️ `--config prd` 不能省:腳本預設寫 `dev`,而非互動執行(agent 跑 Bash)時它

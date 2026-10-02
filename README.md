@@ -13,7 +13,7 @@ Thin self-built MCP server over `notebooklm-py>=0.8.2,<0.9` for NotebookLM autom
 
 ```bash
 uv venv --python 3.12
-uv sync --extra dev
+uv sync
 uv run pytest -q
 ```
 
@@ -57,7 +57,7 @@ same network segment could then drive the account.
 On a GUI machine:
 
 ```bash
-uv sync --extra dev --extra login
+uv sync --extra login
 uv run playwright install chromium
 uv run notebooklm login
 bash scripts/sync-auth.sh

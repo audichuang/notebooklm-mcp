@@ -112,8 +112,8 @@ grep -A1 'name = "mcp"' uv.lock | grep version                       # lock 鎖�
 ~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('mcp'))"   # 實裝的
 ```
 
-漂了就:`uv lock --upgrade-package mcp && uv sync --extra dev && uv run pytest -q`,全綠再 commit uv.lock;
-必要時同步更新 `pyproject.toml` 的下界。**對齊要用 `uv sync --extra dev`,不是 `uv pip install -e .`** —— 後者不會把
+漂了就:`uv lock --upgrade-package mcp && uv sync && uv run pytest -q`,全綠再 commit uv.lock;
+必要時同步更新 `pyproject.toml` 的下界。**對齊要用 `uv sync`,不是 `uv pip install -e .`** —— 後者不會把
 venv 拉到 lock 的版本。
 
 **升 notebooklm-py 之前先跑 `scripts/compare_sdk_surface.py`**:兩版各一個獨立 venv,各跑一次再 `diff`。

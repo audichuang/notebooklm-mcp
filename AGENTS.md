@@ -11,7 +11,7 @@
 ```bash
 # 本 repo 開發(Python 鎖在 pyproject `>=3.12,<3.13`,uv 自己選)。
 # 別用 `uv pip install -e`:它不會把 venv 拉到 lock 的版本,測的跟鎖的不同版。
-uv sync --extra dev
+uv sync
 
 # 全套離線測試(mock client,不需網路/認證)
 uv run pytest -q
