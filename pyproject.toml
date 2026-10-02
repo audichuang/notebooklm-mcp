@@ -19,17 +19,23 @@ dependencies = [
     "notebooklm-py>=0.8.4,<0.9",
     # 上界是硬需求:`uv tool install git+…` **不讀 uv.lock**,消費端每次安裝都自由解析成
     # 當下最新,所以無上界的話 mcp 2.0 一出來,四台機器下一次重裝就靜默吃到 breaking 版本。
-    # 下界 1.27 = 實測過的最舊版。**實際跑過的組合會漂,這裡要跟著更新**:2026-08-09
+    # 下界 1.28.1 = 第一個沒有已知 advisory 的版本(GHSA-jpw9-pfvf-9f58、GHSA-hvrp-rf83-w775 於 1.27.2 修;
+    # GHSA-vj7q-gjh5-988w 於 1.28.1 修);跑不跑得起來由 deps-watch 的 lowest-direct job 驗。上游 migration guide 原文:
+    # 「keep a `<2` upper bound until you've migrated」。**實際跑過的組合會漂,這裡要跟著更新**:2026-08-09
     # 一度漂成「lock 1.28.1 / 生產實裝 1.29.0」,已把 lock 拉到 1.29.0 對齊並跑過全套。
     # (1.29.0 啟動多印一行 pydantic_settings 的 IncompleteFieldDefinitionWarning,
     #  走 stderr 不影響 stdio 協定 —— 但它正是「測試與實跑不同版」會漏掉的那種差異。)
-    "mcp[cli]>=1.27,<2",
-    "Pillow>=10,<12",
+    "mcp[cli]>=1.28.1,<2",
+    # 下界 12.3 = 第一個沒有已知 advisory 的版本(11.3.0 有 18 筆,修正只出在 12.x)。我們只用 open/convert('RGB')/save JPEG,
+    # 12.0 移除的 API 都沒用到;合成圖探測 11.3→12.3 的 JPEG bytes 相同,但沒用真實 Chrome 封面驗過 ——
+    # 已發布的 JPEG 是事實來源,只有重產封面才可能換 content-hash URL。上界理由同上(不讀 lock)。
+    "Pillow>=12.3,<13",
     "httpx>=0.27,<1",
     # 上界是硬需求,理由跟上面兩個依賴一樣(uv tool install git+… 不讀 uv.lock)——這支
     # 之前漏了,是本檔唯一無上界的直接依賴。notes_html 拿它做半信任的 Markdown 渲染,
     # 4.0 若改 extension 語意,允許清單可能靜默拒收,失敗形狀是「(某集)講義發不出去」。
-    "markdown>=3.5,<4",
+    # 下界 3.8.1:CVE-2025-69534(畸形類 HTML 序列讓 HTMLParser 拋未捕捉的 AssertionError,正是「講義發不出去」那種失敗)。
+    "markdown>=3.8.1,<4",
     "mutagen>=1.47,<2",   # 把單集封面內嵌進 true MP3 的 ID3/APIC
 ]
 
@@ -60,5 +66,6 @@ packages = ["notebooklm_mcp"]
 # 別再加 force-include(會與預設收錄撞成「same path」build error)。
 
 [build-system]
-requires = ["hatchling"]
+# 消費端 uv tool install git+… 從原始碼建 wheel,build 隔離環境也不讀 lock;1.27 與 1.32.4 建出的 wheel 檔案清單實測相同。
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
