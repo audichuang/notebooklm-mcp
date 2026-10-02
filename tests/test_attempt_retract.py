@@ -9,21 +9,20 @@ guard 沒保護 manifest,只是把寫入趕出工具外。
 紀錄不會消失、以及被作廢的 attempt **不可能再被復活**——不論是 retract 之前就啟動的
 in-flight finalizer、還是任何把指標寫回去的 writer。
 """
+
 import asyncio
 import copy
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import audio_finalize
-from notebooklm_mcp import tools_basic as b
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import audio_finalize, tools_basic as b, tools_podcast as p
 from notebooklm_mcp._status import TerminalGenerationError
 from notebooklm_mcp.manifest_store import ManifestStore
-
 
 EP = {"title": "心法篇", "brief": "1"}
 
@@ -40,9 +39,7 @@ class _TickingDatetime(datetime):
     @classmethod
     def now(cls, tz=None):
         _TickingDatetime._tick += 1
-        moment = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
-            hours=_TickingDatetime._tick
-        )
+        moment = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=_TickingDatetime._tick)
         return moment.astimezone(tz) if tz else moment
 
 
@@ -56,12 +53,12 @@ async def _complete_ep1(fake_client, tmp_path) -> tuple[str, dict]:
         output_dir=str(tmp_path),
         manifest_path=manifest_path,
     )
-    episode = json.loads(open(manifest_path, encoding="utf-8").read())["episodes"][0]
+    episode = json.loads(Path(manifest_path).read_text(encoding="utf-8"))["episodes"][0]
     return manifest_path, episode
 
 
 def _episode(manifest_path: str) -> dict:
-    return json.loads(open(manifest_path, encoding="utf-8").read())["episodes"][0]
+    return json.loads(Path(manifest_path).read_text(encoding="utf-8"))["episodes"][0]
 
 
 # 候選歸屬雖來自外部知識，仍已用 `candidate_selection_required` 維度收進
@@ -85,9 +82,7 @@ def _assert_public_guidance_matches_capabilities(
     post_retract: bool = False,
 ) -> None:
     snapshot = ManifestStore(manifest_path).read()
-    episode, attempt = p._attempt_record(
-        snapshot, 1, attempt_id, allow_retracted=post_retract
-    )
+    episode, attempt = p._attempt_record(snapshot, 1, attempt_id, allow_retracted=post_retract)
     caps = p._attempt_capabilities(
         episode,
         attempt,
@@ -103,9 +98,7 @@ def _assert_public_guidance_matches_capabilities(
     assert result["next_step"] == p._attempt_next_step(caps)
 
 
-async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(
-    fake_client, tmp_path
-):
+async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(fake_client, tmp_path):
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     attempt_id = before["output_attempt_id"]
 
@@ -149,6 +142,7 @@ async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(
 
 # ---- pubDate 不得漂移(真實事故:saa-drill EP05/EP09)---------------------------
 
+
 def test_first_published_at_skips_abandoned_empty_retraction():
     """`abandons_unauthorized_candidate` 分支(從未 promote 就被作廢的 candidate)留下
     的 `retracted_output` 是空 dict——不能被誤判成「這集從沒發過」而提前 return None,
@@ -159,9 +153,7 @@ def test_first_published_at_skips_abandoned_empty_retraction():
             {
                 "attempt_id": "att-a",
                 "retraction": {
-                    "retracted_output": {
-                        "published_at": "Fri, 24 Jul 2026 09:00:00 +0800"
-                    }
+                    "retracted_output": {"published_at": "Fri, 24 Jul 2026 09:00:00 +0800"}
                 },
             },
         ]
@@ -183,8 +175,12 @@ async def test_replacement_keeps_the_original_published_at_not_the_regeneration_
     await b.source_delete("nb-1", before["feedback_source_id"])
 
     returned = await p.podcast_episode(
-        "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        brief="修正後的 brief",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
 
     after = _episode(manifest_path)
@@ -215,16 +211,24 @@ async def test_resume_promotion_also_returns_the_original_published_at(
     fake_client.artifacts.download_audio_exc = RuntimeError("模擬傳輸中斷")
     with pytest.raises(RuntimeError):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief 2",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後的 brief 2",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     fake_client.artifacts.download_audio_exc = None
     stopped = _episode(manifest_path)
     artifact_id = stopped["attempts"][-1]["remote"]["artifact_id"]
 
     returned = await p.podcast_episode_resume(
-        "nb-1", episode_n=1, title=EP["title"], artifact_id=artifact_id,
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        artifact_id=artifact_id,
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
 
     after = _episode(manifest_path)
@@ -252,8 +256,12 @@ async def test_series_promotion_also_returns_the_original_published_at(
     fake_client.artifacts.download_audio_exc = RuntimeError("模擬傳輸中斷")
     with pytest.raises(RuntimeError):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後的 brief",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     fake_client.artifacts.download_audio_exc = None
     stopped = _episode(manifest_path)
@@ -283,8 +291,12 @@ async def test_second_replacement_still_keeps_the_original_published_at(
     await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
     await b.source_delete("nb-1", before["feedback_source_id"])
     await p.podcast_episode(
-        "nb-1", episode_n=1, title=EP["title"], brief="第二版",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        brief="第二版",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
     replacement = _episode(manifest_path)
     assert replacement["published_at"] == first_published_at
@@ -294,17 +306,19 @@ async def test_second_replacement_still_keeps_the_original_published_at(
     )
     await b.source_delete("nb-1", replacement["feedback_source_id"])
     await p.podcast_episode(
-        "nb-1", episode_n=1, title=EP["title"], brief="第三版",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        brief="第三版",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
 
     final = _episode(manifest_path)
     assert final["published_at"] == first_published_at
 
 
-async def test_replacement_requires_deleting_the_stale_source_first(
-    fake_client, tmp_path
-):
+async def test_replacement_requires_deleting_the_stale_source_first(fake_client, tmp_path):
     """漏刪舊回錄 source 不能只靠文件提醒:finalize 是按 source_id 驗的,不擋同名,
     漏了會靜默留下兩筆同名 media 污染後續每一次生成的 context。故生成前 fail-closed。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
@@ -314,8 +328,12 @@ async def test_replacement_requires_deleting_the_stale_source_first(
 
     with pytest.raises(ValueError, match="retracted feedback sources still in the notebook"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後的 brief",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     # 一次生成配額都沒燒,也沒建新 attempt
     assert not [c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"]
@@ -323,12 +341,16 @@ async def test_replacement_requires_deleting_the_stale_source_first(
 
     await b.source_delete("nb-1", stale)
     await p.podcast_episode(
-        "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        brief="修正後的 brief",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
 
     after = _episode(manifest_path)
-    assert "pending_source_cleanup" not in after           # 義務結案
+    assert "pending_source_cleanup" not in after  # 義務結案
     assert len(after["attempts"]) == 2
     assert after["output_attempt_id"] == after["attempts"][1]["attempt_id"]
     # setdefault 欄位補回來了,而且是首發時間,不是這次重生的完成時間
@@ -340,9 +362,7 @@ async def test_replacement_requires_deleting_the_stale_source_first(
     assert fake_client.sources.titles().count("EP01 心法篇") == 1
 
 
-@pytest.mark.parametrize(
-    "exc_type", [TerminalGenerationError, RuntimeError, ConnectionError]
-)
+@pytest.mark.parametrize("exc_type", [TerminalGenerationError, RuntimeError, ConnectionError])
 async def test_series_does_not_mask_an_early_error_with_a_lookup_crash(
     fake_client, tmp_path, monkeypatch, exc_type
 ):
@@ -391,17 +411,20 @@ async def test_retract_replacement_cannot_change_the_title(fake_client, tmp_path
 
     with pytest.raises(ValueError, match="title cannot change in a retract replacement"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title="改過的標題", brief="修正後的 brief",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title="改過的標題",
+            brief="修正後的 brief",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     assert _episode(manifest_path)["title"] == EP["title"]
 
 
 # ---- 復活防護:retract 之後,被作廢的 attempt 不得再被 finalize／promote --------------
 
-async def test_inflight_finalizer_cannot_resurrect_a_retracted_attempt(
-    fake_client, tmp_path
-):
+
+async def test_inflight_finalizer_cannot_resurrect_a_retracted_attempt(fake_client, tmp_path):
     """真實併發窗口:finalize 在 retract 之前啟動,retract 提交,finalize 才回來寫。
 
     promotion 是它最後一個寫入點,也是唯一會復活 episode 級投影欄位的地方;所有
@@ -409,7 +432,7 @@ async def test_inflight_finalizer_cannot_resurrect_a_retracted_attempt(
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     attempt_id = before["output_attempt_id"]
     store = ManifestStore(manifest_path)
-    stale_output = {                      # in-flight finalizer 手上的舊結果
+    stale_output = {  # in-flight finalizer 手上的舊結果
         "artifact_id": before["artifact_id"],
         "mp3_path": before["mp3_path"],
         "title": before["title"],
@@ -424,8 +447,12 @@ async def test_inflight_finalizer_cannot_resurrect_a_retracted_attempt(
         p._promote_attempt_output(store, 1, attempt_id, stale_output)
     with pytest.raises(ValueError, match="was retracted"):
         await audio_finalize.finalize_attempt(
-            fake_client, store, episode_n=1, attempt_id=attempt_id,
-            output_dir=str(tmp_path), wait_timeout=5,
+            fake_client,
+            store,
+            episode_n=1,
+            attempt_id=attempt_id,
+            output_dir=str(tmp_path),
+            wait_timeout=5,
         )
 
     after = _episode(manifest_path)
@@ -433,9 +460,7 @@ async def test_inflight_finalizer_cannot_resurrect_a_retracted_attempt(
     assert "published_at" not in after
 
 
-async def test_manifest_write_rejects_a_pointer_back_to_a_retracted_attempt(
-    fake_client, tmp_path
-):
+async def test_manifest_write_rejects_a_pointer_back_to_a_retracted_attempt(fake_client, tmp_path):
     """最後一道背壩:任何 writer(含手改)把指標指回作廢的 attempt,那次寫入就失敗。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     attempt_id = before["output_attempt_id"]
@@ -445,22 +470,18 @@ async def test_manifest_write_rejects_a_pointer_back_to_a_retracted_attempt(
     for pointer in ("output_attempt_id", "active_attempt_id"):
         with pytest.raises(ValueError, match="points at retracted attempt"):
             store.update(
-                lambda manifest, key=pointer: manifest["episodes"][0].update(
-                    {key: attempt_id}
-                )
+                lambda manifest, key=pointer: manifest["episodes"][0].update({key: attempt_id})
             )
     assert "output_attempt_id" not in _episode(manifest_path)
 
 
-async def test_retract_is_idempotent_and_reasserts_the_cleared_state(
-    fake_client, tmp_path
-):
+async def test_retract_is_idempotent_and_reasserts_the_cleared_state(fake_client, tmp_path):
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     attempt_id = before["output_attempt_id"]
 
     first = await p.podcast_attempt_retract(manifest_path, 1, attempt_id, reason="QA")
     again = await p.podcast_attempt_retract(manifest_path, 1, attempt_id, reason="別的理由")
-    assert again["retracted_at"] == first["retracted_at"]      # 不重寫審計紀錄
+    assert again["retracted_at"] == first["retracted_at"]  # 不重寫審計紀錄
     assert again["reason"] == first["reason"]
     assert _episode(manifest_path)["retracted_attempt_ids"] == [attempt_id]
 
@@ -484,16 +505,30 @@ async def test_resume_cannot_bypass_the_cleanup_obligation(fake_client, tmp_path
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
     fake_client.artifacts.seed_artifacts(
-        type("A", (), {"id": "art-rescued", "kind": None, "title": "Audio Overview",
-                       "is_completed": True, "status_str": "completed", "created_at": None})()
+        type(
+            "A",
+            (),
+            {
+                "id": "art-rescued",
+                "kind": None,
+                "title": "Audio Overview",
+                "is_completed": True,
+                "status_str": "completed",
+                "created_at": None,
+            },
+        )()
     )
 
     with pytest.raises(ValueError, match="retracted feedback sources still in the notebook"):
         await p.podcast_episode_resume(
-            "nb-1", episode_n=1, title=EP["title"], artifact_id="art-rescued",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            artifact_id="art-rescued",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
-    assert len(_episode(manifest_path)["attempts"]) == 1     # 連 attempt 都沒建
+    assert len(_episode(manifest_path)["attempts"]) == 1  # 連 attempt 都沒建
 
 
 async def test_resume_cannot_rename_the_episode(fake_client, tmp_path):
@@ -507,15 +542,17 @@ async def test_resume_cannot_rename_the_episode(fake_client, tmp_path):
 
     with pytest.raises(ValueError, match="title does not match the manifest"):
         await p.podcast_episode_resume(
-            "nb-1", episode_n=1, title="改過的標題", artifact_id="art-rescued",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title="改過的標題",
+            artifact_id="art-rescued",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     assert _episode(manifest_path)["title"] == EP["title"]
 
 
-async def test_resume_claimed_branch_also_cannot_rename_the_episode(
-    fake_client, tmp_path
-):
+async def test_resume_claimed_branch_also_cannot_rename_the_episode(fake_client, tmp_path):
     """T12(a,測試債):`_ensure_resume_attempt` 有**兩個**建立/續接分支——`artifact_id`
     已被某顆既有 attempt 認領時走 claimed 分支,否則走新建分支。`test_resume_
     cannot_rename_the_episode` 用一顆從沒被任何 attempt 認領過的 artifact_id,
@@ -561,8 +598,12 @@ async def test_resume_claimed_branch_also_cannot_rename_the_episode(
 
     with pytest.raises(ValueError, match="title does not match the manifest"):
         await p.podcast_episode_resume(
-            "nb-1", episode_n=1, title="X", artifact_id="art-claimed",
-            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+            "nb-1",
+            episode_n=1,
+            title="X",
+            artifact_id="art-claimed",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
         )
 
 
@@ -572,23 +613,20 @@ async def test_adopt_cannot_rewrite_a_retracted_attempt(fake_client, tmp_path):
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     attempt_id = before["output_attempt_id"]
     await p.podcast_attempt_retract(manifest_path, 1, attempt_id, reason="QA")
-    other = fake_client.sources._add(
-        f"EP01 {EP['title']}", kind="media", is_ready=True
-    )
+    other = fake_client.sources._add(f"EP01 {EP['title']}", kind="media", is_ready=True)
 
     with pytest.raises(ValueError, match="was retracted"):
         await p.podcast_attempt_adopt(
             manifest_path, 1, attempt_id=attempt_id, feedback_source_id=other
         )
     retracted = _episode(manifest_path)["attempts"][0]
-    assert retracted["finalize"]["feedback_source_upload"]["source_id"] == (
-        before["feedback_source_id"]
+    assert (
+        retracted["finalize"]["feedback_source_upload"]["source_id"]
+        == (before["feedback_source_id"])
     )
 
 
-async def test_delayed_retract_retry_does_not_destroy_the_replacement(
-    fake_client, tmp_path
-):
+async def test_delayed_retract_retry_does_not_destroy_the_replacement(fake_client, tmp_path):
     """A 作廢、B 已成為取代版之後,再重呼 retract(A) 不得清掉 B 的輸出投影。
 
     冪等只能對「自己留下的殘留值」生效——無條件重跑 pop 會把 B 的 artifact_id／
@@ -598,8 +636,12 @@ async def test_delayed_retract_retry_does_not_destroy_the_replacement(
     await p.podcast_attempt_retract(manifest_path, 1, attempt_a, reason="QA")
     await b.source_delete("nb-1", before["feedback_source_id"])
     await p.podcast_episode(
-        "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        brief="修正後的 brief",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
     replacement = _episode(manifest_path)
     # 新語意:取代版的 published_at 本來就該是 A 的首發時間,不是自己重生的完成時間
@@ -646,13 +688,17 @@ async def test_idempotent_retract_after_a_stuck_replacement_does_not_point_at_a_
     fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
     with pytest.raises(TimeoutError, match="response lost"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後的 brief",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後的 brief",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     stuck = _episode(manifest_path)
     attempt_b = stuck["active_attempt_id"]
     assert attempt_b != attempt_a
-    assert stuck.get("output_attempt_id") is None      # B 還沒 promote
+    assert stuck.get("output_attempt_id") is None  # B 還沒 promote
 
     again = await p.podcast_attempt_retract(
         manifest_path, 1, attempt_a, reason="重試(request 被取消後冪等重呼)"
@@ -667,16 +713,12 @@ async def test_idempotent_retract_after_a_stuck_replacement_does_not_point_at_a_
     # 自足」那條紅線):`again["attempt_id"]` 是被 retract 的 A(tombstone,稽核
     # 主體不會變),真正要用的是 `safe_next_attempt_id`——上一版這裡直接從 manifest
     # 私下讀 `attempt_b`,連「回傳裡有沒有這顆身分」都沒驗到。
-    assert again["safe_next_attempt_id"] == attempt_b, again   # 交棒對象正是 B,不是 A
-    out = await p.podcast_episode_reconcile(
-        manifest_path, 1, again["safe_next_attempt_id"]
-    )
-    assert out["episode_n"] == 1     # 沒有 raise 就是走得通
+    assert again["safe_next_attempt_id"] == attempt_b, again  # 交棒對象正是 B,不是 A
+    out = await p.podcast_episode_reconcile(manifest_path, 1, again["safe_next_attempt_id"])
+    assert out["episode_n"] == 1  # 沒有 raise 就是走得通
 
 
-async def test_claimed_artifact_resume_cannot_steal_active_from_the_output(
-    fake_client, tmp_path
-):
+async def test_claimed_artifact_resume_cannot_steal_active_from_the_output(fake_client, tmp_path):
     """第三個入口:`_ensure_resume_attempt` 的 **claimed** 分支。
 
     一筆「歷史上曾被 claim 過」的 artifact 不必新建 attempt,所以第二輪加在新建分支的
@@ -684,7 +726,7 @@ async def test_claimed_artifact_resume_cannot_steal_active_from_the_output(
     active=B／output=A 的死鎖。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     store = ManifestStore(manifest_path)
-    store.update(                                  # 歷史上被 claim 過的另一筆 artifact
+    store.update(  # 歷史上被 claim 過的另一筆 artifact
         lambda manifest: manifest["episodes"][0]["attempts"].append(
             {
                 "attempt_id": "att-historical",
@@ -700,11 +742,14 @@ async def test_claimed_artifact_resume_cannot_steal_active_from_the_output(
 
     with pytest.raises(ValueError, match="already has durable output"):
         p._ensure_resume_attempt(
-            store, notebook_id="nb-1", episode_n=1, title=EP["title"],
+            store,
+            notebook_id="nb-1",
+            episode_n=1,
+            title=EP["title"],
             artifact_id="art-historical",
         )
     after = _episode(manifest_path)
-    assert after["active_attempt_id"] == before["output_attempt_id"]   # 沒被搶走
+    assert after["active_attempt_id"] == before["output_attempt_id"]  # 沒被搶走
 
 
 async def test_retract_can_abandon_an_unauthorized_candidate_to_break_a_split(
@@ -716,18 +761,20 @@ async def test_retract_can_abandon_an_unauthorized_candidate_to_break_a_split(
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     store = ManifestStore(manifest_path)
     store.update(
-        lambda manifest: manifest["episodes"][0]["attempts"].append(
-            {
-                "attempt_id": "att-split",
-                "episode": 1,
-                "title": EP["title"],
-                "notebook_id": "nb-1",
-                "dispatch": {"status": "accepted"},
-                "remote": {"artifact_id": "art-split", "status": "pending"},
-                "finalize": audio_finalize.new_finalize_state(),
-            }
+        lambda manifest: (
+            manifest["episodes"][0]["attempts"].append(
+                {
+                    "attempt_id": "att-split",
+                    "episode": 1,
+                    "title": EP["title"],
+                    "notebook_id": "nb-1",
+                    "dispatch": {"status": "accepted"},
+                    "remote": {"artifact_id": "art-split", "status": "pending"},
+                    "finalize": audio_finalize.new_finalize_state(),
+                }
+            )
+            or manifest["episodes"][0].update({"active_attempt_id": "att-split"})
         )
-        or manifest["episodes"][0].update({"active_attempt_id": "att-split"})
     )
 
     # 先作廢那個沒人授權的 candidate:A 的輸出投影一個字都不能少
@@ -774,7 +821,7 @@ async def _split_with_guarded_candidate(
                 "dispatch": {
                     "status": "acceptance_unknown",
                     "artifact_ids_before": [before["artifact_id"]],
-                    "dispatched_at": datetime.now(timezone.utc).isoformat(),
+                    "dispatched_at": datetime.now(UTC).isoformat(),
                     "wait_timeout": 1200.0,
                 },
             }
@@ -797,9 +844,7 @@ async def _split_with_guarded_candidate(
 
 
 async def test_reconcile_public_guidance_respects_output_owner(fake_client, tmp_path):
-    manifest_path, attempt_b = await _split_with_guarded_candidate(
-        fake_client, tmp_path
-    )
+    manifest_path, attempt_b = await _split_with_guarded_candidate(fake_client, tmp_path)
 
     out = await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
 
@@ -815,9 +860,7 @@ async def test_reconcile_public_guidance_respects_output_owner(fake_client, tmp_
     assert "podcast_attempt_adopt" not in out["next_step"]
 
 
-async def test_reconcile_unique_bind_guidance_respects_output_owner(
-    fake_client, tmp_path
-):
+async def test_reconcile_unique_bind_guidance_respects_output_owner(fake_client, tmp_path):
     manifest_path, attempt_b = await _split_with_guarded_candidate(
         fake_client, tmp_path, add_blocker=False
     )
@@ -832,9 +875,7 @@ async def test_reconcile_unique_bind_guidance_respects_output_owner(
 
 
 async def test_adopt_public_guidance_respects_output_owner(fake_client, tmp_path):
-    manifest_path, attempt_b = await _split_with_guarded_candidate(
-        fake_client, tmp_path
-    )
+    manifest_path, attempt_b = await _split_with_guarded_candidate(fake_client, tmp_path)
     await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
 
     out = await p.podcast_attempt_adopt(
@@ -848,9 +889,7 @@ async def test_adopt_public_guidance_respects_output_owner(fake_client, tmp_path
     assert "podcast_attempt_retract" in out["next_step"]
     assert "podcast_episode_resume" not in out["next_step"]
 
-    reconciled_again = await p.podcast_episode_reconcile(
-        manifest_path, 1, attempt_b
-    )
+    reconciled_again = await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
     _assert_public_guidance_matches_capabilities(
         manifest_path,
         attempt_b,
@@ -861,13 +900,9 @@ async def test_adopt_public_guidance_respects_output_owner(fake_client, tmp_path
 
 
 async def test_retract_public_guidance_keeps_the_existing_output(fake_client, tmp_path):
-    manifest_path, attempt_b = await _split_with_guarded_candidate(
-        fake_client, tmp_path
-    )
+    manifest_path, attempt_b = await _split_with_guarded_candidate(fake_client, tmp_path)
     await p.podcast_episode_reconcile(manifest_path, 1, attempt_b)
-    await p.podcast_attempt_adopt(
-        manifest_path, 1, attempt_id=attempt_b, artifact_id="artifact-b"
-    )
+    await p.podcast_attempt_adopt(manifest_path, 1, attempt_id=attempt_b, artifact_id="artifact-b")
 
     out = await p.podcast_attempt_retract(
         manifest_path, 1, attempt_b, reason="放棄未授權 candidate"
@@ -886,9 +921,7 @@ async def test_retract_public_guidance_keeps_the_existing_output(fake_client, tm
     assert "podcast_series" not in out["next_step"]
 
 
-async def test_promote_refuses_when_another_attempt_owns_the_output(
-    fake_client, tmp_path
-):
+async def test_promote_refuses_when_another_attempt_owns_the_output(fake_client, tmp_path):
     """promotion 的歸屬檢查:沒有它,resume 後門一 finalize 成功就換掉 output 指標。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     store = ManifestStore(manifest_path)
@@ -907,7 +940,9 @@ async def test_promote_refuses_when_another_attempt_owns_the_output(
     )
     with pytest.raises(ValueError, match="output is owned by"):
         p._promote_attempt_output(
-            store, 1, "att-other",
+            store,
+            1,
+            "att-other",
             {
                 "artifact_id": "art-other",
                 "mp3_path": str(tmp_path / "other.mp3"),
@@ -919,9 +954,7 @@ async def test_promote_refuses_when_another_attempt_owns_the_output(
     assert _episode(manifest_path)["output_attempt_id"] == before["output_attempt_id"]
 
 
-async def test_cleanup_cannot_be_discharged_from_another_notebook(
-    fake_client, tmp_path
-):
+async def test_cleanup_cannot_be_discharged_from_another_notebook(fake_client, tmp_path):
     """義務綁在 manifest 那個 notebook 上:拿別的(空的)notebook 來查會「查無此 source」,
     把義務誤判成已結案,而舊來源其實還躺在真正的筆記本裡。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
@@ -931,14 +964,10 @@ async def test_cleanup_cannot_be_discharged_from_another_notebook(
         await p._assert_source_cleanup_done(
             fake_client, ManifestStore(manifest_path), "nb-wrong", 1
         )
-    assert _pending_ids(manifest_path) == [
-        before["feedback_source_id"]
-    ]
+    assert _pending_ids(manifest_path) == [before["feedback_source_id"]]
 
 
-async def test_cleanup_does_not_swallow_an_obligation_added_during_the_check(
-    fake_client, tmp_path
-):
+async def test_cleanup_does_not_swallow_an_obligation_added_during_the_check(fake_client, tmp_path):
     """gate 先 snapshot、再 await sources.list、再寫回:await 期間追加的新義務不得被吞掉。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
@@ -947,10 +976,12 @@ async def test_cleanup_does_not_swallow_an_obligation_added_during_the_check(
     real_list = fake_client.sources.list
 
     async def racing_list(notebook_id):
-        store.update(                       # 另一個 writer 在 await 中追加義務
-            lambda manifest: manifest["episodes"][0]
-            .setdefault("pending_source_cleanup", [])
-            .append("src-added-during-await")
+        store.update(  # 另一個 writer 在 await 中追加義務
+            lambda manifest: (
+                manifest["episodes"][0]
+                .setdefault("pending_source_cleanup", [])
+                .append("src-added-during-await")
+            )
         )
         return await real_list(notebook_id)
 
@@ -962,23 +993,17 @@ async def test_cleanup_does_not_swallow_an_obligation_added_during_the_check(
     assert _pending_ids(manifest_path) == ["src-added-during-await"]
 
 
-async def test_retract_refuses_an_attempt_that_is_not_the_durable_output(
-    fake_client, tmp_path
-):
+async def test_retract_refuses_an_attempt_that_is_not_the_durable_output(fake_client, tmp_path):
     """生成中／未 promote 的 attempt 不是 retract 的守備範圍(該用 reconcile／resume)。"""
     manifest_path = str(tmp_path / "series_manifest.json")
-    fake_client.artifacts.fail_wait_on = 1        # 等待階段逾時 → attempt 在飛但沒 output
-    stopped = await p.podcast_series(
-        "nb-1", episodes=[EP], output_dir=str(tmp_path)
-    )
+    fake_client.artifacts.fail_wait_on = 1  # 等待階段逾時 → attempt 在飛但沒 output
+    stopped = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
     assert stopped["complete"] is False
     episode = _episode(manifest_path)
     assert "output_attempt_id" not in episode or episode["output_attempt_id"] is None
 
     with pytest.raises(ValueError, match="is not episode 1's durable output"):
-        await p.podcast_attempt_retract(
-            manifest_path, 1, stopped["attempt_id"], reason="想抄捷徑"
-        )
+        await p.podcast_attempt_retract(manifest_path, 1, stopped["attempt_id"], reason="想抄捷徑")
 
 
 async def test_retract_refuses_while_another_attempt_is_active(fake_client, tmp_path):
@@ -988,35 +1013,33 @@ async def test_retract_refuses_while_another_attempt_is_active(fake_client, tmp_
     fake_client.artifacts.seed_artifacts(
         type("A", (), {"id": "art-other", "kind": None, "title": "EP01 心法篇"})()
     )
-    ManifestStore(manifest_path).update(          # 模擬 resume 造出的第二個 candidate
-        lambda manifest: manifest["episodes"][0]["attempts"].append(
-            {
-                "attempt_id": "att-other",
-                "episode": 1,
-                "title": EP["title"],
-                "notebook_id": "nb-1",
-                "dispatch": {"status": "accepted"},
-                "remote": {"artifact_id": "art-other", "status": "pending"},
-                "finalize": audio_finalize.new_finalize_state(),
-            }
+    ManifestStore(manifest_path).update(  # 模擬 resume 造出的第二個 candidate
+        lambda manifest: (
+            manifest["episodes"][0]["attempts"].append(
+                {
+                    "attempt_id": "att-other",
+                    "episode": 1,
+                    "title": EP["title"],
+                    "notebook_id": "nb-1",
+                    "dispatch": {"status": "accepted"},
+                    "remote": {"artifact_id": "art-other", "status": "pending"},
+                    "finalize": audio_finalize.new_finalize_state(),
+                }
+            )
+            or manifest["episodes"][0].update({"active_attempt_id": "att-other"})
         )
-        or manifest["episodes"][0].update({"active_attempt_id": "att-other"})
     )
 
     with pytest.raises(ValueError, match="still has active attempt"):
-        await p.podcast_attempt_retract(
-            manifest_path, 1, before["output_attempt_id"], reason="QA"
-        )
+        await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
     assert _episode(manifest_path)["output_attempt_id"] == before["output_attempt_id"]
 
 
-async def test_retract_rejects_bad_arguments_before_touching_the_manifest(
-    fake_client, tmp_path
-):
+async def test_retract_rejects_bad_arguments_before_touching_the_manifest(fake_client, tmp_path):
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
     attempt_id = before["output_attempt_id"]
 
-    with pytest.raises(ValueError, match="reason"):       # 無聲作廢正是要取代的東西
+    with pytest.raises(ValueError, match="reason"):  # 無聲作廢正是要取代的東西
         await p.podcast_attempt_retract(manifest_path, 1, attempt_id, reason="  ")
     with pytest.raises(ValueError, match="episode_n"):
         await p.podcast_attempt_retract(manifest_path, 0, attempt_id, reason="QA")
@@ -1045,26 +1068,20 @@ def _pending_ids(manifest_path):
 
 def _upload(manifest_path, attempt_id):
     snapshot = ManifestStore(manifest_path).read()
-    _, attempt = p._attempt_record(
-        snapshot, 1, attempt_id, allow_retracted=True
-    )
+    _, attempt = p._attempt_record(snapshot, 1, attempt_id, allow_retracted=True)
     return attempt["finalize"]["feedback_source_upload"]
 
 
 def _attempt_next_step_for(manifest_path, attempt_id):
     snapshot = ManifestStore(manifest_path).read()
-    episode, attempt = p._attempt_record(
-        snapshot, 1, attempt_id, allow_retracted=True
-    )
+    episode, attempt = p._attempt_record(snapshot, 1, attempt_id, allow_retracted=True)
     caps = p._attempt_capabilities(episode, attempt, attempt_id, post_retract=True)
     return p._attempt_next_step(caps)
 
 
 def _age_the_dispatch_window(manifest_path, attempt_id):
     """把 dispatched_at 推到候選窗之外(等真實時間過去是不可行的測法)。"""
-    old = datetime.now(timezone.utc) - (
-        audio_finalize.UPLOAD_DISPATCH_WINDOW + timedelta(minutes=1)
-    )
+    old = datetime.now(UTC) - (audio_finalize.UPLOAD_DISPATCH_WINDOW + timedelta(minutes=1))
 
     def mutate(manifest):
         _, attempt = p._attempt_record(manifest, 1, attempt_id, allow_retracted=True)
@@ -1134,9 +1151,7 @@ async def test_retract_abandons_an_in_flight_upload_and_the_gate_finds_the_orpha
         await running
 
     # 生成前的 gate 自己去 notebook 對帳,撈到那筆孤兒 → fail-closed 且零配額。
-    dispatches_before = sum(
-        call[0] == "generate_audio" for call in fake_client.artifacts.calls
-    )
+    dispatches_before = sum(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
     with pytest.raises(ValueError, match="retracted feedback sources still in") as blocked:
         await p.podcast_episode(
             "nb-1",
@@ -1147,9 +1162,10 @@ async def test_retract_abandons_an_in_flight_upload_and_the_gate_finds_the_orpha
             manifest_path=manifest_path,
         )
     assert orphan_id in str(blocked.value)
-    assert sum(
-        call[0] == "generate_audio" for call in fake_client.artifacts.calls
-    ) == dispatches_before
+    assert (
+        sum(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
+        == dispatches_before
+    )
     # 撈到的候選要變成耐久義務,不能只活在那句錯誤訊息裡。
     assert _pending_ids(manifest_path) == [orphan_id]
 
@@ -1174,12 +1190,17 @@ async def test_retract_abandons_an_in_flight_upload_and_the_gate_finds_the_orpha
     await b.source_delete("nb-1", orphan_id)
     with pytest.raises(ValueError, match="候選窗還沒關"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
-    assert sum(
-        call[0] == "generate_audio" for call in fake_client.artifacts.calls
-    ) == dispatches_before
+    assert (
+        sum(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
+        == dispatches_before
+    )
 
     _age_the_dispatch_window(manifest_path, attempt_id)
     out = await p.podcast_episode(
@@ -1194,9 +1215,7 @@ async def test_retract_abandons_an_in_flight_upload_and_the_gate_finds_the_orpha
     episode = _episode(manifest_path)
     assert "pending_source_cleanup" not in episode
     retraction = next(
-        row["retraction"]
-        for row in episode["attempts"]
-        if row["attempt_id"] == attempt_id
+        row["retraction"] for row in episode["attempts"] if row["attempt_id"] == attempt_id
     )
     assert "source_cleanup_unresolved" not in retraction
 
@@ -1243,22 +1262,29 @@ async def test_cancellation_before_the_remote_create_settles_once_the_window_clo
     )
     assert retracted["source_cleanup_unresolved"] is True
 
-    dispatches_before = sum(
-        call[0] == "generate_audio" for call in fake_client.artifacts.calls
-    )
+    dispatches_before = sum(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
     with pytest.raises(ValueError, match="候選窗還沒關"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
-    assert sum(
-        call[0] == "generate_audio" for call in fake_client.artifacts.calls
-    ) == dispatches_before
+    assert (
+        sum(call[0] == "generate_audio" for call in fake_client.artifacts.calls)
+        == dispatches_before
+    )
 
     _age_the_dispatch_window(manifest_path, attempt_id)
     out = await p.podcast_episode(
-        "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=1,
+        title=EP["title"],
+        brief="修正後內容",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
     assert out["episode"] == 1
     retraction = next(
@@ -1291,8 +1317,12 @@ async def test_gate_queues_every_candidate_it_finds_not_just_the_first(
     monkeypatch.setattr(fake_client.sources, "add_file", pause_after_remote_create)
     running = asyncio.create_task(
         p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief=EP["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     )
     await remote_created.wait()
@@ -1311,8 +1341,12 @@ async def test_gate_queues_every_candidate_it_finds_not_just_the_first(
 
     with pytest.raises(ValueError, match="retracted feedback sources still in") as blocked:
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     assert first_orphan in str(blocked.value)
     assert second_orphan in str(blocked.value)
@@ -1353,15 +1387,17 @@ async def test_gate_settles_verified_deletions_before_it_raises_on_the_window(
 
     with pytest.raises(ValueError, match="候選窗還沒關"):
         await p.podcast_episode(
-            "nb-1", episode_n=2, title="實戰篇", brief="第二集",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=2,
+            title="實戰篇",
+            brief="第二集",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
 
     # **raise 了,但已驗證的清除照樣落盤。**
     assert "pending_source_cleanup" not in _episode(manifest_path)
-    replayed = await p.podcast_attempt_retract(
-        manifest_path, 1, attempt_id, reason="QA 拒收"
-    )
+    replayed = await p.podcast_attempt_retract(manifest_path, 1, attempt_id, reason="QA 拒收")
     assert replayed["safe_next_action"] is None, (
         "已經刪掉的 id 還卡在 pending,指引繼續教一個做不到的 source_delete"
     )
@@ -1396,8 +1432,12 @@ async def test_gate_revalidates_ownership_instead_of_dropping_the_discovery(
 
     with pytest.raises(ValueError, match="retracted feedback sources still in"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     # 重驗過歸屬:它仍然是孤兒 → 必須落盤,不能只活在那句錯誤訊息裡。
     assert _pending_ids(manifest_path) == [orphan]
@@ -1437,8 +1477,12 @@ async def test_gate_drops_a_candidate_that_got_claimed_during_the_await(
 
     with pytest.raises(ValueError):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     # 別人的合法來源一個字都不准進待刪清單。
     assert contested not in _pending_ids(manifest_path)
@@ -1458,8 +1502,12 @@ async def test_gate_keeps_the_obligation_when_the_notebook_cannot_be_listed(
     monkeypatch.setattr(fake_client.sources, "add_file", hang_before_remote_create)
     running = asyncio.create_task(
         p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief=EP["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     )
     await entered.wait()
@@ -1478,8 +1526,12 @@ async def test_gate_keeps_the_obligation_when_the_notebook_cannot_be_listed(
     monkeypatch.setattr(fake_client.sources, "list", dead_auth)
     with pytest.raises(RuntimeError, match="auth is dead"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     retraction = next(
         row["retraction"]
@@ -1501,8 +1553,12 @@ async def _abandon_an_unresolved_upload(fake_client, tmp_path, monkeypatch):
     monkeypatch.setattr(fake_client.sources, "add_file", hang_before_remote_create)
     running = asyncio.create_task(
         p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief=EP["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     )
     await entered.wait()
@@ -1517,9 +1573,7 @@ async def _abandon_an_unresolved_upload(fake_client, tmp_path, monkeypatch):
     return manifest_path, attempt_id
 
 
-async def test_gate_sees_an_orphan_that_is_still_ingesting(
-    fake_client, tmp_path, monkeypatch
-):
+async def test_gate_sees_an_orphan_that_is_still_ingesting(fake_client, tmp_path, monkeypatch):
     """卡在 ingest 的回錄(`kind: unknown` / `ready: false`)也是孤兒,gate 必須擋。
 
     v0.9.13 真實驗收:上傳成功、NotebookLM 端 ingest 卡死逾 13 小時,那筆 source 一直
@@ -1531,16 +1585,16 @@ async def test_gate_sees_an_orphan_that_is_still_ingesting(
         fake_client, tmp_path, monkeypatch
     )
     expected_title = _upload(manifest_path, attempt_id)["expected_title"]
-    ingesting = fake_client.sources._add(
-        expected_title, kind="unknown", is_ready=False
-    )
+    ingesting = fake_client.sources._add(expected_title, kind="unknown", is_ready=False)
 
-    with pytest.raises(
-        ValueError, match="retracted feedback sources still in"
-    ) as blocked:
+    with pytest.raises(ValueError, match="retracted feedback sources still in") as blocked:
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     assert ingesting in str(blocked.value)
     assert _pending_ids(manifest_path) == [ingesting]
@@ -1572,8 +1626,12 @@ async def test_gate_refuses_to_discharge_an_obligation_it_cannot_identify(
 
     with pytest.raises(ValueError, match="沒有可核對的 notebook 身分"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     retraction = next(
         row["retraction"]
@@ -1609,8 +1667,12 @@ async def test_gate_never_nominates_a_candidate_from_an_unverified_notebook(
 
     with pytest.raises(ValueError, match="沒有可核對的 notebook 身分") as blocked:
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     # 那筆 decoy 不准出現在任何地方:不被指名、不被持久化。
     assert decoy not in str(blocked.value)
@@ -1644,8 +1706,12 @@ async def test_cleanup_identity_follows_the_attempt_not_the_episode(
 
     # 在**新**的 notebook 生成:舊本的義務不屬於這裡,不該被這一次查詢結案。
     await p.podcast_episode(
-        "nb-new", episode_n=2, title="實戰篇", brief="第二集",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-new",
+        episode_n=2,
+        title="實戰篇",
+        brief="第二集",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
     retraction = next(
         row["retraction"]
@@ -1678,8 +1744,12 @@ async def test_gate_persists_discoveries_even_when_a_later_checkpoint_is_broken(
     monkeypatch.setattr(fake_client.sources, "add_file", pause_after_remote_create)
     running = asyncio.create_task(
         p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief=EP["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     )
     await remote_created.wait()
@@ -1716,8 +1786,12 @@ async def test_gate_persists_discoveries_even_when_a_later_checkpoint_is_broken(
 
     with pytest.raises(ValueError) as failure:
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     # A 的發現要落盤(不是只活在錯誤訊息裡),而 B 的問題照樣要被報出來。
     assert _pending_ids(manifest_path) == [orphan_a]
@@ -1743,8 +1817,12 @@ async def test_gate_names_the_attempt_when_its_checkpoint_cannot_be_reconciled(
 
     with pytest.raises(ValueError, match="對不出候選") as failure:
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief="修正後內容",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief="修正後內容",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     assert attempt_id in str(failure.value)
     assert "episode 1" in str(failure.value)
@@ -1753,9 +1831,7 @@ async def test_gate_names_the_attempt_when_its_checkpoint_cannot_be_reconciled(
 @pytest.mark.parametrize(
     "status", ("dispatching", "acceptance_unknown", "reconciliation_ambiguous")
 )
-async def test_every_unresolved_upload_status_carries_the_obligation(
-    fake_client, tmp_path, status
-):
+async def test_every_unresolved_upload_status_carries_the_obligation(fake_client, tmp_path, status):
     """**三種 unresolved 狀態都要記義務,不只 `dispatching`。**
 
     三者的共同後果相同(遠端可能多出一筆 media、manifest 記不住它是誰),只涵蓋一種
@@ -1806,69 +1882,62 @@ async def test_cleanup_gate_blocks_generating_a_different_episode_in_the_same_no
     EP1 的拒收逐字稿讀進 context。gate 現在聚合整個 canonical notebook 的所有集,
     不是只看即將生成的那一集。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
-    await p.podcast_attempt_retract(
-        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
-    )
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
     call_boundary = len(fake_client.artifacts.calls)
 
-    with pytest.raises(
-        ValueError, match="retracted feedback sources still in the notebook"
-    ):
+    with pytest.raises(ValueError, match="retracted feedback sources still in the notebook"):
         await p.podcast_episode(
-            "nb-1", episode_n=2, title="實戰篇", brief="第二集",
-            output_dir=str(tmp_path), manifest_path=manifest_path,
+            "nb-1",
+            episode_n=2,
+            title="實戰篇",
+            brief="第二集",
+            output_dir=str(tmp_path),
+            manifest_path=manifest_path,
         )
     # 一次生成配額都沒燒,EP2 也沒被寫進 manifest
-    assert not [
-        c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"
-    ]
-    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    assert not [c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"]
+    stored = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     assert len(stored["episodes"]) == 1
 
     # 刪掉 source 後重跑 → 通過,且 EP1 的 pending 被清
     await b.source_delete("nb-1", before["feedback_source_id"])
     out = await p.podcast_episode(
-        "nb-1", episode_n=2, title="實戰篇", brief="第二集",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=2,
+        title="實戰篇",
+        brief="第二集",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
     assert out["episode"] == 2
-    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    stored = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
     assert "pending_source_cleanup" not in ep1
 
 
-async def test_cleanup_gate_blocks_series_start_skipping_the_dirty_episode(
-    fake_client, tmp_path
-):
+async def test_cleanup_gate_blocks_series_start_skipping_the_dirty_episode(fake_client, tmp_path):
     """同一情境透過 `podcast_series(start=2)` 觸發——series 每集前導的 gate 一樣要看
     整個 notebook,不能只看即將生成的那一集。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
-    await p.podcast_attempt_retract(
-        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
-    )
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
     call_boundary = len(fake_client.artifacts.calls)
 
-    with pytest.raises(
-        ValueError, match="retracted feedback sources still in the notebook"
-    ):
+    with pytest.raises(ValueError, match="retracted feedback sources still in the notebook"):
         await p.podcast_series(
             "nb-1",
             [EP, {"title": "實戰篇", "brief": "第二集"}],
             output_dir=str(tmp_path),
             start=2,
         )
-    assert not [
-        c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"
-    ]
+    assert not [c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"]
 
 
 async def test_cleanup_gate_does_not_cross_different_notebooks(fake_client, tmp_path):
     """canonical notebook 不同的集互不影響:EP1 的清理義務若實際上屬於另一個
     notebook,生成同一批次裡不同 notebook 的 EP2 不該被卡住。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
-    await p.podcast_attempt_retract(
-        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
-    )
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
+
     def move_obligation_elsewhere(manifest):
         episode = manifest["episodes"][0]
         episode["notebook_id"] = "nb-other"
@@ -1880,11 +1949,15 @@ async def test_cleanup_gate_does_not_cross_different_notebooks(fake_client, tmp_
     ManifestStore(manifest_path).update(move_obligation_elsewhere)
 
     out = await p.podcast_episode(
-        "nb-1", episode_n=2, title="實戰篇", brief="第二集",
-        output_dir=str(tmp_path), manifest_path=manifest_path,
+        "nb-1",
+        episode_n=2,
+        title="實戰篇",
+        brief="第二集",
+        output_dir=str(tmp_path),
+        manifest_path=manifest_path,
     )
     assert out["episode"] == 2
-    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    stored = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
     # EP1 的義務原封不動,沒被誤判成已結案
     assert [row["source_id"] for row in ep1["pending_source_cleanup"]] == [
@@ -1895,16 +1968,12 @@ async def test_cleanup_gate_does_not_cross_different_notebooks(fake_client, tmp_
 # ---- _create_audio_attempt 也要驗 episode notebook 一致性(review #9) -------------
 
 
-async def test_create_audio_attempt_rejects_notebook_mismatch_after_retract(
-    fake_client, tmp_path
-):
+async def test_create_audio_attempt_rejects_notebook_mismatch_after_retract(fake_client, tmp_path):
     """post-retract 的集用 podcast_episode 傳錯 notebook_id 會造成
     episode(nb-A)/attempt(nb-B)身分分裂——`_create_audio_attempt` 補上跟
     `_ensure_resume_attempt` 兩條分支一致的 guard。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
-    await p.podcast_attempt_retract(
-        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
-    )
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
     await b.source_delete("nb-1", before["feedback_source_id"])
 
     store = ManifestStore(manifest_path)
@@ -1928,9 +1997,7 @@ async def test_create_audio_attempt_rejects_notebook_mismatch_after_retract(
 # ---- adopt 換 source 後,舊 id 與未選中 candidate 都要進清理義務(review #4) -------
 
 
-async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
-    fake_client, tmp_path
-):
+async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(fake_client, tmp_path):
     """adopt 換掉 attempt 的 feedback source 後,被取代的舊 id 與同一輪未被選中的
     candidate 都要進 pending_source_cleanup——否則同名重複 source 從此沒人記得,
     後續每集生成都讀到它。"""
@@ -1941,14 +2008,20 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     fake_client.sources.add_file_exc_after_create = TimeoutError("upload response lost")
     with pytest.raises(TimeoutError, match="upload response lost"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title=EP["title"], brief=EP["brief"],
-            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+            "nb-1",
+            episode_n=1,
+            title=EP["title"],
+            brief=EP["brief"],
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
         )
     fake_client.sources.add_file_exc_after_create = None
     fake_client.sources._add("ep01.mp3", kind="media")
 
     stopped = await p.podcast_series(
-        "nb-1", episodes=[EP], output_dir=str(tmp_path),
+        "nb-1",
+        episodes=[EP],
+        output_dir=str(tmp_path),
     )
     assert stopped["observed_state"] == "reconciliation_ambiguous"
     assert stopped["safe_next_action"] == p.ACTION_ADOPT, stopped
@@ -1962,12 +2035,12 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     candidate_a, candidate_b = candidates
 
     adopted = await p.podcast_attempt_adopt(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
         feedback_source_id=candidate_a,
     )
-    assert PUBLIC_GUIDANCE_EXCEPTIONS[
-        "podcast_attempt_adopt.feedback_source"
-    ].strip()
+    assert PUBLIC_GUIDANCE_EXCEPTIONS["podcast_attempt_adopt.feedback_source"].strip()
     assert adopted["stale_source_ids"] == [candidate_b]
     assert adopted["safe_next_action"] == "source_delete"
     pending = [
@@ -1982,7 +2055,9 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     # 被取代的 candidate_a 也要排進清理義務,而不是只留在 previous_source_ids 裡。
     candidate_c = fake_client.sources._add("EP01 心法篇", kind="media")
     corrected = await p.podcast_attempt_adopt(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
         feedback_source_id=candidate_c,
     )
     # 回傳的是「這一集尚未結案的全部義務」,不是只有這次新增的那筆——host 照著
@@ -2000,7 +2075,9 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
     # 冪等重呼:狀態不累積,**指引也不能翻回 series**。義務還掛著就必須還是
     # source_delete,否則自動化 host 照著回傳去跑 series,會被 gate 硬擋成 ValueError。
     again = await p.podcast_attempt_adopt(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
         feedback_source_id=candidate_c,
     )
     assert set(again["stale_source_ids"]) == {candidate_a, candidate_b}
@@ -2010,27 +2087,24 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(
         for row in json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
             "pending_source_cleanup"
         ]
-    } == {candidate_a, candidate_b}          # 不累積
+    } == {candidate_a, candidate_b}  # 不累積
 
     # 下一次生成前不刪就 fail-closed
     store = ManifestStore(manifest_path)
-    with pytest.raises(
-        ValueError, match="retracted feedback sources still in the notebook"
-    ):
+    with pytest.raises(ValueError, match="retracted feedback sources still in the notebook"):
         await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
 
     # 全部刪掉後通過
     await b.source_delete("nb-1", candidate_a)
     await b.source_delete("nb-1", candidate_b)
     await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
-    assert "pending_source_cleanup" not in json.loads(
-        manifest_path.read_text(encoding="utf-8")
-    )["episodes"][0]
+    assert (
+        "pending_source_cleanup"
+        not in json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]
+    )
 
 
-async def test_legacy_adopt_source_replacement_queues_previous_for_cleanup(
-    fake_client, tmp_path
-):
+async def test_legacy_adopt_source_replacement_queues_previous_for_cleanup(fake_client, tmp_path):
     """legacy 分支(attempt_id=None)換 source 時,被取代的舊 id 一樣要進
     pending_source_cleanup——不能只留在 previous_feedback_source_ids 裡沒人清。"""
     manifest_path = tmp_path / "series_manifest.json"
@@ -2061,18 +2135,20 @@ async def test_legacy_adopt_source_replacement_queues_previous_for_cleanup(
     new_source_id = fake_client.sources._add(label, kind="media")
 
     await p.podcast_attempt_adopt(
-        str(manifest_path), episode_n=1, feedback_source_id=old_source_id,
+        str(manifest_path),
+        episode_n=1,
+        feedback_source_id=old_source_id,
     )
     result = await p.podcast_attempt_adopt(
-        str(manifest_path), episode_n=1, feedback_source_id=new_source_id,
+        str(manifest_path),
+        episode_n=1,
+        feedback_source_id=new_source_id,
     )
 
     assert result["stale_source_ids"] == [old_source_id]
     assert result["safe_next_action"] == "source_delete"
     episode = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]
-    assert [row["source_id"] for row in episode["pending_source_cleanup"]] == [
-        old_source_id
-    ]
+    assert [row["source_id"] for row in episode["pending_source_cleanup"]] == [old_source_id]
     assert episode["previous_feedback_source_ids"] == [old_source_id]
 
 
@@ -2092,7 +2168,7 @@ async def test_retract_abandons_an_in_flight_attempt_when_the_caller_declares_it
     跑完 → promote → retract → source_delete → 重生。
     """
     manifest_path = str(tmp_path / "series_manifest.json")
-    fake_client.artifacts.fail_wait_on = 1        # 等待階段逾時 → attempt 在飛但沒 output
+    fake_client.artifacts.fail_wait_on = 1  # 等待階段逾時 → attempt 在飛但沒 output
     stopped = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
     assert stopped["complete"] is False
     attempt_id = stopped["attempt_id"]
@@ -2130,9 +2206,7 @@ async def test_abandon_in_flight_still_refuses_a_foreign_attempt(fake_client, tm
         )
 
 
-async def test_retract_clears_an_attempt_that_never_left_this_machine(
-    fake_client, tmp_path
-):
+async def test_retract_clears_an_attempt_that_never_left_this_machine(fake_client, tmp_path):
     """`prepared` / `not_accepted` 的 attempt **不需要 `abandon_in_flight`** 就能作廢。
 
     真實死結,撞過三次:一次 dispatch 被配額或 502 同步拒絕後,attempt 停在
@@ -2182,7 +2256,7 @@ async def test_the_refusal_message_points_at_the_way_out(fake_client, tmp_path):
     呼叫端得知道自己落在需要外部知識的那一格,才會先去 `artifact_list` 查雲端。
     """
     manifest_path = str(tmp_path / "series_manifest.json")
-    fake_client.artifacts.fail_wait_on = 1        # dispatch 成功、等待階段斷掉
+    fake_client.artifacts.fail_wait_on = 1  # dispatch 成功、等待階段斷掉
     stopped = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path))
     assert stopped["complete"] is False
 
@@ -2216,9 +2290,7 @@ async def test_the_audit_record_says_whether_the_flag_was_used(fake_client, tmp_
     plain_path = str(tmp_path / "plain" / "series_manifest.json")
     (tmp_path / "plain").mkdir()
     fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
-    refused = await p.podcast_series(
-        "nb-1", episodes=[EP], output_dir=str(tmp_path / "plain")
-    )
+    refused = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(tmp_path / "plain"))
     fake_client.artifacts.generate_audio_exc = None
     plain = await p.podcast_attempt_retract(
         plain_path, 1, refused["attempt_id"], reason="brief 寫錯"
@@ -2246,7 +2318,7 @@ async def test_the_audit_record_says_whether_the_flag_was_used(fake_client, tmp_
     assert flagged["dispatch_status_at_retraction"] == "accepted"
 
     # 落盤的也要有 —— 回傳值看得到但 manifest 沒記等於沒記。
-    stored = json.loads(open(flagged_path, encoding="utf-8").read())
+    stored = json.loads(Path(flagged_path).read_text(encoding="utf-8"))
     retraction = stored["episodes"][0]["attempts"][0]["retraction"]
     assert retraction["abandon_in_flight"] is True
     assert retraction["dispatch_status_at_retraction"] == "accepted"
@@ -2271,10 +2343,8 @@ async def test_the_audit_record_names_the_authorization_basis(fake_client, tmp_p
     fake_client.artifacts.generate_audio_exc = RateLimitError("每日配額已用盡")
     refused = await p.podcast_series("nb-1", episodes=[EP], output_dir=str(plain_dir))
     fake_client.artifacts.generate_audio_exc = None
-    await p.podcast_attempt_retract(
-        plain_path, 1, refused["attempt_id"], reason="brief 寫錯"
-    )
-    stored = json.loads(open(plain_path, encoding="utf-8").read())
+    await p.podcast_attempt_retract(plain_path, 1, refused["attempt_id"], reason="brief 寫錯")
+    stored = json.loads(Path(plain_path).read_text(encoding="utf-8"))
     retraction = stored["episodes"][0]["attempts"][0]["retraction"]
     assert retraction["authorization_basis"] == "settled"
     assert retraction["remote_status_at_retraction"] == "failed"
@@ -2283,18 +2353,14 @@ async def test_the_audit_record_names_the_authorization_basis(fake_client, tmp_p
     output_dir = tmp_path / "output"
     output_dir.mkdir()
     output_path, episode = await _complete_ep1(fake_client, output_dir)
-    await p.podcast_attempt_retract(
-        output_path, 1, episode["output_attempt_id"], reason="QA 拒收"
-    )
-    stored2 = json.loads(open(output_path, encoding="utf-8").read())
+    await p.podcast_attempt_retract(output_path, 1, episode["output_attempt_id"], reason="QA 拒收")
+    stored2 = json.loads(Path(output_path).read_text(encoding="utf-8"))
     retraction2 = stored2["episodes"][0]["attempts"][0]["retraction"]
     assert retraction2["authorization_basis"] == "output_owner"
     assert retraction2["remote_status_at_retraction"] == "completed"
 
 
-async def test_retract_sends_a_pinned_episode_back_to_the_single_entry_point(
-    fake_client, tmp_path
-):
+async def test_retract_sends_a_pinned_episode_back_to_the_single_entry_point(fake_client, tmp_path):
     """**`safe_next_action` 不能把帶 `source_ids` 的一集丟回 `podcast_series`。**
 
     v0.9.4 Codex 複審抓到的最重一條,已重現:`podcast_episode(source_ids=["src-1"])`
@@ -2324,9 +2390,7 @@ async def test_retract_sends_a_pinned_episode_back_to_the_single_entry_point(
     fake_client.artifacts.generate_audio_exc = None
     attempt_id = _episode(manifest_path)["active_attempt_id"]
 
-    out = await p.podcast_attempt_retract(
-        manifest_path, 1, attempt_id, reason="brief 改了"
-    )
+    out = await p.podcast_attempt_retract(manifest_path, 1, attempt_id, reason="brief 改了")
 
     assert out["safe_next_action"] == "podcast_episode", (
         "帶 source_ids 的一集丟回 series 會靜默改掉生成輸入"
@@ -2334,9 +2398,7 @@ async def test_retract_sends_a_pinned_episode_back_to_the_single_entry_point(
     assert "source_ids" in out["next_step"]
 
 
-async def test_retract_does_not_offer_the_flag_to_a_superseded_attempt(
-    fake_client, tmp_path
-):
+async def test_retract_does_not_offer_the_flag_to_a_superseded_attempt(fake_client, tmp_path):
     """**歷史 attempt 不是旗標的守備範圍,訊息不可以教它傳。**
 
     `abandon_in_flight` 只放行 `active_attempt_id` 那一顆。A 被 supersede、B 接手之後,
@@ -2362,9 +2424,7 @@ async def test_retract_does_not_offer_the_flag_to_a_superseded_attempt(
     )
 
     with pytest.raises(ValueError) as caught:
-        await p.podcast_attempt_retract(
-            manifest_path, 1, "att-superseded", reason="想清掉歷史"
-        )
+        await p.podcast_attempt_retract(manifest_path, 1, "att-superseded", reason="想清掉歷史")
 
     msg = str(caught.value)
     # 訊息**可以**提到旗標(用來解釋「它對你無效」),但不可以**教它傳** ——
@@ -2374,17 +2434,15 @@ async def test_retract_does_not_offer_the_flag_to_a_superseded_attempt(
     assert output_attempt_id in msg, f"沒指出現在真正的 output 是哪顆: {msg}"
 
 
-async def test_a_retracted_frozen_bundle_is_not_offered_for_reuse(
-    fake_client, tmp_path
-):
+async def test_a_retracted_frozen_bundle_is_not_offered_for_reuse(fake_client, tmp_path):
     """**frozen bundle 的重生指引不能說「用同一份 bundle」。**
 
     `attempt-binding.json` 刻意只能建立一次,而它綁的正是這顆已成為 tombstone 的
     attempt —— 沿用同一份 bundle 重生會撞 `was retracted`,**新 dispatch 數 = 0**。
     v0.9.5 的 `next_step` 卻寫著「或同一份 frozen bundle」,照做完全生不出東西。
     """
-    from test_generation_input_bundle import _write_bundle
     from notebooklm.exceptions import RateLimitError
+    from test_generation_input_bundle import _write_bundle
 
     workspace = tmp_path / "workspace"
     manifest_path = workspace / "manifest" / "series_manifest.json"
@@ -2404,9 +2462,7 @@ async def test_a_retracted_frozen_bundle_is_not_offered_for_reuse(
     fake_client.artifacts.generate_audio_exc = None
     attempt_id = _episode(str(manifest_path))["active_attempt_id"]
 
-    out = await p.podcast_attempt_retract(
-        str(manifest_path), 1, attempt_id, reason="輸入要重做"
-    )
+    out = await p.podcast_attempt_retract(str(manifest_path), 1, attempt_id, reason="輸入要重做")
 
     assert out["safe_next_action"] == "podcast_episode"
     assert "新的、尚未綁定" in out["next_step"], out["next_step"]
@@ -2432,9 +2488,7 @@ async def test_cleanup_obligation_identity_survives_switching_the_episode_notebo
     於是義務被當成已結案清掉,而它其實還躺在舊本裡污染那邊每一集的 context。
     """
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
-    await p.podcast_attempt_retract(
-        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
-    )
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
     stale = before["feedback_source_id"]
     assert _pending_ids(manifest_path) == [stale]
 
@@ -2445,34 +2499,26 @@ async def test_cleanup_obligation_identity_survives_switching_the_episode_notebo
 
     # 拿新本來查:nb-new 裡沒有 src,但**不准**因此把義務判成已結案。
     with pytest.raises(ValueError, match="清理義務屬於 notebook"):
-        await p._assert_source_cleanup_done(
-            fake_client, ManifestStore(manifest_path), "nb-new", 1
-        )
+        await p._assert_source_cleanup_done(fake_client, ManifestStore(manifest_path), "nb-new", 1)
     assert _pending_ids(manifest_path) == [stale], "義務被別本的查詢結果清掉了"
 
 
-async def test_legacy_string_obligation_without_any_identity_fails_closed(
-    fake_client, tmp_path
-):
+async def test_legacy_string_obligation_without_any_identity_fails_closed(fake_client, tmp_path):
     """v0.9.11 之前寫進去的純字串沒有身分。補得出 canonical 就用它;連 canonical 都沒有
     的,是身分不明 —— 不准放行生成(舊版會直接通過,而那筆 source 可能還在某本裡)。"""
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
-    await p.podcast_attempt_retract(
-        manifest_path, 1, before["output_attempt_id"], reason="QA 拒收"
-    )
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA 拒收")
 
     def strip_all_identity(manifest):
         manifest.pop("notebook_id", None)
         episode = manifest["episodes"][0]
         episode.pop("notebook_id", None)
-        episode["pending_source_cleanup"] = ["src-legacy"]   # 舊格式:純字串
+        episode["pending_source_cleanup"] = ["src-legacy"]  # 舊格式:純字串
 
     ManifestStore(manifest_path).update(strip_all_identity)
 
     with pytest.raises(ValueError, match="沒有可核對的 notebook 身分"):
-        await p._assert_source_cleanup_done(
-            fake_client, ManifestStore(manifest_path), "nb-1", 1
-        )
+        await p._assert_source_cleanup_done(fake_client, ManifestStore(manifest_path), "nb-1", 1)
     assert _pending_ids(manifest_path) == ["src-legacy"]
 
 
@@ -2522,9 +2568,7 @@ def _gate_client(sources, *, entered=None, release=None):
 async def _run_gate(manifest_path, client):
     """跑一次 gate,把預期內的 fail-closed 吞掉(這裡只關心它寫了什麼)。"""
     try:
-        await p._assert_source_cleanup_done(
-            client, ManifestStore(manifest_path), "nb-1", 1
-        )
+        await p._assert_source_cleanup_done(client, ManifestStore(manifest_path), "nb-1", 1)
     except ValueError:
         pass
 
@@ -2572,10 +2616,10 @@ async def test_concurrent_zero_and_positive_reconciliation_never_forgets_the_orp
     slow_task = asyncio.create_task(
         _run_gate(manifest_path, _gate_client(slow, entered=parked, release=release))
     )
-    await parked.wait()                     # 這一邊已經讀到 revision R,停在 await 上
-    await _run_gate(manifest_path, _gate_client(fast))   # 另一邊整輪跑完並 commit
+    await parked.wait()  # 這一邊已經讀到 revision R,停在 await 上
+    await _run_gate(manifest_path, _gate_client(fast))  # 另一邊整輪跑完並 commit
     release.set()
-    await slow_task                         # 停住的那邊才寫 → 撞上 CAS
+    await slow_task  # 停住的那邊才寫 → 撞上 CAS
 
     assert orphan in _pending_ids(manifest_path), "orphan 已經從 manifest 完全消失"
 
@@ -2622,7 +2666,7 @@ async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_vio
                 "attempts": [
                     {
                         "attempt_id": ep2_attempt_id,
-                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "created_at": datetime.now(UTC).isoformat(),
                         "notebook_id": "nb-1",
                         "episode": 2,
                         "title": "實戰篇",
@@ -2655,9 +2699,7 @@ async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_vio
         for row in manifest["episodes"]:
             for candidate_attempt in row.get("attempts", []):
                 if candidate_attempt.get("attempt_id") == ep2_attempt_id:
-                    candidate_attempt["finalize"]["feedback_source_upload"][
-                        "source_id"
-                    ] = orphan
+                    candidate_attempt["finalize"]["feedback_source_upload"]["source_id"] = orphan
 
     ManifestStore(manifest_path).update(claim)
     release.set()
@@ -2683,16 +2725,14 @@ async def test_blocked_gate_does_not_bump_the_revision(fake_client, tmp_path, mo
     `ManifestStore.update` 的 revision 是無條件 +1,所以 blocked/waiting 每跑一次就 bump
     —— 除了無效寫盤,還會平白撞掉另一個 process 正在做的 discovery CAS。
     """
-    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+    manifest_path, _attempt_id = await _abandon_an_unresolved_upload(
         fake_client, tmp_path, monkeypatch
     )
     before = ManifestStore(manifest_path).read()["revision"]
 
     # 候選窗還沒關 + 零候選 → 一定 fail-closed,而且什麼都沒得改
     with pytest.raises(ValueError, match="候選窗還沒關"):
-        await p._assert_source_cleanup_done(
-            fake_client, ManifestStore(manifest_path), "nb-1", 1
-        )
+        await p._assert_source_cleanup_done(fake_client, ManifestStore(manifest_path), "nb-1", 1)
 
     assert ManifestStore(manifest_path).read()["revision"] == before
 
@@ -2721,9 +2761,7 @@ async def test_adopt_also_returns_both_source_delete_arguments(fake_client, tmp_
     ]
 
 
-async def test_adopt_does_not_relabel_a_preexisting_obligations_notebook(
-    fake_client, tmp_path
-):
+async def test_adopt_does_not_relabel_a_preexisting_obligations_notebook(fake_client, tmp_path):
     """T4(P3):`_queue_pending_source_cleanup` 回 `list[str]` 丟身分,adopt 組
     `source_cleanup_obligations` 時每筆都填「這次 adopt 的 notebook」——如果這
     一集本來就有一筆屬於**別本** notebook 的未結案義務(例如上一次在別本筆記本
@@ -2763,17 +2801,13 @@ async def test_adopt_does_not_relabel_a_preexisting_obligations_notebook(
     ]
 
 
-async def test_identity_unknown_obligation_never_prints_an_unexecutable_call(
-    fake_client, tmp_path
-):
+async def test_identity_unknown_obligation_never_prints_an_unexecutable_call(fake_client, tmp_path):
     """身分不明時指引不准印出 `source_delete(notebook_id=None, ...)`。
 
     照抄會失敗 —— 又是一句「在它自己產生的狀態下不可執行」的指引。
     """
     manifest_path, before = await _complete_ep1(fake_client, tmp_path)
-    await p.podcast_attempt_retract(
-        manifest_path, 1, before["output_attempt_id"], reason="QA"
-    )
+    await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
 
     def strip_identity(manifest):
         manifest.pop("notebook_id", None)

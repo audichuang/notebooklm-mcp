@@ -1,10 +1,11 @@
 """Pin notebooklm-py PUBLIC API signatures. Breaks loudly if the SDK changes
 under us - our single tripwire against silent upstream API drift."""
+
 import inspect
+from datetime import UTC
 
 import httpx
 import pytest
-
 from notebooklm.rpc.types import AudioFormat, AudioLength
 
 
@@ -46,14 +47,14 @@ def test_default_backend_is_still_web():
     # 在 `app._INLINE_AUTH_ENV_OVERRIDES` 把 `NOTEBOOKLM_BACKEND` 刪掉 —— 那道護欄綁的是
     # **字面字串**(上游沒有導出常數),所以名字要在這裡對回 SDK,否則上游改名之後我們的
     # 覆寫會靜默變成 no-op,而症狀是「某天 pool 整個換 backend」。
-    from notebooklm_mcp.app import _BACKEND_ENV, _INLINE_AUTH_ENV_OVERRIDES
-
     # 0.8.3 把讀環境變數那一行從 `_client_assembly` 搬到 `_client_options`(from_storage 的 normalizer)。
     from notebooklm import _client_options
 
-    assert f'os.environ.get("{_BACKEND_ENV}")' in _inspect.getsource(
-        _client_options
-    ), "SDK 讀的 backend 環境變數名改了,app 的 inline 覆寫要跟著改"
+    from notebooklm_mcp.app import _BACKEND_ENV, _INLINE_AUTH_ENV_OVERRIDES
+
+    assert f'os.environ.get("{_BACKEND_ENV}")' in _inspect.getsource(_client_options), (
+        "SDK 讀的 backend 環境變數名改了,app 的 inline 覆寫要跟著改"
+    )
     assert _INLINE_AUTH_ENV_OVERRIDES[_BACKEND_ENV] is None
 
 
@@ -112,11 +113,19 @@ def test_read_surface_signatures_and_fields():
     assert _params(SourcesAPI.get_fulltext) == ["self", "notebook_id", "source_id", "output_format"]
     assert _params(NotebooksAPI.get) == ["self", "notebook_id"]
     # chat_ask focuses on a subset / continues a thread via these kwargs.
-    assert _params(ChatAPI.ask) == ["self", "notebook_id", "question", "source_ids", "conversation_id"]
+    assert _params(ChatAPI.ask) == [
+        "self",
+        "notebook_id",
+        "question",
+        "source_ids",
+        "conversation_id",
+    ]
 
     assert {"id", "title"} <= {f.name for f in dataclasses.fields(Source)}
     assert all(hasattr(Source, p) for p in ("kind", "is_ready"))
-    assert {"source_id", "content", "char_count"} <= {f.name for f in dataclasses.fields(SourceFulltext)}
+    assert {"source_id", "content", "char_count"} <= {
+        f.name for f in dataclasses.fields(SourceFulltext)
+    }
     # `role` 是 0.8.1 新增的,`notebook_get` 直取 `nb.role`(無 getattr 防護)——
     # 上游改名時要在這裡紅,而不是在生產拋 AttributeError。
     assert {"id", "title", "sources_count", "is_owner", "role"} <= {
@@ -159,7 +168,7 @@ def test_add_file_accepts_mime_wait_and_title():
     p = _params(SourcesAPI.add_file)
     assert p[:3] == ["self", "notebook_id", "file_path"]
     # 0.7.x:title= 存在但內部仍是 add→rename 兩步、改名失敗只 log 不 raise
-    #(podcast 流程因此維持顯式 rename;見 AGENTS.md gotcha)。on_progress 上傳進度 callback。
+    # (podcast 流程因此維持顯式 rename;見 AGENTS.md gotcha)。on_progress 上傳進度 callback。
     assert p == [
         "self",
         "notebook_id",
@@ -199,11 +208,26 @@ def test_rename_signatures_gained_return_object():
     from notebooklm._artifacts import ArtifactsAPI
     from notebooklm._sources import SourcesAPI
 
-    assert _params(ArtifactsAPI.rename) == ["self", "notebook_id", "artifact_id", "new_title", "return_object"]
-    assert _params(SourcesAPI.rename) == ["self", "notebook_id", "source_id", "new_title", "return_object"]
+    assert _params(ArtifactsAPI.rename) == [
+        "self",
+        "notebook_id",
+        "artifact_id",
+        "new_title",
+        "return_object",
+    ]
+    assert _params(SourcesAPI.rename) == [
+        "self",
+        "notebook_id",
+        "source_id",
+        "new_title",
+        "return_object",
+    ]
     # return_object 是 keyword-only:鎖住它,擋未來有人寫成位置參數(我方一律 keyword 傳 False)。
     for func in (ArtifactsAPI.rename, SourcesAPI.rename):
-        assert inspect.signature(func).parameters["return_object"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert (
+            inspect.signature(func).parameters["return_object"].kind
+            is inspect.Parameter.KEYWORD_ONLY
+        )
 
 
 def test_rename_false_no_longer_short_circuits():
@@ -244,15 +268,13 @@ def test_generation_kickoff_refuses_by_raising():
     """
     import inspect as _inspect
 
-    from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
     from notebooklm._web.artifact import generation
+    from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
 
     assert issubclass(RateLimitError, Exception)
     assert issubclass(ArtifactFeatureUnavailableError, Exception)
     # 「artifact id 缺席 = 沒有建出 task」是我們把它歸成 not_accepted 的理由。
-    parse_src = _inspect.getsource(
-        generation.ArtifactGenerationService._parse_generation_result
-    )
+    parse_src = _inspect.getsource(generation.ArtifactGenerationService._parse_generation_result)
     assert "raise ArtifactFeatureUnavailableError" in parse_src
 
 
@@ -313,7 +335,13 @@ def test_chat_ask_signature_and_answer_field():
     from notebooklm import AskResult
     from notebooklm._chat import ChatAPI
 
-    assert _params(ChatAPI.ask) == ["self", "notebook_id", "question", "source_ids", "conversation_id"]
+    assert _params(ChatAPI.ask) == [
+        "self",
+        "notebook_id",
+        "question",
+        "source_ids",
+        "conversation_id",
+    ]
     assert "answer" in getattr(AskResult, "__dataclass_fields__", {})
 
 
@@ -323,9 +351,24 @@ def test_source_signatures_and_fields():
 
     # 0.8.0 add_url 尾端加 title(可在 add 時直接命名,省掉 add→rename 兩步;
     # podcast 流程目前仍走顯式兩步,因為 add_file 的 title= 內部就是那兩步且會靜默失敗)。
-    assert _params(SourcesAPI.add_url) == ["self", "notebook_id", "url", "wait", "wait_timeout", "title"]
+    assert _params(SourcesAPI.add_url) == [
+        "self",
+        "notebook_id",
+        "url",
+        "wait",
+        "wait_timeout",
+        "title",
+    ]
     # 0.7.x add_text 尾端加 idempotent(重試防重複;我們不傳,預設即可)
-    assert _params(SourcesAPI.add_text) == ["self", "notebook_id", "title", "content", "wait", "wait_timeout", "idempotent"]
+    assert _params(SourcesAPI.add_text) == [
+        "self",
+        "notebook_id",
+        "title",
+        "content",
+        "wait",
+        "wait_timeout",
+        "idempotent",
+    ]
     assert _params(SourcesAPI.delete) == ["self", "notebook_id", "source_id"]
     assert "id" in getattr(Source, "__dataclass_fields__", {})
 
@@ -338,14 +381,14 @@ def test_source_created_at_is_timezone_aware():
     acceptance_unknown。上游哪天再翻回 naive,這裡先紅,提醒同步改 fake。
     (`_created_at_utc` 本身兩種都吃,有專屬單元測試——這條鎖的是「fake 有沒有說謊」。)
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from notebooklm._types.common import _datetime_from_timestamp
 
     stamped = _datetime_from_timestamp(1_785_000_000)
     assert isinstance(stamped, datetime)
     assert stamped.tzinfo is not None, "上游翻回 naive 了 —— conftest 的 fake 要跟著改"
-    assert stamped.utcoffset() == timezone.utc.utcoffset(None)
+    assert stamped.utcoffset() == UTC.utcoffset(None)
 
 
 def test_notebook_signatures_and_fields():
@@ -390,11 +433,21 @@ def test_slide_deck_signatures():
     from notebooklm._artifacts import ArtifactsAPI
 
     assert _params(ArtifactsAPI.generate_slide_deck) == [
-        "self", "notebook_id", "source_ids", "language",
-        "instructions", "slide_format", "slide_length",
+        "self",
+        "notebook_id",
+        "source_ids",
+        "language",
+        "instructions",
+        "slide_format",
+        "slide_length",
     ]
     assert _params(ArtifactsAPI.download_slide_deck) == [
-        "self", "notebook_id", "output_path", "artifact_id", "output_format", "artifacts_data",
+        "self",
+        "notebook_id",
+        "output_path",
+        "artifact_id",
+        "output_format",
+        "artifacts_data",
     ]
 
 
@@ -402,19 +455,32 @@ def test_report_signatures():
     from notebooklm._artifacts import ArtifactsAPI
 
     assert _params(ArtifactsAPI.generate_report) == [
-        "self", "notebook_id", "report_format", "source_ids",
-        "language", "custom_prompt", "extra_instructions",
+        "self",
+        "notebook_id",
+        "report_format",
+        "source_ids",
+        "language",
+        "custom_prompt",
+        "extra_instructions",
     ]
     assert _params(ArtifactsAPI.generate_study_guide) == [
-        "self", "notebook_id", "source_ids", "language", "extra_instructions",
+        "self",
+        "notebook_id",
+        "source_ids",
+        "language",
+        "extra_instructions",
     ]
     assert _params(ArtifactsAPI.download_report) == [
-        "self", "notebook_id", "output_path", "artifact_id", "artifacts_data",
+        "self",
+        "notebook_id",
+        "output_path",
+        "artifact_id",
+        "artifacts_data",
     ]
 
 
 def test_slide_and_report_enum_members():
-    from notebooklm.types import SlideDeckFormat, SlideDeckLength, ReportFormat
+    from notebooklm.types import ReportFormat, SlideDeckFormat, SlideDeckLength
 
     assert SlideDeckFormat.DETAILED_DECK == 1 and SlideDeckFormat.PRESENTER_SLIDES == 2
     assert SlideDeckLength.DEFAULT == 1 and SlideDeckLength.SHORT == 2
@@ -431,7 +497,11 @@ def test_quota_rescue_signatures():
     from notebooklm._artifacts import ArtifactsAPI
 
     assert _params(ArtifactsAPI.revise_slide) == [
-        "self", "notebook_id", "artifact_id", "slide_index", "prompt",
+        "self",
+        "notebook_id",
+        "artifact_id",
+        "slide_index",
+        "prompt",
     ]
     assert _params(ArtifactsAPI.retry_failed) == ["self", "notebook_id", "artifact_id"]
 
@@ -456,7 +526,12 @@ def test_add_user_permission_is_positional():
     from notebooklm._sharing import SharingAPI
 
     assert _params(SharingAPI.add_user) == [
-        "self", "notebook_id", "email", "permission", "notify", "welcome_message",
+        "self",
+        "notebook_id",
+        "email",
+        "permission",
+        "notify",
+        "welcome_message",
     ]
     kind = inspect.signature(SharingAPI.add_user).parameters["permission"].kind
     assert kind is not inspect.Parameter.KEYWORD_ONLY
@@ -475,7 +550,11 @@ def test_set_users_signature():
     from notebooklm.types import ShareStatus
 
     assert _params(SharingAPI.set_users) == [
-        "self", "notebook_id", "grants", "notify", "welcome_message",
+        "self",
+        "notebook_id",
+        "grants",
+        "notify",
+        "welcome_message",
     ]
     assert get_type_hints(SharingAPI.set_users)["return"] is ShareStatus
 
@@ -560,8 +639,8 @@ def test_artifact_exposes_source_ids():
     from datetime import datetime
     from typing import get_type_hints
 
-    from notebooklm.types import Artifact
     import notebooklm.types as notebooklm_types
+    from notebooklm.types import Artifact
 
     assert "source_ids" in {f.name for f in dataclasses.fields(Artifact)}
     hints = get_type_hints(
@@ -626,9 +705,9 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
     # 實際上只是 harness 位置不同。tripwire 給錯訊號比不給還糟。
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     metadata = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    requirements = metadata["project"]["dependencies"] + metadata["project"][
-        "optional-dependencies"
-    ]["login"]
+    requirements = (
+        metadata["project"]["dependencies"] + metadata["project"]["optional-dependencies"]["login"]
+    )
     notebooklm_requirements = [
         Requirement(spec) for spec in requirements if Requirement(spec).name == "notebooklm-py"
     ]
@@ -639,7 +718,10 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
         assert Version("0.8.1") not in requirement.specifier
         # 0.8.2 + 本版程式碼從沒測過(測試已改 import 0.8.3 的搬家位置),別讓消費端解析到它。
         assert Version("0.8.2") not in requirement.specifier
-        assert Version("0.8.3") in requirement.specifier
+        # 0.8.3 runs (lowest-direct was green) but is excluded so the tested version equals the installed one;
+        # 0.8.4 also changed sharing.set_users semantics.
+        assert Version("0.8.3") not in requirement.specifier
+        assert Version("0.8.4") in requirement.specifier
 
 
 def test_rotation_lock_and_file_lock_semantics_that_app_lifespan_depends_on(tmp_path):
@@ -716,7 +798,7 @@ def test_share_status_and_shared_user_fields():
     `ShareStatus.shared_users[].email` / `.permission` 這兩個欄位形狀。"""
     import dataclasses
 
-    from notebooklm.types import ShareStatus, SharedUser
+    from notebooklm.types import SharedUser, ShareStatus
 
     assert "shared_users" in {f.name for f in dataclasses.fields(ShareStatus)}
     assert {"email", "permission"} <= {f.name for f in dataclasses.fields(SharedUser)}
@@ -756,11 +838,11 @@ def test_import_identity_differs_from_citation_identity():
     from notebooklm.research import normalize_citation_url as cite_key
 
     frag = "https://Example.com/a/#section"
-    assert import_key(frag) == "https://example.com/a"        # fragment 丟掉
+    assert import_key(frag) == "https://example.com/a"  # fragment 丟掉
     assert cite_key(frag) == "https://example.com/a#section"  # fragment 保留
     dotted = "https://example.com/a."
-    assert import_key(dotted) == "https://example.com/a."     # 標點保留
-    assert cite_key(dotted) == "https://example.com/a"        # 標點 strip
+    assert import_key(dotted) == "https://example.com/a."  # 標點保留
+    assert cite_key(dotted) == "https://example.com/a"  # 標點 strip
     # 兩顆都不 strip 前後空白 —— 呼叫端傳進來的 URL 必須自己先 strip。
     assert import_key(" https://example.com/a ") != import_key("https://example.com/a")
 
@@ -768,7 +850,12 @@ def test_import_identity_differs_from_citation_identity():
 def test_research_task_and_source_fields():
     import dataclasses
 
-    from notebooklm._types.research import ResearchSource, ResearchStart, ResearchStatus, ResearchTask
+    from notebooklm._types.research import (
+        ResearchSource,
+        ResearchStart,
+        ResearchStatus,
+        ResearchTask,
+    )
 
     assert {"task_id", "status", "query", "sources", "summary", "report"} <= {
         f.name for f in dataclasses.fields(ResearchTask)
@@ -778,8 +865,12 @@ def test_research_task_and_source_fields():
     }
     assert {"task_id", "report_id", "mode"} <= {f.name for f in dataclasses.fields(ResearchStart)}
     # research_wait 依 status 決定成功/fail-loud;這四個值都要在。
-    assert {ResearchStatus.COMPLETED, ResearchStatus.IN_PROGRESS,
-            ResearchStatus.FAILED, ResearchStatus.NOT_FOUND} <= set(ResearchStatus)
+    assert {
+        ResearchStatus.COMPLETED,
+        ResearchStatus.IN_PROGRESS,
+        ResearchStatus.FAILED,
+        ResearchStatus.NOT_FOUND,
+    } <= set(ResearchStatus)
     assert ResearchSource(url="u", title="t").is_report is False
 
 
@@ -853,31 +944,33 @@ def test_sync_auth_uses_the_sdk_profile_path_resolver():
     # 與上面 pyproject 那條同一個根因:用 `__file__` 定位,不吃 CWD
     # (從 `audiskill/` 容器層跑 `pytest notebooklm-mcp/tests/...` 會 FileNotFoundError,
     #  而那個症狀看起來像契約被違反)。
-    script = (Path(__file__).resolve().parents[1] / "scripts/sync-auth.sh").read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "scripts/sync-auth.sh").read_text(
+        encoding="utf-8"
+    )
     assert "get_storage_path" in script
-    assert 'NBLM_HOME=' not in script
+    assert "NBLM_HOME=" not in script
 
 
 def test_auth_probe_matches_the_sdk_http_auth_error_shape():
     """The compatibility shim must follow the HTTP cause retained by SDK 0.8.0."""
-    from notebooklm._web.transport.executor import RpcExecutor
     from notebooklm._runtime import is_auth_error
+    from notebooklm._web.transport.executor import RpcExecutor
     from notebooklm.exceptions import RPCError
     from notebooklm.rpc.types import RPCMethod
 
     from notebooklm_mcp.auth_probe import _is_probe_auth_error
 
     assert callable(is_auth_error)
-    request = httpx.Request("POST", "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute")
+    request = httpx.Request(
+        "POST", "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute"
+    )
     for status in (401, 403):
         response = httpx.Response(status, request=request)
         http_error = httpx.HTTPStatusError(
             response.reason_phrase, request=request, response=response
         )
         with pytest.raises(RPCError) as caught:
-            RpcExecutor.raise_rpc_error_from_http_status(
-                None, http_error, RPCMethod.LIST_NOTEBOOKS
-            )
+            RpcExecutor.raise_rpc_error_from_http_status(None, http_error, RPCMethod.LIST_NOTEBOOKS)
         assert caught.value.__cause__ is http_error
         assert _is_probe_auth_error(caught.value)
 
@@ -923,9 +1016,9 @@ def test_generation_takes_its_source_list_from_the_notebook_not_the_server():
     )
 
     fulltext = inspect.getsource(SourceContentRenderer)
-    assert "[[source_id]" in fulltext and "notebook_id" not in fulltext.split("params =")[1][:120], (
-        "get_fulltext 開始帶 notebook_id 了 —— 那樣『刪掉還讀得回』就變成真的異常,要重查"
-    )
+    assert (
+        "[[source_id]" in fulltext and "notebook_id" not in fulltext.split("params =")[1][:120]
+    ), "get_fulltext 開始帶 notebook_id 了 —— 那樣『刪掉還讀得回』就變成真的異常,要重查"
 
 
 def test_source_search_signature_and_chunk_fields():
@@ -1006,7 +1099,9 @@ async def test_create_artifact_transport_429_is_marked_unconfirmed_but_decoded_r
             raise make()
 
         with pytest.raises(RateLimitError) as info:
-            await call_unconfirmed_on_transport_loss(call, method=RPCMethod.CREATE_ARTIFACT, what="x")
+            await call_unconfirmed_on_transport_loss(
+                call, method=RPCMethod.CREATE_ARTIFACT, what="x"
+            )
         return info.value
 
     transport = await _raised(lambda: RateLimitError("429 Too Many Requests"))

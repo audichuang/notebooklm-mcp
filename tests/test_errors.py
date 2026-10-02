@@ -1,13 +1,13 @@
 """Coverage for error / edge paths: bad language, generation timeout, malformed input."""
+
 import json
 import os
+from pathlib import Path
 
 import pytest
 from notebooklm.exceptions import ClientError, NetworkError
 
-from notebooklm_mcp import _errors
-from notebooklm_mcp import tools_basic as t
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import _errors, tools_basic as t, tools_podcast as p
 
 
 async def test_bad_language_raises_before_any_sdk_call(fake_client):
@@ -28,9 +28,7 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
         {"title": "收尾篇", "brief": "3"},
     ]
 
-    out = await p.podcast_series(
-        "nb-1", episodes=eps, output_dir=str(tmp_path), start=1
-    )
+    out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path), start=1)
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 2
     assert out["observed_state"] == "pending"
@@ -38,7 +36,9 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
 
     # EP2 的 accepted attempt 必須留下，讓下次重呼 wait 同一 artifact；
     # 只有 EP1 已 promotion，EP3 尚未產生任何 attempt。
-    manifest = json.load(open(os.path.join(str(tmp_path), "series_manifest.json"), encoding="utf-8"))
+    manifest = json.loads(
+        Path(os.path.join(str(tmp_path), "series_manifest.json")).read_text(encoding="utf-8")
+    )
     assert [e["episode"] for e in manifest["episodes"]] == [1, 2]
     assert manifest["episodes"][0]["output_attempt_id"]
     assert "output_attempt_id" not in manifest["episodes"][1]
@@ -48,31 +48,23 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
     assert fake_client.sources.titles() == ["EP01 心法篇"]
 
 
-async def test_series_resume_network_error_returns_structured_partial(
-    fake_client, tmp_path
-):
+async def test_series_resume_network_error_returns_structured_partial(fake_client, tmp_path):
     fake_client.artifacts.fail_wait_on = 1
     eps = [{"title": "心法篇", "brief": "1"}]
 
-    first = await p.podcast_series(
-        "nb-1", episodes=eps, output_dir=str(tmp_path)
-    )
+    first = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
     assert first["complete"] is False
     assert first["observed_state"] == "pending"
 
     fake_client.artifacts.fail_wait_on = 2
     fake_client.artifacts.wait_exc = NetworkError("resume network down")
-    resumed = await p.podcast_series(
-        "nb-1", episodes=eps, output_dir=str(tmp_path)
-    )
+    resumed = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
 
     assert resumed["complete"] is False
     assert resumed["stopped_at_episode"] == 1
     assert resumed["observed_state"] == "pending"
     assert resumed["safe_next_action"] == "podcast_series"
-    stored = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     attempt = stored["episodes"][0]["attempts"][0]
     assert attempt["remote"]["artifact_id"] == "task-123"
     assert attempt["remote"]["status"] == "pending"
@@ -93,7 +85,9 @@ async def test_failed_generation_status_fails_fast(fake_client, tmp_path):
     # ensure_started 仍防得住這個舊分支(defense-in-depth),不是真實 SDK 現在的形狀。
     fake_client.artifacts.fail_generate = True
     with pytest.raises(RuntimeError, match="Generation failed"):
-        await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path)
+        )
     # It stopped right after generate — no wait/download on the empty id.
     kinds = [c[0] for c in fake_client.artifacts.calls]
     assert kinds == ["generate_audio"]
@@ -112,7 +106,9 @@ async def test_failure_during_wait_fails_fast(fake_client, tmp_path):
     # artifact. Without that guard the run would proceed on a failed generation.
     fake_client.artifacts.fail_complete = True
     with pytest.raises(RuntimeError, match="failed while waiting"):
-        await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path)
+        )
     # Stopped right after the wait — never reached rename/download/self-upload,
     # so the failed episode left NO orphaned source or artifact rename.
     assert [c[0] for c in fake_client.artifacts.calls] == ["generate_audio", "wait"]
@@ -121,12 +117,14 @@ async def test_failure_during_wait_fails_fast(fake_client, tmp_path):
 
 async def test_removed_status_during_wait_fails_fast(fake_client, tmp_path):
     # 0.6.0 起:配額耗盡/伺服器下架的 artifact 回 status="removed" 且 is_failed=False
-    #(0.4.x 是合成 "failed")。ensure_completed 只看 is_failed 會把它當成功放行,
+    # (0.4.x 是合成 "failed")。ensure_completed 只看 is_failed 會把它當成功放行,
     # 於是帶著死 artifact 繼續 rename/download,最後以誤導性錯誤爆掉、遮蔽配額真因。
     # 多小時整季生成撞每日配額正是這條路徑,必須 fail-loud 且點出配額。
     fake_client.artifacts.fail_removed = True
     with pytest.raises(RuntimeError, match="removed"):
-        await p.podcast_episode("nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path))
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path)
+        )
     # 停在 wait 之後,沒進 rename/download/自上傳。
     assert [c[0] for c in fake_client.artifacts.calls] == ["generate_audio", "wait"]
     assert fake_client.sources.titles() == []
@@ -151,10 +149,10 @@ class _NotAClientError(Exception):
 @pytest.mark.parametrize(
     ("rpc_code", "expected"),
     [
-        (7, True),
-        ("7", True),
-        (5, False),
-        ("5", False),
+        pytest.param(7, True, id="int-7"),
+        pytest.param("7", True, id="str-7"),
+        pytest.param(5, False, id="int-5"),
+        pytest.param("5", False, id="str-5"),
         (None, False),
         ("", False),
     ],
@@ -166,7 +164,8 @@ def test_is_permission_denied_normalizes_upstream_rpc_codes(rpc_code, expected):
 
 
 @pytest.mark.parametrize(
-    "exc", [RuntimeError("permission denied"), _NotAClientError()],
+    "exc",
+    [RuntimeError("permission denied"), _NotAClientError()],
     ids=["not-client-error", "not-client-error-with-rpc-code"],
 )
 def test_is_permission_denied_rejects_non_client_errors_and_missing_codes(exc):
@@ -226,9 +225,7 @@ def test_permission_denied_message_is_stable_and_names_both():
     )
 
 
-async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(
-    fake_client, tmp_path
-):
+async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(fake_client, tmp_path):
     """「有 task_id 卻 is_failed」傳給 `_mark_acceptance_unknown` 的是 **status 物件**。
 
     舊版本用 `type(error).__name__` / `str(error)` 直接處理,落盤成
@@ -238,8 +235,7 @@ async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(
     """
     import json
 
-    from notebooklm_mcp import runtime
-    from notebooklm_mcp import tools_podcast as p
+    from notebooklm_mcp import runtime, tools_podcast as p
 
     class _AcceptedThenFailed:
         task_id = "art-123"
@@ -251,8 +247,14 @@ async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(
     manifest_path = tmp_path / "series_manifest.json"
     store = p.ManifestStore(str(manifest_path))
     attempt_id = p._create_audio_attempt(
-        store, notebook_id="nb-1", episode_n=1, title="t", brief="b",
-        language="en", audio_format=None, audio_length=None,
+        store,
+        notebook_id="nb-1",
+        episode_n=1,
+        title="t",
+        brief="b",
+        language="en",
+        audio_format=None,
+        audio_length=None,
     )
     p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
     runtime.set_clients([("a@x", fake_client)])
@@ -262,8 +264,12 @@ async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(
 
     with pytest.raises(RuntimeError):
         await p._dispatch_audio_with_failover(
-            store, 1, attempt_id, accepted_then_failed,
-            account="a@x", client=fake_client,
+            store,
+            1,
+            attempt_id,
+            accepted_then_failed,
+            account="a@x",
+            client=fake_client,
         )
 
     attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]

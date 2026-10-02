@@ -201,7 +201,7 @@ python3 -m pip download --no-deps --no-binary :all: notebooklm-py==X.Y.Z -d /tmp
 
 # 2. 開獨立 venv 實裝新版 + 我們的套件（--no-deps 避開舊 pin），跑全套
 uv venv --python 3.12 /tmp/vX && uv pip install --python /tmp/vX/bin/python \
-  "notebooklm-py==X.Y.Z" "mcp[cli]>=1.27,<2" Pillow markdown mutagen pytest pytest-asyncio
+  "notebooklm-py==X.Y.Z" "mcp[cli]>=1.28.1,<2" "Pillow>=12.3,<13" "markdown>=3.8.1,<4" mutagen pytest pytest-asyncio
 uv pip install --python /tmp/vX/bin/python --no-deps -e .
 /tmp/vX/bin/python -m pytest -q
 

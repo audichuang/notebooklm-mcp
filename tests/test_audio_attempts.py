@@ -1,13 +1,12 @@
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import tools_basic as b
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import tools_basic as b, tools_podcast as p
 
 
 async def test_attempt_is_dispatching_before_generate_audio_side_effect(fake_client, tmp_path):
@@ -37,9 +36,8 @@ async def test_attempt_is_dispatching_before_generate_audio_side_effect(fake_cli
     assert attempt["remote"]["artifact_id"] is None
     assert out["attempt_id"] == attempt["attempt_id"]
 
-async def test_transport_loss_marks_acceptance_unknown_without_regenerating(
-    fake_client, tmp_path
-):
+
+async def test_transport_loss_marks_acceptance_unknown_without_regenerating(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
 
@@ -61,10 +59,9 @@ async def test_transport_loss_marks_acceptance_unknown_without_regenerating(
     assert attempt["remote"]["artifact_id"] is None
     assert attempt["errors"][-1]["phase"] == "dispatch"
     assert attempt["errors"][-1]["type"] == "TimeoutError"
-    assert [
-        call[0] for call in fake_client.artifacts.calls
-        if call[0] == "generate_audio"
-    ] == ["generate_audio"]
+    assert [call[0] for call in fake_client.artifacts.calls if call[0] == "generate_audio"] == [
+        "generate_audio"
+    ]
 
 
 async def test_retry_same_episode_after_transport_loss_does_not_generate_again(
@@ -104,7 +101,7 @@ def _remote_audio(artifact_id: str):
         id=artifact_id,
         title="Audio Overview",
         kind=ArtifactType.AUDIO,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -128,53 +125,38 @@ async def _leave_acceptance_unknown(
     return manifest_path, stored["episodes"][0]["active_attempt_id"]
 
 
-async def test_reconcile_adopts_the_only_unclaimed_audio_candidate(
-    fake_client, tmp_path
-):
+async def test_reconcile_adopts_the_only_unclaimed_audio_candidate(fake_client, tmp_path):
     manifest_path, attempt_id = await _leave_acceptance_unknown(
         fake_client, tmp_path, [_remote_audio("remote-audio-1")]
     )
 
-    out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id
-    )
+    out = await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     attempt = stored["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "accepted"
     assert attempt["remote"]["artifact_id"] == "remote-audio-1"
     assert out["artifact_id"] == "remote-audio-1"
-    assert [
-        call[0] for call in fake_client.artifacts.calls
-        if call[0] == "generate_audio"
-    ] == ["generate_audio"]
+    assert [call[0] for call in fake_client.artifacts.calls if call[0] == "generate_audio"] == [
+        "generate_audio"
+    ]
 
 
-async def test_reconcile_accepts_sdk_naive_local_artifact_timestamp(
-    fake_client, tmp_path
-):
+async def test_reconcile_accepts_sdk_naive_local_artifact_timestamp(fake_client, tmp_path):
     artifact = _remote_audio("remote-audio-naive")
-    artifact.created_at = datetime.now()
-    manifest_path, attempt_id = await _leave_acceptance_unknown(
-        fake_client, tmp_path, [artifact]
-    )
+    artifact.created_at = datetime.now()  # noqa: DTZ005 —— 刻意構造 naive datetime(0.7.x host-local 舊值)
+    manifest_path, attempt_id = await _leave_acceptance_unknown(fake_client, tmp_path, [artifact])
 
-    out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id
-    )
+    out = await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     assert out["artifact_id"] == "remote-audio-naive"
     assert out["safe_next_action"] == "podcast_episode_resume"
 
 
 async def test_reconcile_with_no_candidate_stays_unknown(fake_client, tmp_path):
-    manifest_path, attempt_id = await _leave_acceptance_unknown(
-        fake_client, tmp_path, []
-    )
+    manifest_path, attempt_id = await _leave_acceptance_unknown(fake_client, tmp_path, [])
 
-    out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id
-    )
+    out = await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     attempt = stored["episodes"][0]["attempts"][0]
@@ -190,9 +172,7 @@ async def test_reconcile_with_no_candidate_stays_unknown(fake_client, tmp_path):
     assert out["safe_next_action"] == "podcast_episode_reconcile"
 
 
-async def test_reconcile_with_no_candidate_past_the_window_offers_retract(
-    fake_client, tmp_path
-):
+async def test_reconcile_with_no_candidate_past_the_window_offers_retract(fake_client, tmp_path):
     """**F3 窗外分支(item 4)的鑑別測試。**
 
     候選窗(`dispatched_at` 到 `wait_timeout` 那段時間,含 1 分鐘時鐘容錯)已經關了
@@ -200,15 +180,11 @@ async def test_reconcile_with_no_candidate_past_the_window_offers_retract(
     `podcast_attempt_retract`。用 `_attempt_record` 直接把 `dispatched_at` 往回撥
     2 小時,模擬「窗早就關了」而不必真的等 `wait_timeout` 秒。
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    manifest_path, attempt_id = await _leave_acceptance_unknown(
-        fake_client, tmp_path, []
-    )
+    manifest_path, attempt_id = await _leave_acceptance_unknown(fake_client, tmp_path, [])
     store = p.ManifestStore(str(manifest_path))
-    stale_dispatched_at = (
-        datetime.now(timezone.utc) - timedelta(hours=2)
-    ).isoformat()
+    stale_dispatched_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
 
     def backdate(manifest: dict) -> None:
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
@@ -216,9 +192,7 @@ async def test_reconcile_with_no_candidate_past_the_window_offers_retract(
 
     store.update(backdate)
 
-    out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id
-    )
+    out = await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     assert out["safe_next_action"] == "podcast_attempt_retract"
     step = out["next_step"]
@@ -241,16 +215,14 @@ async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller
     """
     from datetime import timedelta
 
-    manifest_path, attempt_id = await _leave_acceptance_unknown(
-        fake_client, tmp_path, []
-    )
+    manifest_path, attempt_id = await _leave_acceptance_unknown(fake_client, tmp_path, [])
     store = p.ManifestStore(str(manifest_path))
 
     def backdate(seconds: float):
         def _mutate(manifest: dict) -> None:
             _, attempt = p._attempt_record(manifest, 1, attempt_id)
             attempt["dispatch"]["dispatched_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=seconds)
+                datetime.now(UTC) - timedelta(seconds=seconds)
             ).isoformat()
 
         store.update(_mutate)
@@ -260,7 +232,10 @@ async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller
     # 還沒到——不該被縮小到給 retract。
     backdate(120)
     out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        wait_timeout=1,
     )
     assert out["safe_next_action"] == p.ACTION_RECONCILE, (
         f"wait_timeout=1 不該把候選窗縮小到 61 秒就關掉:{out}"
@@ -270,7 +245,10 @@ async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller
     # wait_timeout=1(下限保證窗不會比它更小,不代表窗永遠不關)。
     backdate(p._RECONCILIATION_MIN_WINDOW.total_seconds() + 120)
     out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        wait_timeout=1,
     )
     assert out["safe_next_action"] == p.ACTION_RETRACT, out
 
@@ -332,7 +310,7 @@ async def test_reconcile_does_not_auto_bind_when_another_attempt_is_still_unreso
         def _mutate(manifest: dict) -> None:
             _, attempt = p._attempt_record(manifest, episode_n, attempt_id)
             attempt["dispatch"]["dispatched_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+                datetime.now(UTC) - timedelta(seconds=seconds_ago)
             ).isoformat()
 
         store.update(_mutate)
@@ -341,7 +319,10 @@ async def test_reconcile_does_not_auto_bind_when_another_attempt_is_still_unreso
     backdate(2, ep2_attempt_id, 100)
 
     out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=ep1_attempt_id, wait_timeout=1200,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=ep1_attempt_id,
+        wait_timeout=1200,
     )
 
     # **鑑別點**:artifact-created-by-b 停在候選清單裡等呼叫端指名,不是被 EP1
@@ -390,20 +371,14 @@ async def test_reconcile_rechecks_unresolved_attempts_atomically_before_binding(
 
     monkeypatch.setattr(fake_client.artifacts, "list", list_after_b_dispatches)
 
-    out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_a
-    )
+    out = await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_a)
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     episode_a = next(row for row in stored["episodes"] if row["episode"] == 1)
     episode_b = next(row for row in stored["episodes"] if row["episode"] == 2)
-    attempt_a_row = next(
-        row for row in episode_a["attempts"] if row["attempt_id"] == attempt_a
-    )
+    attempt_a_row = next(row for row in episode_a["attempts"] if row["attempt_id"] == attempt_a)
     attempt_b_row = next(
-        row
-        for row in episode_b["attempts"]
-        if row["attempt_id"] == episode_b["active_attempt_id"]
+        row for row in episode_b["attempts"] if row["attempt_id"] == episode_b["active_attempt_id"]
     )
     assert attempt_b_row["dispatch"]["status"] == "acceptance_unknown"
     assert attempt_a_row["remote"]["artifact_id"] is None
@@ -443,9 +418,7 @@ async def test_tombstone_blocker_offers_and_executes_the_negative_candidate_path
     attempt_a = await dispatch_and_lose(1, "心法篇")
     fake_client.artifacts.seed_artifacts(_remote_audio("late-orphan-from-tombstone"))
 
-    out = await p.podcast_episode_reconcile(
-        str(manifest_path), 1, attempt_a
-    )
+    out = await p.podcast_episode_reconcile(str(manifest_path), 1, attempt_a)
 
     assert out["candidate_artifact_ids"] == ["late-orphan-from-tombstone"]
     assert out["blocking_attempt_ids"] == [tombstone_id]
@@ -483,9 +456,7 @@ async def test_tombstone_blocker_offers_and_executes_the_negative_candidate_path
     assert regenerated["complete"] is True
 
 
-async def test_dispatch_persists_the_original_wait_timeout_promise(
-    fake_client, tmp_path
-):
+async def test_dispatch_persists_the_original_wait_timeout_promise(fake_client, tmp_path):
     """**P1 前置**:兩個 `_claim_prepared_dispatch` 呼叫端(`_run_episode` 與
     `podcast_series` 的 inline 重送分支)都要把**原始承諾**的秒數存進
     `dispatch["wait_timeout"]`——只補一條正是 AGENTS.md 點名的病灶(v0.8.0 的
@@ -501,9 +472,7 @@ async def test_dispatch_persists_the_original_wait_timeout_promise(
     assert attempt["dispatch"]["wait_timeout"] == 7200.0, attempt["dispatch"]
 
 
-async def test_series_resend_dispatch_also_persists_the_wait_timeout_promise(
-    fake_client, tmp_path
-):
+async def test_series_resend_dispatch_also_persists_the_wait_timeout_promise(fake_client, tmp_path):
     """同一條紀律的第二個呼叫端:`podcast_series` re-arm 一顆 `not_accepted` attempt
     後、真正 dispatch 前也要走 `_claim_prepared_dispatch`(:3549 附近的 inline 分支)
     ——這條路徑跟 `_run_episode` 是**分開**補的,漏一條全季重送都測不出來(第一次
@@ -512,19 +481,13 @@ async def test_series_resend_dispatch_also_persists_the_wait_timeout_promise(
     episodes = [{"title": "心法篇", "brief": "1"}]
 
     fake_client.artifacts.fail_generate = True
-    await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321
-    )
+    await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321)
     fake_client.artifacts.fail_generate = False
 
     # 第二次呼叫走 re-arm → prepared → `_claim_prepared_dispatch` 那條 inline 分支。
-    await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321
-    )
+    await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321)
 
-    stored = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     attempt = stored["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["wait_timeout"] == 4321.0, attempt["dispatch"]
 
@@ -620,7 +583,10 @@ async def test_podcast_series_rejects_a_bad_wait_timeout_before_any_dispatch(
     episodes = [{"title": "心法篇", "brief": "1"}]
     with pytest.raises(ValueError, match="wait_timeout must be a finite number greater than zero"):
         await p.podcast_series(
-            "nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=bad_wait_timeout,
+            "nb-1",
+            episodes=episodes,
+            output_dir=str(tmp_path),
+            wait_timeout=bad_wait_timeout,
         )
     assert fake_client.artifacts.calls == []
 
@@ -647,13 +613,16 @@ async def test_reconcile_honors_the_original_promise_over_a_smaller_retry_timeou
     def backdate(manifest: dict) -> None:
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=4000)
+            datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
 
     store.update(backdate)
 
     out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        wait_timeout=1,
     )
     assert out["safe_next_action"] == p.ACTION_RECONCILE, (
         f"原始承諾 7200 秒還沒到(只過了 4000 秒),不該被 wait_timeout=1 誤判成窗已關:{out}"
@@ -683,20 +652,21 @@ async def test_legacy_attempt_without_a_persisted_promise_still_uses_the_floor(
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         del attempt["dispatch"]["wait_timeout"]  # 模擬 legacy manifest 沒有這個欄位
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=4000)
+            datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
 
     store.update(strip_and_backdate)
 
     out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        wait_timeout=1,
     )
     assert out["safe_next_action"] == p.ACTION_RETRACT, out
 
 
-async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(
-    fake_client, tmp_path
-):
+async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(fake_client, tmp_path):
     """**item 4(第四輪修復,補一條真的走 floor 的測試)**:上一輪的
     `test_reconciliation_window_closure_has_a_conservative_floor_the_caller_cannot_shrink`
     兩個 backdate 值不管有沒有套 floor 都會得到同一個答案(1200 秒的承諾／3600 秒的
@@ -718,14 +688,17 @@ async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(
     成這次 dispatch 的候選,綁進錯的 attempt)。
     """
     manifest_path, attempt_id = await _leave_acceptance_unknown(
-        fake_client, tmp_path, [], wait_timeout=60,
+        fake_client,
+        tmp_path,
+        [],
+        wait_timeout=60,
     )
     store = p.ManifestStore(str(manifest_path))
 
     def backdate(manifest: dict) -> None:
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=1500)
+            datetime.now(UTC) - timedelta(seconds=1500)
         ).isoformat()
 
     store.update(backdate)
@@ -734,7 +707,10 @@ async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(
     fake_client.artifacts.artifacts = [_remote_audio("unrelated-late-artifact")]
 
     out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        wait_timeout=1,
     )
     assert out.get("artifact_id") is None, (
         f"候選窗(60 秒承諾,不套 floor)早就關了,這顆遲來的 artifact 不該被當成候選:{out}"
@@ -745,9 +721,7 @@ async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(
     assert "已經關了" not in out["next_step"], out["next_step"]
 
 
-async def test_candidate_window_also_honors_the_original_promise(
-    fake_client, tmp_path
-):
+async def test_candidate_window_also_honors_the_original_promise(fake_client, tmp_path):
     """**P1 的第二個窗**:候選 artifact 篩選窗(`candidate_window_end`)也要讀
     `_promised_reconciliation_window_seconds`(原始承諾與這次呼叫取大),不能只信
     這次呼叫的 `wait_timeout=1`——那會先把「4000 秒後才建立」的真 artifact 排除在
@@ -773,7 +747,7 @@ async def test_candidate_window_also_honors_the_original_promise(
     def backdate(manifest: dict) -> None:
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=4000)
+            datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
 
     store.update(backdate)
@@ -781,18 +755,17 @@ async def test_candidate_window_also_honors_the_original_promise(
     fake_client.artifacts.artifacts = [_remote_audio("late-real-artifact")]
 
     out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id, wait_timeout=1,
+        str(manifest_path),
+        episode_n=1,
+        attempt_id=attempt_id,
+        wait_timeout=1,
     )
     assert out.get("artifact_id") == "late-real-artifact", out
     assert out["safe_next_action"] == p.ACTION_RESUME, out
 
 
-async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(
-    fake_client, tmp_path
-):
-    manifest_path, original_attempt_id = await _leave_acceptance_unknown(
-        fake_client, tmp_path, []
-    )
+async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(fake_client, tmp_path):
+    manifest_path, original_attempt_id = await _leave_acceptance_unknown(fake_client, tmp_path, [])
     fake_client.artifacts.generate_audio_exc = None
 
     with pytest.raises(ValueError, match="active attempt|先.*reconcile"):
@@ -812,9 +785,7 @@ async def test_explicit_resume_cannot_replace_an_unreconciled_active_attempt(
     assert episode["attempts"][0]["remote"]["artifact_id"] is None
 
 
-async def test_resume_refuses_another_artifact_while_a_durable_output_exists(
-    fake_client, tmp_path
-):
+async def test_resume_refuses_another_artifact_while_a_durable_output_exists(fake_client, tmp_path):
     """已有 durable output 時,resume 不得為「另一個 artifact」開新 attempt。
 
     舊行為放行(只要 active == output),而當時的 `_promote_attempt_output` 沒有歸屬檢查
@@ -845,9 +816,7 @@ async def test_resume_refuses_another_artifact_while_a_durable_output_exists(
     assert len(stored["episodes"][0]["attempts"]) == 1
 
 
-async def test_claimed_artifact_resume_cannot_hide_another_active_attempt(
-    fake_client, tmp_path
-):
+async def test_claimed_artifact_resume_cannot_hide_another_active_attempt(fake_client, tmp_path):
     """有 attempt 在飛時,resume 不得改抓另一個 artifact —— 包含**已被別的 attempt claim**
     的那筆(claimed 分支是 `_ensure_resume_attempt` 裡另一條建立路徑,兩條都要驗)。
 
@@ -898,15 +867,11 @@ async def test_claimed_artifact_resume_cannot_hide_another_active_attempt(
     assert stored["episodes"][0]["active_attempt_id"] == newer_attempt_id
 
 
-async def test_late_dispatch_outcomes_cannot_downgrade_or_replace_mapping(
-    fake_client, tmp_path
-):
+async def test_late_dispatch_outcomes_cannot_downgrade_or_replace_mapping(fake_client, tmp_path):
     manifest_path, attempt_id = await _leave_acceptance_unknown(
         fake_client, tmp_path, [_remote_audio("remote-audio-1")]
     )
-    await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id
-    )
+    await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     store = p.ManifestStore(manifest_path)
     p._mark_acceptance_unknown(
@@ -917,12 +882,8 @@ async def test_late_dispatch_outcomes_cannot_downgrade_or_replace_mapping(
     assert attempt["dispatch"]["status"] == "accepted"
     assert attempt["remote"]["artifact_id"] == "remote-audio-1"
 
-    failed_status = SimpleNamespace(
-        error="late failure", error_code=None, status="failed"
-    )
-    p._mark_not_accepted(
-        store, episode_n=1, attempt_id=attempt_id, status=failed_status
-    )
+    failed_status = SimpleNamespace(error="late failure", error_code=None, status="failed")
+    p._mark_not_accepted(store, episode_n=1, attempt_id=attempt_id, status=failed_status)
     after_failure = json.loads(manifest_path.read_text(encoding="utf-8"))
     attempt = after_failure["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "accepted"
@@ -933,9 +894,7 @@ async def test_late_dispatch_outcomes_cannot_downgrade_or_replace_mapping(
             store, episode_n=1, attempt_id=attempt_id, artifact_id="remote-audio-2"
         )
     final = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert final["episodes"][0]["attempts"][0]["remote"]["artifact_id"] == (
-        "remote-audio-1"
-    )
+    assert final["episodes"][0]["attempts"][0]["remote"]["artifact_id"] == ("remote-audio-1")
 
     def mark_completed(manifest):
         _, current = p._attempt_record(manifest, 1, attempt_id)
@@ -949,23 +908,17 @@ async def test_late_dispatch_outcomes_cannot_downgrade_or_replace_mapping(
         artifact_id="remote-audio-1",
     )
     completed = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert completed["episodes"][0]["attempts"][0]["remote"]["status"] == (
-        "completed"
-    )
+    assert completed["episodes"][0]["attempts"][0]["remote"]["status"] == ("completed")
 
 
-async def test_reconcile_with_multiple_candidates_is_ambiguous(
-    fake_client, tmp_path
-):
+async def test_reconcile_with_multiple_candidates_is_ambiguous(fake_client, tmp_path):
     manifest_path, attempt_id = await _leave_acceptance_unknown(
         fake_client,
         tmp_path,
         [_remote_audio("remote-audio-1"), _remote_audio("remote-audio-2")],
     )
 
-    out = await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id
-    )
+    out = await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     attempt = stored["episodes"][0]["attempts"][0]
@@ -1020,17 +973,13 @@ async def test_adopt_selects_one_ambiguous_artifact_without_remote_side_effects(
     assert fake_client.sources.calls[source_boundary:] == []
 
 
-async def test_adopt_rejects_attempt_identity_drift_before_remote_lookup(
-    fake_client, tmp_path
-):
+async def test_adopt_rejects_attempt_identity_drift_before_remote_lookup(fake_client, tmp_path):
     manifest_path, attempt_id = await _leave_acceptance_unknown(
         fake_client,
         tmp_path,
         [_remote_audio("remote-audio-1"), _remote_audio("remote-audio-2")],
     )
-    await p.podcast_episode_reconcile(
-        str(manifest_path), episode_n=1, attempt_id=attempt_id
-    )
+    await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     # 繞過 ManifestStore 直接改寫 JSON 檔:真實的手改破壞本來就長這樣。只留 title
     # drift——episode/attempt notebook 分裂現在會被 manifest_store._validate 的一致性
@@ -1059,9 +1008,7 @@ async def test_adopt_rejects_attempt_identity_drift_before_remote_lookup(
     assert fake_client.sources.calls[source_boundary:] == []
 
 
-async def test_sdk_failed_status_is_not_accepted_not_transport_unknown(
-    fake_client, tmp_path
-):
+async def test_sdk_failed_status_is_not_accepted_not_transport_unknown(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     fake_client.artifacts.fail_generate = True
 
@@ -1084,9 +1031,7 @@ async def test_sdk_failed_status_is_not_accepted_not_transport_unknown(
     assert attempt["errors"][-1]["phase"] == "dispatch"
 
 
-async def test_sdk_raised_rate_limit_is_not_accepted_not_acceptance_unknown(
-    fake_client, tmp_path
-):
+async def test_sdk_raised_rate_limit_is_not_accepted_not_acceptance_unknown(fake_client, tmp_path):
     """notebooklm-py 0.8.0(ADR-0019 / #1342)把伺服器的同步拒絕從「回傳
     status='failed'」改成 **raise**。同一件事(配額/限流)不能因為 SDK 換了表達方式
     就掉進不同的終態:
@@ -1113,9 +1058,7 @@ async def test_sdk_raised_rate_limit_is_not_accepted_not_acceptance_unknown(
             manifest_path=str(manifest_path),
         )
 
-    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
-        "attempts"
-    ][0]
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "not_accepted"
     assert attempt["remote"]["artifact_id"] is None
     assert attempt["remote"]["status"] == "failed"
@@ -1149,9 +1092,7 @@ async def test_generic_rpc_failure_stays_acceptance_unknown(fake_client, tmp_pat
             manifest_path=str(manifest_path),
         )
 
-    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
-        "attempts"
-    ][0]
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "acceptance_unknown"
 
 

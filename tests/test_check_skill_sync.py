@@ -5,6 +5,7 @@
 sys.path[0]=scripts/ 那條路(那條路才需要 PYTHONPATH=$(pwd) 這個 gotcha——見
 AGENTS.md 與這支腳本自己的呼叫慣例)。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -77,12 +78,8 @@ async def test_fully_covered_docs_pass(tmp_path, capsys):
     skill_md = skill_dir / "SKILL.md"
     tool_reference = skill_dir / "references" / "tool-reference.md"
 
-    tool_reference.write_text(
-        _full_doc(names, module.REQUIRED_CONTRACT_TERMS), encoding="utf-8"
-    )
-    skill_md.write_text(
-        _full_doc(names, module.SKILL_MD_REQUIRED_TERMS), encoding="utf-8"
-    )
+    tool_reference.write_text(_full_doc(names, module.REQUIRED_CONTRACT_TERMS), encoding="utf-8")
+    skill_md.write_text(_full_doc(names, module.SKILL_MD_REQUIRED_TERMS), encoding="utf-8")
 
     rc = await module.main(skill_md=skill_md, tool_reference=tool_reference)
 

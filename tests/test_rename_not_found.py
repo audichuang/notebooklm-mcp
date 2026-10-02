@@ -21,6 +21,7 @@ finalize_attempt`` 在呼叫 rename **之前**就先用 ``_artifact_title_state`
 消失(模擬「rename 當下才發現遠端已經不在了」),唯一辦法是直接 monkeypatch
 ``rename`` 本身,而不是單靠 conftest 修好的預設行為。
 """
+
 import json
 
 import pytest
@@ -45,9 +46,7 @@ async def test_rename_not_found_marks_outcome_unknown_without_touching_download(
 ):
     manifest_path = tmp_path / "series_manifest.json"
 
-    async def vanished_at_rename_time(
-        notebook_id, artifact_id, new_title, *, return_object=True
-    ):
+    async def vanished_at_rename_time(notebook_id, artifact_id, new_title, *, return_object=True):
         # 模擬「rename 當下才發現遠端已經不在了」:先讓 list() 也看不到它
         # (與真實 0.8.2 的 miss-detection 同形),再 raise。
         fake_client.artifacts.artifacts[:] = [
@@ -56,8 +55,7 @@ async def test_rename_not_found_marks_outcome_unknown_without_touching_download(
         fake_client.artifacts.calls.append(
             (
                 "rename",
-                dict(artifact_id=artifact_id, new_title=new_title,
-                     return_object=return_object),
+                dict(artifact_id=artifact_id, new_title=new_title, return_object=return_object),
             )
         )
         raise ArtifactNotFoundError(artifact_id)

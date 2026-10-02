@@ -7,9 +7,7 @@ from notebooklm_mcp import tools_podcast as p
 from notebooklm_mcp._status import TerminalGenerationError
 
 
-async def test_series_serial_rss_title_does_not_double_the_studio_name(
-    fake_client, tmp_path
-):
+async def test_series_serial_rss_title_does_not_double_the_studio_name(fake_client, tmp_path):
     """連載大綱寫 `EP01. 心法篇`(publish 硬契約)時,工作室/回錄仍是 `EP01 心法篇`。
 
     疊成 `EP01 EP01. 心法篇` 會讓 continuity 對帳、retract 重生、source_list 比對
@@ -79,7 +77,9 @@ async def test_episode_names_with_title(fake_client, tmp_path):
     out = await p.podcast_episode(
         "nb-1", episode_n=2, title="實戰篇", brief="第二集", output_dir=str(tmp_path)
     )
-    artifact_rename = next(c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename")
+    artifact_rename = next(
+        c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename"
+    )
     source_rename = next(c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename")
     assert artifact_rename == "EP02 實戰篇"
     assert source_rename == "EP02 實戰篇"
@@ -165,13 +165,16 @@ async def test_episode_rejects_prior_mp3_for_first_episode(fake_client, tmp_path
 
     with pytest.raises(ValueError, match="episode_n >= 2"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title="開場篇", brief="x", output_dir=str(tmp_path), prior_mp3_path=str(prior)
+            "nb-1",
+            episode_n=1,
+            title="開場篇",
+            brief="x",
+            output_dir=str(tmp_path),
+            prior_mp3_path=str(prior),
         )
 
 
-async def test_manifest_backed_episode_rejects_uncheckpointed_prior_upload(
-    fake_client, tmp_path
-):
+async def test_manifest_backed_episode_rejects_uncheckpointed_prior_upload(fake_client, tmp_path):
     prior = tmp_path / "prior.mp3"
     prior.write_bytes(b"prior")
     manifest_path = tmp_path / "series_manifest.json"
@@ -264,15 +267,14 @@ async def test_podcast_episode_rejects_non_positive_episode_n(fake_client, tmp_p
 
 # ---- 容錯:超時後用既有 artifact_id 續完一集(不重生、不燒 quota)----
 
+
 async def test_resume_finishes_episode_without_regenerating(fake_client, tmp_path):
     """podcast_episode_resume 拿既有 artifact_id 續完後半段:等完成→命名→下載→
     自上傳回錄,回傳與正常生成相同形狀的 dict,但**完全不呼叫 generate_audio**。
 
     fake `rename` 0.8.2 起對查無 id 的 artifact raise(見 test_rename_not_found.py)
     ——resume 的前提是這顆 artifact 已經在遠端存在,所以先 seed。"""
-    fake_client.artifacts.seed_artifact(
-        "art-xyz", kind=ArtifactType.AUDIO, title="Audio Overview"
-    )
+    fake_client.artifacts.seed_artifact("art-xyz", kind=ArtifactType.AUDIO, title="Audio Overview")
     out = await p.podcast_episode_resume(
         "nb-1", episode_n=2, title="實戰篇", artifact_id="art-xyz", output_dir=str(tmp_path)
     )
@@ -280,9 +282,18 @@ async def test_resume_finishes_episode_without_regenerating(fake_client, tmp_pat
     assert "generate_audio" not in kinds  # 核心:不重生
     assert kinds == ["wait", "rename", "download"]  # 只做後半段
     # 命名鐵律照舊:Studio artifact 與自上傳來源同名 EP02 實戰篇,且都指向傳入的 id。
-    assert next(c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename") == "EP02 實戰篇"
-    assert next(c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename") == "EP02 實戰篇"
-    assert next(c[1]["artifact_id"] for c in fake_client.artifacts.calls if c[0] == "download") == "art-xyz"
+    assert (
+        next(c[1]["new_title"] for c in fake_client.artifacts.calls if c[0] == "rename")
+        == "EP02 實戰篇"
+    )
+    assert (
+        next(c[1]["new_title"] for c in fake_client.sources.calls if c[0] == "rename")
+        == "EP02 實戰篇"
+    )
+    assert (
+        next(c[1]["artifact_id"] for c in fake_client.artifacts.calls if c[0] == "download")
+        == "art-xyz"
+    )
     assert out["artifact_id"] == "art-xyz"
     assert out["label"] == "EP02 實戰篇"
     assert out["mp3_path"].endswith("ep02.mp3")
@@ -315,7 +326,6 @@ async def test_resume_reports_removed_artifact(fake_client, tmp_path):
         await p.podcast_episode_resume("nb-1", 1, "心法篇", "art-1", str(tmp_path))
 
 
-
 def _absent_timeout(history, timeout=1200.0):
     """0.8.3 的真實形狀:輪詢不再合成 `removed`,缺席一路等到 deadline 才 raise。"""
     from notebooklm.exceptions import ArtifactPendingTimeoutError
@@ -333,8 +343,12 @@ async def test_whole_window_absence_is_reported_as_removed(fake_client, tmp_path
     fake_client.artifacts.wait_exc = _absent_timeout(("not_found",))
     with pytest.raises(TerminalGenerationError, match="配額|removed") as ei:
         await p.podcast_episode(
-            "nb-1", episode_n=1, title="心法篇", brief="b",
-            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="b",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
         )
     assert "podcast_episode_resume" not in str(ei.value)
     attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
@@ -352,9 +366,12 @@ async def test_partial_absence_stays_resumable(fake_client, tmp_path, history, t
     fake_client.artifacts.fail_wait_on = 1
     fake_client.artifacts.wait_exc = _absent_timeout(history, timeout)
     with pytest.raises(TimeoutError) as ei:
-        await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path))
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path)
+        )
     assert not isinstance(ei.value, TerminalGenerationError)
     assert "podcast_episode_resume" in str(ei.value)
+
 
 async def test_episode_timeout_error_carries_artifact_id_for_resume(fake_client, tmp_path):
     """核心容錯:podcast_episode 在生成送出後 wait 超時,錯誤仍是 TimeoutError(既有
@@ -362,7 +379,9 @@ async def test_episode_timeout_error_carries_artifact_id_for_resume(fake_client,
     續完(不必再 artifact_list 撈)。"""
     fake_client.artifacts.fail_wait_on = 1  # 第一次 wait_for_completion 拋 TimeoutError
     with pytest.raises(TimeoutError) as ei:  # 型別保留:逾時仍是 TimeoutError
-        await p.podcast_episode("nb-1", episode_n=2, title="實戰篇", brief="b", output_dir=str(tmp_path))
+        await p.podcast_episode(
+            "nb-1", episode_n=2, title="實戰篇", brief="b", output_dir=str(tmp_path)
+        )
     msg = str(ei.value)
     assert "task-123" in msg  # generate_audio 回的 artifact_id 有被帶出來
     assert "podcast_episode_resume" in msg
@@ -370,9 +389,7 @@ async def test_episode_timeout_error_carries_artifact_id_for_resume(fake_client,
     assert any(c[0] == "generate_audio" for c in fake_client.artifacts.calls)
 
 
-async def test_manifest_backed_finalize_error_hint_keeps_durable_identity(
-    fake_client, tmp_path
-):
+async def test_manifest_backed_finalize_error_hint_keeps_durable_identity(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     fake_client.artifacts.fail_wait_on = 1
 
@@ -402,7 +419,9 @@ async def test_episode_error_preserves_real_sdk_exception_type(fake_client, tmp_
     fake_client.artifacts.fail_wait_on = 1
     fake_client.artifacts.wait_exc = ArtifactPendingTimeoutError("nb-1", "task-123", 1200.0)
     with pytest.raises(ArtifactPendingTimeoutError) as ei:  # 型別未被吞成 TypeError/RuntimeError
-        await p.podcast_episode("nb-1", episode_n=2, title="實戰篇", brief="b", output_dir=str(tmp_path))
+        await p.podcast_episode(
+            "nb-1", episode_n=2, title="實戰篇", brief="b", output_dir=str(tmp_path)
+        )
     msg = str(ei.value)
     assert "task-123" in msg and "podcast_episode_resume" in msg
 
@@ -412,20 +431,29 @@ async def test_episode_terminal_failure_not_labeled_resumable(fake_client, tmp_p
     resume 救不回——錯誤原樣拋出、**不得**帶 podcast_episode_resume 指引誤導呼叫端。"""
     fake_client.artifacts.fail_complete = True  # wait 回 failed status → TerminalGenerationError
     with pytest.raises(RuntimeError) as ei:
-        await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path))
+        await p.podcast_episode(
+            "nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path)
+        )
     assert "podcast_episode_resume" not in str(ei.value)
 
 
 # ── manifest stub(v0.2.8:podcast_episode 傳 manifest_path 即自動 upsert)─────────
 
+
 async def test_episode_writes_manifest_stub(fake_client, tmp_path):
     """傳 manifest_path:生成受理後 stub 立即進 manifest(fresh 檔自動建),帶
     決定性 mp3_path + 每集自己的 notebook_id/artifact_id——滾動 feed 免手動補步。"""
-    import json, os
+    import json
+    import os
+
     mpath = tmp_path / "series_manifest.json"
     await p.podcast_episode(
-        "nb-9", episode_n=3, title="紀律篇", brief="b",
-        output_dir=str(tmp_path), manifest_path=str(mpath),
+        "nb-9",
+        episode_n=3,
+        title="紀律篇",
+        brief="b",
+        output_dir=str(tmp_path),
+        manifest_path=str(mpath),
     )
     data = json.loads(mpath.read_text(encoding="utf-8"))
     ep = next(e for e in data["episodes"] if e["episode"] == 3)
@@ -438,16 +466,19 @@ async def test_episode_writes_manifest_stub(fake_client, tmp_path):
 async def test_episode_stub_with_output_evidence_fails_closed(fake_client, tmp_path):
     """舊 manifest 只要已有 published_at 等產出證據，就不能當成全新集重生。"""
     import json
+
     mpath = tmp_path / "series_manifest.json"
-    manual = {"episode": 3, "title": "手動標題",
-              "published_at": "Wed, 01 Jan 2020 09:00:00 +0800"}
-    mpath.write_text(json.dumps({"notebook_id": "old-nb", "episodes": [manual]}),
-                     encoding="utf-8")
+    manual = {"episode": 3, "title": "手動標題", "published_at": "Wed, 01 Jan 2020 09:00:00 +0800"}
+    mpath.write_text(json.dumps({"notebook_id": "old-nb", "episodes": [manual]}), encoding="utf-8")
 
     with pytest.raises(ValueError, match="refusing to silently overwrite"):
         await p.podcast_episode(
-            "nb-9", episode_n=3, title="紀律篇", brief="b",
-            output_dir=str(tmp_path), manifest_path=str(mpath),
+            "nb-9",
+            episode_n=3,
+            title="紀律篇",
+            brief="b",
+            output_dir=str(tmp_path),
+            manifest_path=str(mpath),
         )
 
     data = json.loads(mpath.read_text(encoding="utf-8"))
@@ -459,8 +490,10 @@ async def test_episode_stub_with_output_evidence_fails_closed(fake_client, tmp_p
 async def test_episode_without_manifest_path_writes_nothing(fake_client, tmp_path):
     """不傳 manifest_path = 舊行為:只 return,不產生任何 manifest 檔。"""
     import os
-    await p.podcast_episode("nb-1", episode_n=1, title="心法篇", brief="b",
-                            output_dir=str(tmp_path))
+
+    await p.podcast_episode(
+        "nb-1", episode_n=1, title="心法篇", brief="b", output_dir=str(tmp_path)
+    )
     assert not os.path.exists(tmp_path / "series_manifest.json")
 
 
@@ -486,15 +519,11 @@ def _dispatching_reconcile_attempt(tmp_path):
         audio_format="deep-dive",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(
-        store, 1, attempt_id, [], account="#1", wait_timeout=1200.0
-    )
+    assert p._claim_prepared_dispatch(store, 1, attempt_id, [], account="#1", wait_timeout=1200.0)
     return manifest_path, store, attempt_id
 
 
-async def test_reconcile_reads_an_accepted_attempt_while_auth_is_unavailable(
-    fake_client, tmp_path
-):
+async def test_reconcile_reads_an_accepted_attempt_while_auth_is_unavailable(fake_client, tmp_path):
     """已 accepted 的耐久對應是純本機讀取,認證斷掉時仍必須讀得到。"""
     manifest_path, store, attempt_id = _dispatching_reconcile_attempt(tmp_path)
     p._bind_accepted_artifact(store, 1, attempt_id, "art-accepted")
@@ -509,9 +538,7 @@ async def test_reconcile_reads_an_accepted_attempt_while_auth_is_unavailable(
     assert fake_client.artifacts.calls == []
 
 
-async def test_reconcile_reports_invalid_local_state_before_auth(
-    fake_client, tmp_path
-):
+async def test_reconcile_reports_invalid_local_state_before_auth(fake_client, tmp_path):
     """本機狀態錯誤不得被無關的認證中斷蓋掉。"""
     from notebooklm.exceptions import RateLimitError
 
@@ -520,24 +547,18 @@ async def test_reconcile_reports_invalid_local_state_before_auth(
     fake_client.notebooks.fail_list = True
 
     with pytest.raises(ValueError, match="cannot be reconciled"):
-        await p.podcast_episode_reconcile(
-            str(manifest_path), episode_n=1, attempt_id=attempt_id
-        )
+        await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
     assert fake_client.artifacts.calls == []
 
 
-async def test_reconcile_auth_failure_does_not_mutate_dispatching_attempt(
-    fake_client, tmp_path
-):
+async def test_reconcile_auth_failure_does_not_mutate_dispatching_attempt(fake_client, tmp_path):
     """dispatching 被耐久改成 acceptance_unknown 之前,認證必須先過。"""
     manifest_path, store, attempt_id = _dispatching_reconcile_attempt(tmp_path)
     before = store.read()
     fake_client.notebooks.fail_list = True
 
     with pytest.raises(RuntimeError, match="sync-auth"):
-        await p.podcast_episode_reconcile(
-            str(manifest_path), episode_n=1, attempt_id=attempt_id
-        )
+        await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     after = store.read()
     assert after["revision"] == before["revision"]
@@ -551,10 +572,15 @@ async def test_resume_rejects_a_manifest_path_that_does_not_exist(fake_client, t
     missing = tmp_path / "nested" / "series_manifest.json"
     with pytest.raises(ValueError, match="does not exist"):
         await p.podcast_episode_resume(
-            "nb-1", 1, "心法篇", "art-1", str(tmp_path), manifest_path=str(missing),
+            "nb-1",
+            1,
+            "心法篇",
+            "art-1",
+            str(tmp_path),
+            manifest_path=str(missing),
         )
-    assert not missing.parent.exists()          # 沒有亂建父目錄
-    assert fake_client.artifacts.calls == []     # 沒打任何 RPC
+    assert not missing.parent.exists()  # 沒有亂建父目錄
+    assert fake_client.artifacts.calls == []  # 沒打任何 RPC
 
 
 async def test_reconcile_rejects_a_manifest_path_that_does_not_exist(fake_client, tmp_path):
@@ -600,7 +626,12 @@ async def test_resume_missing_manifest_error_points_at_the_standalone_escape_hat
     missing = tmp_path / "nested" / "series_manifest.json"
     with pytest.raises(ValueError, match="standalone best-effort"):
         await p.podcast_episode_resume(
-            "nb-1", 1, "心法篇", "art-1", str(tmp_path), manifest_path=str(missing),
+            "nb-1",
+            1,
+            "心法篇",
+            "art-1",
+            str(tmp_path),
+            manifest_path=str(missing),
         )
     assert fake_client.artifacts.calls == []
 
@@ -609,13 +640,19 @@ async def test_series_write_manifest_preserves_unknown_top_level_keys(fake_clien
     """v0.2.9 起 publish_series 會把 show 七欄存進 manifest["show"];podcast_series 的
     整寫不可把它(或其他未知頂層 key)擦掉,否則跑一次續集就得重打七欄。"""
     import json
+
     mpath = tmp_path / "series_manifest.json"
-    mpath.write_text(json.dumps({
-        "notebook_id": "nb-1", "episodes": [],
-        "show": {"show_id": "audicast", "show_title": "Audicast"},
-    }), encoding="utf-8")
-    await p.podcast_series("nb-1", [{"title": "心法篇", "brief": "b"}],
-                           output_dir=str(tmp_path))
+    mpath.write_text(
+        json.dumps(
+            {
+                "notebook_id": "nb-1",
+                "episodes": [],
+                "show": {"show_id": "audicast", "show_title": "Audicast"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    await p.podcast_series("nb-1", [{"title": "心法篇", "brief": "b"}], output_dir=str(tmp_path))
     data = json.loads(mpath.read_text(encoding="utf-8"))
-    assert data["show"] == {"show_id": "audicast", "show_title": "Audicast"}   # 沒被擦掉
-    assert data["episodes"]                                                     # 整季照寫
+    assert data["show"] == {"show_id": "audicast", "show_title": "Audicast"}  # 沒被擦掉
+    assert data["episodes"]  # 整季照寫

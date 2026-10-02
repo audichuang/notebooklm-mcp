@@ -6,19 +6,20 @@
 **`get_client()` 的語意刻意不變**(「當前作用中的 client」),所以 46 個呼叫點
 一行都不用改;pool 在 `runtime.py` 之上是隱形的。
 """
+
 import json
 import logging
 import stat
 from pathlib import Path
 
 import pytest
-
+from notebooklm._browser.headless_reauth import NOTEBOOKLM_HEADLESS_REAUTH_ENV
 from notebooklm.auth import (
     NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV,
     NOTEBOOKLM_REFRESH_CMD_ENV,
     NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV,
 )
-from notebooklm._browser.headless_reauth import NOTEBOOKLM_HEADLESS_REAUTH_ENV
+
 from notebooklm_mcp import app, runtime
 
 
@@ -305,7 +306,7 @@ async def test_each_pooled_client_carries_its_own_credential_file(monkeypatch):
         paths = [c.path for c in built]
         assert all(p is not None for p in paths), "每個槽位都要有自己的憑證檔"
         assert len(set(paths)) == 2, "兩個槽位不能共用同一個檔"
-        for path, tag in zip(paths, ("1", "2")):
+        for path, tag in zip(paths, ("1", "2"), strict=True):
             assert path.read_text(encoding="utf-8") == _cred(tag)
             assert stat.S_IMODE(path.stat().st_mode) == 0o600, "憑證檔不能讓 umask 決定權限"
             assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
@@ -624,9 +625,7 @@ def test_precheck_agrees_with_the_sdk_strict_loader(tmp_path):
         )
 
 
-def test_precheck_warns_but_accepts_expired_psidts_that_would_trigger_heal(
-    tmp_path, caplog
-):
+def test_precheck_warns_but_accepts_expired_psidts_that_would_trigger_heal(tmp_path, caplog):
     """routability 只代表能否 refresh,不代表這份憑證能否使用。"""
     from notebooklm_mcp import _cookies
 
@@ -888,16 +887,17 @@ def test_heal_reason_splits_the_or_that_got_misread():
 
     def psidts(domain=".google.com", expires=-1):
         return {
-            "name": "__Secure-1PSIDTS", "value": "t",
-            "domain": domain, "path": "/", "expires": expires,
+            "name": "__Secure-1PSIDTS",
+            "value": "t",
+            "domain": domain,
+            "path": "/",
+            "expires": expires,
         }
 
     assert _cookies.describe_inline_heal_reason(state(psidts())) == ""
     assert _cookies.describe_inline_heal_reason(state(psidts(".youtube.com"))) == "wrong_scope"
     assert _cookies.describe_inline_heal_reason(state(psidts(expires=1))) == "expired"
-    assert _cookies.describe_inline_heal_reason(
-        state(psidts(expires=1), psidts())
-    ) == "expired"
+    assert _cookies.describe_inline_heal_reason(state(psidts(expires=1), psidts())) == "expired"
     assert _cookies.describe_inline_heal_reason(state()) == "missing"
 
     # domain 是 wrong_scope 唯一可操作的證據,而它不是秘密(值才是)。
@@ -980,7 +980,7 @@ async def test_startup_diagnostic_never_breaks_startup(monkeypatch, caplog):
 
     with caplog.at_level(logging.DEBUG, logger=app.logger.name):
         async with app._lifespan(app.mcp):
-            assert runtime.account_count() == 2          # 啟動沒有被診斷拖垮
+            assert runtime.account_count() == 2  # 啟動沒有被診斷拖垮
             rows = runtime.slot_diagnostics()
 
     assert [row["refreshable"] for row in rows] == [None, None]  # 誠實回「沒量」
@@ -1003,12 +1003,28 @@ def test_mixed_identity_wrong_scope_does_not_claim_nothing_expired():
     from notebooklm_mcp import _cookies
 
     now = time.time()
-    state = {"cookies": [
-        {"name": "__Secure-1PSIDTS", "value": "a", "domain": ".google.com",
-         "path": "/", "expires": now - 10, "httpOnly": True, "secure": True},
-        {"name": "__Secure-1PSIDTS", "value": "b", "domain": ".youtube.com",
-         "path": "/", "expires": -1, "httpOnly": True, "secure": True},
-    ]}
+    state = {
+        "cookies": [
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "a",
+                "domain": ".google.com",
+                "path": "/",
+                "expires": now - 10,
+                "httpOnly": True,
+                "secure": True,
+            },
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "b",
+                "domain": ".youtube.com",
+                "path": "/",
+                "expires": -1,
+                "httpOnly": True,
+                "secure": True,
+            },
+        ]
+    }
 
     assert _cookies.describe_inline_heal_reason(state) == "wrong_scope"
     detail = _cookies.heal_warning_detail(state)

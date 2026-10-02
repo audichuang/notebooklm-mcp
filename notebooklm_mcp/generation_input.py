@@ -1,4 +1,5 @@
 """Frozen generation-input bundles consumed immediately before podcast dispatch."""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +8,7 @@ import os
 import re
 import stat
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -229,7 +230,7 @@ def _other_series_manifests(workspace: Path, manifest: Path) -> list[Path]:
     的同形狀)。podcast-lab 的 ``shows/`` 底下唯一的隱藏目錄是 ``.venv*``,不會有套件在
     裡面 ship ``series_manifest.json``,所以拿掉這個排除不會誤傷真實佈局。"""
     others: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
+    for dirpath, _dirnames, filenames in os.walk(workspace, followlinks=False):
         if "series_manifest.json" in filenames:
             found = Path(dirpath, "series_manifest.json")
             if found.resolve(strict=False) != manifest:
@@ -310,20 +311,15 @@ def load_frozen_generation_input(
         or request.get("qa_kind") != "generation_attempt_input"
         or request.get("status") != "frozen"
         or request.get("episode_id") != expected_episode
-        or request.get("dispatch_contract")
-        != "provider_must_load_runtime_brief_from_this_bundle"
+        or request.get("dispatch_contract") != "provider_must_load_runtime_brief_from_this_bundle"
         or not isinstance(request.get("generation_request_id"), str)
-        or re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", request["generation_request_id"]
-        )
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", request["generation_request_id"])
         is None
         or not _valid_timestamp(request.get("frozen_at"))
     ):
         raise ValueError("generation request metadata is invalid")
-    frozen_at = datetime.fromisoformat(
-        request["frozen_at"].replace("Z", "+00:00")
-    ).astimezone(timezone.utc)
-    if frozen_at > datetime.now(timezone.utc):
+    frozen_at = datetime.fromisoformat(request["frozen_at"].replace("Z", "+00:00")).astimezone(UTC)
+    if frozen_at > datetime.now(UTC):
         raise ValueError("generation request timestamp order is invalid")
     files = request.get("files")
     if not isinstance(files, dict) or set(files) != set(_BUNDLE_FILES):
@@ -392,9 +388,7 @@ def _reverify_bundle_containment(prepared: dict[str, Any]) -> None:
     """
     current = os.lstat(prepared["bundle"])
     if (current.st_dev, current.st_ino) != prepared["bundle_inode"]:
-        raise ValueError(
-            "input bundle changed or became a symlink since the frozen input was read"
-        )
+        raise ValueError("input bundle changed or became a symlink since the frozen input was read")
 
 
 def write_attempt_binding(
@@ -403,10 +397,8 @@ def write_attempt_binding(
     _reverify_bundle_containment(prepared)
     bundle = prepared["bundle"]
     record_base = prepared["record_base"]
-    bound_at = datetime.now(timezone.utc)
-    frozen_at = datetime.fromisoformat(
-        prepared["frozen_at"].replace("Z", "+00:00")
-    ).astimezone(timezone.utc)
+    bound_at = datetime.now(UTC)
+    frozen_at = datetime.fromisoformat(prepared["frozen_at"].replace("Z", "+00:00")).astimezone(UTC)
     if bound_at < frozen_at:
         raise ValueError("attempt binding timestamp order is invalid")
     binding = {
@@ -421,9 +413,7 @@ def write_attempt_binding(
     }
     encoded = (json.dumps(binding, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     path = bundle / "attempt-binding.json"
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=".attempt-binding.", suffix=".tmp", dir=bundle
-    )
+    fd, temporary_name = tempfile.mkstemp(prefix=".attempt-binding.", suffix=".tmp", dir=bundle)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -456,12 +446,12 @@ def write_attempt_binding(
     # ---- 發布之後 --------------------------------------------------------------
     # 綁定已經在磁碟上了。這之後的清理失敗都**不得回滾** —— 把成功的綁定刪掉,會讓
     # 下一次重跑誤以為沒綁過而重建 attempt。
-    _discard(temporary)             # 殘留一個隱藏 temp 檔無害,不值得炸掉已成功的綁定
+    _discard(temporary)  # 殘留一個隱藏 temp 檔無害,不值得炸掉已成功的綁定
     try:
         fsync_parent(str(path))
     except OSError as exc:
         if exc.errno in _DIR_FSYNC_UNSUPPORTED:
-            pass                    # 有些 filesystem 不支援 directory fsync,那不是失敗
+            pass  # 有些 filesystem 不支援 directory fsync,那不是失敗
         else:
             raise OSError(
                 exc.errno,
@@ -503,12 +493,9 @@ def read_attempt_binding(
         or binding.get("schema_version") != 1
         or binding.get("qa_kind") != "generation_attempt_input_binding"
         or binding.get("episode_id") != prepared["episode_id"]
-        or binding.get("generation_request_id")
-        != record_base["generation_request_id"]
-        or binding.get("generation_request_sha256")
-        != record_base["generation_request_sha256"]
-        or binding.get("manifest_workspace_sha256")
-        != record_base["manifest_workspace_sha256"]
+        or binding.get("generation_request_id") != record_base["generation_request_id"]
+        or binding.get("generation_request_sha256") != record_base["generation_request_sha256"]
+        or binding.get("manifest_workspace_sha256") != record_base["manifest_workspace_sha256"]
         or not isinstance(attempt_id, str)
         or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", attempt_id) is None
         or not _valid_timestamp(binding.get("bound_at"))
@@ -516,15 +503,9 @@ def read_attempt_binding(
         raise ValueError(
             "attempt binding does not match frozen generation request or manifest workspace"
         )
-    bound_timestamp = datetime.fromisoformat(
-        binding["bound_at"].replace("Z", "+00:00")
-    )
-    frozen_timestamp = datetime.fromisoformat(
-        prepared["frozen_at"].replace("Z", "+00:00")
-    )
-    if bound_timestamp.astimezone(timezone.utc) < frozen_timestamp.astimezone(
-        timezone.utc
-    ):
+    bound_timestamp = datetime.fromisoformat(binding["bound_at"].replace("Z", "+00:00"))
+    frozen_timestamp = datetime.fromisoformat(prepared["frozen_at"].replace("Z", "+00:00"))
+    if bound_timestamp.astimezone(UTC) < frozen_timestamp.astimezone(UTC):
         raise ValueError("attempt binding timestamp order is invalid")
     record = dict(record_base)
     record["attempt_binding_sha256"] = _sha(encoded)
@@ -546,7 +527,7 @@ def rollback_attempt_binding(prepared: dict[str, Any], encoded: bytes) -> str | 
     path = prepared["bundle"] / "attempt-binding.json"
     try:
         if path.read_bytes() != encoded:
-            return None            # 已被別人換掉,不是我們這次寫的,不碰
+            return None  # 已被別人換掉,不是我們這次寫的,不碰
         path.unlink()
     except FileNotFoundError:
         return None

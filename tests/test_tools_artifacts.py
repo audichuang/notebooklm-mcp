@@ -1,17 +1,19 @@
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from conftest import FakeClient
 
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_artifacts as a
+from notebooklm_mcp import runtime, tools_artifacts as a
 
 
 def _manifest(tmp_path, episodes):
     p = tmp_path / "series_manifest.json"
-    p.write_text(json.dumps({"notebook_id": "nb-1", "episodes": episodes}, ensure_ascii=False),
-                 encoding="utf-8")
+    p.write_text(
+        json.dumps({"notebook_id": "nb-1", "episodes": episodes}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return str(p)
 
 
@@ -22,15 +24,16 @@ async def test_generate_slides_downloads_and_writes_manifest(fake_client, tmp_pa
 
     # 呼叫了對的 SDK 方法,帶對的 enum
     from notebooklm.types import SlideDeckFormat
+
     gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_slide_deck")
     assert gen["source_ids"] == ["src-1"]
     assert gen["slide_format"] == SlideDeckFormat.DETAILED_DECK
-    assert gen["language"] == "zh_Hant"                       # resolve_language 預設
+    assert gen["language"] == "zh_Hant"  # resolve_language 預設
 
     # 下載到 manifest 同目錄的預期檔名
     assert res["slides_pdf_path"].endswith("ep01-slides.pdf")
     # 路徑回寫進 manifest
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
     assert data["schema_version"] == 2
     # 一次成功生成 = **一次** manifest 寫入:路徑與 provenance 同一次 `update`。
@@ -53,13 +56,14 @@ async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp
     res = await a.generate_report("nb-1", m, 1, report_format="study_guide", source_ids=["src-1"])
 
     from notebooklm.types import ReportFormat
+
     gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_report")
     assert gen["report_format"] == ReportFormat.STUDY_GUIDE
     assert gen["language"] == "zh_Hant"
 
     assert res["report_md_path"].endswith("ep01-report.md")
     assert res["report_format"] == "study_guide"
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
     assert data["episodes"][0]["report_format"] == "study_guide"
 
@@ -100,6 +104,7 @@ async def test_generate_report_custom_passes_prompt_to_sdk(fake_client, tmp_path
     )
 
     from notebooklm.types import ReportFormat
+
     gen = next(c[1] for c in fake_client.artifacts.calls if c[0] == "generate_report")
     assert gen["report_format"] == ReportFormat.CUSTOM
     assert gen["custom_prompt"] == "用時間軸列出每個 claim 的第一方出處"
@@ -135,6 +140,7 @@ async def test_custom_format_rejects_extra_instructions(fake_client, tmp_path):
 
 # ---- 救援下載:client 端 timeout 丟掉結果時,別重生一次燒配額 ----------------------
 
+
 async def test_artifact_download_slides_downloads_without_generating(fake_client, tmp_path):
     """雲端已生好、artifact_id 是呼叫端自己找回來的 → 只走下載 + 回寫,不碰生成。"""
     m = _manifest(tmp_path, [{"episode": 7, "title": "EP07"}])
@@ -144,7 +150,7 @@ async def test_artifact_download_slides_downloads_without_generating(fake_client
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
     assert dl["artifact_id"] == "slide-rescued"
     assert res["slides_pdf_path"].endswith("ep07-slides.pdf")
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
 
 
@@ -155,7 +161,7 @@ async def test_artifact_download_report_downloads_without_generating(fake_client
     assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_report"]
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_report")
     assert dl["artifact_id"] == "report-rescued"
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
     assert data["episodes"][0]["report_format"] == "study_guide"
 
@@ -186,16 +192,22 @@ async def test_revise_slide_revises_then_redownloads_without_regenerating(fake_c
     """就地改第 3 張 → 重新下載同一份 deck 並回寫 manifest,完全不碰 generate。"""
     m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
     fake_client.artifacts.seed_artifact("deck-1")
-    res = await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 2, "把這頁的數字改成 2026-05 的版本")
+    res = await a.artifact_revise_slide(
+        "nb-1", m, 5, "deck-1", 2, "把這頁的數字改成 2026-05 的版本"
+    )
 
     assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_slide_deck"]
     rev = next(c[1] for c in fake_client.artifacts.calls if c[0] == "revise_slide")
-    assert rev == {"notebook_id": "nb-1", "artifact_id": "deck-1", "slide_index": 2,
-                   "prompt": "把這頁的數字改成 2026-05 的版本"}
+    assert rev == {
+        "notebook_id": "nb-1",
+        "artifact_id": "deck-1",
+        "slide_index": 2,
+        "prompt": "把這頁的數字改成 2026-05 的版本",
+    }
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
     assert dl["artifact_id"] == "deck-1"
     assert res["slides_pdf_path"].endswith("ep05-slides.pdf")
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
 
 
@@ -229,7 +241,7 @@ async def test_revise_slide_follows_the_returned_id_not_the_input(fake_client, t
     res = await a.artifact_revise_slide("nb-1", m, 5, "deck-1", 0, "改這頁")
 
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
-    assert dl["artifact_id"] == "deck-2"          # 下載改版後那份,不是原 id
+    assert dl["artifact_id"] == "deck-2"  # 下載改版後那份,不是原 id
     assert res["artifact_id"] == "deck-2"
     # 舊那顆仍在遠端,呼叫端要拿得到它才有辦法自己決定清不清。
     assert res["superseded_artifact_id"] == "deck-1"
@@ -272,11 +284,12 @@ async def test_revise_slide_fails_closed_on_removed_deck(fake_client, tmp_path):
 
 # ---- v0.2.9 token-diet:P5 episode_set_description --------------------------------
 
+
 async def test_episode_set_description_writes_and_strips(tmp_path):
     """回寫走 MCP server 同 process 的讀改寫;預設清引用標記(新工具,無相容包袱)。"""
     m = _manifest(tmp_path, [{"episode": 21, "title": "EP21 標題"}])
     res = await a.episode_set_description(m, 21, "重點整理 [1],結論 [3, 4]。")
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     # 標記清掉,**標點前不留空格**(v0.9.13 驗收:show notes 是公開文案,那一格看得到)
     assert data["episodes"][0]["description"] == "重點整理,結論。"
     assert "[" not in data["episodes"][0]["description"]
@@ -286,15 +299,15 @@ async def test_episode_set_description_writes_and_strips(tmp_path):
 async def test_episode_set_description_keep_citations(tmp_path):
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     await a.episode_set_description(m, 1, "重點 [1]。", strip_citations=False)
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["description"] == "重點 [1]。"
 
 
 async def test_episode_set_description_validates(tmp_path):
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
-    with pytest.raises(ValueError):                      # 空(清完標記後也算)
+    with pytest.raises(ValueError):  # 空(清完標記後也算)
         await a.episode_set_description(m, 1, "  [1]  ")
-    with pytest.raises(ValueError):                      # 等於標題 = 假 show notes
+    with pytest.raises(ValueError):  # 等於標題 = 假 show notes
         await a.episode_set_description(m, 1, "EP01")
     with pytest.raises(ValueError, match="episode 9 not found"):
         await a.episode_set_description(m, 9, "真 show notes")
@@ -311,7 +324,9 @@ async def test_episode_set_description_rejects_unsafe_notes_at_write_time(tmp_pa
         with pytest.raises(ValueError, match="自包含"):
             await a.episode_set_description(m, 1, bad)
     # 正常的中文技術散文不可誤殺(guard 誤判的代價是整季發不出去)
-    ok = await a.episode_set_description(m, 1, "• 我們談 JavaScript:動態語言的起點\n• 設定 online=1")
+    ok = await a.episode_set_description(
+        m, 1, "• 我們談 JavaScript:動態語言的起點\n• 設定 online=1"
+    )
     assert "JavaScript" in ok["description"]
 
 
@@ -324,7 +339,7 @@ async def test_episode_set_description_rejects_xml_forbidden_chars_at_write_time
     with pytest.raises(ValueError, match="XML"):
         await a.episode_set_description(m, 1, "本集重點\x0c續完")
     # 沒有半途寫入
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert "description" not in data["episodes"][0]
 
 
@@ -335,7 +350,7 @@ async def test_episode_set_description_rejects_xml_forbidden_chars_at_write_time
 
 
 def _revision_of(path):
-    return json.loads(open(path, encoding="utf-8").read()).get("revision")
+    return json.loads(Path(path).read_text(encoding="utf-8")).get("revision")
 
 
 async def test_set_publication_state_writes_all_three_audit_fields(tmp_path):
@@ -345,9 +360,9 @@ async def test_set_publication_state_writes_all_three_audit_fields(tmp_path):
     (`episode` 回 0、`reason` 回 None 都能全綠)。"""
     m = _manifest(tmp_path, [{"episode": 46, "title": "EP46"}])
     res = await a.episode_set_publication_state(m, 46, "deferred", reason="  五次 QA 拒收  ")
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert ep["publication_state"] == "deferred"
-    assert ep["publication_state_reason"] == "五次 QA 拒收"          # strip 過
+    assert ep["publication_state_reason"] == "五次 QA 拒收"  # strip 過
     # 真的解析得動、真的是 UTC —— 只檢查 endswith("+00:00") 對 "garbage+00:00" 也會綠
     stamped = datetime.fromisoformat(ep["publication_state_at"])
     assert stamped.utcoffset() == timedelta(0)
@@ -366,7 +381,7 @@ async def test_clearing_publication_state_removes_the_whole_audit_triple(tmp_pat
     m = _manifest(tmp_path, [{"episode": 46, "title": "EP46"}])
     await a.episode_set_publication_state(m, 46, "deferred", reason="五次 QA 拒收")
     res = await a.episode_set_publication_state(m, 46, None)
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert "publication_state" not in ep
     assert "publication_state_reason" not in ep
     assert "publication_state_at" not in ep
@@ -391,7 +406,7 @@ async def test_replaying_the_same_call_does_not_bump_revision(tmp_path):
     again = await a.episode_set_publication_state(m, 1, "deferred", reason="QA 拒收")
     assert first["changed"] is True and again["changed"] is False
     assert again["previous_state"] == "deferred"
-    assert _revision_of(m) == rev                       # 一次寫盤都沒發生
+    assert _revision_of(m) == rev  # 一次寫盤都沒發生
     # 解除一個本來就沒扣的集數同理:冪等、不寫盤
     await a.episode_set_publication_state(m, 1, None)
     rev_after_clear = _revision_of(m)
@@ -400,7 +415,7 @@ async def test_replaying_the_same_call_does_not_bump_revision(tmp_path):
     # 但**換了理由**是真的變更,要寫進去
     changed = await a.episode_set_publication_state(m, 1, "deferred", reason="改用新素材重錄")
     assert changed["changed"] is True
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert ep["publication_state_reason"] == "改用新素材重錄"
 
 
@@ -434,21 +449,30 @@ async def test_replay_repairs_a_legacy_incomplete_audit_triple(tmp_path):
     形狀:有 `publication_state` + `reason`、沒有 `publication_state_at`(某個舊腳本或
     手改留下的)。若 no-op 只比對 state+reason,重呼會直接 `_NoChange`,而「重呼一次把它
     修好」正是呼叫端唯一能做的補救 —— 那個缺欄從此永遠是缺的。"""
-    m = _manifest(tmp_path, [{
-        "episode": 46, "title": "EP46",
-        "publication_state": "deferred",
-        "publication_state_reason": "QA 拒收",
-    }])
+    m = _manifest(
+        tmp_path,
+        [
+            {
+                "episode": 46,
+                "title": "EP46",
+                "publication_state": "deferred",
+                "publication_state_reason": "QA 拒收",
+            }
+        ],
+    )
     res = await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
-    assert res["changed"] is True                      # 同一組 state+reason,但仍要寫
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    assert res["changed"] is True  # 同一組 state+reason,但仍要寫
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert datetime.fromisoformat(ep["publication_state_at"]).utcoffset() == timedelta(0)
     # 補完之後才變成真正的 no-op
-    assert (await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收"))["changed"] is False
+    assert (await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收"))[
+        "changed"
+    ] is False
 
 
 @pytest.mark.parametrize(
-    "stamp", [None, "", "garbage+00:00", "2026-08-14T00:05:36", 1755000000],
+    "stamp",
+    [None, "", "garbage+00:00", "2026-08-14T00:05:36", 1755000000],
     ids=["null", "empty", "garbage", "naive_no_tz", "epoch_int"],
 )
 async def test_replay_repairs_a_present_but_invalid_timestamp(tmp_path, stamp):
@@ -456,15 +480,21 @@ async def test_replay_repairs_a_present_but_invalid_timestamp(tmp_path, stamp):
 
     這幾種值都是 key 存在但稽核脈絡為零(含 naive 的無時區字串:那筆記錄事後對不上時區)。
     若把它們當合法,no-op 會讓那個壞欄永遠補不上。"""
-    m = _manifest(tmp_path, [{
-        "episode": 46, "title": "EP46",
-        "publication_state": "deferred",
-        "publication_state_reason": "QA 拒收",
-        "publication_state_at": stamp,
-    }])
+    m = _manifest(
+        tmp_path,
+        [
+            {
+                "episode": 46,
+                "title": "EP46",
+                "publication_state": "deferred",
+                "publication_state_reason": "QA 拒收",
+                "publication_state_at": stamp,
+            }
+        ],
+    )
     res = await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
     assert res["changed"] is True
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert datetime.fromisoformat(ep["publication_state_at"]).utcoffset() == timedelta(0)
 
 
@@ -486,19 +516,26 @@ async def test_set_publication_state_validates(tmp_path):
     with pytest.raises(ValueError, match="episode 9 not found"):
         await a.episode_set_publication_state(m, 9, "deferred", reason="不存在的集")
     # 全程一個字都不准落地
-    assert "publication_state" not in open(m, encoding="utf-8").read()
+    assert "publication_state" not in Path(m).read_text(encoding="utf-8")
 
 
 async def test_set_publication_state_never_touches_attempts_or_output(tmp_path):
     """它只管發布層:不動 attempt、artifact、本機檔案 —— deferred 不代表禁止重生。"""
-    m = _manifest(tmp_path, [{
-        "episode": 46, "title": "EP46",
-        "attempts": [{"attempt_id": "att-1", "remote": {"artifact_id": "art-1"}}],
-        "artifact_id": "art-1", "mp3_path": "/tmp/ep46.mp3",
-        "retracted_attempt_ids": ["att-0"],
-    }])
+    m = _manifest(
+        tmp_path,
+        [
+            {
+                "episode": 46,
+                "title": "EP46",
+                "attempts": [{"attempt_id": "att-1", "remote": {"artifact_id": "art-1"}}],
+                "artifact_id": "art-1",
+                "mp3_path": "/tmp/ep46.mp3",
+                "retracted_attempt_ids": ["att-0"],
+            }
+        ],
+    )
     await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert ep["attempts"] == [{"attempt_id": "att-1", "remote": {"artifact_id": "art-1"}}]
     assert ep["artifact_id"] == "art-1" and ep["mp3_path"] == "/tmp/ep46.mp3"
     assert ep["retracted_attempt_ids"] == ["att-0"]
@@ -515,9 +552,16 @@ def test_importing_tools_publish_first_does_not_deadlock_on_the_whitelist():
     import sys
 
     proc = subprocess.run(
-        [sys.executable, "-c", "import notebooklm_mcp.tools_publish as t; "
-                              "assert t.state_mod.WITHHELD_PUBLICATION_STATES"],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            "-c",
+            (
+                "import notebooklm_mcp.tools_publish as t; "
+                "assert t.state_mod.WITHHELD_PUBLICATION_STATES"
+            ),
+        ],
+        capture_output=True,
+        text=True,
     )
     assert proc.returncode == 0, proc.stderr
 
@@ -532,9 +576,8 @@ async def test_state_whitelist_is_shared_with_publish_not_duplicated(tmp_path):
     這裡驗的是 writer 用同一個 frozenset、而 publisher 用同一個 state 模組。"""
     from notebooklm_mcp import tools_artifacts, tools_publish
     from notebooklm_mcp.publish import state
-    assert (
-        tools_artifacts.WITHHELD_PUBLICATION_STATES is state.WITHHELD_PUBLICATION_STATES
-    )
+
+    assert tools_artifacts.WITHHELD_PUBLICATION_STATES is state.WITHHELD_PUBLICATION_STATES
     assert tools_publish.state_mod is state
 
 
@@ -557,16 +600,16 @@ def _part_files(tmp_path):
 
 async def test_slides_download_failure_leaves_previous_pdf_intact(fake_client, tmp_path):
     m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 GOOD OLD")
-    fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 half"     # partial 先落地
+    fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 half"  # partial 先落地
     fake_client.artifacts.download_slides_exc = RuntimeError("connection reset")
 
     with pytest.raises(RuntimeError, match="connection reset"):
         await a.generate_slides("nb-1", m, 1)
 
-    assert existing.read_bytes() == b"%PDF-1.4 GOOD OLD"               # 舊那份毫髮無傷
-    assert _part_files(tmp_path) == []                                 # temp 清乾淨
-    data = json.loads(open(m, encoding="utf-8").read())
-    assert "slides_pdf_path" not in data["episodes"][0]                # 失敗不回寫 manifest
+    assert existing.read_bytes() == b"%PDF-1.4 GOOD OLD"  # 舊那份毫髮無傷
+    assert _part_files(tmp_path) == []  # temp 清乾淨
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
+    assert "slides_pdf_path" not in data["episodes"][0]  # 失敗不回寫 manifest
 
 
 async def test_report_download_failure_leaves_previous_markdown_intact(fake_client, tmp_path):
@@ -579,7 +622,7 @@ async def test_report_download_failure_leaves_previous_markdown_intact(fake_clie
 
     assert existing.read_bytes() == "# 舊講義\n完整\n".encode()
     assert _part_files(tmp_path) == []
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert "report_md_path" not in data["episodes"][0]
 
 
@@ -588,16 +631,16 @@ async def test_slides_replaced_atomically_on_success(fake_client, tmp_path):
     fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 BRAND NEW"
     res = await a.generate_slides("nb-1", m, 1)
 
-    assert existing.read_bytes() == b"%PDF-1.4 BRAND NEW"              # 一次性換上
+    assert existing.read_bytes() == b"%PDF-1.4 BRAND NEW"  # 一次性換上
     assert res["slides_pdf_path"] == str(existing)
     assert _part_files(tmp_path) == []
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == str(existing)
 
 
 async def test_empty_download_is_rejected_and_old_file_kept(fake_client, tmp_path):
     m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 GOOD OLD")
-    fake_client.artifacts.download_slides_bytes = b""                  # 零位元組
+    fake_client.artifacts.download_slides_bytes = b""  # 零位元組
     with pytest.raises(ValueError, match="empty"):
         await a.generate_slides("nb-1", m, 1)
     assert existing.read_bytes() == b"%PDF-1.4 GOOD OLD"
@@ -629,7 +672,9 @@ async def test_invalid_utf8_report_is_rejected_and_old_file_kept(fake_client, tm
 async def test_atomic_replace_preserves_existing_file_mode(fake_client, tmp_path):
     """mkstemp 建的 temp 是 0600,os.replace 會把它帶到最終檔——既有 0644 的講義被重生後
     別人就讀不到了(下一次 publish_series 拿到 PermissionError)。換檔要保留原 mode。"""
-    import os, stat
+    import os
+    import stat
+
     m, existing = _episode_with_existing(tmp_path, "ep01-report.md", "# 舊\n".encode())
     os.chmod(existing, 0o644)
     await a.generate_report("nb-1", m, 1)
@@ -638,17 +683,23 @@ async def test_atomic_replace_preserves_existing_file_mode(fake_client, tmp_path
 
 async def test_atomic_replace_new_file_is_not_private(fake_client, tmp_path):
     """首次生成沒有舊檔可繼承 mode,也不該落成 mkstemp 的 0600。"""
-    import os, stat
+    import os
+    import stat
+
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     res = await a.generate_slides("nb-1", m, 1)
     assert stat.S_IMODE(os.stat(res["slides_pdf_path"]).st_mode) == 0o644
 
 
-async def test_unsupported_directory_fsync_does_not_fail_the_download(fake_client, tmp_path, monkeypatch):
+async def test_unsupported_directory_fsync_does_not_fail_the_download(
+    fake_client, tmp_path, monkeypatch
+):
     """os.replace 之後就是 commit point。有些 filesystem 不支援 directory fsync
     (EINVAL/ENOTSUP)——那不是失敗,不該讓已經成功的換檔回報成錯誤。"""
     import errno
+
     from notebooklm_mcp import _atomic
+
     m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 OLD")
     fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 NEW"
 
@@ -656,16 +707,20 @@ async def test_unsupported_directory_fsync_does_not_fail_the_download(fake_clien
         raise OSError(errno.EINVAL, "Invalid argument")
 
     monkeypatch.setattr(_atomic, "fsync_parent", unsupported)
-    res = await a.generate_slides("nb-1", m, 1)          # 不該 raise
+    res = await a.generate_slides("nb-1", m, 1)  # 不該 raise
     assert existing.read_bytes() == b"%PDF-1.4 NEW"
     assert res["slides_pdf_path"] == str(existing)
 
 
-async def test_post_commit_failure_says_the_file_was_already_replaced(fake_client, tmp_path, monkeypatch):
+async def test_post_commit_failure_says_the_file_was_already_replaced(
+    fake_client, tmp_path, monkeypatch
+):
     """真正的 IO 錯誤仍要 raise,但訊息必須講明「檔案已經換掉了」——否則呼叫端會照
     docstring 以為舊檔還在,做出錯誤的復原決定。"""
     import errno
+
     from notebooklm_mcp import _atomic
+
     m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 OLD")
     fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 NEW"
 
@@ -675,7 +730,7 @@ async def test_post_commit_failure_says_the_file_was_already_replaced(fake_clien
     monkeypatch.setattr(_atomic, "fsync_parent", io_error)
     with pytest.raises(OSError, match="already replaced"):
         await a.generate_slides("nb-1", m, 1)
-    assert existing.read_bytes() == b"%PDF-1.4 NEW"      # commit 已發生,誠實反映
+    assert existing.read_bytes() == b"%PDF-1.4 NEW"  # commit 已發生,誠實反映
 
 
 # ---- v0.4.1:遠端 mutation 前的便宜 preflight ------------------------------------
@@ -694,6 +749,7 @@ async def test_revise_slide_rejects_an_artifact_from_another_notebook(fake_clien
 
 async def test_revise_slide_rejects_a_non_slide_artifact(fake_client, tmp_path):
     from notebooklm.types import ArtifactType
+
     m = _manifest(tmp_path, [{"episode": 5, "title": "EP05"}])
     fake_client.artifacts.seed_artifact("rep-1", kind=ArtifactType.REPORT)
     with pytest.raises(ValueError, match="不是 slide_deck"):
@@ -714,10 +770,12 @@ async def test_revise_slide_rejects_an_unknown_episode_before_any_rpc(fake_clien
     fake_client.artifacts.seed_artifact("deck-1")
     with pytest.raises(ValueError, match="episode 9 not found"):
         await a.artifact_revise_slide("nb-1", m, 9, "deck-1", 0, "改這頁")
-    assert not fake_client.artifacts.calls          # 連 get_or_none 都還沒打
+    assert not fake_client.artifacts.calls  # 連 get_or_none 都還沒打
 
 
-async def test_generate_slides_and_report_check_the_episode_before_generating(fake_client, tmp_path):
+async def test_generate_slides_and_report_check_the_episode_before_generating(
+    fake_client, tmp_path
+):
     """打錯 episode_n 舊行為是「生成 → 下載 → 回寫時才 raise」= 白燒一次配額。"""
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     with pytest.raises(ValueError, match="episode 2 not found"):
@@ -750,9 +808,7 @@ async def test_generate_report_rejects_an_absent_source_before_generating(fake_c
     assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_report"]
 
 
-@pytest.mark.parametrize(
-    "bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"]
-)
+@pytest.mark.parametrize("bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"])
 async def test_generate_slides_rejects_a_malformed_selection(fake_client, tmp_path, bad):
     """空清單/重複/非字串在打 RPC 之前就退,與 to_source_ids 的既定語意一致。"""
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
@@ -761,9 +817,7 @@ async def test_generate_slides_rejects_a_malformed_selection(fake_client, tmp_pa
     assert not fake_client.artifacts.calls
 
 
-@pytest.mark.parametrize(
-    "bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"]
-)
+@pytest.mark.parametrize("bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"])
 async def test_generate_report_rejects_a_malformed_selection(fake_client, tmp_path, bad):
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     with pytest.raises(ValueError):

@@ -12,14 +12,16 @@ v0.9.16 之前只有音檔會換帳號:`_rotate_for_quota` 只長在 `tools_podc
 真的接上去了**、以及附件家族專屬的稽核面(episode 級,因為附件沒有 durable attempt)。
 每一條都同時是「不補一半」的反向鎖:三支工具各驗一次,不是只驗 slides。
 """
+
 import json
+from pathlib import Path
 
 import pytest
 from conftest import FakeClient, bouncing_rotate_client, refuse_first
 
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_artifacts as a
+from notebooklm_mcp import runtime, tools_artifacts as a
 from notebooklm_mcp._errors import NotebookAccessDenied
+from notebooklm_mcp._status import TerminalGenerationError
 
 
 def _manifest(tmp_path, episodes=None):
@@ -35,7 +37,7 @@ def _manifest(tmp_path, episodes=None):
 
 
 def _episode(manifest_path, episode_n=1):
-    data = json.loads(open(manifest_path, encoding="utf-8").read())
+    data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     return next(e for e in data["episodes"] if e["episode"] == episode_n)
 
 
@@ -138,7 +140,8 @@ async def test_all_accounts_exhausted_raises_after_trying_each_once(fake_client,
     # 往外拋的例外裡。response 一遺失,「哪個帳號被拒過」就答不出來 —— 而那正是
     # ADR-0010/0011 拿來justify「可以換帳號」的兩個問題之一。
     refused = [
-        e for e in _episode(manifest_path)["attachment_errors"]
+        e
+        for e in _episode(manifest_path)["attachment_errors"]
         if e["phase"] == "attachment_dispatch_refused"
     ]
     assert [e["account"] for e in refused] == ["c@x"], (
@@ -179,8 +182,16 @@ async def test_acceptance_unknown_leaves_a_breadcrumb(fake_client, tmp_path):
     manifest_path = _manifest(tmp_path)
 
     async def accepted_then_failed(*args, **kwargs):
-        return type("S", (), {"task_id": "art-9", "is_failed": True,
-                              "status": "failed", "error": "伺服器端生成失敗"})()
+        return type(
+            "S",
+            (),
+            {
+                "task_id": "art-9",
+                "is_failed": True,
+                "status": "failed",
+                "error": "伺服器端生成失敗",
+            },
+        )()
 
     fake_client.artifacts.generate_slide_deck = accepted_then_failed
 
@@ -218,8 +229,17 @@ async def test_terminates_even_if_rotate_never_reports_exhaustion(
         calls.append(state["active"])
         if shape == "raise":
             raise RateLimitError("每日配額已用盡")
-        return type("S", (), {"task_id": "", "is_failed": True, "status": "failed",
-                              "error": "每日配額已用盡", "error_code": "RateLimitError"})()
+        return type(
+            "S",
+            (),
+            {
+                "task_id": "",
+                "is_failed": True,
+                "status": "failed",
+                "error": "每日配額已用盡",
+                "error_code": "RateLimitError",
+            },
+        )()
 
     pool = ["a@x", "b@x"]
     state = {"active": "a@x", "n": 0}
@@ -254,8 +274,9 @@ async def test_generic_failure_never_rotates(fake_client, tmp_path):
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
-                  exc=RPCError("伺服器 500"))
+    refuse_first(
+        fake_client, "generate_slide_deck", calls, fail_first_n=99, exc=RPCError("伺服器 500")
+    )
 
     with pytest.raises(RPCError):
         await a.generate_slides("nb-1", manifest_path, 1)
@@ -308,9 +329,17 @@ async def test_empty_task_id_refusal_rotates(fake_client, tmp_path):
     async def refuse_then_ok(*args, **kwargs):
         calls.append(runtime.active_account())
         if len(calls) == 1:
-            return type("S", (), {"task_id": "", "is_failed": True,
-                                  "status": "failed", "error": "配額用盡",
-                                  "error_code": "RateLimitError"})()
+            return type(
+                "S",
+                (),
+                {
+                    "task_id": "",
+                    "is_failed": True,
+                    "status": "failed",
+                    "error": "配額用盡",
+                    "error_code": "RateLimitError",
+                },
+            )()
         return await original(*args, **kwargs)
 
     fake_client.artifacts.generate_slide_deck = refuse_then_ok
@@ -330,8 +359,13 @@ async def test_permission_denied_never_rotates_and_names_the_fix(fake_client, tm
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
     calls: list = []
-    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=99,
-                  exc=ClientError("permission denied", rpc_code=7))
+    refuse_first(
+        fake_client,
+        "generate_slide_deck",
+        calls,
+        fail_first_n=99,
+        exc=ClientError("permission denied", rpc_code=7),
+    )
 
     with pytest.raises(NotebookAccessDenied, match="分享") as excinfo:
         await a.generate_slides("nb-1", manifest_path, 1)
@@ -344,9 +378,7 @@ async def test_permission_denied_never_rotates_and_names_the_fix(fake_client, tm
     assert _failovers(manifest_path) == []
 
 
-async def test_permission_denied_is_a_clean_refusal_not_acceptance_unknown(
-    fake_client, tmp_path
-):
+async def test_permission_denied_is_a_clean_refusal_not_acceptance_unknown(fake_client, tmp_path):
     """權限被拒要走**乾淨終態**(`refused`),不是「受理不明」——上面那條鎖不到這件事。
 
     `_failovers(...) == []` 在**兩種**終態下都成立,所以權限那條 except 若被搬到泛用分支
@@ -366,8 +398,13 @@ async def test_permission_denied_is_a_clean_refusal_not_acceptance_unknown(
 
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(tmp_path)
-    refuse_first(fake_client, "generate_slide_deck", [], fail_first_n=99,
-                 exc=ClientError("permission denied", rpc_code=7))
+    refuse_first(
+        fake_client,
+        "generate_slide_deck",
+        [],
+        fail_first_n=99,
+        exc=ClientError("permission denied", rpc_code=7),
+    )
 
     with pytest.raises(NotebookAccessDenied):
         await a.generate_slides("nb-1", manifest_path, 1)
@@ -426,9 +463,7 @@ async def test_download_uses_the_account_that_dispatched_after_failover(tmp_path
     assert [c for c in second.artifacts.calls if c[0] == download], (
         "下載要落在實際送出生成的那個 client 上"
     )
-    assert [c for c in first.artifacts.calls if c[0] == download] == [], (
-        "被拒的那個帳號不該碰下載"
-    )
+    assert [c for c in first.artifacts.calls if c[0] == download] == [], "被拒的那個帳號不該碰下載"
     assert _episode(manifest_path)[account_field] == "b@x"
 
 
@@ -463,12 +498,16 @@ async def test_rescue_download_never_claims_to_know_who_generated(fake_client, t
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     manifest_path = _manifest(
         tmp_path,
-        [{
-            "episode": 1, "title": "EP01",
-            "slides_account": "a@x", "slides_artifact_id": "deck-OLD",
-        }],
+        [
+            {
+                "episode": 1,
+                "title": "EP01",
+                "slides_account": "a@x",
+                "slides_artifact_id": "deck-OLD",
+            }
+        ],
     )
-    runtime.rotate_client(refused="a@x")     # 游標推到 b@x —— 不該被寫進紀錄
+    runtime.rotate_client(refused="a@x")  # 游標推到 b@x —— 不該被寫進紀錄
 
     await a.artifact_download_slides("nb-1", manifest_path, 1, "deck-NEW")
 
@@ -479,9 +518,7 @@ async def test_rescue_download_never_claims_to_know_who_generated(fake_client, t
     assert episode["slides_artifact_id"] == "deck-NEW", "本機成品現在是這一顆"
 
 
-async def test_failed_generation_leaves_the_previous_provenance_untouched(
-    fake_client, tmp_path
-):
+async def test_failed_generation_leaves_the_previous_provenance_untouched(fake_client, tmp_path):
     """生成失敗時,舊成品的 provenance **一個字都不能動**。
 
     這是第二版「受理憑據」被退掉的直接原因(獨立複審第二輪 F1,實測重現):憑據在受理成功
@@ -493,20 +530,28 @@ async def test_failed_generation_leaves_the_previous_provenance_untouched(
     pdf.write_bytes(b"%PDF-OLD")
     manifest_path = _manifest(
         tmp_path,
-        [{
-            "episode": 1, "title": "EP01", "slides_pdf_path": str(pdf),
-            "slides_account": "old@x", "slides_artifact_id": "deck-OLD",
-        }],
+        [
+            {
+                "episode": 1,
+                "title": "EP01",
+                "slides_pdf_path": str(pdf),
+                "slides_account": "old@x",
+                "slides_artifact_id": "deck-OLD",
+            }
+        ],
     )
     runtime.set_clients([("new@x", fake_client)])
 
     async def failed_wait(*args, **kwargs):
-        return type("S", (), {"is_completed": False, "is_failed": True,
-                              "status_str": "failed", "status": "failed"})()
+        return type(
+            "S",
+            (),
+            {"is_completed": False, "is_failed": True, "status_str": "failed", "status": "failed"},
+        )()
 
     fake_client.artifacts.wait_for_completion = failed_wait
 
-    with pytest.raises(Exception):
+    with pytest.raises(TerminalGenerationError):
         await a.generate_slides("nb-1", manifest_path, 1)
 
     episode = _episode(manifest_path)
@@ -601,55 +646,12 @@ async def test_series_resend_closure_does_not_hold_local_conversions(fake_client
     from notebooklm_mcp import tools_artifacts, tools_podcast
 
     LOCAL_CONVERSIONS = {
-        "resolve_language", "to_slide_format", "to_slide_length",
-        "to_report_format", "to_audio_format", "to_audio_length",
-    }
-    offenders = []
-    for module in (tools_podcast, tools_artifacts):
-        tree = ast.parse(inspect.getsource(module))
-        for node in ast.walk(tree):
-            # dispatch closure = 傳給共用迴圈的那個 `async def`,一律叫 _generate* / _revise*
-            if not isinstance(node, ast.AsyncFunctionDef):
-                continue
-            if not (node.name.startswith("_generate") or node.name.startswith("_revise")):
-                continue
-            for call in ast.walk(node):
-                if (
-                    isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name)
-                    and call.func.id in LOCAL_CONVERSIONS
-                ):
-                    offenders.append(f"{module.__name__}.{node.name} -> {call.func.id}()")
-
-    assert offenders == [], (
-        "dispatch closure 內做純本地轉換 —— 它拋的 ValueError 會落進共用迴圈的泛用 "
-        f"except,被記成從未發生的遠端事件:{offenders}"
-    )
-
-
-async def test_series_resend_closure_does_not_hold_local_conversions(fake_client, tmp_path):
-    """**系統裡第三個 dispatch closure** 也不准在 closure 內做純本地轉換。
-
-    v0.9.16 把 `generate_slides` / `generate_report` 的 `resolve_language` / enum 轉換移到
-    closure 外(否則 `ValueError` 會被寫成一筆假的「遠端受理不明」),但漏了
-    `podcast_series` 的 `_generate_resend` —— 而音檔那條的後果比附件嚴重:不是多一行假
-    log,是**一個 durable attempt 被推進 `acceptance_unknown` 而遠端一次都沒被碰到**,
-    而 ADR-0009 會把呼叫端從那個狀態導去 reconcile,那裡什麼都撈不到。
-
-    ⚠️ **那條路是可達的** —— 本測試第一版的 docstring 寫「目前碰不到,靠 `_assert_series_owns_attempt`
-    擋著」,獨立複審用 probe 證明是錯的:`_audio_settings` 只保存**原始字串**,所以 prepared
-    attempt 與本次呼叫帶同一個「目前 mapper 不認得的舊值」時,ownership 等值檢查會通過。
-    行為面由 `test_series_resend_converts_before_the_durable_claim` 守;這條是**結構鎖**,
-    守住三個 closure 都不准把本地轉換關進去(AST 看得到而行為測試看不到的那一半)。
-    """
-    import ast
-    import inspect
-
-    from notebooklm_mcp import tools_artifacts, tools_podcast
-
-    LOCAL_CONVERSIONS = {
-        "resolve_language", "to_slide_format", "to_slide_length",
-        "to_report_format", "to_audio_format", "to_audio_length",
+        "resolve_language",
+        "to_slide_format",
+        "to_slide_length",
+        "to_report_format",
+        "to_audio_format",
+        "to_audio_length",
     }
     offenders = []
     for module in (tools_podcast, tools_artifacts):
@@ -691,8 +693,13 @@ async def test_identical_refusals_stay_as_separate_entries(fake_client, tmp_path
 
     runtime.set_clients([("a@x", fake_client)])
     manifest_path = _manifest(tmp_path)
-    refuse_first(fake_client, "generate_slide_deck", [], fail_first_n=99,
-                 exc=ClientError("permission denied", rpc_code=7))
+    refuse_first(
+        fake_client,
+        "generate_slide_deck",
+        [],
+        fail_first_n=99,
+        exc=ClientError("permission denied", rpc_code=7),
+    )
 
     for _ in range(4):
         with pytest.raises(NotebookAccessDenied):
@@ -702,9 +709,7 @@ async def test_identical_refusals_stay_as_separate_entries(fake_client, tmp_path
     assert len(events) == 4, f"四次拒絕要留四筆原始事件,實得 {len(events)}"
     assert all(e["phase"] == "attachment_dispatch_refused" for e in events)
     assert len({e["recorded_at"] for e in events}) == 4, "每一筆的時間都要可還原"
-    assert not any("repeated" in e for e in events), (
-        "不准把逐筆事件換成摘要 —— 要做先改 ADR-0011"
-    )
+    assert not any("repeated" in e for e in events), "不准把逐筆事件換成摘要 —— 要做先改 ADR-0011"
 
 
 async def test_two_different_terminal_states_each_leave_an_entry(fake_client, tmp_path):
@@ -750,8 +755,9 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
     轉換才是第一個爆點。劇本沿用 `test_series_failover` 既有的 resend 佈置
     (attempt 先 claim 再 `not_accepted`,podcast_series 會 re-arm 它並重送)。
     """
-    from notebooklm_mcp import tools_podcast as p
     from notebooklm.exceptions import RateLimitError
+
+    from notebooklm_mcp import tools_podcast as p
 
     manifest_path = tmp_path / "series_manifest.json"
     store = p.ManifestStore(str(manifest_path))
@@ -769,16 +775,14 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
         audio_format="no-such-format",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(
-        store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0
-    )
+    assert p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
     p._mark_not_accepted(store, 1, attempt_id, RateLimitError("每日配額已用盡"))
 
     with pytest.raises(ValueError, match="no-such-format"):
         await p.podcast_series(
             "nb-1",
             episodes=[{"title": "心法篇", "brief": "1"}],
-            output_dir=str(tmp_path),   # manifest 由 output_dir 推導
+            output_dir=str(tmp_path),  # manifest 由 output_dir 推導
             audio_format="no-such-format",
         )
 
@@ -786,6 +790,4 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
     assert attempt["dispatch"]["status"] != "dispatching", (
         "本地轉換失敗不得留下『正在送』的 durable 狀態 —— 遠端一次都沒被碰到"
     )
-    assert [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"] == [], (
-        "零生成 RPC"
-    )
+    assert [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"] == [], "零生成 RPC"

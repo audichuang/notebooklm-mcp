@@ -7,12 +7,12 @@ notebook sources that persist across process runs. (Verified live: a fresh
 process listing the notebook still showed EP01/EP02 — RESUME_CONTINUITY_PRESERVED.)
 FakeSources now models that persistent set, so these tests assert the real invariant.
 """
+
 import json
 
 import pytest
 
 from notebooklm_mcp import tools_podcast as p
-
 
 EPS3 = [
     {"title": "心法篇", "brief": "1"},

@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from conftest import FakeClient, _structured_document
 from notebooklm.exceptions import (
     AuthError,
     ClientError,
@@ -22,18 +23,24 @@ from notebooklm.types import (
     utf16_len,
 )
 
-from conftest import FakeClient, _structured_document
-
 from notebooklm_mcp import runtime, tools_basic as t
 from notebooklm_mcp._errors import NotebookAccessDenied
 
 
 def _fake_art(id, title, kind, completed=True, source_ids=("src-1", "src-2")):
-    return type("A", (), {
-        "id": id, "title": title, "kind": kind, "is_completed": completed,
-        "status_str": "completed" if completed else "processing", "created_at": None,
-        "source_ids": source_ids,
-    })()
+    return type(
+        "A",
+        (),
+        {
+            "id": id,
+            "title": title,
+            "kind": kind,
+            "is_completed": completed,
+            "status_str": "completed" if completed else "processing",
+            "created_at": None,
+            "source_ids": source_ids,
+        },
+    )()
 
 
 async def test_generate_audio_defaults_zh_hant(fake_client):
@@ -79,7 +86,11 @@ async def test_ask_passes_scope_and_returns_refs(fake_client):
     call = fake_client.chat.calls[-1][1]
     assert call["source_ids"] == ["src-1"] and call["conversation_id"] == "c9"
     assert out["conversation_id"] == "c9"
-    assert out["references"][0] == {"source_id": "src-1", "citation_number": 1, "cited_text": "引用片段"}
+    assert out["references"][0] == {
+        "source_id": "src-1",
+        "citation_number": 1,
+        "cited_text": "引用片段",
+    }
 
 
 async def test_ask_rejects_an_empty_source_ids_list(fake_client):
@@ -104,20 +115,32 @@ async def test_source_fulltext(fake_client):
 
 
 async def test_notebook_get(fake_client):
-    fake_client.notebooks.get = AsyncMock(return_value=SimpleNamespace(
-        id="nb-7", title="Test", sources_count=2, is_owner=True,
-        created_at=None, role=None,
-    ))
+    fake_client.notebooks.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="nb-7",
+            title="Test",
+            sources_count=2,
+            is_owner=True,
+            created_at=None,
+            role=None,
+        )
+    )
     out = await t.notebook_get("nb-7")
     assert out["notebook_id"] == "nb-7" and out["sources_count"] == 2
     assert out["is_owner"] is True and out["role"] is None
 
 
 async def test_notebook_get_forwards_role_name(fake_client):
-    fake_client.notebooks.get = AsyncMock(return_value=SimpleNamespace(
-        id="nb-7", title="Test", sources_count=2, is_owner=False,
-        created_at=None, role=SharePermission.VIEWER,
-    ))
+    fake_client.notebooks.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="nb-7",
+            title="Test",
+            sources_count=2,
+            is_owner=False,
+            created_at=None,
+            role=SharePermission.VIEWER,
+        )
+    )
     out = await t.notebook_get("nb-7")
     assert out["role"] == "VIEWER"
 
@@ -130,9 +153,7 @@ async def test_notebook_get_translates_permission_denied_with_the_repair_hint(fa
     `notebook_get` 確認目標對不對」,所以實務上這是最先撞到的一支
     (`_list_sources` 早就有這層翻譯,兩處不該只有一處對)。
     """
-    fake_client.notebooks.get = AsyncMock(
-        side_effect=ClientError("permission denied", rpc_code=7)
-    )
+    fake_client.notebooks.get = AsyncMock(side_effect=ClientError("permission denied", rpc_code=7))
     with pytest.raises(NotebookAccessDenied) as excinfo:
         await t.notebook_get("nb-7")
     assert "notebook_share_with_pool" in str(excinfo.value)
@@ -164,9 +185,15 @@ async def test_artifact_list_maps_fields(fake_client):
     out = await t.artifact_list("nb-1")
     rows = out["artifacts"]
     assert [r["artifact_id"] for r in rows] == ["a1", "a2"]
-    assert rows[0] == {"artifact_id": "a1", "title": "EP01 心法篇", "kind": "audio",
-                       "completed": True, "status": "completed", "created_at": None,
-                       "source_ids": ["src-1", "src-2"]}
+    assert rows[0] == {
+        "artifact_id": "a1",
+        "title": "EP01 心法篇",
+        "kind": "audio",
+        "completed": True,
+        "status": "completed",
+        "created_at": None,
+        "source_ids": ["src-1", "src-2"],
+    }
     assert rows[1]["kind"] == "report" and rows[1]["completed"] is False
     assert rows[1]["status"] == "processing"
 
@@ -230,9 +257,7 @@ async def test_artifact_rename_rejects_an_id_from_another_notebook_before_mutati
         assert (notebook_id, artifact_id) == ("nb-requested", "task-elsewhere")
         return None
 
-    monkeypatch.setattr(
-        fake_client.artifacts, "get_or_none", absent_from_requested_notebook
-    )
+    monkeypatch.setattr(fake_client.artifacts, "get_or_none", absent_from_requested_notebook)
 
     with pytest.raises(ValueError, match="not in notebook"):
         await t.artifact_rename("nb-requested", "task-elsewhere", "不應落地")
@@ -337,7 +362,7 @@ async def test_auth_check_hints_relogin_for_real_sdk_auth_shapes(fake_client, er
 )
 async def test_auth_check_preserves_non_auth_error_type(fake_client, error):
     fake_client.notebooks.list = AsyncMock(side_effect=error)
-    with pytest.raises(type(error)) as caught:
+    with pytest.raises(type(error)):
         await t.auth_check()
 
 
@@ -418,38 +443,45 @@ async def test_source_add_file_title_whitespace_not_false_positive(fake_client, 
 
 # ---- v0.2.9 token-diet:P1 source_fulltext 輕量對帳 ----------------------------
 
+
 async def test_source_fulltext_default_shape_unchanged(fake_client):
     """不傳新參數 = 現行輸出(非破壞性硬約束)。"""
     out = await t.source_fulltext("nb-1", "src-9")
-    assert out == {"source_id": "src-9", "title": "來源標題",
-                   "char_count": 4, "content": "來源全文"}
+    assert out == {
+        "source_id": "src-9",
+        "title": "來源標題",
+        "char_count": 4,
+        "content": "來源全文",
+    }
 
 
 async def test_source_fulltext_max_chars_truncates(fake_client):
-    fake_client.sources.fulltext_content = "零一二三四五六七八九" * 10   # 100 chars
+    fake_client.sources.fulltext_content = "零一二三四五六七八九" * 10  # 100 chars
     out = await t.source_fulltext("nb-1", "src-9", max_chars=10)
     assert out["content"] == "零一二三四五六七八九"
     assert out["truncated"] is True
-    assert out["char_count"] == 100          # char_count 永遠是全文長度,不因截斷變小
+    assert out["char_count"] == 100  # char_count 永遠是全文長度,不因截斷變小
 
 
 async def test_source_fulltext_contains_normalizes_cjk_spaces(fake_client):
     # NotebookLM 對 CJK 會插空格;比對前兩邊都要 normalize
     fake_client.sources.fulltext_content = "來 源 全 文 有 harness 工 程"
-    out = await t.source_fulltext("nb-1", "src-9", max_chars=0,
-                                  contains=["來源全文", "harness", "沒有的詞"])
+    out = await t.source_fulltext(
+        "nb-1", "src-9", max_chars=0, contains=["來源全文", "harness", "沒有的詞"]
+    )
     assert out["hits"] == {"來源全文": True, "harness": True, "沒有的詞": False}
-    assert out["content"] == ""              # max_chars=0:對帳只要 char_count+hits,不灌全文
+    assert out["content"] == ""  # max_chars=0:對帳只要 char_count+hits,不灌全文
 
 
 async def test_source_fulltext_rejects_bad_args(fake_client):
     with pytest.raises(ValueError):
         await t.source_fulltext("nb-1", "src-9", max_chars=-1)
     with pytest.raises(ValueError):
-        await t.source_fulltext("nb-1", "src-9", contains=["ok", "  "])   # 空關鍵詞永遠命中
+        await t.source_fulltext("nb-1", "src-9", contains=["ok", "  "])  # 空關鍵詞永遠命中
 
 
 # ---- v0.2.9 token-diet:P2 add source 自帶落地驗證(best-effort probe)---------
+
 
 async def test_source_add_url_returns_char_count(fake_client):
     fake_client.sources.fulltext_content = "文章正文" * 50
@@ -485,7 +517,7 @@ async def test_source_add_no_probe_when_wait_false(fake_client):
 async def test_source_add_probe_failure_is_best_effort(fake_client):
     fake_client.sources.fulltext_raises = True
     out = await t.source_add_url("nb-1", "https://example.com/post")
-    assert out["source_id"].startswith("src-")   # add 本身成功,probe 掛掉不連坐
+    assert out["source_id"].startswith("src-")  # add 本身成功,probe 掛掉不連坐
     assert out["char_count"] is None and "note" in out
     assert "RuntimeError" in out["note"]
 
@@ -516,8 +548,8 @@ async def test_source_add_file_wraps_unsupported_text_as_markdown(fake_client, t
     call = _add_file_call(fake_client)
     # 保留原副檔名做出處:a.ts 與 a.json 不會撞成同一個 a.md。
     assert call["file_path"].endswith("fixture-output.json.md")
-    assert call["file_bytes"] == b'{"ok": true}\n'      # 內容一字不差
-    assert call["mime_type"] is None                    # 讓 SDK 從 .md 推 text/markdown
+    assert call["file_bytes"] == b'{"ok": true}\n'  # 內容一字不差
+    assert call["mime_type"] is None  # 讓 SDK 從 .md 推 text/markdown
     assert out["converted_from"] == "fixture-output.json"
 
 
@@ -531,7 +563,7 @@ async def test_source_add_file_explicit_mime_wins_over_wrapping(fake_client, tmp
     out = await t.source_add_file("nb-1", str(f), mime_type="application/json")
 
     call = _add_file_call(fake_client)
-    assert call["file_path"] == str(f)                  # 原樣,沒被改名
+    assert call["file_path"] == str(f)  # 原樣,沒被改名
     assert call["mime_type"] == "application/json"
     assert "converted_from" not in out
 
@@ -539,15 +571,15 @@ async def test_source_add_file_explicit_mime_wins_over_wrapping(fake_client, tmp
 @pytest.mark.parametrize(
     "name, content",
     [
-        ("notes.md", b"# already markdown\n"),          # 原生格式
-        ("table.csv", b"a,b\n1,2\n"),                   # 表格:包成 .md 會丟掉原生語意
-        ("deck.pptx", b"PK\x03\x04binary"),             # 官方列為可上傳來源
-        ("ep03.mp3", b"x"),                             # 不傳 mime 的假 mp3:仍不得包裝
-        ("shot.png", b"\x89PNG\r\n\x1a\nIHDR"),         # 圖片(SourceType.IMAGE)
+        ("notes.md", b"# already markdown\n"),  # 原生格式
+        ("table.csv", b"a,b\n1,2\n"),  # 表格:包成 .md 會丟掉原生語意
+        ("deck.pptx", b"PK\x03\x04binary"),  # 官方列為可上傳來源
+        ("ep03.mp3", b"x"),  # 不傳 mime 的假 mp3:仍不得包裝
+        ("shot.png", b"\x89PNG\r\n\x1a\nIHDR"),  # 圖片(SourceType.IMAGE)
         ("diagram.svg", b"<svg xmlns='http://www.w3.org/2000/svg'/>"),  # 合法 UTF-8 的圖片
         ("page.html", b"<html><script>x</script></html>"),  # 上游刻意 fail-loud,不偽轉換
-        ("blob.bin", b"\xff\xfe\x00binary"),            # 無效 UTF-8
-        ("nulls.dat", b"abc\x00def"),                   # NUL 是合法 UTF-8,decode 擋不掉
+        ("blob.bin", b"\xff\xfe\x00binary"),  # 無效 UTF-8
+        ("nulls.dat", b"abc\x00def"),  # NUL 是合法 UTF-8,decode 擋不掉
     ],
 )
 async def test_source_add_file_passes_through_untouched(fake_client, tmp_path, name, content):
@@ -578,7 +610,7 @@ async def test_source_add_file_wrap_size_cap_is_exclusive(fake_client, tmp_path,
     out = await t.source_add_file("nb-1", str(over_cap))
     assert "converted_from" not in out
     last = [c[1] for c in fake_client.sources.calls if c[0] == "add_file"][-1]
-    assert last["file_path"] == str(over_cap)        # 超過上限:原樣送,沒進包裝
+    assert last["file_path"] == str(over_cap)  # 超過上限:原樣送,沒進包裝
 
 
 def test_max_convert_bytes_value_is_locked():
@@ -587,6 +619,7 @@ def test_max_convert_bytes_value_is_locked():
 
 
 # ---- v0.2.9 token-diet:P4 chat_ask 清引用 + 可關 references --------------------
+
 
 async def test_chat_ask_default_keeps_citations_and_references(fake_client):
     """預設不清標記、照回 references(非破壞性:既有 caller 靠標記對照引用)。
@@ -730,9 +763,7 @@ async def test_chat_ask_strip_citations_render_keeps_paragraph_breaks(fake_clien
     完全不插分隔符,段落會黏在一起。這條測試是 (1) 的絆線——有人把
     `chat_ask` 改回讀 `.text` 這裡會紅。
     """
-    fake_client.chat.answer_document = _structured_document(
-        "重點一", "重點二", "重點三"
-    )
+    fake_client.chat.answer_document = _structured_document("重點一", "重點二", "重點三")
     out = await t.chat_ask("nb-1", "重點?", strip_citations=True)
     assert out["answer"] == "重點一\n重點二\n重點三"
 
@@ -753,16 +784,19 @@ async def test_chat_ask_strip_citations_leaves_no_gap_before_punctuation(fake_cl
 
 async def test_chat_ask_exclude_references(fake_client):
     out = await t.chat_ask("nb-1", "重點?", include_references=False)
-    assert out["references"] == []   # show notes 路徑不需要 references,省 token
+    assert out["references"] == []  # show notes 路徑不需要 references,省 token
 
 
-async def test_source_add_file_wrapping_does_not_block_the_event_loop(fake_client, tmp_path, monkeypatch):
+async def test_source_add_file_wrapping_does_not_block_the_event_loop(
+    fake_client, tmp_path, monkeypatch
+):
     """包裝會做 stat + 最多 25 MiB 的 read/write。同步跑在 async 工具裡會卡住整個 MCP
     event loop——其他 request、取消、長跑狀態查詢全被凍住,外層 client 可能先 timeout。"""
-    import asyncio, time
+    import asyncio
+    import time
 
     def slow_wrap(file_path, tmpdir):
-        time.sleep(0.2)                      # 模擬慢速掛載上的大檔 I/O
+        time.sleep(0.2)  # 模擬慢速掛載上的大檔 I/O
         return file_path, None
 
     monkeypatch.setattr(t, "_as_uploadable_text", slow_wrap)
@@ -779,7 +813,7 @@ async def test_source_add_file_wrapping_does_not_block_the_event_loop(fake_clien
     f.write_text('{"ok": true}', encoding="utf-8")
     await t.source_add_file("nb-1", str(f))
     beat.cancel()
-    assert ticks >= 5                        # 慢 I/O 期間 event loop 仍在轉
+    assert ticks >= 5  # 慢 I/O 期間 event loop 仍在轉
 
 
 async def test_artifact_retry_failed_rejects_an_artifact_from_another_notebook(fake_client):
@@ -792,13 +826,14 @@ async def test_artifact_retry_failed_rejects_an_artifact_from_another_notebook(f
 async def test_artifact_retry_failed_refuses_a_healthy_artifact(fake_client):
     """retry 一個已完成的 artifact 會在遠端就地重跑,可能把一份好的產物換掉。
     刻意不限制 kind —— retry_failed 本來就是跨 artifact 種類的通用能力。"""
-    fake_client.artifacts.seed_artifact("deck-1")           # completed、非 failed
+    fake_client.artifacts.seed_artifact("deck-1")  # completed、非 failed
     with pytest.raises(ValueError, match="不是 failed 狀態"):
         await t.artifact_retry_failed("nb-123", "deck-1")
     assert not [c for c in fake_client.artifacts.calls if c[0] == "retry_failed"]
 
 
 # ---- auth_check 的射程:預設只量作用中那一槽 -------------------------------------
+
 
 def _pool(*clients):
     """裝一個多槽 pool,label 用 index 區分。"""
@@ -829,16 +864,28 @@ async def test_auth_check_all_slots_reports_every_slot_with_refreshability(fake_
     dead = FakeClient()
     dead.notebooks.fail_list = True
     _pool(fake_client, dead)
-    runtime.set_slot_diagnostics([
-        {"slot": 1, "env": "NOTEBOOKLM_AUTH_JSON", "refreshable": False,
-         "heal_reason": "wrong_scope", "psidts_domains": [".youtube.com"]},
-        {"slot": 2, "env": "NOTEBOOKLM_AUTH_JSON_2", "refreshable": True,
-         "heal_reason": None, "psidts_domains": [".google.com"]},
-    ])
+    runtime.set_slot_diagnostics(
+        [
+            {
+                "slot": 1,
+                "env": "NOTEBOOKLM_AUTH_JSON",
+                "refreshable": False,
+                "heal_reason": "wrong_scope",
+                "psidts_domains": [".youtube.com"],
+            },
+            {
+                "slot": 2,
+                "env": "NOTEBOOKLM_AUTH_JSON_2",
+                "refreshable": True,
+                "heal_reason": None,
+                "psidts_domains": [".google.com"],
+            },
+        ]
+    )
 
     result = await t.auth_check(all_slots=True)
 
-    assert result["ok"] is True          # 作用中那一槽活著 —— 與預設模式同義
+    assert result["ok"] is True  # 作用中那一槽活著 —— 與預設模式同義
     assert result["all_usable"] is False  # 但 pool 不是全綠
     first, second = result["slots"]
     assert first["slot"] == 1 and first["active"] is True
@@ -896,7 +943,7 @@ async def test_auth_check_all_slots_ok_is_null_when_the_active_slot_was_not_meas
         raise TimeoutError("upstream slow")
 
     flaky.notebooks.list = _boom
-    _pool(flaky, fake_client)          # 作用中 = 第一槽 = 探測不到的那個
+    _pool(flaky, fake_client)  # 作用中 = 第一槽 = 探測不到的那個
 
     result = await t.auth_check(all_slots=True)
 
@@ -916,15 +963,14 @@ class TestSourceSearch:
 
     async def test_passes_every_argument_through_untouched(self, fake_client):
         from notebooklm.types import RelevantChunk
+
         from notebooklm_mcp import tools_basic as t
 
         fake_client.sources.search_results = [
             RelevantChunk(source_id="s1", text="第一段", rank=1, start=0, end=3),
             RelevantChunk(source_id="s2", text="第二段", rank=2, start=None, end=None),
         ]
-        out = await t.source_search(
-            "nb1", "  什麼是 X  ", source_ids=["s1", "s2"], limit=5
-        )
+        out = await t.source_search("nb1", "  什麼是 X  ", source_ids=["s1", "s2"], limit=5)
 
         call = [c for c in fake_client.sources.calls if c[0] == "search"][-1]
         assert call[1] == {
@@ -954,6 +1000,7 @@ class TestSourceSearch:
     async def test_sdk_validation_error_is_not_swallowed(self, fake_client):
         """空 query 必須爆,不可以變成「查無結果」——那會讓呼叫端以為來源裡沒有。"""
         from notebooklm.exceptions import ValidationError
+
         from notebooklm_mcp import tools_basic as t
 
         with pytest.raises(ValidationError):

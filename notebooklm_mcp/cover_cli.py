@@ -27,6 +27,7 @@ content-hash)。換 Chrome 或字型版本可能改 bytes → 重發時該集封
     notebooklm-cover --output ep05.jpg --show-name Audicast --episode EP05 \\
         --title "本集標題" --byline audichuang
 """
+
 from __future__ import annotations
 
 import argparse
@@ -40,14 +41,19 @@ import tempfile
 from PIL import Image
 
 from notebooklm_mcp._atomic import prepared_replacement
-from notebooklm_mcp.publish.artwork import validate_artwork
 from notebooklm_mcp.manifest_store import ManifestStore
 from notebooklm_mcp.naming import bare_episode_title
+from notebooklm_mcp.publish.artwork import validate_artwork
 
 _ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-_CHROME_CANDIDATES = ["google-chrome", "google-chrome-stable", "chromium",
-                      "chromium-browser", "chrome"]
-S = 3000        # 邊長:Apple 上限,縮圖與大圖都最清晰
+_CHROME_CANDIDATES = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+]
+S = 3000  # 邊長:Apple 上限,縮圖與大圖都最清晰
 _SHOW_HUE = 265  # 節目封面品牌簽名色(色相),可 --hue 覆寫
 
 
@@ -99,16 +105,26 @@ def _render(template: str, subs: dict, output: str, chrome: str) -> dict:
             with open(hpath, "w", encoding="utf-8") as f:
                 f.write(doc)
             r = subprocess.run(
-                [chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
-                 "--hide-scrollbars", "--force-device-scale-factor=1",
-                 f"--window-size={S},{S}", f"--screenshot={png}",
-                 f"file://{os.path.abspath(hpath)}"],   # 必須絕對路徑,否則 Chrome 當 host → ERR_INVALID_URL
-                capture_output=True, text=True, timeout=180)
+                [
+                    chrome,
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--hide-scrollbars",
+                    "--force-device-scale-factor=1",
+                    f"--window-size={S},{S}",
+                    f"--screenshot={png}",
+                    f"file://{os.path.abspath(hpath)}",
+                ],  # 必須絕對路徑,否則 Chrome 當 host → ERR_INVALID_URL
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
             if not os.path.exists(png):
                 raise SystemExit(f"Chrome 光柵化失敗 (exit={r.returncode}):{r.stderr[-400:]}")
             with Image.open(png) as image:
                 image.convert("RGB").save(temporary_output, "JPEG", quality=92)
-        info = validate_artwork(temporary_output)   # 驗過才 commit(replace 在離開時)
+        info = validate_artwork(temporary_output)  # 驗過才 commit(replace 在離開時)
     return info
 
 
@@ -151,34 +167,46 @@ def _preflight_episodes(episodes: list) -> None:
             raise ValueError(f"episode {n}: title 必填且非空")
 
 
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="生成 Apple-Podcast 合規封面(HTML template + headless Chrome)")
-    ap.add_argument("--manifest", default=None,
-                    help="JSON manifest:批次為每集生單集封面並寫回 cover_path")
+        description="生成 Apple-Podcast 合規封面(HTML template + headless Chrome)"
+    )
+    ap.add_argument(
+        "--manifest", default=None, help="JSON manifest:批次為每集生單集封面並寫回 cover_path"
+    )
     ap.add_argument("--show", action="store_true", help="產節目(show 層)品牌封面")
     ap.add_argument("--output", default=None, help="輸出路徑(.jpg);單集/節目模式必填")
     ap.add_argument("--output-dir", default=None, help="批次模式輸出目錄")
     # 沒有預設值:曾經的 "Audicast" 永遠 truthy,首發前 manifest 還沒有 show.show_title
     # 可對照時,guard 會靜默放行「Audicast」品牌——使用者從未確認過這就是 Audicast 節目
     # (見下面 `if args.manifest` 分支的 ap.error)。
-    ap.add_argument("--show-name", default=None, help="節目名(封面 wordmark);批次模式"
-                    "可省略以沿用 manifest['show']['show_title'],兩者皆無則報錯")
+    ap.add_argument(
+        "--show-name",
+        default=None,
+        help="節目名(封面 wordmark);批次模式"
+        "可省略以沿用 manifest['show']['show_title'],兩者皆無則報錯",
+    )
     ap.add_argument("--title", default="", help="單集標題(單集一次性模式)")
     ap.add_argument("--tagline", default="", help="節目封面副標(--show 模式)")
     ap.add_argument("--byline", default="", help="署名")
     ap.add_argument("--episode", default=None, help="集號如 EP05(單集一次性模式)")
-    ap.add_argument("--skip-existing", action="store_true",
-                    help="批次模式:目標封面檔已存在就跳過 render(只生新集,仍寫回 cover_path)")
-    ap.add_argument("--hue", type=int, default=None,
-                    help="覆寫色相 0-360(預設:單集用集號決定、節目用品牌色)")
-    ap.add_argument("--chrome", default=None,
-                    help="Chrome binary(否則自動找 / 用 NOTEBOOKLM_COVER_CHROME)")
-    ap.add_argument("--allow-audicast-branding", action="store_true",
-                    help="明確同意沿用模板內寫死的 Audicast 品牌(副標/裝飾程式碼區塊);"
-                         "非 Audicast 節目沒有這個旗標一律拒絕")
+    ap.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="批次模式:目標封面檔已存在就跳過 render(只生新集,仍寫回 cover_path)",
+    )
+    ap.add_argument(
+        "--hue", type=int, default=None, help="覆寫色相 0-360(預設:單集用集號決定、節目用品牌色)"
+    )
+    ap.add_argument(
+        "--chrome", default=None, help="Chrome binary(否則自動找 / 用 NOTEBOOKLM_COVER_CHROME)"
+    )
+    ap.add_argument(
+        "--allow-audicast-branding",
+        action="store_true",
+        help="明確同意沿用模板內寫死的 Audicast 品牌(副標/裝飾程式碼區塊);"
+        "非 Audicast 節目沒有這個旗標一律拒絕",
+    )
     args = ap.parse_args()
 
     # 1) 批次:整季單集封面
@@ -197,7 +225,7 @@ def main() -> None:
             ap.error(message)
         episodes = manifest.get("episodes", [])
         try:
-            _preflight_episodes(episodes)   # 壞資料 fail-fast,絕不半途覆寫 manifest
+            _preflight_episodes(episodes)  # 壞資料 fail-fast,絕不半途覆寫 manifest
         except ValueError as e:
             ap.error(str(e))
 
@@ -213,14 +241,13 @@ def main() -> None:
                 "需要 --show-name:manifest 尚無 show.show_title(還沒發布過),"
                 "無從判斷節目名稱,首次生成封面前請顯式傳 --show-name"
             )
-        _guard_audicast_branding([show_name, manifest_show_title],
-                                 args.allow_audicast_branding)
+        _guard_audicast_branding([show_name, manifest_show_title], args.allow_audicast_branding)
         out_dir = args.output_dir or os.path.dirname(os.path.abspath(args.manifest))
         os.makedirs(out_dir, exist_ok=True)
         tpl = _load_template("cover_episode.html")
         cover_updates: dict[int, tuple[str, str]] = {}
         for ep in episodes:
-            n = int(ep["episode"])                      # 已過 preflight,保證 int
+            n = int(ep["episode"])  # 已過 preflight,保證 int
             cover_path = os.path.abspath(os.path.join(out_dir, f"EP{n:02d}.jpg"))
             if args.skip_existing and os.path.exists(cover_path):
                 # `--skip-existing` 的語意是「已經做完的跳過」,而**壞檔就是沒做完**
@@ -236,23 +263,25 @@ def main() -> None:
                     print(f"SKIP {cover_path} (exists)")
                     continue
             hue = args.hue if args.hue is not None else _episode_hue(n)
-            info = _render(tpl, {
-                "__SHOW__": show_name,
-                "__EPNUM__": f"{n:02d}",
-                "__TITLE__": bare_episode_title(n, ep["title"]),
-                "__BYLINE__": args.byline,
-                "__HUE__": hue,
-            }, cover_path, _find_chrome(args.chrome))
+            info = _render(
+                tpl,
+                {
+                    "__SHOW__": show_name,
+                    "__EPNUM__": f"{n:02d}",
+                    "__TITLE__": bare_episode_title(n, ep["title"]),
+                    "__BYLINE__": args.byline,
+                    "__HUE__": hue,
+                },
+                cover_path,
+                _find_chrome(args.chrome),
+            )
             print(f"OK {cover_path} -> {info}")
             cover_updates[n] = (ep["title"], cover_path)
 
         def attach_cover_paths(latest):
             for episode_n, (expected_title, cover_path) in cover_updates.items():
                 current = next(
-                    (
-                        item for item in latest["episodes"]
-                        if item.get("episode") == episode_n
-                    ),
+                    (item for item in latest["episodes"] if item.get("episode") == episode_n),
                     None,
                 )
                 if current is None or current.get("title") != expected_title:
@@ -276,12 +305,17 @@ def main() -> None:
             ap.error("--show 模式需要 --show-name")
         _guard_audicast_branding([args.show_name], args.allow_audicast_branding)
         hue = args.hue if args.hue is not None else _SHOW_HUE
-        info = _render(_load_template("cover_show.html"), {
-            "__SHOW__": args.show_name,
-            "__TAGLINE__": args.tagline,
-            "__BYLINE__": args.byline,
-            "__HUE__": hue,
-        }, args.output, _find_chrome(args.chrome))
+        info = _render(
+            _load_template("cover_show.html"),
+            {
+                "__SHOW__": args.show_name,
+                "__TAGLINE__": args.tagline,
+                "__BYLINE__": args.byline,
+                "__HUE__": hue,
+            },
+            args.output,
+            _find_chrome(args.chrome),
+        )
         print(f"OK {args.output} -> {info}")
         return
 
@@ -296,13 +330,18 @@ def main() -> None:
     m = re.search(r"\d+", args.episode)
     n = int(m.group(0)) if m else 1
     hue = args.hue if args.hue is not None else _episode_hue(n)
-    info = _render(_load_template("cover_episode.html"), {
-        "__SHOW__": args.show_name,
-        "__EPNUM__": f"{n:02d}",
-        "__TITLE__": bare_episode_title(n, args.title),
-        "__BYLINE__": args.byline,
-        "__HUE__": hue,
-    }, args.output, _find_chrome(args.chrome))
+    info = _render(
+        _load_template("cover_episode.html"),
+        {
+            "__SHOW__": args.show_name,
+            "__EPNUM__": f"{n:02d}",
+            "__TITLE__": bare_episode_title(n, args.title),
+            "__BYLINE__": args.byline,
+            "__HUE__": hue,
+        },
+        args.output,
+        _find_chrome(args.chrome),
+    )
     print(f"OK {args.output} -> {info}")
 
 

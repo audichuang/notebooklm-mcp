@@ -11,16 +11,15 @@ retract 的正主檔案 `test_attempt_retract.py` 不在允許清單裡,所以�
   (`_run_episode` 那圈)一樣覆核 manifest 裡真正記下的狀態。
 - retract 對「已 accepted、從未 promote」的 attempt 沒有出路。
 """
+
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_podcast as p
-
 from conftest import FakeClient
+
+from notebooklm_mcp import runtime, tools_podcast as p
 
 
 def _episode(manifest_path, episode_n=1):
@@ -55,10 +54,11 @@ async def test_inline_resend_finalize_uses_the_rotated_client_not_the_stale_one(
     client_a.artifacts.generate_audio = a_always_refuses
     client_b.artifacts.generate_audio = a_always_refuses
     runtime.set_clients([("a@x", client_a), ("b@x", client_b)])
-    manifest_path = tmp_path / "series_manifest.json"
     stopped = await p.podcast_series(
-        "nb-1", episodes=[{"title": "心法篇", "brief": "1"}],
-        output_dir=str(tmp_path), start=1,
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "1"}],
+        output_dir=str(tmp_path),
+        start=1,
     )
     assert stopped["observed_state"] == "not_accepted"
 
@@ -69,8 +69,10 @@ async def test_inline_resend_finalize_uses_the_rotated_client_not_the_stale_one(
     client_b.artifacts.generate_audio = b_default_generate
 
     out = await p.podcast_series(
-        "nb-1", episodes=[{"title": "心法篇", "brief": "1"}],
-        output_dir=str(tmp_path), start=1,
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "1"}],
+        output_dir=str(tmp_path),
+        start=1,
     )
     assert out["complete"] is True
 
@@ -153,9 +155,7 @@ async def test_cross_episode_probe_auth_follows_the_rotated_account(tmp_path):
         start=1,
     )
 
-    assert probed == ["a@x", "b@x"], (
-        "EP2 開頭的認證預檢要用 EP1 rotate 之後的帳號(B),不能還停在 A"
-    )
+    assert probed == ["a@x", "b@x"], "EP2 開頭的認證預檢要用 EP1 rotate 之後的帳號(B),不能還停在 A"
 
 
 async def test_inline_resend_does_not_lie_about_acceptance_unknown(fake_client, tmp_path):
@@ -186,9 +186,7 @@ async def test_inline_resend_does_not_lie_about_acceptance_unknown(fake_client, 
         raise RateLimitError("每日配額已用盡")
 
     fake_client.artifacts.generate_audio = refuse
-    stopped = await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    stopped = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
     assert stopped["observed_state"] == "not_accepted"
 
     # 第二輪:同一個帳號,這次改丟一個跟配額/權限都無關的普通 RuntimeError——
@@ -199,9 +197,7 @@ async def test_inline_resend_does_not_lie_about_acceptance_unknown(fake_client, 
     fake_client.artifacts.generate_audio = boom
     runtime.set_clients([("solo@x", fake_client)])
 
-    result = await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    result = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
 
     attempt = _episode(manifest_path)["attempts"][0]
     assert attempt["dispatch"]["status"] == "acceptance_unknown", (
@@ -251,13 +247,9 @@ async def test_series_auth_expiry_preserves_prior_results_without_mutation(
             store, 2, attempt_id, [], account="#1", wait_timeout=1200.0
         )
         if attempt_state == "not_accepted":
-            p._mark_not_accepted(
-                store, 2, attempt_id, RateLimitError("每日配額已用盡")
-            )
+            p._mark_not_accepted(store, 2, attempt_id, RateLimitError("每日配額已用盡"))
         else:
-            p._mark_acceptance_unknown(
-                store, 2, attempt_id, TimeoutError("response lost")
-            )
+            p._mark_acceptance_unknown(store, 2, attempt_id, TimeoutError("response lost"))
 
     original_generate = fake_client.artifacts.generate_audio
     generate_count = 0
@@ -276,9 +268,7 @@ async def test_series_auth_expiry_preserves_prior_results_without_mutation(
         return await original_probe(client)
 
     monkeypatch.setattr(p, "probe_auth", expire_after_first_episode)
-    result = await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    result = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
 
     assert result["complete"] is False
     assert result["stopped_at_episode"] == 2
@@ -288,9 +278,7 @@ async def test_series_auth_expiry_preserves_prior_results_without_mutation(
     assert generate_count == 1
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    episode_2 = next(
-        (row for row in manifest["episodes"] if row.get("episode") == 2), None
-    )
+    episode_2 = next((row for row in manifest["episodes"] if row.get("episode") == 2), None)
     if attempt_state != "missing":
         assert episode_2 is not None
         assert episode_2["active_attempt_id"] == attempt_id
@@ -300,9 +288,7 @@ async def test_series_auth_expiry_preserves_prior_results_without_mutation(
         assert episode_2 is None
 
 
-@pytest.mark.parametrize(
-    "attempt_state", ["prepared", "not_accepted"], ids=["prepared", "resend"]
-)
+@pytest.mark.parametrize("attempt_state", ["prepared", "not_accepted"], ids=["prepared", "resend"])
 async def test_auth_expiry_hands_a_pinned_attempt_to_its_real_owner(
     fake_client, tmp_path, monkeypatch, attempt_state
 ):
@@ -358,9 +344,7 @@ async def test_auth_expiry_hands_a_pinned_attempt_to_its_real_owner(
         return await original_probe(client)
 
     monkeypatch.setattr(p, "probe_auth", expire_after_first_episode)
-    result = await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    result = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
 
     assert result["observed_state"] == "auth_expired"
     assert result["stopped_at_episode"] == 2
@@ -401,9 +385,7 @@ async def test_auth_handoff_carries_the_sources_the_next_step_needs(
         audio_length="long",
         source_ids=["src-2"],
     )
-    assert p._claim_prepared_dispatch(
-        store, 2, attempt_id, [], account="#1", wait_timeout=1200.0
-    )
+    assert p._claim_prepared_dispatch(store, 2, attempt_id, [], account="#1", wait_timeout=1200.0)
     p._mark_not_accepted(store, 2, attempt_id, RateLimitError("每日配額已用盡"))
 
     async def always_expired(client):
@@ -435,20 +417,14 @@ async def test_auth_handoff_carries_the_sources_the_next_step_needs(
     )
     assert out["episode"] == 2
     dispatched = [
-        c[1]["source_ids"]
-        for c in fake_client.artifacts.calls
-        if c[0] == "generate_audio"
+        c[1]["source_ids"] for c in fake_client.artifacts.calls if c[0] == "generate_audio"
     ]
     assert dispatched == [["src-2"]], dispatched
     # 沿用同一顆重送,不新建 attempt。
-    assert [a["attempt_id"] for a in _episode(manifest_path, 2)["attempts"]] == [
-        attempt_id
-    ]
+    assert [a["attempt_id"] for a in _episode(manifest_path, 2)["attempts"]] == [attempt_id]
 
 
-async def test_auth_handoff_spells_out_a_drifted_argument(
-    fake_client, tmp_path, monkeypatch
-):
+async def test_auth_handoff_spells_out_a_drifted_argument(fake_client, tmp_path, monkeypatch):
     """指對工具還不夠 —— 附帶條件沒講,呼叫端照做一樣走不通。
 
     這一集的 attempt 是 series 自己建的,所以停點回 `podcast_series` 是對的;但**這次
@@ -545,9 +521,7 @@ async def test_series_transient_auth_probe_failure_preserves_prior_results(
         return await original_probe(client)
 
     monkeypatch.setattr(p, "probe_auth", disconnect_after_first_episode)
-    result = await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    result = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
 
     assert result["complete"] is False
     assert result["stopped_at_episode"] == 2
@@ -567,7 +541,7 @@ async def test_series_auth_expiry_stops_before_pending_cleanup_rpc(
     fake_client, tmp_path, monkeypatch
 ):
     """每集的認證守門排在清理義務之前,且保住已完成集的結果。"""
-    from notebooklm.exceptions import RPCError, RateLimitError
+    from notebooklm.exceptions import RateLimitError, RPCError
 
     episodes = [
         {"title": "心法篇", "brief": "1"},
@@ -585,9 +559,7 @@ async def test_series_auth_expiry_stops_before_pending_cleanup_rpc(
         audio_format="deep-dive",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(
-        store, 2, attempt_id, [], account="#1", wait_timeout=1200.0
-    )
+    assert p._claim_prepared_dispatch(store, 2, attempt_id, [], account="#1", wait_timeout=1200.0)
     p._mark_not_accepted(store, 2, attempt_id, RateLimitError("每日配額已用盡"))
 
     expired = False
@@ -620,9 +592,7 @@ async def test_series_auth_expiry_stops_before_pending_cleanup_rpc(
     fake_client.notebooks.list = fail_probe_when_expired
     fake_client.sources.list = reject_cleanup_before_probe
 
-    result = await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    result = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
 
     episode_2 = _episode(manifest_path, 2)
     assert result["observed_state"] == "auth_expired"
@@ -647,9 +617,7 @@ async def test_series_reconcile_reuses_per_episode_auth_probe(fake_client, tmp_p
         audio_format="deep-dive",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(
-        store, 1, attempt_id, [], account="#1", wait_timeout=1200.0
-    )
+    assert p._claim_prepared_dispatch(store, 1, attempt_id, [], account="#1", wait_timeout=1200.0)
     p._mark_acceptance_unknown(store, 1, attempt_id, TimeoutError("response lost"))
     probes = 0
     original_probe = fake_client.notebooks.list
@@ -729,7 +697,7 @@ async def test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted(
         # "accepted"、remote.artifact_id 指向與 legacy 硬證據不同的第三顆
         # artifact、未 promote),繞過現在會 fail-fast 擋下這個組合的建立路徑本身。
         episode = manifest["episodes"][0]
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         episode["attempts"].append(
             {
                 "attempt_id": bad_attempt_id,
@@ -796,9 +764,7 @@ async def test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted(
     assert result["episode"] == 1
 
 
-async def test_series_unconfirmed_429_on_a_later_episode_keeps_prior_results(
-    fake_client, tmp_path
-):
+async def test_series_unconfirmed_429_on_a_later_episode_keeps_prior_results(fake_client, tmp_path):
     """第 2 集 dispatch 撞到 0.8.3 標成 `unconfirmed` 的 429:failover 把它標成
     acceptance_unknown 原樣拋。`podcast_series` 的 `_run_episode` handler 對
     「不是 not_accepted」曾經 bare raise —— 第 1 集已完成的 run_results 整份丟掉(F-4 形狀)。

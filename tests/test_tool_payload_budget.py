@@ -17,6 +17,7 @@ session 用不用得到 NotebookLM。v0.9.26 實測(`claude -p --output-format j
 (全 repo 沒有任何 `Field(description=...)`),要降只能刪參數。所以實務上這條上限
 擋的是 docstring。
 """
+
 import json
 
 from notebooklm_mcp import app
@@ -35,8 +36,10 @@ MAX_SINGLE_TOOL_CHARS = 3_200
 async def test_tool_list_payload_stays_within_budget():
     tools = await app.mcp.list_tools()
     rows = sorted(
-        ((len(json.dumps(t.model_dump(exclude_none=True), ensure_ascii=False)), t.name)
-         for t in tools),
+        (
+            (len(json.dumps(t.model_dump(exclude_none=True), ensure_ascii=False)), t.name)
+            for t in tools
+        ),
         reverse=True,
     )
     total = sum(size for size, _ in rows)
@@ -52,7 +55,8 @@ async def test_no_single_tool_description_dominates():
     oversized = {
         t.name: len(json.dumps(t.model_dump(exclude_none=True), ensure_ascii=False))
         for t in tools
-        if len(json.dumps(t.model_dump(exclude_none=True), ensure_ascii=False)) > MAX_SINGLE_TOOL_CHARS
+        if len(json.dumps(t.model_dump(exclude_none=True), ensure_ascii=False))
+        > MAX_SINGLE_TOOL_CHARS
     }
     assert not oversized, (
         f"這幾支單支就超過 {MAX_SINGLE_TOOL_CHARS} 字元:{oversized}。"

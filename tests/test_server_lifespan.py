@@ -9,12 +9,12 @@
    notebooklm_mcp.server` (the __main__ double-import trap) — the MCP came up
    with ZERO tools. Tools now live on `notebooklm_mcp.app.mcp`; assert they're there.
 """
+
 import logging
 
 import pytest
 
 from notebooklm_mcp import app, runtime
-
 
 DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
 HEADLESS_REAUTH_ENV = "NOTEBOOKLM_HEADLESS_REAUTH"

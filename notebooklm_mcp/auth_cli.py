@@ -1,4 +1,5 @@
 """Headless-friendly helper to write storage_state.json from pasted JSON."""
+
 from __future__ import annotations
 
 import argparse
@@ -27,16 +28,18 @@ def main() -> None:
     # 上游改語義時只有其中一邊會被改到,而 tripwire 只守著 app 那一邊。
     try:
         assert_usable_storage_state(data)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 任何驗證失敗都轉成同一個 SystemExit 訊息
         raise SystemExit(f"Invalid storage_state: {exc}") from None
 
     out = os.path.expanduser(args.out)
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     # 原子換檔走 `_atomic` 那一份(gotchas-files 的紅線:不准再自己寫一份)。
     # `mode=0o600` 是顯式的:憑證不繼承既有檔案的 mode,也不吃 `_NEW_FILE_MODE` 的 0644。
-    with prepared_replacement(out, mode=0o600) as temporary_path:
-        with open(temporary_path, "wb") as handle:
-            handle.write(json.dumps(data).encode("utf-8"))
+    with (
+        prepared_replacement(out, mode=0o600) as temporary_path,
+        open(temporary_path, "wb") as handle,
+    ):
+        handle.write(json.dumps(data).encode("utf-8"))
     print(f"Wrote {out} ({len(data['cookies'])} cookies)", file=sys.stderr)
 
 

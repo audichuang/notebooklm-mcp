@@ -32,6 +32,7 @@ EP01 變成「最新一集」卡在列表第一個。`itunes:type=serial` 救不
 冪等:已經遞增就不會動(連 revision 都不跳)。落地後重跑 `publish_series` 讓 feed.xml
 重渲染(GUID 與媒體 content-hash 都不變 → Apple 視為同集更新,不會產生孤兒連結)。
 """
+
 from __future__ import annotations
 
 import os
@@ -75,8 +76,9 @@ def _plan(manifest: dict) -> list[tuple[int, str, str]]:
             f"這些集沒有 published_at:{missing} —— 重排現有時間戳修不了混合狀態"
             "(缺值的集在 feed 裡走 2020 的 fallback)。先讓那幾集有真實時間戳再跑這支。"
         )
-    pool = sorted((_parse_pub_date(ep["published_at"], int(ep["episode"])), ep["published_at"])
-                  for ep in eps)
+    pool = sorted(
+        (_parse_pub_date(ep["published_at"], int(ep["episode"])), ep["published_at"]) for ep in eps
+    )
     dupes = [raw for i, (dt, raw) in enumerate(pool) if i and dt == pool[i - 1][0]]
     if dupes:
         raise SystemExit(
@@ -84,7 +86,7 @@ def _plan(manifest: dict) -> list[tuple[int, str, str]]:
         )
     return [
         (int(ep["episode"]), ep["published_at"], raw)
-        for ep, (_dt, raw) in zip(eps, pool)
+        for ep, (_dt, raw) in zip(eps, pool, strict=False)
     ]
 
 
@@ -127,8 +129,10 @@ def main() -> int:
         if warnings:
             print("\n⚠️ 這幾集重生過,attempt 首發歷史與重排後的值不同:")
             print("\n".join(warnings))
-            print("  → **不要再對這份 manifest 跑 backfill_published_at.py**,它會把這幾集"
-                  "改回歷史值(那組值本身可能也是亂序的)。backfill 現在會自己擋下這種回填。")
+            print(
+                "  → **不要再對這份 manifest 跑 backfill_published_at.py**,它會把這幾集"
+                "改回歷史值(那組值本身可能也是亂序的)。backfill 現在會自己擋下這種回填。"
+            )
 
     if not apply:
         # 這份 snapshot 是**鎖外**讀的,只用來給人看;--apply 的判斷一律在鎖內重算。
@@ -159,8 +163,10 @@ def main() -> int:
         return 0
 
     report(manifest, changed, applied=True)
-    print(f"\n完成,實際重排 {len(changed)} 集。接著重跑 publish_series 讓 feed.xml 重渲染"
-          "(GUID 不變 → Apple 視為同集更新)。")
+    print(
+        f"\n完成,實際重排 {len(changed)} 集。接著重跑 publish_series 讓 feed.xml 重渲染"
+        "(GUID 不變 → Apple 視為同集更新)。"
+    )
     return 0
 
 

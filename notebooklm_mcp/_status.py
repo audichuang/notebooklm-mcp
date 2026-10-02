@@ -5,6 +5,7 @@ rejection) as GenerationStatus(task_id="", status="failed", error=...) rather
 than by raising. Blindly using status.task_id would then wait / download with an
 empty id (hang or garbage). These helpers fail fast with a clear message.
 """
+
 from __future__ import annotations
 
 

@@ -11,13 +11,20 @@
 ```bash
 # 本 repo 開發(Python 鎖在 pyproject `>=3.12,<3.13`,uv 自己選)。
 # 別用 `uv pip install -e`:它不會把 venv 拉到 lock 的版本,測的跟鎖的不同版。
-uv sync --extra dev
+uv sync
 
 # 全套離線測試(mock client,不需網路/認證)
 uv run pytest -q
 #   ⚠️ 不要同時跑兩個 `uv run pytest`:`uv run` 會 uninstall/reinstall 共用 venv 裡的 editable 套件,
 #   並行時另一邊會撞到套件消失的瞬間,產生與程式碼無關的假紅(v0.9.14 實際發生,序列重跑全綠)。
 #   同一機制也會悄悄把 `uv pip install X==版本` 換上的套件拉回 lock 版——對特定版本跑測試見 release-checklist。
+
+# lint / format(ruff 精確 pin 在 pyproject 的 dev group;--no-sync 避免觸發共用 venv 重裝)
+uv run --no-sync ruff check --fix . && uv run --no-sync ruff format .
+# CI 同款測試:覆蓋率門檻 + 「整支測試全 skip 就紅」守門(需要 ffmpeg/ffprobe 在 PATH)
+NBLM_STRICT_SKIPS=1 uv run --no-sync pytest -q -ra --cov --cov-report=term-missing:skip-covered
+# 每個 clone 做一次
+uv tool install pre-commit && pre-commit install && git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 # 消費端安裝(3 VM / podcast-lab 各裝一次;@latest = 最新發版,不追 master)
 uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
@@ -70,9 +77,9 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 [docs/design-notes.md](docs/design-notes.md) = 模組設計細節;`docs/gotchas-*.md` = 按需載入的雷區(路由表見 §Gotchas 末尾);
 `docs/superpowers/` = 設計/計畫/findings。**SKILL.md 路由層 + references 不在本 repo**,在 `audi-skill/notebooklm`。
 
-## Gotchas(notebooklm-py 0.8.2,pin `>=0.8.2,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
+## Gotchas(notebooklm-py 0.8.4,pin `>=0.8.4,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
 
-- **`mcp[cli]` 必須有上界(`>=1.27,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端每次安裝都自由解析成當下
+- **`mcp[cli]` 必須有上界(`>=1.28.1,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端每次安裝都自由解析成當下
   最新 —— 上界擋 2.0 被靜默吃進去。lock 與實裝之間的漂移會自己長回來(已量到三次,且曾帶行為差異),
   發版時照 release-checklist 對帳。
 - **server 命令叫 `nblm-mcp`,不是 `notebooklm-mcp`**:`notebooklm-py` 自己宣告了同名 script,同一個 tool venv 只留
@@ -108,6 +115,8 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
   `git apply --cached --unidiff-zero` 實測把一整個 helper 插進另一個函式的註解中間、三個 commit 全錯,而 `uv run pytest`
   跑的是 working tree 所以照樣全綠。派 agent 做多條修正時逐條做完逐條 commit;混在一起就寧可一個 commit。
   **commit 的內容 = 驗證過的內容,比 commit 粒度重要。**
+- lint/format 修正與語意修正分開 commit;新的 noqa 必須附理由(`# noqa: CODE —— 為何`);不為了 lint 改執行期行為。
+- `ci.yml` 是 latest 的閘(lint + 測試 + 覆蓋率 + wheel 冒煙),任何會隨日期或上游發版變動的檢查放 `deps-watch.yml`,不准放進 `ci.yml`。
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
 - **驗收分三層,而且三層都自己跑 —— 不要產出「可貼的啟動 prompt」叫使用者開 session。**
   headless `claude -p --model sonnet` 每題約 $0.2,所以跑得起「每題 n 次取平均 + 盲評 + 每次改完重跑」;

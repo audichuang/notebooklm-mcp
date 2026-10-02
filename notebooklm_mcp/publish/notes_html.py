@@ -1,5 +1,6 @@
 """把 NotebookLM report/study-guide 的 Markdown 渲染成自包含、手機好讀的 HTML。
 純函式、可離線測;inline CSS,無外部資源(才能被 uploader 白名單當單一 .html 檔服務)。"""
+
 from __future__ import annotations
 
 import re
@@ -30,17 +31,54 @@ _EXTENSIONS = ["fenced_code", "footnotes", "def_list", "tables", "abbr", "sane_l
 # 讓後面真正的危險屬性逃出掃描範圍)、以及 entity 編碼的 scheme
 # (`jav&#x09;ascript:`)——`convert_charrefs=True` 會先把字元參照解碼回真正字元,
 # scheme 檢查才照見它本來的意思,不會被編碼繞過。
-_ALLOWED_TAGS = frozenset({
-    "p", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
-    "a", "code", "pre", "em", "strong", "blockquote",
-    "table", "thead", "tbody", "tr", "th", "td", "hr", "br",
-    "sup", "dl", "dt", "dd", "abbr", "del", "ins",
-    "div",  # footnotes extension 的 <div class="footnote"> 包裹區塊
-    # 惰性行內標籤:不執行、不載外部資源,屬性另有逐一過濾,放進來不擴大攻擊面。
-    # report 來自 NotebookLM,偶爾夾帶這類行內 HTML 並不罕見,而拒收的形狀是「整季
-    # publish_series raise」,錯誤訊息只能叫使用者改寫措辭——誤判成本遠高於收益。
-    "b", "i", "u", "s", "small", "span", "sub", "details", "summary",
-})
+_ALLOWED_TAGS = frozenset(
+    {
+        "p",
+        "ul",
+        "ol",
+        "li",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "a",
+        "code",
+        "pre",
+        "em",
+        "strong",
+        "blockquote",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "th",
+        "td",
+        "hr",
+        "br",
+        "sup",
+        "dl",
+        "dt",
+        "dd",
+        "abbr",
+        "del",
+        "ins",
+        "div",  # footnotes extension 的 <div class="footnote"> 包裹區塊
+        # 惰性行內標籤:不執行、不載外部資源,屬性另有逐一過濾,放進來不擴大攻擊面。
+        # report 來自 NotebookLM,偶爾夾帶這類行內 HTML 並不罕見,而拒收的形狀是「整季
+        # publish_series raise」,錯誤訊息只能叫使用者改寫措辭——誤判成本遠高於收益。
+        "b",
+        "i",
+        "u",
+        "s",
+        "small",
+        "span",
+        "sub",
+        "details",
+        "summary",
+    }
+)
 _ALLOWED_ATTRS = frozenset({"href", "title", "id", "class", "colspan", "rowspan", "start"})
 _ALLOWED_HREF_SCHEMES = frozenset({"http", "https", "mailto", ""})  # "" = 相對連結/純 fragment
 # tables extension 的對齊語法(`| :--- |`)在 th/td 上輸出這個精確 pattern(實測鎖定;
@@ -57,7 +95,7 @@ class _TagAllowlistChecker(HTMLParser):
         self.violation: str | None = None
 
     def _reject(self, detail: str) -> None:
-        if self.violation is None:      # 只留第一個違規訊息就夠診斷
+        if self.violation is None:  # 只留第一個違規訊息就夠診斷
             self.violation = detail
 
     def _check(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:

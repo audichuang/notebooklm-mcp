@@ -4,6 +4,7 @@
 要「只聽這幾筆」就得指名。**選哪幾筆是 host 的政策**(ADR-0007)——例如重生某集時
 排除集號更大的來源——這裡只負責別讓壞的選取燒掉一次生成。
 """
+
 from __future__ import annotations
 
 from ._errors import raise_if_access_denied
@@ -111,8 +112,7 @@ async def assert_source_count_is_safe(
         count = len(source_ids)
         cause = f"指名了 {count} 筆來源"
         remedy = (
-            "把清單砍到本集自己的來源 + 最近 5 集的音檔回錄(共約 6 筆),"
-            "集號比本集大的回錄一律排除。"
+            "把清單砍到本集自己的來源 + 最近 5 集的音檔回錄(共約 6 筆),集號比本集大的回錄一律排除。"
         )
     else:
         # `pending_uploads` 是**這次呼叫自己稍後會加進筆記本**的來源筆數(目前只有

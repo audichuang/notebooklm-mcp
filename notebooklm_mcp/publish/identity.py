@@ -1,6 +1,7 @@
 """Stable feed identity. The feed's token is derived deterministically from a
 stable ``show_id`` via HMAC, so the same show always maps to the same URL with
 NO global registry (hence no multi-VM read-modify-write race)."""
+
 from __future__ import annotations
 
 import base64
@@ -38,4 +39,4 @@ def episode_guid(show_id: str, episode_n: int) -> str:
     (show_id, episode_n) -> same GUID forever, so regenerating an episode reads
     as an update, not a new item. (Moved here from the deleted state.py.)"""
     validate_show_id(show_id)
-    return hashlib.sha1(f"{show_id}:{episode_n}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{show_id}:{episode_n}".encode()).hexdigest()

@@ -2,14 +2,13 @@
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import tools_podcast as p
-
 
 EPS3 = [
     {"title": "心法篇", "brief": "1"},
@@ -26,9 +25,8 @@ def _generate_briefs(fake_client, start: int = 0) -> list[str]:
     ]
 
 
-
 async def test_safe_next_action_vocabulary_names_public_mcp_tools():
-    assert p.SAFE_NEXT_ACTIONS == {
+    assert {
         "podcast_attempt_adopt",
         # 來源筆數守門的停點:series 生不出帶 `source_ids` 的 settings,所以下一步
         # 只能換工具。指回 `podcast_series` 會叫呼叫端撞回同一道牆,而 `attempt_count`
@@ -46,14 +44,13 @@ async def test_safe_next_action_vocabulary_names_public_mcp_tools():
         "podcast_attempt_retract",
         "podcast_series",
         "source_delete",
-    }
+    } == p.SAFE_NEXT_ACTIONS
     # 白名單的意義是「一定是真的 MCP 工具名」,不是「一定在本模組」——source_delete 住在
     # tools_basic,所以對真正的工具註冊表驗,而不是對模組屬性。
     from notebooklm_mcp import app
 
     registered = {tool.name for tool in await app.mcp.list_tools()}
-    assert p.SAFE_NEXT_ACTIONS <= registered
-
+    assert registered >= p.SAFE_NEXT_ACTIONS
 
 
 async def _complete_episode(fake_client, tmp_path, episode_n: int) -> None:
@@ -68,45 +65,33 @@ async def _complete_episode(fake_client, tmp_path, episode_n: int) -> None:
     )
 
 
-async def test_default_start_skips_completed_attempts_and_generates_only_ep3(
-    fake_client, tmp_path
-):
+async def test_default_start_skips_completed_attempts_and_generates_only_ep3(fake_client, tmp_path):
     await _complete_episode(fake_client, tmp_path, 1)
     await _complete_episode(fake_client, tmp_path, 2)
     call_boundary = len(fake_client.artifacts.calls)
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1)
 
     assert _generate_briefs(fake_client, call_boundary) == ["3"]
     assert [episode["episode"] for episode in out["episodes"]] == [3]
 
 
-async def test_start_two_skips_completed_ep2_and_generates_only_ep3(
-    fake_client, tmp_path
-):
+async def test_start_two_skips_completed_ep2_and_generates_only_ep3(fake_client, tmp_path):
     await _complete_episode(fake_client, tmp_path, 2)
     call_boundary = len(fake_client.artifacts.calls)
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2)
 
     assert _generate_briefs(fake_client, call_boundary) == ["3"]
     assert [episode["episode"] for episode in out["episodes"]] == [3]
 
 
-async def test_completed_episode_with_missing_feedback_source_stops_series(
-    fake_client, tmp_path
-):
+async def test_completed_episode_with_missing_feedback_source_stops_series(fake_client, tmp_path):
     await _complete_episode(fake_client, tmp_path, 1)
     fake_client.sources.sources.clear()
     call_boundary = len(fake_client.artifacts.calls)
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3[:2], output_dir=str(tmp_path), start=1
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3[:2], output_dir=str(tmp_path), start=1)
 
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 1
@@ -115,9 +100,7 @@ async def test_completed_episode_with_missing_feedback_source_stops_series(
     assert _generate_briefs(fake_client, call_boundary) == []
 
 
-async def test_start_three_does_not_validate_earlier_plan_entries(
-    fake_client, tmp_path
-):
+async def test_start_three_does_not_validate_earlier_plan_entries(fake_client, tmp_path):
     out = await p.podcast_series(
         "nb-1",
         episodes=[None, {"ignored": True}, EPS3[2]],
@@ -129,9 +112,7 @@ async def test_start_three_does_not_validate_earlier_plan_entries(
     assert _generate_briefs(fake_client) == ["3"]
 
 
-async def test_series_treats_flat_v1_artifact_as_legacy_completed_output(
-    fake_client, tmp_path
-):
+async def test_series_treats_flat_v1_artifact_as_legacy_completed_output(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     legacy_source_id = fake_client.sources._add("EP01 心法篇", kind="media")
     manifest_path.write_text(
@@ -155,9 +136,7 @@ async def test_series_treats_flat_v1_artifact_as_legacy_completed_output(
     )
     (tmp_path / "legacy-ep01.mp3").write_bytes(b"legacy audio")
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3[:2], output_dir=str(tmp_path), start=1
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3[:2], output_dir=str(tmp_path), start=1)
 
     assert _generate_briefs(fake_client) == ["2"]
     assert [episode["episode"] for episode in out["episodes"]] == [2]
@@ -168,9 +147,7 @@ async def test_series_treats_flat_v1_artifact_as_legacy_completed_output(
     assert "output_attempt_id" not in legacy
 
 
-async def test_unverified_legacy_stub_stops_before_next_episode(
-    fake_client, tmp_path
-):
+async def test_unverified_legacy_stub_stops_before_next_episode(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -193,9 +170,7 @@ async def test_unverified_legacy_stub_stops_before_next_episode(
     (tmp_path / "unlinked-ep01.mp3").write_bytes(b"legacy audio")
     fake_client.sources._add("EP01 心法篇", kind="media")
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3[:2], output_dir=str(tmp_path), start=1
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3[:2], output_dir=str(tmp_path), start=1)
 
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 1
@@ -206,9 +181,7 @@ async def test_unverified_legacy_stub_stops_before_next_episode(
     assert _generate_briefs(fake_client) == []
 
 
-async def test_partial_legacy_output_never_regenerates_or_overwrites_audio(
-    fake_client, tmp_path
-):
+async def test_partial_legacy_output_never_regenerates_or_overwrites_audio(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     mp3_path = tmp_path / "ep19.mp3"
     original_audio = b"already published EP19"
@@ -233,9 +206,7 @@ async def test_partial_legacy_output_never_regenerates_or_overwrites_audio(
         ),
         encoding="utf-8",
     )
-    episodes = [None] * 18 + [
-        {"title": "既有第十九集", "brief": "不得靜默重生"}
-    ]
+    episodes = [None] * 18 + [{"title": "既有第十九集", "brief": "不得靜默重生"}]
 
     out = await p.podcast_series(
         "nb-1",
@@ -255,9 +226,7 @@ async def test_partial_legacy_output_never_regenerates_or_overwrites_audio(
     assert stored["episodes"][0].get("attempts", []) == []
 
 
-async def test_acceptance_unknown_stops_series_without_generating_ep2_or_ep3(
-    fake_client, tmp_path
-):
+async def test_acceptance_unknown_stops_series_without_generating_ep2_or_ep3(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
     with pytest.raises(TimeoutError, match="response lost"):
@@ -274,9 +243,7 @@ async def test_acceptance_unknown_stops_series_without_generating_ep2_or_ep3(
     attempt_id = manifest["episodes"][0]["active_attempt_id"]
     call_boundary = len(fake_client.artifacts.calls)
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2)
 
     assert _generate_briefs(fake_client, call_boundary) == []
     assert out["complete"] is False
@@ -291,22 +258,16 @@ async def test_acceptance_unknown_stops_series_without_generating_ep2_or_ep3(
     assert "next_step" in out, "series 重包時不能把 next_step 漏傳"
 
 
-async def test_first_call_not_accepted_returns_structured_safe_stop(
-    fake_client, tmp_path
-):
+async def test_first_call_not_accepted_returns_structured_safe_stop(fake_client, tmp_path):
     fake_client.artifacts.fail_generate = True
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
 
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 1
     assert out["observed_state"] == "not_accepted"
     assert out["safe_next_action"] == "podcast_series"
-    stored = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     assert stored["episodes"][0]["attempts"][0]["dispatch"]["status"] == "not_accepted"
     attempt = stored["episodes"][0]["attempts"][0]
     attempt_id = attempt["attempt_id"]
@@ -314,13 +275,9 @@ async def test_first_call_not_accepted_returns_structured_safe_stop(
     assert len(_generate_briefs(fake_client)) == 1
 
     fake_client.artifacts.fail_generate = False
-    resumed = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    resumed = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
 
-    final = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    final = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     episode = final["episodes"][0]
     assert resumed["complete"] is True
     assert episode["output_attempt_id"] == attempt_id
@@ -345,9 +302,7 @@ async def test_series_retries_same_prepared_attempt_after_pre_dispatch_crash(
         return original_claim(*args, **kwargs)
 
     monkeypatch.setattr(p, "_claim_prepared_dispatch", crash_once)
-    first = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    first = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
 
     manifest_path = tmp_path / "series_manifest.json"
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -356,9 +311,7 @@ async def test_series_retries_same_prepared_attempt_after_pre_dispatch_crash(
     assert first["observed_state"] == "prepared"
     assert _generate_briefs(fake_client) == []
 
-    resumed = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    resumed = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
 
     final = json.loads(manifest_path.read_text(encoding="utf-8"))
     episode = final["episodes"][0]
@@ -369,13 +322,9 @@ async def test_series_retries_same_prepared_attempt_after_pre_dispatch_crash(
     assert _generate_briefs(fake_client) == ["1"]
 
 
-async def test_terminal_failed_attempt_is_superseded_on_next_series_call(
-    fake_client, tmp_path
-):
+async def test_terminal_failed_attempt_is_superseded_on_next_series_call(fake_client, tmp_path):
     fake_client.artifacts.fail_complete = True
-    first = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    first = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
     assert first["complete"] is False
     assert first["observed_state"] == "failed"
     assert first["safe_next_action"] == "podcast_series"
@@ -392,9 +341,7 @@ async def test_terminal_failed_attempt_is_superseded_on_next_series_call(
     old_attempt_id = stored["episodes"][0]["active_attempt_id"]
 
     fake_client.artifacts.fail_complete = False
-    resumed = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    resumed = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
 
     final = json.loads(manifest_path.read_text(encoding="utf-8"))
     episode = final["episodes"][0]
@@ -409,9 +356,7 @@ async def test_terminal_failed_attempt_is_superseded_on_next_series_call(
     assert len(_generate_briefs(fake_client)) == 2
 
 
-async def test_series_repairs_completed_artifact_and_source_title_drift(
-    fake_client, tmp_path
-):
+async def test_series_repairs_completed_artifact_and_source_title_drift(fake_client, tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
     first = await p.podcast_episode(
         "nb-1",
@@ -422,23 +367,17 @@ async def test_series_repairs_completed_artifact_and_source_title_drift(
         manifest_path=str(manifest_path),
     )
     artifact = next(
-        row
-        for row in fake_client.artifacts.artifacts
-        if row.id == first["artifact_id"]
+        row for row in fake_client.artifacts.artifacts if row.id == first["artifact_id"]
     )
     source = next(
-        row
-        for row in fake_client.sources.sources
-        if row["id"] == first["feedback_source_id"]
+        row for row in fake_client.sources.sources if row["id"] == first["feedback_source_id"]
     )
     artifact.title = "被改掉的 artifact 名稱"
     source["title"] = "被改掉的 source 名稱"
     artifact_boundary = len(fake_client.artifacts.calls)
     source_boundary = len(fake_client.sources.calls)
 
-    resumed = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    resumed = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
 
     assert resumed["complete"] is True
     assert artifact.title == "EP01 心法篇"
@@ -447,15 +386,11 @@ async def test_series_repairs_completed_artifact_and_source_title_drift(
         "rename"
     ) == 1
     assert [
-        call
-        for call in fake_client.sources.calls[source_boundary:]
-        if call[0] == "add_file"
+        call for call in fake_client.sources.calls[source_boundary:] if call[0] == "add_file"
     ] == []
 
 
-async def test_series_rejects_manifest_from_another_notebook(
-    fake_client, tmp_path
-):
+async def test_series_rejects_manifest_from_another_notebook(fake_client, tmp_path):
     await _complete_episode(fake_client, tmp_path, 1)
     call_boundary = len(fake_client.artifacts.calls)
 
@@ -468,9 +403,7 @@ async def test_series_rejects_manifest_from_another_notebook(
         )
 
     assert _generate_briefs(fake_client, call_boundary) == []
-    manifest = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     assert manifest["notebook_id"] == "nb-1"
 
 
@@ -512,9 +445,7 @@ async def test_adopt_explicit_source_id_migrates_legacy_output_without_upload(
     assert stored["episodes"][0]["feedback_source_id"] == source_id
     assert stored["episodes"][0].get("attempts", []) == []
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3[:1], output_dir=str(tmp_path)
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
     assert out["complete"] is True
     assert _generate_briefs(fake_client) == []
     assert [
@@ -540,9 +471,7 @@ async def test_series_raised_rate_limit_stops_as_not_accepted(fake_client, tmp_p
     assert out["complete"] is False
     assert out["observed_state"] == "not_accepted"
     assert out["safe_next_action"] == "podcast_series"
-    stored = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     attempt = stored["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "not_accepted"
     assert "每日配額已用盡" in attempt["remote"]["error"]
@@ -582,9 +511,7 @@ async def test_series_transient_error_during_ambiguous_reconciliation_directs_vi
     現在改走 caps,答案與(不撞 transient error 時)`except RuntimeError:` 那格一致:
     都是 `podcast_attempt_adopt` + 候選。"""
     manifest_path = tmp_path / "series_manifest.json"
-    fake_client.sources.add_file_exc_after_create = TimeoutError(
-        "upload response lost"
-    )
+    fake_client.sources.add_file_exc_after_create = TimeoutError("upload response lost")
     with pytest.raises(TimeoutError, match="upload response lost"):
         await p.podcast_episode(
             "nb-1",
@@ -624,18 +551,14 @@ async def test_series_transient_error_during_ambiguous_reconciliation_directs_vi
     assert "next_step" in out
 
 
-async def test_attempt_backed_adopt_with_matching_title_directs_via_caps(
-    fake_client, tmp_path
-):
+async def test_attempt_backed_adopt_with_matching_title_directs_via_caps(fake_client, tmp_path):
     """T2:`needs_rename=False`(候選標題已經對)時,`safe_next_action` 必須跟 caps
     一致——舊版寫死 `podcast_series`,但 finalize 還沒 promote 成 output,照做 host
     直接 publish 會撞 `_ensure_local_mp3`(缺 mp3_path/artifact_id)。caps 給的是
     `podcast_episode_resume`(續完 finalize),而且要帶得出 resume 需要的 artifact_id
     ——舊版回傳完全沒有 `next_step`/`safe_next_artifact_id` 這兩個欄位。"""
     manifest_path = tmp_path / "series_manifest.json"
-    fake_client.sources.add_file_exc_after_create = TimeoutError(
-        "upload response lost"
-    )
+    fake_client.sources.add_file_exc_after_create = TimeoutError("upload response lost")
     with pytest.raises(TimeoutError, match="upload response lost"):
         await p.podcast_episode(
             "nb-1",
@@ -662,15 +585,13 @@ async def test_attempt_backed_adopt_with_matching_title_directs_via_caps(
     assert adopted["observed_state"] == "continuity_verified"
     assert adopted["complete"] is False
     assert adopted["safe_next_action"] == "podcast_episode_resume"
-    assert "next_step" in adopted and adopted["next_step"]
+    assert adopted.get("next_step")
     assert adopted["safe_next_attempt_id"] == attempt_id
     assert adopted["safe_next_artifact_id"] == "task-123"
     assert "stale_source_ids" not in adopted
 
 
-async def test_attempt_backed_adopt_needing_rename_directs_via_caps(
-    fake_client, tmp_path
-):
+async def test_attempt_backed_adopt_needing_rename_directs_via_caps(fake_client, tmp_path):
     """T2:`needs_rename=True` 只能經由 ambiguity 擇一放行(guard 逼的),而 ambiguous
     定義上至少兩個候選——擇一之後**必然**剩下未選中的同名候選要清,所以
     `safe_next_action` 會被 stale-source 覆寫成 `source_delete`。這正是 T2 的另一個
@@ -678,9 +599,7 @@ async def test_attempt_backed_adopt_needing_rename_directs_via_caps(
     ——那會變成兩個欄位對同一個狀態指不同工具(紅線①)。清理句子必須**排在前面**、
     caps 的話接在後面,兩者都要看得到。"""
     manifest_path = tmp_path / "series_manifest.json"
-    fake_client.sources.add_file_exc_after_create = TimeoutError(
-        "upload response lost"
-    )
+    fake_client.sources.add_file_exc_after_create = TimeoutError("upload response lost")
     with pytest.raises(TimeoutError, match="upload response lost"):
         await p.podcast_episode(
             "nb-1",
@@ -713,7 +632,7 @@ async def test_attempt_backed_adopt_needing_rename_directs_via_caps(
     assert adopted["complete"] is False
     assert adopted["stale_source_ids"], "未選中的同名候選必須進清理義務"
     assert adopted["safe_next_action"] == "source_delete"
-    assert "next_step" in adopted and adopted["next_step"]
+    assert adopted.get("next_step")
     assert "source_delete" in adopted["next_step"]
     # caps 原本教的續完 finalize 不能被覆寫掉——先刪、刪完之後照這句做。
     assert "podcast_episode_resume" in adopted["next_step"]
@@ -736,9 +655,7 @@ async def test_series_retract_of_a_middle_episode_does_not_regenerate_reading_th
     manifest_path = tmp_path / "series_manifest.json"
     fake_client.sources.seed("整季講義")
 
-    first = await p.podcast_series(
-        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1
-    )
+    first = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1)
     assert first["complete"] is True
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -749,26 +666,20 @@ async def test_series_retract_of_a_middle_episode_does_not_regenerate_reading_th
         str(manifest_path), 2, ep2_attempt_id, reason="QA 拒收 EP02"
     )
     for obligation in retracted["source_cleanup_obligations"]:
-        await fake_client.sources.delete(
-            obligation["notebook_id"], obligation["source_id"]
-        )
+        await fake_client.sources.delete(obligation["notebook_id"], obligation["source_id"])
 
-    generate_boundary = len(
-        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
-    )
+    generate_boundary = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=1)
 
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 2
     assert out["observed_state"] == "later_episode_has_output"
     assert out["safe_next_action"] == "podcast_episode"
     assert "next_step" in out and "source_ids" in out["next_step"]
-    assert [
-        c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
-    ][generate_boundary:] == [], "重生前必須停下,不准對 EP02 重新 dispatch"
+    assert [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"][
+        generate_boundary:
+    ] == [], "重生前必須停下,不准對 EP02 重新 dispatch"
 
 
 async def test_series_blocks_earlier_dispatch_when_later_feedback_uploaded_but_not_promoted(
@@ -785,8 +696,11 @@ async def test_series_blocks_earlier_dispatch_when_later_feedback_uploaded_but_n
         patch.setattr(p, "_promote_attempt_output", crash_before_promotion)
         with pytest.raises(RuntimeError, match="crash after feedback upload"):
             await p.podcast_episode(
-                "nb-1", episode_n=3, title=EPS3[2]["title"],
-                brief=EPS3[2]["brief"], output_dir=str(tmp_path),
+                "nb-1",
+                episode_n=3,
+                title=EPS3[2]["title"],
+                brief=EPS3[2]["brief"],
+                output_dir=str(tmp_path),
                 manifest_path=str(manifest_path),
             )
 
@@ -813,12 +727,24 @@ async def test_series_blocks_earlier_dispatch_when_legacy_later_feedback_was_ado
     fake_client, tmp_path
 ):
     manifest_path = tmp_path / "series_manifest.json"
-    manifest_path.write_text(json.dumps({
-        "schema_version": 1, "notebook_id": "nb-1", "episodes": [{
-            "episode": 3, "notebook_id": "nb-1", "title": "收尾篇",
-            "label": "EP03 收尾篇", "attempts": [],
-        }],
-    }), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 3,
+                        "notebook_id": "nb-1",
+                        "title": "收尾篇",
+                        "label": "EP03 收尾篇",
+                        "attempts": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     fake_client.sources.seed("整季講義")
     source_id = fake_client.sources._add("EP03 收尾篇", kind="media")
     await p.podcast_attempt_adopt(str(manifest_path), 3, feedback_source_id=source_id)
@@ -833,12 +759,23 @@ async def test_series_blocks_earlier_dispatch_when_legacy_later_feedback_was_ado
 
 def test_later_output_in_another_notebook_does_not_block(tmp_path):
     manifest_path = tmp_path / "series_manifest.json"
-    manifest_path.write_text(json.dumps({
-        "schema_version": 1, "notebook_id": "nb-1", "episodes": [{
-            "episode": 3, "notebook_id": "nb-2", "title": "收尾篇",
-            "artifact_id": "later-artifact",
-        }],
-    }), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "notebook_id": "nb-1",
+                "episodes": [
+                    {
+                        "episode": 3,
+                        "notebook_id": "nb-2",
+                        "title": "收尾篇",
+                        "artifact_id": "later-artifact",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     snapshot = p.ManifestStore(manifest_path).read()
     assert not p._later_episode_has_output(snapshot, 2, "nb-1")
 
@@ -858,9 +795,7 @@ async def test_series_retract_of_a_middle_episode_with_a_stuck_attempt_offers_re
     fake_client.sources.seed("整季講義")
     fake_client.artifacts.fail_generate = True
 
-    stopped_ep2 = await p.podcast_series(
-        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2
-    )
+    stopped_ep2 = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2)
     assert stopped_ep2["complete"] is False
     fake_client.artifacts.fail_generate = False
 
@@ -878,27 +813,21 @@ async def test_series_retract_of_a_middle_episode_with_a_stuck_attempt_offers_re
     ep2 = next(row for row in stored["episodes"] if row["episode"] == 2)
     assert ep2["attempts"][0]["dispatch"]["status"] == "not_accepted"
 
-    generate_boundary = len(
-        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
-    )
+    generate_boundary = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
 
-    out = await p.podcast_series(
-        "nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2
-    )
+    out = await p.podcast_series("nb-1", episodes=EPS3, output_dir=str(tmp_path), start=2)
 
     assert out["complete"] is False
     assert out["stopped_at_episode"] == 2
     assert out["observed_state"] == "later_episode_has_output"
     assert out["safe_next_action"] == "podcast_attempt_retract"
     assert "next_step" in out and "podcast_episode" in out["next_step"]
-    assert [
-        c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
-    ][generate_boundary:] == [], "重生前必須停下,不准對 EP02 重新 dispatch"
+    assert [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"][
+        generate_boundary:
+    ] == [], "重生前必須停下,不准對 EP02 重新 dispatch"
 
 
-async def test_legacy_audio_missing_hands_off_to_adopt_when_not_yet_adopted(
-    fake_client, tmp_path
-):
+async def test_legacy_audio_missing_hands_off_to_adopt_when_not_yet_adopted(fake_client, tmp_path):
     """T5(P1,`scratchpad/verify-G/g2_legacy_audio_missing.py`):`legacy_audio_missing`
     停點過去無條件交棒 `podcast_episode_resume`,但 `_ensure_resume_attempt` 的 seed
     條件(把回錄 source 的身分接回來、不重複上傳)要求 `feedback_source_adopted_at`
@@ -939,12 +868,10 @@ async def test_legacy_audio_missing_hands_off_to_adopt_when_not_yet_adopted(
             id="legacy-artifact",
             title="EP01 心法篇",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
-    add_file_boundary = len(
-        [c for c in fake_client.sources.calls if c[0] == "add_file"]
-    )
+    add_file_boundary = len([c for c in fake_client.sources.calls if c[0] == "add_file"])
 
     stopped = await p.podcast_series(
         "nb-1",
@@ -974,18 +901,14 @@ async def test_legacy_audio_missing_hands_off_to_adopt_when_not_yet_adopted(
     assert adopted["feedback_source_id"] == source_id
     assert resumed["feedback_source_id"] == source_id
     assert (
-        len([c for c in fake_client.sources.calls if c[0] == "add_file"])
-        - add_file_boundary
-        == 0
+        len([c for c in fake_client.sources.calls if c[0] == "add_file"]) - add_file_boundary == 0
     ), "照公開回傳做下去不准第二次上傳同名回錄"
-    assert [
-        s["title"] for s in fake_client.sources.sources if s["kind"] == "media"
-    ].count("EP01 心法篇") == 1
+    assert [s["title"] for s in fake_client.sources.sources if s["kind"] == "media"].count(
+        "EP01 心法篇"
+    ) == 1
 
 
-async def test_legacy_audio_missing_hands_off_to_resume_when_already_adopted(
-    fake_client, tmp_path
-):
+async def test_legacy_audio_missing_hands_off_to_resume_when_already_adopted(fake_client, tmp_path):
     """T5:已經跑過 adopt(`feedback_source_adopted_at` 存在)時,原本的交棒對象
     `podcast_episode_resume` 必須繼續放行——這條是既有
     `test_legacy_missing_audio_resumes_without_duplicate_adopted_source` 鎖住的路,
@@ -1019,7 +942,7 @@ async def test_legacy_audio_missing_hands_off_to_resume_when_already_adopted(
             id="legacy-artifact",
             title="EP01 心法篇",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -1033,9 +956,7 @@ async def test_legacy_audio_missing_hands_off_to_resume_when_already_adopted(
     assert stopped["artifact_id"] == "legacy-artifact"
 
 
-async def test_series_reports_a_deleted_remote_artifact_as_a_structured_stop(
-    fake_client, tmp_path
-):
+async def test_series_reports_a_deleted_remote_artifact_as_a_structured_stop(fake_client, tmp_path):
     """T6(P2,`scratchpad/verify-A2/07_artifact_gone.py`):已完成集的正式輸出
     在遠端被刪掉(source 還在)之後,series 對它的 drift 複驗過去裸拋
     `RuntimeError("artifact ... cannot be verified in the remote list")`
@@ -1056,9 +977,7 @@ async def test_series_reports_a_deleted_remote_artifact_as_a_structured_stop(
     fake_client.artifacts.artifacts = [
         row for row in fake_client.artifacts.artifacts if row.title != "EP01 心法篇"
     ]
-    generate_boundary = len(
-        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
-    )
+    generate_boundary = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
 
     out = await p.podcast_series("nb-1", episodes=eps, output_dir=str(tmp_path))
 
@@ -1067,9 +986,9 @@ async def test_series_reports_a_deleted_remote_artifact_as_a_structured_stop(
     assert out["observed_state"] == "output_unverifiable"
     assert out["safe_next_action"] == "podcast_attempt_retract"
     assert "next_step" in out and "start=" in out["next_step"]
-    assert [
-        c for c in fake_client.artifacts.calls if c[0] == "generate_audio"
-    ][generate_boundary:] == [], "不准對這一集重新 dispatch"
+    assert [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"][
+        generate_boundary:
+    ] == [], "不准對這一集重新 dispatch"
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert stored["episodes"][0]["output_attempt_id"] is not None, (
         "還沒 retract,既有 output 指標不能被動到"
@@ -1121,9 +1040,7 @@ def _install_promotion_refusal(monkeypatch, message="GUARD MESSAGE MARKER"):
     (那些已經被 `test_attempt_capabilities.py` 與上一輪迴歸鎖住)。"""
 
     def _raise_refused(store, episode_n, attempt_id, output):
-        raise p.PromotionRefusedError(
-            message, episode_n=episode_n, attempt_id=attempt_id
-        )
+        raise p.PromotionRefusedError(message, episode_n=episode_n, attempt_id=attempt_id)
 
     monkeypatch.setattr(p, "_promote_attempt_output", _raise_refused)
 
@@ -1194,7 +1111,7 @@ async def test_series_repair_path_promotion_refusal_becomes_a_structured_stop(
     assert out["observed_state"] == "promotion_refused"
     # 這顆是已完成的 output attempt,caps 給的下一步是免旗標 retract。
     assert out["safe_next_action"] == p.ACTION_RETRACT
-    assert "next_step" in out and out["next_step"]
+    assert out.get("next_step")
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert stored["episodes"][0]["output_attempt_id"] is not None, (
         "促進被拒絕,既有 output 指標不能被動到"
@@ -1233,4 +1150,4 @@ async def test_series_active_attempt_promotion_refusal_becomes_a_structured_stop
     # 這顆還沒 promote、但 finalize 已完成(remote.artifact_id 落盤),caps 給的下
     # 一步是 resume 續完(不重新生成)。
     assert out["safe_next_action"] == p.ACTION_RESUME
-    assert "next_step" in out and out["next_step"]
+    assert out.get("next_step")

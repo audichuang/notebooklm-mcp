@@ -1,6 +1,6 @@
 [project]
 name = "notebooklm-mcp"
-version = "0.9.28"
+version = "0.9.29"
 description = "Thin self-built MCP server over notebooklm-py for NotebookLM automation"
 # 鎖 3.12:3.13+ 未驗過(原記在 AGENTS.md,2026-08-30 隨 pin 搬來)。
 # 當初另一半理由「3.14 會觸發 notebooklm-py 的 inspect.signature bug」已被上游 0.8.2 #2268 修掉,
@@ -15,29 +15,35 @@ dependencies = [
     # web 實作搬到 `notebooklm._web.*`,`tests/test_contracts.py` 的 getsource 斷言
     # 因此釘在 `_web.*`(在 0.8.1 不存在)。**production code 兩版都跑得起來**,
     # 抬下界是為了讓「測的」與「裝的」是同一版,不是功能需求。
-    "notebooklm-py>=0.8.3,<0.9",
+    # 下界 0.8.3→0.8.4:消費端全新安裝已解析到 0.8.4,同上理由讓測的=裝的;0.8.4 的 set_users 多了 readback 驗證(見 CHANGELOG v0.9.29)。
+    "notebooklm-py>=0.8.4,<0.9",
     # 上界是硬需求:`uv tool install git+…` **不讀 uv.lock**,消費端每次安裝都自由解析成
     # 當下最新,所以無上界的話 mcp 2.0 一出來,四台機器下一次重裝就靜默吃到 breaking 版本。
-    # 下界 1.27 = 實測過的最舊版。**實際跑過的組合會漂,這裡要跟著更新**:2026-08-09
+    # 下界 1.28.1 = 第一個沒有已知 advisory 的版本(GHSA-jpw9-pfvf-9f58、GHSA-hvrp-rf83-w775 於 1.27.2 修;
+    # GHSA-vj7q-gjh5-988w 於 1.28.1 修);跑不跑得起來由 deps-watch 的 lowest-direct job 驗。上游 migration guide 原文:
+    # 「keep a `<2` upper bound until you've migrated」。**實際跑過的組合會漂,這裡要跟著更新**:2026-08-09
     # 一度漂成「lock 1.28.1 / 生產實裝 1.29.0」,已把 lock 拉到 1.29.0 對齊並跑過全套。
     # (1.29.0 啟動多印一行 pydantic_settings 的 IncompleteFieldDefinitionWarning,
     #  走 stderr 不影響 stdio 協定 —— 但它正是「測試與實跑不同版」會漏掉的那種差異。)
-    "mcp[cli]>=1.27,<2",
-    "Pillow>=10,<12",
+    "mcp[cli]>=1.28.1,<2",
+    # 下界 12.3 = 第一個沒有已知 advisory 的版本(11.3.0 有 18 筆,修正只出在 12.x)。我們只用 open/convert('RGB')/save JPEG,
+    # 12.0 移除的 API 都沒用到;合成圖探測 11.3→12.3 的 JPEG bytes 相同,但沒用真實 Chrome 封面驗過 ——
+    # 已發布的 JPEG 是事實來源,只有重產封面才可能換 content-hash URL。上界理由同上(不讀 lock)。
+    "Pillow>=12.3,<13",
     "httpx>=0.27,<1",
     # 上界是硬需求,理由跟上面兩個依賴一樣(uv tool install git+… 不讀 uv.lock)——這支
     # 之前漏了,是本檔唯一無上界的直接依賴。notes_html 拿它做半信任的 Markdown 渲染,
     # 4.0 若改 extension 語意,允許清單可能靜默拒收,失敗形狀是「(某集)講義發不出去」。
-    "markdown>=3.5,<4",
+    # 下界 3.8.1:CVE-2025-69534(畸形類 HTML 序列讓 HTMLParser 拋未捕捉的 AssertionError,正是「講義發不出去」那種失敗)。
+    "markdown>=3.8.1,<4",
     "mutagen>=1.47,<2",   # 把單集封面內嵌進 true MP3 的 ID3/APIC
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 # Only the LOCAL login machine needs a browser; the 3 VMs auth via Doppler
 # (NOTEBOOKLM_AUTH_JSON) and never install this. After installing, run:
 #   uv run playwright install chromium
-login = ["notebooklm-py[browser]>=0.8.3,<0.9"]
+login = ["notebooklm-py[browser]>=0.8.4,<0.9"]
 
 [project.scripts]
 # ⚠️ 命令叫 `nblm-mcp` 而不是 `notebooklm-mcp`,是因為 **notebooklm-py 0.8.0 自己也宣告了一支
@@ -49,9 +55,56 @@ login = ["notebooklm-py[browser]>=0.8.3,<0.9"]
 nblm-mcp = "notebooklm_mcp.server:main"
 notebooklm-cover = "notebooklm_mcp.cover_cli:main"
 
+[dependency-groups]
+# PEP 735:uv sync / uv run 預設就會裝 dev group;不會進 wheel METADATA。
+# ruff 精確 pin:minor 版會改預設規則集與格式化風格(0.15→0.16 預設規則從 59 條變成 413 條),
+# 範圍 pin 會讓 CI 在沒改任何 code 時變紅、凍住 latest。升級時要和 .pre-commit-config.yaml 的 rev 一起改。
+dev = ["pytest>=9.0.3", "pytest-asyncio>=1.3", "pytest-cov>=7", "ruff==0.16.10"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+strict = true                              # pytest 9: strict markers/config/xfail/parametrization ids
+filterwarnings = [
+    "error",  # exempt upstream warnings narrowly (msg regex + category), never globally
+    # mcp 1.28.1 (our lowest-direct floor) FastMCP Settings.lifespan forward ref + pydantic-settings 2.15.0; not seen on the locked mcp 1.30.x
+    "ignore:Field 'lifespan' has an incomplete definition:pydantic_settings.exceptions.IncompleteFieldDefinitionWarning",
+]
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+branch = true
+source = ["notebooklm_mcp"]
+
+[tool.coverage.report]
+precision = 2
+# 實測 91.54%(含 ffmpeg 路徑);只准往上調,紅了就補測試,只能靠 live 驗的路徑才加 pragma 並寫理由
+fail_under = 91
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100  # 既有慣例:E501 在 88→100 之間斷崖(967→129)
+extend-exclude = ["*.md", "audi-skill"]  # 0.16 預設會格式化 md 的 code fence;CI 會把 audi-skill clone 進工作區
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "C4", "SIM", "ASYNC", "RUF", "DTZ", "PLE", "BLE001", "ISC004"]
+ignore = [
+    "RUF001", "RUF002", "RUF003",  # 繁中全形標點是 house style
+    "SIM105",                       # try/except/pass 底下常掛註解說明為何吞掉,suppress() 放不下
+    "ASYNC109",                     # timeout/wait_timeout 是 MCP 工具的公開 inputSchema,不能改名
+    "ASYNC230", "ASYNC240",         # 單 client stdio server,本地小檔(manifest/artwork/講義/PDF)同步 I/O 可接受;manifest 讀改寫中間無 await 點,改 to_thread 反而引入交錯。新增「同步讀整支音檔」這類大檔 I/O 時要重新評估
+]
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120  # formatter 目標 100;E501 硬上限 120,留給 CJK 註解/docstring
+
+[tool.ruff.lint.isort]
+known-first-party = ["notebooklm_mcp"]
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["RUF043", "C408"]  # RUF043: match= 刻意寫 regex;C408: dict(k=v) 在測試裡可讀
+"scripts/**" = ["BLE001", "SIM115"]  # 一次性 CLI/eval 工具,捕捉後印出
 
 [tool.hatch.build.targets.wheel]
 packages = ["notebooklm_mcp"]
@@ -59,5 +112,6 @@ packages = ["notebooklm_mcp"]
 # 別再加 force-include(會與預設收錄撞成「same path」build error)。
 
 [build-system]
-requires = ["hatchling"]
+# 消費端 uv tool install git+… 從原始碼建 wheel,build 隔離環境也不讀 lock;1.27 與 1.32.4 建出的 wheel 檔案清單實測相同。
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"

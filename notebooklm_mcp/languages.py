@@ -3,6 +3,7 @@
 The SDK forwards language codes without validation. This mirrors
 notebooklm-py's CLI language code list so MCP calls fail early on typos.
 """
+
 from __future__ import annotations
 
 DEFAULT_LANGUAGE = "zh_Hant"
@@ -102,6 +103,5 @@ def resolve_language(code: str | None) -> str:
     if "-" in code:
         hint = " Use underscore form (e.g. 'zh_Hant', not 'zh-TW')."
     raise ValueError(
-        f"Unknown language code {code!r}.{hint} "
-        f"Supported: {', '.join(SUPPORTED_LANGUAGES)}"
+        f"Unknown language code {code!r}.{hint} Supported: {', '.join(SUPPORTED_LANGUAGES)}"
     )

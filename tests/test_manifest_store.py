@@ -10,11 +10,10 @@ from notebooklm_mcp.manifest_store import ManifestConflictError, ManifestStore
 def _increment_episode(path: str, episode_number: int, iterations: int) -> None:
     store = ManifestStore(path)
     for _ in range(iterations):
+
         def increment(manifest):
             episode = next(
-                item
-                for item in manifest["episodes"]
-                if item["episode"] == episode_number
+                item for item in manifest["episodes"] if item["episode"] == episode_number
             )
             episode["updates"] = episode.get("updates", 0) + 1
 
@@ -93,9 +92,7 @@ def test_update_preserves_existing_manifest_file_mode(tmp_path):
     ManifestStore(path).update(lambda manifest: manifest["episodes"].append({"episode": 1}))
     os.chmod(path, 0o600)
 
-    ManifestStore(path).update(
-        lambda manifest: manifest["episodes"][0].update({"title": "心法篇"})
-    )
+    ManifestStore(path).update(lambda manifest: manifest["episodes"][0].update({"title": "心法篇"}))
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 
@@ -259,15 +256,13 @@ def test_existing_notebook_split_manifest_stays_readable(tmp_path):
             {
                 "episode": 1,
                 "notebook_id": "nb-A",
-                "attempts": [
-                    {"attempt_id": "att-1", "episode": 1, "notebook_id": "nb-B"}
-                ],
+                "attempts": [{"attempt_id": "att-1", "episode": 1, "notebook_id": "nb-B"}],
             }
         ],
     }
     path.write_text(json.dumps(split), encoding="utf-8")
 
-    snapshot = ManifestStore(path).read()               # 不得 raise
+    snapshot = ManifestStore(path).read()  # 不得 raise
     assert snapshot["episodes"][0]["notebook_id"] == "nb-A"
 
     # 但新的寫入仍 fail-closed(不讓分裂繼續長)
@@ -299,8 +294,8 @@ def test_directory_fsync_unsupported_is_tolerated_after_commit(tmp_path, monkeyp
     ManifestStore(path).update(lambda manifest: manifest.update({"notebook_id": "nb-1"}))
 
     committed = json.loads(path.read_text(encoding="utf-8"))
-    assert committed["notebook_id"] == "nb-1"          # 已提交
-    assert committed["revision"] == 1                    # revision 有遞增
+    assert committed["notebook_id"] == "nb-1"  # 已提交
+    assert committed["revision"] == 1  # revision 有遞增
     assert not list(tmp_path.glob(".series_manifest.json.*.tmp"))
 
 
@@ -442,9 +437,7 @@ def test_retracted_attempt_notebook_split_is_exempt(tmp_path):
     )
 
     # 走**寫入**路徑才鎖得住豁免:讀取端本來就不驗這條,用 read() 會空過。
-    ManifestStore(path).update(
-        lambda manifest: manifest["episodes"][0].update({"title": "心法篇"})
-    )
+    ManifestStore(path).update(lambda manifest: manifest["episodes"][0].update({"title": "心法篇"}))
 
 
 def test_multi_notebook_manifest_with_consistent_attempts_passes(tmp_path):

@@ -1,5 +1,6 @@
 """cover_cli(notebooklm-cover)固化後的測試:設計在 HTML template,工具做
 填佔位符 → Chrome 光柵化 → JPEG。需要系統有 headless Chrome 的測試會自動 skip。"""
+
 import json
 import os
 import sys
@@ -52,12 +53,20 @@ def test_render_episode_smoke(tmp_path):
     out = tmp_path / "EP07.jpg"
     info = cover_cli._render(
         tpl,
-        {"__SHOW__": "Audicast", "__EPNUM__": "07",
-         "__TITLE__": "測試標題 test <&>", "__BYLINE__": "tester", "__HUE__": 120},
-        str(out), cover_cli._find_chrome())
+        {
+            "__SHOW__": "Audicast",
+            "__EPNUM__": "07",
+            "__TITLE__": "測試標題 test <&>",
+            "__BYLINE__": "tester",
+            "__HUE__": 120,
+        },
+        str(out),
+        cover_cli._find_chrome(),
+    )
     assert info == {"width": 3000, "height": 3000, "format": "JPEG"}
     # 擋「相對路徑 → Chrome ERR_INVALID_URL 白頁」回歸:深色設計平均亮度應偏低
     from PIL import Image, ImageStat
+
     luma = ImageStat.Stat(Image.open(out).convert("L")).mean[0]
     assert luma < 120, f"疑似白色錯誤頁而非封面 (luma={luma})"
 
@@ -65,25 +74,43 @@ def test_render_episode_smoke(tmp_path):
 @chrome_required
 def test_batch_writes_cover_path(tmp_path, monkeypatch):
     man = tmp_path / "m.json"
-    man.write_text(json.dumps(
-        {"episodes": [{"episode": 1, "title": "甲集"}, {"episode": 2, "title": "乙集"}]}),
-        encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--manifest", str(man), "--show-name", "Audicast",
-        "--byline", "x", "--output-dir", str(tmp_path)])
+    man.write_text(
+        json.dumps(
+            {"episodes": [{"episode": 1, "title": "甲集"}, {"episode": 2, "title": "乙集"}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--manifest",
+            str(man),
+            "--show-name",
+            "Audicast",
+            "--byline",
+            "x",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
     cover_cli.main()
     m = json.loads(man.read_text(encoding="utf-8"))
     for ep in m["episodes"]:
         assert ep["cover_path"].endswith(f"EP{ep['episode']:02d}.jpg")
         assert os.path.getsize(ep["cover_path"]) > 0
 
+
 def test_batch_strips_serial_prefix_from_cover_title(tmp_path, monkeypatch):
     """封面徽章已經是 EPISODE NN,標題再帶 `EP01. ` 會印兩次。"""
     man = tmp_path / "m.json"
     man.write_text(
-        json.dumps({
-            "episodes": [{"episode": 1, "title": "EP01. 心法篇"}],
-        }),
+        json.dumps(
+            {
+                "episodes": [{"episode": 1, "title": "EP01. 心法篇"}],
+            }
+        ),
         encoding="utf-8",
     )
     captured: list[str] = []
@@ -96,12 +123,19 @@ def test_batch_strips_serial_prefix_from_cover_title(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
     monkeypatch.setattr(cover_cli, "_render", fake_render)
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover",
-        "--manifest", str(man),
-        "--show-name", "Audicast",
-        "--output-dir", str(tmp_path),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--manifest",
+            str(man),
+            "--show-name",
+            "Audicast",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
 
     cover_cli.main()
     assert captured == ["心法篇"]
@@ -110,10 +144,12 @@ def test_batch_strips_serial_prefix_from_cover_title(tmp_path, monkeypatch):
 def test_batch_manifest_update_uses_manifest_store(tmp_path, monkeypatch):
     man = tmp_path / "m.json"
     man.write_text(
-        json.dumps({
-            "unknown": {"keep": True},
-            "episodes": [{"episode": 1, "title": "甲集"}],
-        }),
+        json.dumps(
+            {
+                "unknown": {"keep": True},
+                "episodes": [{"episode": 1, "title": "甲集"}],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -124,12 +160,19 @@ def test_batch_manifest_update_uses_manifest_store(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
     monkeypatch.setattr(cover_cli, "_render", fake_render)
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover",
-        "--manifest", str(man),
-        "--show-name", "Audicast",
-        "--output-dir", str(tmp_path),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--manifest",
+            str(man),
+            "--show-name",
+            "Audicast",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
 
     cover_cli.main()
 
@@ -157,9 +200,18 @@ def test_render_failure_preserves_existing_output(tmp_path, monkeypatch):
     monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
     monkeypatch.setattr(cover_cli.subprocess, "run", fake_chrome)
     monkeypatch.setattr(cover_cli, "validate_artwork", reject_artwork)
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--show", "--output", str(output), "--show-name", "Audicast",
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--show",
+            "--output",
+            str(output),
+            "--show-name",
+            "Audicast",
+        ],
+    )
 
     with pytest.raises(ValueError, match="invalid rendered artwork"):
         cover_cli.main()
@@ -194,10 +246,20 @@ def test_skip_existing_rebuilds_a_corrupt_cover_instead_of_trusting_it(
 
     monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
     monkeypatch.setattr(cover_cli.subprocess, "run", fake_chrome)
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--manifest", str(manifest),
-        "--output-dir", str(tmp_path), "--skip-existing", "--show-name", "Audicast",
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--manifest",
+            str(manifest),
+            "--output-dir",
+            str(tmp_path),
+            "--skip-existing",
+            "--show-name",
+            "Audicast",
+        ],
+    )
 
     cover_cli.main()
 
@@ -225,10 +287,20 @@ def test_skip_existing_keeps_a_valid_cover_untouched(tmp_path, monkeypatch, caps
 
     monkeypatch.setattr(cover_cli, "_find_chrome", lambda _explicit=None: "fake-chrome")
     monkeypatch.setattr(cover_cli.subprocess, "run", explode)
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--manifest", str(manifest),
-        "--output-dir", str(tmp_path), "--skip-existing", "--show-name", "Audicast",
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--manifest",
+            str(manifest),
+            "--output-dir",
+            str(tmp_path),
+            "--skip-existing",
+            "--show-name",
+            "Audicast",
+        ],
+    )
 
     cover_cli.main()
 
@@ -236,9 +308,7 @@ def test_skip_existing_keeps_a_valid_cover_untouched(tmp_path, monkeypatch, caps
     assert good.read_bytes() == before
 
 
-def test_skip_existing_does_not_need_chrome_when_every_cover_is_valid(
-    tmp_path, monkeypatch
-):
+def test_skip_existing_does_not_need_chrome_when_every_cover_is_valid(tmp_path, monkeypatch):
     """全部封面都驗得過時,這一輪根本不需要 Chrome —— 不該因為沒裝而失敗。
 
     Chrome lookup 原本在 main 開頭無條件跑,於是「只是要把既有封面寫回 manifest」也得
@@ -257,10 +327,20 @@ def test_skip_existing_does_not_need_chrome_when_every_cover_is_valid(
         raise SystemExit("找不到 headless Chrome")
 
     monkeypatch.setattr(cover_cli, "_find_chrome", no_chrome_on_this_machine)
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--manifest", str(manifest),
-        "--output-dir", str(tmp_path), "--skip-existing", "--show-name", "Audicast",
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--manifest",
+            str(manifest),
+            "--output-dir",
+            str(tmp_path),
+            "--skip-existing",
+            "--show-name",
+            "Audicast",
+        ],
+    )
 
     cover_cli.main()
 
@@ -270,9 +350,18 @@ def test_skip_existing_does_not_need_chrome_when_every_cover_is_valid(
 
 def test_guard_refuses_non_audicast_show(monkeypatch, tmp_path):
     """模板含寫死的 Audicast 品牌;非 Audicast 節目預設 fail-loud,不需要 Chrome 就該擋。"""
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--show", "--output", str(tmp_path / "cover.jpg"),
-        "--show-name", "Spring 深入淺出"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--show",
+            "--output",
+            str(tmp_path / "cover.jpg"),
+            "--show-name",
+            "Spring 深入淺出",
+        ],
+    )
     with pytest.raises(SystemExit) as exc:
         cover_cli.main()
     msg = str(exc.value)
@@ -290,9 +379,19 @@ def test_guard_opt_in_flag_allows_other_show(monkeypatch, tmp_path):
         return {"width": 3000, "height": 3000, "format": "JPEG"}
 
     monkeypatch.setattr(cover_cli, "_render", fake_render)
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--show", "--output", str(tmp_path / "cover.jpg"),
-        "--show-name", "Spring 深入淺出", "--allow-audicast-branding"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--show",
+            "--output",
+            str(tmp_path / "cover.jpg"),
+            "--show-name",
+            "Spring 深入淺出",
+            "--allow-audicast-branding",
+        ],
+    )
     cover_cli.main()
     assert rendered["__SHOW__"] == "Spring 深入淺出"
 
@@ -301,12 +400,18 @@ def test_guard_batch_checks_manifest_show_title(monkeypatch, tmp_path):
     """批次模式沒給 --show-name 時 wordmark 會沿用 manifest 既有的 show.show_title
     (別的節目名稱)→ 一樣拒絕(schema v2 的身分在 show.show_title)。"""
     man = tmp_path / "m.json"
-    man.write_text(json.dumps({
-        "show": {"show_title": "資料結構拆解室"},
-        "episodes": [{"episode": 1, "title": "EP01. 甲集"}],
-    }), encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--manifest", str(man), "--output-dir", str(tmp_path)])
+    man.write_text(
+        json.dumps(
+            {
+                "show": {"show_title": "資料結構拆解室"},
+                "episodes": [{"episode": 1, "title": "EP01. 甲集"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["notebooklm-cover", "--manifest", str(man), "--output-dir", str(tmp_path)]
+    )
     with pytest.raises(SystemExit) as exc:
         cover_cli.main()
     assert "Audicast 品牌" in str(exc.value)
@@ -320,11 +425,17 @@ def test_guard_batch_requires_explicit_show_name_before_first_publish(
     而使用者從未確認過這就是 Audicast 節目。改成 default=None 之後,兩者皆缺要明確
     報錯,不能靜默印 Audicast。"""
     man = tmp_path / "m.json"
-    man.write_text(json.dumps({
-        "episodes": [{"episode": 1, "title": "甲集"}],   # 無 "show" 鍵
-    }), encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--manifest", str(man), "--output-dir", str(tmp_path)])
+    man.write_text(
+        json.dumps(
+            {
+                "episodes": [{"episode": 1, "title": "甲集"}],  # 無 "show" 鍵
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["notebooklm-cover", "--manifest", str(man), "--output-dir", str(tmp_path)]
+    )
     with pytest.raises(SystemExit) as exc:
         cover_cli.main()
     assert exc.value.code == 2
@@ -334,9 +445,16 @@ def test_guard_batch_requires_explicit_show_name_before_first_publish(
 def test_show_mode_requires_explicit_show_name(monkeypatch, tmp_path, capsys):
     """`--show` 模式沒有 manifest 可對照身分,`--show-name` default 改 None 之後不能
     讓 `None` 靜默流進 `_render` 被印成字面 "None"——沒傳就該明確報錯。"""
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--show", "--output", str(tmp_path / "cover.jpg"),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--show",
+            "--output",
+            str(tmp_path / "cover.jpg"),
+        ],
+    )
     with pytest.raises(SystemExit) as exc:
         cover_cli.main()
     assert exc.value.code == 2
@@ -347,10 +465,19 @@ def test_single_episode_mode_requires_explicit_show_name(monkeypatch, tmp_path, 
     """單集一次性模式同理:`docs/gotchas-publish.md` 記載的用法本來就沒帶
     `--show-name`(只有 `--output --episode --title`),default 改 None 後這條路徑
     一樣不能讓 `None` 靜默流進封面。"""
-    monkeypatch.setattr(sys, "argv", [
-        "notebooklm-cover", "--output", str(tmp_path / "ep05.jpg"),
-        "--episode", "EP05", "--title", "本集標題",
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notebooklm-cover",
+            "--output",
+            str(tmp_path / "ep05.jpg"),
+            "--episode",
+            "EP05",
+            "--title",
+            "本集標題",
+        ],
+    )
     with pytest.raises(SystemExit) as exc:
         cover_cli.main()
     assert exc.value.code == 2

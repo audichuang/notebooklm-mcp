@@ -1,0 +1,13 @@
+# Prerequisite: repo Settings → Secrets and variables → Dependabot → add AUDI_SKILL_DEPLOY_KEY
+# (same value as the Actions secret); Dependabot-triggered ci.yml runs cannot read Actions secrets
+# and would fail at the audi-skill checkout. Python deps stay manual (pins carry rationale;
+# notebooklm-py upgrades need an SDK source diff) and are watched by deps-watch.yml.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

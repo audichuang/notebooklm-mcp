@@ -14,9 +14,9 @@ def test_renders_markdown_structure():
 def test_self_contained_and_titled():
     html = render_report_html("內文", "我的講義")
     assert html.lstrip().lower().startswith("<!doctype html>")
-    assert "我的講義" in html                 # title 有帶入
+    assert "我的講義" in html  # title 有帶入
     assert "http://" not in html and "https://" not in html  # 無外部資源
-    assert "<style" in html                    # CSS inline
+    assert "<style" in html  # CSS inline
 
 
 def test_rejects_raw_script():
@@ -33,8 +33,8 @@ def test_rejects_external_image():
 def test_code_showing_html_tags_is_safe():
     # 程式碼區塊裡展示 <script> 會被逸出成 &lt;script,是安全的,不該誤擋
     html = render_report_html("```html\n<script>x</script>\n```", "x")
-    assert "&lt;script&gt;" in html          # 逸出後當文字顯示
-    assert "<script>" not in html            # 沒有真的 script 標籤
+    assert "&lt;script&gt;" in html  # 逸出後當文字顯示
+    assert "<script>" not in html  # 沒有真的 script 標籤
 
 
 def test_episode_notes_html_bullets_and_named_links():
@@ -62,8 +62,8 @@ def test_episode_notes_neutralizes_raw_html():
     from notebooklm_mcp.publish.notes_html import render_episode_notes_html
 
     html = render_episode_notes_html("正文\n\n<script>alert(1)</script>", [])
-    assert "<script>" not in html            # 沒有真的 script 標籤
-    assert "&lt;script&gt;" in html          # 逸出後當文字顯示
+    assert "<script>" not in html  # 沒有真的 script 標籤
+    assert "&lt;script&gt;" in html  # 逸出後當文字顯示
 
 
 def test_episode_notes_html_no_attachments():
@@ -138,7 +138,9 @@ def test_rejects_table_background_attribute():
     # <table> 本身在允許清單內,但 background= 這個屬性不在允許清單——必須逐屬性擋,
     # 不能只驗標籤名。
     with pytest.raises(ValueError, match="自包含"):
-        render_report_html('<table background="javascript:alert(1)"><tr><td>a</td></tr></table>', "x")
+        render_report_html(
+            '<table background="javascript:alert(1)"><tr><td>a</td></tr></table>', "x"
+        )
 
 
 def test_rejects_entity_encoded_javascript_scheme_in_link():
@@ -162,9 +164,7 @@ def test_rejects_markup_hidden_in_cdata():
     # handle_starttag;但瀏覽器把 <![CDATA[ 當 bogus comment 在第一個 > 結束,<img>
     # 變真元素(chrome --dump-dom 驗過)。舊的字串 regex 反而擋得住——這條防回歸。
     with pytest.raises(ValueError, match="自包含"):
-        render_report_html(
-            "<![CDATA[ > <img src=https://evil.example/x.png> ]]>", "x"
-        )
+        render_report_html("<![CDATA[ > <img src=https://evil.example/x.png> ]]>", "x")
 
 
 def test_rejects_markup_hidden_in_comment():

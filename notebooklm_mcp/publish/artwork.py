@@ -1,5 +1,6 @@
 """Validate podcast artwork against Apple's Show Cover requirements:
 square, 1400-3000 px per side, PNG or JPEG, RGB, no alpha channel."""
+
 from __future__ import annotations
 
 import os

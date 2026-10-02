@@ -5,6 +5,7 @@ Serial RSS titles must carry ``EP{NN}. `` because most players hide
 the iron rule ``EP{NN} 正文`` — same string on both sides, no dotted prefix.
 This module is the only place that derives one from the other.
 """
+
 from __future__ import annotations
 
 
