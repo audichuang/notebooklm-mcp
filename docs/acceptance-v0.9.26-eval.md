@@ -68,4 +68,3 @@ payload 另一半是 `inputSchema`,由參數名與型別推導(全 repo 沒有 `
 - **cwd 也要乾淨。** 早期版本把 harness 與結果放在同一層,受測 agent 掃到之後一次回答了
   全部十題,turn 數與成本全部失真。
 - **先看 `modelUsage` 拆解再下結論**,不要直接用 `total_cost_usd`。
-
