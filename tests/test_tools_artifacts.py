@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 from datetime import datetime, timedelta
 
@@ -30,7 +31,7 @@ async def test_generate_slides_downloads_and_writes_manifest(fake_client, tmp_pa
     # 下載到 manifest 同目錄的預期檔名
     assert res["slides_pdf_path"].endswith("ep01-slides.pdf")
     # 路徑回寫進 manifest
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
     assert data["schema_version"] == 2
     # 一次成功生成 = **一次** manifest 寫入:路徑與 provenance 同一次 `update`。
@@ -59,7 +60,7 @@ async def test_generate_report_downloads_md_and_writes_manifest(fake_client, tmp
 
     assert res["report_md_path"].endswith("ep01-report.md")
     assert res["report_format"] == "study_guide"
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
     assert data["episodes"][0]["report_format"] == "study_guide"
 
@@ -144,7 +145,7 @@ async def test_artifact_download_slides_downloads_without_generating(fake_client
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
     assert dl["artifact_id"] == "slide-rescued"
     assert res["slides_pdf_path"].endswith("ep07-slides.pdf")
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
 
 
@@ -155,7 +156,7 @@ async def test_artifact_download_report_downloads_without_generating(fake_client
     assert not [c for c in fake_client.artifacts.calls if c[0] == "generate_report"]
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_report")
     assert dl["artifact_id"] == "report-rescued"
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["report_md_path"] == res["report_md_path"]
     assert data["episodes"][0]["report_format"] == "study_guide"
 
@@ -195,7 +196,7 @@ async def test_revise_slide_revises_then_redownloads_without_regenerating(fake_c
     dl = next(c[1] for c in fake_client.artifacts.calls if c[0] == "download_slide_deck")
     assert dl["artifact_id"] == "deck-1"
     assert res["slides_pdf_path"].endswith("ep05-slides.pdf")
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == res["slides_pdf_path"]
 
 
@@ -276,7 +277,7 @@ async def test_episode_set_description_writes_and_strips(tmp_path):
     """回寫走 MCP server 同 process 的讀改寫;預設清引用標記(新工具,無相容包袱)。"""
     m = _manifest(tmp_path, [{"episode": 21, "title": "EP21 標題"}])
     res = await a.episode_set_description(m, 21, "重點整理 [1],結論 [3, 4]。")
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     # 標記清掉,**標點前不留空格**(v0.9.13 驗收:show notes 是公開文案,那一格看得到)
     assert data["episodes"][0]["description"] == "重點整理,結論。"
     assert "[" not in data["episodes"][0]["description"]
@@ -286,7 +287,7 @@ async def test_episode_set_description_writes_and_strips(tmp_path):
 async def test_episode_set_description_keep_citations(tmp_path):
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     await a.episode_set_description(m, 1, "重點 [1]。", strip_citations=False)
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["description"] == "重點 [1]。"
 
 
@@ -324,7 +325,7 @@ async def test_episode_set_description_rejects_xml_forbidden_chars_at_write_time
     with pytest.raises(ValueError, match="XML"):
         await a.episode_set_description(m, 1, "本集重點\x0c續完")
     # 沒有半途寫入
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert "description" not in data["episodes"][0]
 
 
@@ -335,7 +336,7 @@ async def test_episode_set_description_rejects_xml_forbidden_chars_at_write_time
 
 
 def _revision_of(path):
-    return json.loads(open(path, encoding="utf-8").read()).get("revision")
+    return json.loads(Path(path).read_text(encoding="utf-8")).get("revision")
 
 
 async def test_set_publication_state_writes_all_three_audit_fields(tmp_path):
@@ -345,7 +346,7 @@ async def test_set_publication_state_writes_all_three_audit_fields(tmp_path):
     (`episode` 回 0、`reason` 回 None 都能全綠)。"""
     m = _manifest(tmp_path, [{"episode": 46, "title": "EP46"}])
     res = await a.episode_set_publication_state(m, 46, "deferred", reason="  五次 QA 拒收  ")
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert ep["publication_state"] == "deferred"
     assert ep["publication_state_reason"] == "五次 QA 拒收"          # strip 過
     # 真的解析得動、真的是 UTC —— 只檢查 endswith("+00:00") 對 "garbage+00:00" 也會綠
@@ -366,7 +367,7 @@ async def test_clearing_publication_state_removes_the_whole_audit_triple(tmp_pat
     m = _manifest(tmp_path, [{"episode": 46, "title": "EP46"}])
     await a.episode_set_publication_state(m, 46, "deferred", reason="五次 QA 拒收")
     res = await a.episode_set_publication_state(m, 46, None)
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert "publication_state" not in ep
     assert "publication_state_reason" not in ep
     assert "publication_state_at" not in ep
@@ -400,7 +401,7 @@ async def test_replaying_the_same_call_does_not_bump_revision(tmp_path):
     # 但**換了理由**是真的變更,要寫進去
     changed = await a.episode_set_publication_state(m, 1, "deferred", reason="改用新素材重錄")
     assert changed["changed"] is True
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert ep["publication_state_reason"] == "改用新素材重錄"
 
 
@@ -441,7 +442,7 @@ async def test_replay_repairs_a_legacy_incomplete_audit_triple(tmp_path):
     }])
     res = await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
     assert res["changed"] is True                      # 同一組 state+reason,但仍要寫
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert datetime.fromisoformat(ep["publication_state_at"]).utcoffset() == timedelta(0)
     # 補完之後才變成真正的 no-op
     assert (await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收"))["changed"] is False
@@ -464,7 +465,7 @@ async def test_replay_repairs_a_present_but_invalid_timestamp(tmp_path, stamp):
     }])
     res = await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
     assert res["changed"] is True
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert datetime.fromisoformat(ep["publication_state_at"]).utcoffset() == timedelta(0)
 
 
@@ -486,7 +487,7 @@ async def test_set_publication_state_validates(tmp_path):
     with pytest.raises(ValueError, match="episode 9 not found"):
         await a.episode_set_publication_state(m, 9, "deferred", reason="不存在的集")
     # 全程一個字都不准落地
-    assert "publication_state" not in open(m, encoding="utf-8").read()
+    assert "publication_state" not in Path(m).read_text(encoding="utf-8")
 
 
 async def test_set_publication_state_never_touches_attempts_or_output(tmp_path):
@@ -498,7 +499,7 @@ async def test_set_publication_state_never_touches_attempts_or_output(tmp_path):
         "retracted_attempt_ids": ["att-0"],
     }])
     await a.episode_set_publication_state(m, 46, "deferred", reason="QA 拒收")
-    ep = json.loads(open(m, encoding="utf-8").read())["episodes"][0]
+    ep = json.loads(Path(m).read_text(encoding="utf-8"))["episodes"][0]
     assert ep["attempts"] == [{"attempt_id": "att-1", "remote": {"artifact_id": "art-1"}}]
     assert ep["artifact_id"] == "art-1" and ep["mp3_path"] == "/tmp/ep46.mp3"
     assert ep["retracted_attempt_ids"] == ["att-0"]
@@ -565,7 +566,7 @@ async def test_slides_download_failure_leaves_previous_pdf_intact(fake_client, t
 
     assert existing.read_bytes() == b"%PDF-1.4 GOOD OLD"               # 舊那份毫髮無傷
     assert _part_files(tmp_path) == []                                 # temp 清乾淨
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert "slides_pdf_path" not in data["episodes"][0]                # 失敗不回寫 manifest
 
 
@@ -579,7 +580,7 @@ async def test_report_download_failure_leaves_previous_markdown_intact(fake_clie
 
     assert existing.read_bytes() == "# 舊講義\n完整\n".encode()
     assert _part_files(tmp_path) == []
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert "report_md_path" not in data["episodes"][0]
 
 
@@ -591,7 +592,7 @@ async def test_slides_replaced_atomically_on_success(fake_client, tmp_path):
     assert existing.read_bytes() == b"%PDF-1.4 BRAND NEW"              # 一次性換上
     assert res["slides_pdf_path"] == str(existing)
     assert _part_files(tmp_path) == []
-    data = json.loads(open(m, encoding="utf-8").read())
+    data = json.loads(Path(m).read_text(encoding="utf-8"))
     assert data["episodes"][0]["slides_pdf_path"] == str(existing)
 
 

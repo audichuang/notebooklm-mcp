@@ -3,6 +3,7 @@ faked via httpx.MockTransport injected through the tools_publish._make_client se
 (monkeypatched) — zero real sockets, zero NAS mount, zero NotebookLM calls (every
 episode here already has a local mp3_path, so _ensure_local_mp3's re-download
 branch, which needs fake_client, is never exercised)."""
+from pathlib import Path
 import hashlib
 import json
 import os
@@ -49,7 +50,7 @@ def _noop_embed(monkeypatch):
     """多數 publish 測試用假 audio bytes，不適合真丟給 ffprobe/ffmpeg/mutagen。
     把 _embed_cover seam 換成「回原始 bytes」；真媒體契約由檔案下方 regression tests 鎖住。"""
     monkeypatch.setattr(tools_publish, "_embed_cover",
-                        lambda mp3_path, cover_path: open(mp3_path, "rb").read())
+                        lambda mp3_path, cover_path: Path(mp3_path).read_bytes())
     monkeypatch.setattr(tools_publish, "_require_media_binaries", lambda: None)
 
 
@@ -135,10 +136,10 @@ def _numbered_manifest(tmp_path, **kw):
     所以每個傳 `itunes_type="serial"` 的測試都得用這一份,不能用裸的那個。
     """
     manifest = _two_episode_manifest(tmp_path, **kw)
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     for ep in stored["episodes"]:
         ep["title"] = f"EP{ep['episode']:02d}. {ep['title']}"
-    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    Path(manifest).write_text(json.dumps(stored, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 
@@ -300,7 +301,7 @@ async def test_publish_persists_show_config_then_manifest_path_alone_suffices(
     manifest = _two_episode_manifest(tmp_path, published_at=pub_at)
     await _publish(manifest, artwork_png)                       # 顯式傳齊(現行姿勢)
 
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     assert stored["schema_version"] == 2
     assert stored["revision"] == 1
     saved = stored["show"]
@@ -334,7 +335,7 @@ async def test_publish_explicit_param_overrides_manifest_show(env, tmp_path, art
     )
     show2 = json.loads([c["content"] for c in captured if c["name"] == "show.json"][-1])
     assert show2["title"] == "改名後"
-    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    saved = json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]
     assert saved["show_title"] == "改名後"          # 覆蓋值也回寫,下次沿用
 
 
@@ -355,7 +356,7 @@ async def test_publish_first_ever_publish_stores_feed_identity_hash(
     _install_mock(monkeypatch)
     manifest = _two_episode_manifest(tmp_path)          # 無 manifest["show"]
     await _publish(manifest, artwork_png)                # show_id="ai-news"(_show_kwargs 預設)
-    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    saved = json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]
     assert saved["feed_identity_sha256"] == _identity_hash("ai-news", "s3cret")
 
 
@@ -374,7 +375,7 @@ async def test_publish_refuses_show_id_change_on_same_manifest(
         await _publish(manifest, artwork_png, show_id="ai-news-v2")
 
     assert len(captured) == first_count       # 第二次零 PUT
-    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    saved = json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]
     assert saved["show_id"] == "ai-news"      # manifest 沒被覆寫
 
 
@@ -400,10 +401,10 @@ async def test_publish_same_identity_republish_is_fine(
     captured = _install_mock(monkeypatch)
     manifest = _two_episode_manifest(tmp_path)
     await _publish(manifest, artwork_png)
-    first_hash = json.loads(open(manifest, encoding="utf-8").read())["show"]["feed_identity_sha256"]
+    first_hash = json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]["feed_identity_sha256"]
 
     await _publish(manifest, artwork_png)
-    second_hash = json.loads(open(manifest, encoding="utf-8").read())["show"]["feed_identity_sha256"]
+    second_hash = json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]["feed_identity_sha256"]
     assert first_hash == second_hash == _identity_hash("ai-news", "s3cret")
     assert len(captured) == 16   # 兩次都成功,各 8 個 PUT
 
@@ -424,7 +425,7 @@ async def test_publish_allows_identity_change_after_removing_feed_identity_hash(
     captured.clear()
     res = await _publish(manifest, artwork_png, show_id="ai-news-v2")
     assert res["token"] == identity.make_token("ai-news-v2", "s3cret")
-    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    saved = json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]
     assert saved["show_id"] == "ai-news-v2"
     assert saved["feed_identity_sha256"] == _identity_hash("ai-news-v2", "s3cret")
 
@@ -659,9 +660,9 @@ def _retired_manifest(tmp_path, value):
     """一份**完全合法、能發**的兩集 manifest,只多了頂層 `retired`。合法是重點:閘要證明的是
     「內容再對也不發」,拿一份本來就會被別的 preflight 擋下的 manifest 測不出這件事。"""
     manifest = _two_episode_manifest(tmp_path, filename=f"retired-{value!r}.json")
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     stored["retired"] = value
-    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    Path(manifest).write_text(json.dumps(stored, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 
@@ -700,7 +701,7 @@ async def test_manifest_without_retired_field_publishes(env, tmp_path, artwork_p
     這條只是把「缺席=放行」講成一條看得見的契約)。"""
     captured = _install_mock(monkeypatch)
     manifest = _two_episode_manifest(tmp_path)
-    assert "retired" not in json.loads(open(manifest, encoding="utf-8").read())
+    assert "retired" not in json.loads(Path(manifest).read_text(encoding="utf-8"))
     out = await _publish(manifest, artwork_png)
     assert out["episode_count"] == 2
     assert captured
@@ -1041,9 +1042,9 @@ async def test_unresolvable_mp3_blocks_publish_before_any_put(env, tmp_path, art
     import json
     captured = _install_mock(monkeypatch)
     mpath = _two_episode_manifest(tmp_path, filename="mp3_gate.json")
-    data = json.loads(open(mpath, encoding="utf-8").read())
+    data = json.loads(Path(mpath).read_text(encoding="utf-8"))
     os.unlink(data["episodes"][1]["mp3_path"])          # EP02 音檔不見、也沒有 artifact_id
-    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    Path(mpath).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(ValueError, match="no artifact_id"):
         await _publish(mpath, artwork_png)
     assert captured == []                               # EP01 一個 blob 都沒落地
@@ -1110,7 +1111,7 @@ async def test_cover_embedded_into_published_mp3(env, tmp_path, artwork_png, mon
     captured = _install_mock(monkeypatch)
     monkeypatch.setattr(
         tools_publish, "_embed_cover",
-        lambda mp3_path, cover_path: b"COVR:" + open(mp3_path, "rb").read())
+        lambda mp3_path, cover_path: b"COVR:" + Path(mp3_path).read_bytes())
     manifest = _manifest(tmp_path, [{
         "episode": 1, "title": "第1集", "description": "本集重點。",
         "mp3_path": _write_mp3(tmp_path, "emb.mp3", b"RAWAUDIO"),
@@ -1129,8 +1130,8 @@ def test_embed_cover_normalizes_notebooklm_mp4_to_real_mp3(tmp_path):
     """NotebookLM 的 fragmented MP4/AAC 即使副檔名叫 .mp3，發布器也必須輸出真正
     MP3 + ID3 APIC，讓副檔名與 RSS audio/mpeg 不再說謊；同輸入輸出必須決定性。"""
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        pytest.skip("需要 ffmpeg")
+    if not (ffmpeg and shutil.which("ffprobe")):
+        pytest.skip("需要 ffmpeg/ffprobe")
     # 造一個 fragmented AAC MP4，模擬 NotebookLM 的 DASH 下載檔。
     src = tmp_path / "dash.mp3"
     subprocess.run(
@@ -1165,8 +1166,8 @@ def test_embed_cover_normalizes_notebooklm_mp4_to_real_mp3(tmp_path):
 def test_embed_cover_accepts_mp4_with_leading_free_box(tmp_path):
     """MP4 不保證 ftyp 固定在 byte 4；leading free box 仍應由 ffprobe 正確辨識。"""
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        pytest.skip("需要 ffmpeg")
+    if not (ffmpeg and shutil.which("ffprobe")):
+        pytest.skip("需要 ffmpeg/ffprobe")
     plain = tmp_path / "plain.m4a"
     subprocess.run(
         [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
@@ -1190,8 +1191,8 @@ def test_embed_cover_preserves_real_mp3_and_adds_id3_artwork(tmp_path):
     """若呼叫端已把 NotebookLM AAC 轉成真正 MP3，發布器不能再把它 remux 回 MP4
     卻仍用 `.mp3`/`audio/mpeg` 宣告。輸出必須維持 MP3、內嵌 ID3 APIC，且 bytes 決定性。"""
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        pytest.skip("需要 ffmpeg")
+    if not (ffmpeg and shutil.which("ffprobe")):
+        pytest.skip("需要 ffmpeg/ffprobe")
     src = tmp_path / "real.mp3"
     subprocess.run(
         [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
@@ -1218,8 +1219,8 @@ def test_embed_cover_rejects_unsupported_adts_aac(tmp_path):
     """不是 MP3、也不是 NotebookLM MP4/AAC 的輸入必須 fail-closed，不能只因
     bytes[4:8] != ftyp 就被當成 MP3 後以 audio/mpeg 發布。"""
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        pytest.skip("需要 ffmpeg")
+    if not (ffmpeg and shutil.which("ffprobe")):
+        pytest.skip("需要 ffmpeg/ffprobe")
     src = tmp_path / "raw.aac"
     subprocess.run(
         [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
@@ -1352,7 +1353,7 @@ async def test_embed_cover_runs_off_event_loop_thread(env, tmp_path, artwork_png
 
     def spy(mp3_path, cover_path):
         seen["thread"] = threading.current_thread()
-        return open(mp3_path, "rb").read()
+        return Path(mp3_path).read_bytes()
 
     monkeypatch.setattr(tools_publish, "_embed_cover", spy)
     await _publish(_two_episode_manifest(tmp_path), artwork_png)
@@ -1381,8 +1382,8 @@ async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(
     """端到端鎖住發布契約：真 NotebookLM-like MP4/AAC 經 publish_series 後，
     上傳 bytes 必須是 MP3，且 enclosure 同時使用 .mp3 與 audio/mpeg。"""
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        pytest.skip("需要 ffmpeg")
+    if not (ffmpeg and shutil.which("ffprobe")):
+        pytest.skip("需要 ffmpeg/ffprobe")
     captured = _install_mock(monkeypatch)
     monkeypatch.setattr(tools_publish, "_embed_cover", _real_embed)
     src = tmp_path / "notebooklm.mp3"
@@ -1433,12 +1434,12 @@ async def test_missing_mp3_prefers_episode_notebook_id(env, tmp_path, artwork_pn
     import json
     _install_mock(monkeypatch)
     mpath = _two_episode_manifest(tmp_path)
-    data = json.loads(open(mpath, encoding="utf-8").read())
+    data = json.loads(Path(mpath).read_text(encoding="utf-8"))
     ep1 = data["episodes"][0]
     os.unlink(ep1["mp3_path"])                      # 模擬 output/ 被清掉
     ep1["artifact_id"] = "a-1"
     ep1["notebook_id"] = "nb-ep1"                   # 每集自己的筆記本
-    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    Path(mpath).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     fake_client.artifacts.download_audio_bytes = None  # 此案例刻意模擬 SDK 沒落檔
     with pytest.raises(ValueError, match="produced no file"):
         await _publish(mpath, artwork_png, notebook_id="nb-show-level")
@@ -1455,14 +1456,14 @@ async def test_missing_mp3_redownloads_when_parent_directory_is_gone(
     import json
     _install_mock(monkeypatch)
     mpath = _two_episode_manifest(tmp_path)
-    data = json.loads(open(mpath, encoding="utf-8").read())
+    data = json.loads(Path(mpath).read_text(encoding="utf-8"))
     ep1 = data["episodes"][0]
     os.unlink(ep1["mp3_path"])
     # 整個 attempts/<id>/ 目錄都不存在,只有 manifest 記得那個路徑
     ep1["mp3_path"] = str(tmp_path / "attempts" / "att-1" / "ep01.mp3")
     ep1["artifact_id"] = "a-1"
     ep1["notebook_id"] = "nb-ep1"
-    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    Path(mpath).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     await _publish(mpath, artwork_png)                  # 不得 FileNotFoundError
 
@@ -1478,12 +1479,12 @@ async def test_download_audio_value_error_propagates_unrewritten(
     import json
     _install_mock(monkeypatch)
     mpath = _two_episode_manifest(tmp_path)
-    data = json.loads(open(mpath, encoding="utf-8").read())
+    data = json.loads(Path(mpath).read_text(encoding="utf-8"))
     ep1 = data["episodes"][0]
     os.unlink(ep1["mp3_path"])
     ep1["artifact_id"] = "a-1"
     ep1["notebook_id"] = "nb-ep1"
-    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    Path(mpath).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     fake_client.artifacts.download_audio_exc = ValueError("artifact a-1 not found in notebook nb-ep1")
     with pytest.raises(ValueError, match="not found in notebook"):
         await _publish(mpath, artwork_png)
@@ -1497,13 +1498,13 @@ async def test_interrupted_mp3_redownload_leaves_no_partial_file(
     import json
     _install_mock(monkeypatch)
     mpath = _two_episode_manifest(tmp_path)
-    data = json.loads(open(mpath, encoding="utf-8").read())
+    data = json.loads(Path(mpath).read_text(encoding="utf-8"))
     ep1 = data["episodes"][0]
     mp3_path = ep1["mp3_path"]
     os.unlink(mp3_path)                              # 模擬 output/ 被清掉，需要重抓
     ep1["artifact_id"] = "a-1"
     ep1["notebook_id"] = "nb-ep1"
-    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    Path(mpath).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     fake_client.artifacts.download_audio_partial_bytes = b"only-half-a-file"
     fake_client.artifacts.download_audio_exc = ConnectionError("dropped mid-transfer")
@@ -1521,12 +1522,12 @@ async def test_staging_dir_is_cleaned_up_after_publish(env, tmp_path, artwork_pn
     離開(成功或例外)都自動清乾淨——不是每次缺檔各自 mkdtemp() 留一個目錄無界累積。"""
     _install_mock(monkeypatch)
     mpath = _two_episode_manifest(tmp_path)
-    data = json.loads(open(mpath, encoding="utf-8").read())
+    data = json.loads(Path(mpath).read_text(encoding="utf-8"))
     ep1 = data["episodes"][0]
     os.unlink(ep1["mp3_path"])                      # 觸發重抓分支,才會用到 staging_dir
     ep1["artifact_id"] = "a-1"
     ep1["notebook_id"] = "nb-ep1"
-    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    Path(mpath).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     seen: dict = {}
     real_ensure = tools_publish._ensure_local_mp3
@@ -1546,11 +1547,11 @@ async def test_missing_mp3_without_any_notebook_fails_clearly(env, tmp_path, art
     import json
     _install_mock(monkeypatch)
     mpath = _two_episode_manifest(tmp_path)
-    data = json.loads(open(mpath, encoding="utf-8").read())
+    data = json.loads(Path(mpath).read_text(encoding="utf-8"))
     ep1 = data["episodes"][0]
     os.unlink(ep1["mp3_path"])
     ep1["artifact_id"] = "a-1"                      # 有 artifact 但無任何 notebook_id
-    open(mpath, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
+    Path(mpath).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(ValueError, match="no notebook_id"):
         await _publish(mpath, artwork_png, notebook_id=None)
 
@@ -1576,7 +1577,7 @@ async def test_attachment_policy_persists_for_rolling_publish(env, tmp_path, art
 
     await _publish(manifest, artwork_png, require_slides=False, require_report=True)
 
-    saved = json.loads(open(manifest, encoding="utf-8").read())["show"]
+    saved = json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]
     assert saved["require_slides"] is False and saved["require_report"] is True
 
     # 滾動加集:照文件只傳 manifest_path,必須沿用而不是回到預設 True
@@ -1705,7 +1706,7 @@ async def test_serial_is_declared_and_persisted_as_a_season_setting(
     await _publish(manifest, artwork_png, itunes_type="serial")
     assert "<itunes:type>serial</itunes:type>" in _feed_of(captured)
 
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     assert stored["show"]["itunes_type"] == "serial"
 
     # 滾動加集只傳 manifest_path:不能悄悄退回 episodic。
@@ -1761,7 +1762,7 @@ async def test_blank_category_is_refused_before_any_put(
     with pytest.raises(ValueError, match="category"):
         await _publish(manifest, artwork_png, category=bad_category)
     assert captured == []
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     assert "show" not in stored     # 沒有任何一次成功發布,manifest 不該有 show 區塊
 
 
@@ -1773,13 +1774,13 @@ async def test_explicit_itunes_type_overrides_the_persisted_one(
     captured = _install_mock(monkeypatch)
     manifest = _numbered_manifest(tmp_path)
     await _publish(manifest, artwork_png, itunes_type="serial")
-    assert json.loads(open(manifest, encoding="utf-8").read())["show"]["itunes_type"] == "serial"
+    assert json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]["itunes_type"] == "serial"
 
     captured.clear()
     await _publish(manifest, artwork_png, itunes_type="episodic")
 
     assert "<itunes:type>episodic</itunes:type>" in _feed_of(captured)
-    assert json.loads(open(manifest, encoding="utf-8").read())["show"]["itunes_type"] == "episodic"
+    assert json.loads(Path(manifest).read_text(encoding="utf-8"))["show"]["itunes_type"] == "episodic"
 
 
 async def test_bad_itunes_type_persisted_in_the_manifest_still_blocks_every_put(
@@ -1794,9 +1795,9 @@ async def test_bad_itunes_type_persisted_in_the_manifest_still_blocks_every_put(
     manifest = _two_episode_manifest(tmp_path)
     await _publish(manifest, artwork_png)
 
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     stored["show"]["itunes_type"] = "series"          # 手改/跨版本留下的壞值
-    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    Path(manifest).write_text(json.dumps(stored, ensure_ascii=False), encoding="utf-8")
 
     captured.clear()
     with pytest.raises(ValueError, match="itunes_type"):
@@ -1832,9 +1833,9 @@ async def test_serial_refuses_a_prefix_that_names_another_episode(
     """
     captured = _install_mock(monkeypatch)
     manifest = _numbered_manifest(tmp_path)
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     stored["episodes"][1]["title"] = "EP07. 你在介面上看到的每個字"     # 這是第 2 集
-    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    Path(manifest).write_text(json.dumps(stored, ensure_ascii=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match="EP02"):
         await _publish(manifest, artwork_png, itunes_type="serial")
@@ -2021,22 +2022,22 @@ def test_reorder_script_repairs_the_order_without_inventing_timestamps(monkeypat
         ],
         "reorder.json",
     )
-    before = json.loads(open(manifest, encoding="utf-8").read())
+    before = json.loads(Path(manifest).read_text(encoding="utf-8"))
     original = sorted(ep["published_at"] for ep in before["episodes"])
 
     assert _run_reorder(monkeypatch, manifest) == 0                     # dry-run
-    assert json.loads(open(manifest, encoding="utf-8").read()) == before
+    assert json.loads(Path(manifest).read_text(encoding="utf-8")) == before
 
     assert _run_reorder(monkeypatch, manifest, "--apply") == 0
-    after = json.loads(open(manifest, encoding="utf-8").read())["episodes"]
+    after = json.loads(Path(manifest).read_text(encoding="utf-8"))["episodes"]
     dates = [parsedate_to_datetime(ep["published_at"]) for ep in after]
     assert dates == sorted(dates)                                       # 依集號遞增
     assert sorted(ep["published_at"] for ep in after) == original       # 沒發明新時間
 
     # 冪等:已經對了就不再改(revision 也不該再跳)。
-    settled = json.loads(open(manifest, encoding="utf-8").read())
+    settled = json.loads(Path(manifest).read_text(encoding="utf-8"))
     assert _run_reorder(monkeypatch, manifest, "--apply") == 0
-    assert json.loads(open(manifest, encoding="utf-8").read()) == settled
+    assert json.loads(Path(manifest).read_text(encoding="utf-8")) == settled
 
 
 def test_reorder_script_refuses_a_manifest_with_a_missing_timestamp(monkeypatch, tmp_path):
@@ -2072,7 +2073,7 @@ def test_reorder_script_leaves_withheld_episodes_alone(monkeypatch, tmp_path):
     )
     assert _run_reorder(monkeypatch, manifest, "--apply") == 0
     eps = {ep["episode"]: ep["published_at"]
-           for ep in json.loads(open(manifest, encoding="utf-8").read())["episodes"]}
+           for ep in json.loads(Path(manifest).read_text(encoding="utf-8"))["episodes"]}
     assert eps[2] == "Sat, 16 Aug 2026 23:00:00 +0800"                  # 未被動到
     assert parsedate_to_datetime(eps[1]) < parsedate_to_datetime(eps[3])
 
@@ -2237,7 +2238,7 @@ def test_backfill_refuses_a_reorder_breaking_backfill(monkeypatch, tmp_path, cap
         ],
         "backfill_conflict.json",
     )
-    before = open(manifest, encoding="utf-8").read()
+    before = Path(manifest).read_text(encoding="utf-8")
 
     import sys as _sys
 
@@ -2245,7 +2246,7 @@ def test_backfill_refuses_a_reorder_breaking_backfill(monkeypatch, tmp_path, cap
     monkeypatch.setattr(_sys, "argv", ["backfill_published_at.py", manifest, "--apply"])
     assert mod.main() == 2
     assert "拒絕回填" in capsys.readouterr().err
-    assert open(manifest, encoding="utf-8").read() == before      # 零寫入
+    assert Path(manifest).read_text(encoding="utf-8") == before      # 零寫入
 
 
 def test_backfill_still_repairs_a_season_it_does_not_break(monkeypatch, tmp_path):
@@ -2265,7 +2266,7 @@ def test_backfill_still_repairs_a_season_it_does_not_break(monkeypatch, tmp_path
     monkeypatch.setattr(_sys, "argv", ["backfill_published_at.py", manifest, "--apply"])
     assert mod.main() == 0
     eps = {ep["episode"]: ep["published_at"]
-           for ep in json.loads(open(manifest, encoding="utf-8").read())["episodes"]}
+           for ep in json.loads(Path(manifest).read_text(encoding="utf-8"))["episodes"]}
     assert eps[1] == "Fri, 31 Jul 2026 07:00:00 +0800"            # 回填成首發時間
     assert eps[2] == "Fri, 31 Jul 2026 08:00:00 +0800"
 
@@ -2284,7 +2285,7 @@ def _attach_attempt(manifest_path, n, *, sha, attempt_id=None, point=True):
     """給第 n 集掛一顆帶 finalize.download.sha256 的 attempt;point=False 不寫
     output_attempt_id(模擬「有 attempts 卻分不出 canonical」的歧義形狀)。"""
     attempt_id = attempt_id or f"att-{n}"
-    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    stored = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     for ep in stored["episodes"]:
         if ep["episode"] == n:
             ep.setdefault("attempts", []).append({
@@ -2293,7 +2294,7 @@ def _attach_attempt(manifest_path, n, *, sha, attempt_id=None, point=True):
             })
             if point:
                 ep["output_attempt_id"] = attempt_id
-    open(manifest_path, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    Path(manifest_path).write_text(json.dumps(stored, ensure_ascii=False), encoding="utf-8")
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -2363,9 +2364,9 @@ async def test_promoted_pointer_to_a_missing_attempt_is_rejected(
     captured = _install_mock(monkeypatch)
     manifest = _two_episode_manifest(tmp_path)
     _attach_attempt(manifest, 1, sha=_sha256_hex(b"audio-1"))
-    stored = json.loads(open(manifest, encoding="utf-8").read())
+    stored = json.loads(Path(manifest).read_text(encoding="utf-8"))
     stored["episodes"][1]["output_attempt_id"] = "att-ghost"
-    open(manifest, "w", encoding="utf-8").write(json.dumps(stored, ensure_ascii=False))
+    Path(manifest).write_text(json.dumps(stored, ensure_ascii=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match="output_attempt_id does not reference"):
         await _publish(manifest, artwork_png)

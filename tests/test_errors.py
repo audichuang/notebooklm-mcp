@@ -1,4 +1,5 @@
 """Coverage for error / edge paths: bad language, generation timeout, malformed input."""
+from pathlib import Path
 import json
 import os
 
@@ -38,7 +39,7 @@ async def test_series_generation_timeout_surfaces_with_partial_manifest(fake_cli
 
     # EP2 的 accepted attempt 必須留下，讓下次重呼 wait 同一 artifact；
     # 只有 EP1 已 promotion，EP3 尚未產生任何 attempt。
-    manifest = json.load(open(os.path.join(str(tmp_path), "series_manifest.json"), encoding="utf-8"))
+    manifest = json.loads(Path(os.path.join(str(tmp_path), "series_manifest.json")).read_text(encoding="utf-8"))
     assert [e["episode"] for e in manifest["episodes"]] == [1, 2]
     assert manifest["episodes"][0]["output_attempt_id"]
     assert "output_attempt_id" not in manifest["episodes"][1]
@@ -151,10 +152,10 @@ class _NotAClientError(Exception):
 @pytest.mark.parametrize(
     ("rpc_code", "expected"),
     [
-        (7, True),
-        ("7", True),
-        (5, False),
-        ("5", False),
+        pytest.param(7, True, id="int-7"),
+        pytest.param("7", True, id="str-7"),
+        pytest.param(5, False, id="int-5"),
+        pytest.param("5", False, id="str-5"),
         (None, False),
         ("", False),
     ],

@@ -5,15 +5,16 @@
 只看 `returncode != 0` 會假綠(import 錯、語法錯、任何 traceback 都是非零)。"""
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 
 def _run(manifest_path: Path):
     return subprocess.run(
         [
-            "uv",
-            "run",
-            "notebooklm-cover",
+            sys.executable,
+            "-m",
+            "notebooklm_mcp.cover_cli",
             "--manifest",
             str(manifest_path),
             "--tag",

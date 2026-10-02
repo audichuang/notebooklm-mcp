@@ -12,6 +12,7 @@ v0.9.16 之前只有音檔會換帳號:`_rotate_for_quota` 只長在 `tools_podc
 真的接上去了**、以及附件家族專屬的稽核面(episode 級,因為附件沒有 durable attempt)。
 每一條都同時是「不補一半」的反向鎖:三支工具各驗一次,不是只驗 slides。
 """
+from pathlib import Path
 import json
 
 import pytest
@@ -35,7 +36,7 @@ def _manifest(tmp_path, episodes=None):
 
 
 def _episode(manifest_path, episode_n=1):
-    data = json.loads(open(manifest_path, encoding="utf-8").read())
+    data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     return next(e for e in data["episodes"] if e["episode"] == episode_n)
 
 

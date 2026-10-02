@@ -9,6 +9,7 @@ guard 沒保護 manifest,只是把寫入趕出工具外。
 紀錄不會消失、以及被作廢的 attempt **不可能再被復活**——不論是 retract 之前就啟動的
 in-flight finalizer、還是任何把指標寫回去的 writer。
 """
+from pathlib import Path
 import asyncio
 import copy
 import json
@@ -56,12 +57,12 @@ async def _complete_ep1(fake_client, tmp_path) -> tuple[str, dict]:
         output_dir=str(tmp_path),
         manifest_path=manifest_path,
     )
-    episode = json.loads(open(manifest_path, encoding="utf-8").read())["episodes"][0]
+    episode = json.loads(Path(manifest_path).read_text(encoding="utf-8"))["episodes"][0]
     return manifest_path, episode
 
 
 def _episode(manifest_path: str) -> dict:
-    return json.loads(open(manifest_path, encoding="utf-8").read())["episodes"][0]
+    return json.loads(Path(manifest_path).read_text(encoding="utf-8"))["episodes"][0]
 
 
 # 候選歸屬雖來自外部知識，仍已用 `candidate_selection_required` 維度收進
@@ -1822,7 +1823,7 @@ async def test_cleanup_gate_blocks_generating_a_different_episode_in_the_same_no
     assert not [
         c for c in fake_client.artifacts.calls[call_boundary:] if c[0] == "generate_audio"
     ]
-    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    stored = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     assert len(stored["episodes"]) == 1
 
     # 刪掉 source 後重跑 → 通過,且 EP1 的 pending 被清
@@ -1832,7 +1833,7 @@ async def test_cleanup_gate_blocks_generating_a_different_episode_in_the_same_no
         output_dir=str(tmp_path), manifest_path=manifest_path,
     )
     assert out["episode"] == 2
-    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    stored = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
     assert "pending_source_cleanup" not in ep1
 
@@ -1884,7 +1885,7 @@ async def test_cleanup_gate_does_not_cross_different_notebooks(fake_client, tmp_
         output_dir=str(tmp_path), manifest_path=manifest_path,
     )
     assert out["episode"] == 2
-    stored = json.loads(open(manifest_path, encoding="utf-8").read())
+    stored = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     ep1 = next(e for e in stored["episodes"] if e["episode"] == 1)
     # EP1 的義務原封不動,沒被誤判成已結案
     assert [row["source_id"] for row in ep1["pending_source_cleanup"]] == [
@@ -2246,7 +2247,7 @@ async def test_the_audit_record_says_whether_the_flag_was_used(fake_client, tmp_
     assert flagged["dispatch_status_at_retraction"] == "accepted"
 
     # 落盤的也要有 —— 回傳值看得到但 manifest 沒記等於沒記。
-    stored = json.loads(open(flagged_path, encoding="utf-8").read())
+    stored = json.loads(Path(flagged_path).read_text(encoding="utf-8"))
     retraction = stored["episodes"][0]["attempts"][0]["retraction"]
     assert retraction["abandon_in_flight"] is True
     assert retraction["dispatch_status_at_retraction"] == "accepted"
@@ -2274,7 +2275,7 @@ async def test_the_audit_record_names_the_authorization_basis(fake_client, tmp_p
     await p.podcast_attempt_retract(
         plain_path, 1, refused["attempt_id"], reason="brief 寫錯"
     )
-    stored = json.loads(open(plain_path, encoding="utf-8").read())
+    stored = json.loads(Path(plain_path).read_text(encoding="utf-8"))
     retraction = stored["episodes"][0]["attempts"][0]["retraction"]
     assert retraction["authorization_basis"] == "settled"
     assert retraction["remote_status_at_retraction"] == "failed"
@@ -2286,7 +2287,7 @@ async def test_the_audit_record_names_the_authorization_basis(fake_client, tmp_p
     await p.podcast_attempt_retract(
         output_path, 1, episode["output_attempt_id"], reason="QA 拒收"
     )
-    stored2 = json.loads(open(output_path, encoding="utf-8").read())
+    stored2 = json.loads(Path(output_path).read_text(encoding="utf-8"))
     retraction2 = stored2["episodes"][0]["attempts"][0]["retraction"]
     assert retraction2["authorization_basis"] == "output_owner"
     assert retraction2["remote_status_at_retraction"] == "completed"
