@@ -108,11 +108,11 @@ grep -rEn "notebooklm-mcp\.git@v[0-9]" --include="*.md" . ../podcast-lab \
 (走 stderr 沒破壞 stdio 協定,但證明實裝版本有 CI 從沒跑過的行為)。2026-08-30 又漂成 1.29.0 / 1.29.1。
 
 ```sh
-diff <(uv export --frozen --no-hashes --no-emit-project --no-header --no-annotate | grep -v '^#' | sort) \
+diff <(uv export --frozen --no-dev --no-hashes --no-emit-project --no-header --no-annotate | grep -v '^#' | sed 's/ ;.*//' | sort) \
      <(uv pip compile pyproject.toml --python-version 3.12 --no-header --no-annotate -q | sort)
 ```
 
-涵蓋全部依賴(只看 mcp 會漏掉像 filelock 3→4 這種傳遞依賴漂移)。只剩平台 marker(colorama/pywin32)的差異才算對齊;
+`--no-dev` 排除 dev group、`sed` 去掉環境 marker(`uv pip compile` 兩者都沒有),否則 lock 已對齊也會有雜訊。涵蓋全部依賴(只看 mcp 會漏掉像 filelock 3→4 這種傳遞依賴漂移)。只剩平台 marker(colorama/pywin32)的差異才算對齊;
 有差就 `uv lock --upgrade && uv sync && uv run pytest -q`,全綠再 commit uv.lock;deps-watch 的 highest job 每週替你跑這件事。
 必要時同步更新 `pyproject.toml` 的下界。**對齊要用 `uv sync`,不是 `uv pip install -e .`** —— 後者不會把
 venv 拉到 lock 的版本。
