@@ -1889,8 +1889,12 @@ async def test_out_of_order_pub_dates_block_every_put(
         1: "Sat, 16 Aug 2026 21:33:00 +0800",       # 最後才補的 EP01
         2: "Sat, 16 Aug 2026 21:15:00 +0800",
     })
-    with pytest.raises(ValueError, match="published_at 必須隨集號遞增"):
+    with pytest.raises(ValueError, match="published_at 必須隨集號遞增") as excinfo:
         await _publish(manifest, artwork_png)
+    # 守住 3aefaaa 的修法那半段:重新配對 + 已安裝機器(@latest)沒腳本時改看 skill
+    msg = str(excinfo.value)
+    assert "依集號重新配對" in msg
+    assert "@latest" in msg and "notebooklm skill" in msg
     assert captured == []
 
 
