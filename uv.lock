@@ -345,8 +345,8 @@ requires-dist = [
     { name = "markdown", specifier = ">=3.5,<4" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27,<2" },
     { name = "mutagen", specifier = ">=1.47,<2" },
-    { name = "notebooklm-py", specifier = ">=0.8.3,<0.9" },
-    { name = "notebooklm-py", extras = ["browser"], marker = "extra == 'login'", specifier = ">=0.8.3,<0.9" },
+    { name = "notebooklm-py", specifier = ">=0.8.4,<0.9" },
+    { name = "notebooklm-py", extras = ["browser"], marker = "extra == 'login'", specifier = ">=0.8.4,<0.9" },
     { name = "pillow", specifier = ">=10,<12" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -355,17 +355,18 @@ provides-extras = ["dev", "login"]
 
 [[package]]
 name = "notebooklm-py"
-version = "0.8.3"
+version = "0.8.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "filelock" },
     { name = "httpx" },
+    { name = "idna" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/12/42/bb68d1e14993074f8b0acb81d0654a66b48e9c9820be2eac54b5d568f72b/notebooklm_py-0.8.3.tar.gz", hash = "sha256:7d444c19193e405bae7277b37c29a365c936a8d278a1f62910f6b06d92aabf2a", size = 23829916, upload-time = "2026-09-26T03:46:06.131Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4a/c2/2446641f1b42d1ab03efd6a1b9488bc8be19dd4cee05f1eb6e8c399080af/notebooklm_py-0.8.4.tar.gz", hash = "sha256:b27caef2d1774e7d009ea51601024f1c6295895fa95f263caa4addb993e57897", size = 23922657, upload-time = "2026-10-01T23:55:02.885Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/78/277a3193bb5bc3a051de7d9cdcee8c98a4485328f9755dee1772294968f5/notebooklm_py-0.8.3-py3-none-any.whl", hash = "sha256:7e3e02057b3acf354d3dbc337c08869d2a4954c9c324f3271e272236cfcc2bfc", size = 2051740, upload-time = "2026-09-26T03:46:03.916Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/9b/b0d6dad3308aec25f9f4828034f3da87a891f6cdc7f2e5021a4ea0f6d048/notebooklm_py-0.8.4-py3-none-any.whl", hash = "sha256:6e558fa059af86618a8342e9f59ee557d2fd5e1c931ad8d9e28f647045bc6073", size = 2086780, upload-time = "2026-10-01T23:54:59.794Z" },
 ]
 
 [package.optional-dependencies]

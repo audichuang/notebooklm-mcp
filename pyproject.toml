@@ -15,7 +15,8 @@ dependencies = [
     # web 實作搬到 `notebooklm._web.*`,`tests/test_contracts.py` 的 getsource 斷言
     # 因此釘在 `_web.*`(在 0.8.1 不存在)。**production code 兩版都跑得起來**,
     # 抬下界是為了讓「測的」與「裝的」是同一版,不是功能需求。
-    "notebooklm-py>=0.8.3,<0.9",
+    # 下界 0.8.3→0.8.4:消費端全新安裝已解析到 0.8.4,同上理由讓測的=裝的;0.8.4 的 set_users 多了 readback 驗證(見 CHANGELOG v0.9.29)。
+    "notebooklm-py>=0.8.4,<0.9",
     # 上界是硬需求:`uv tool install git+…` **不讀 uv.lock**,消費端每次安裝都自由解析成
     # 當下最新,所以無上界的話 mcp 2.0 一出來,四台機器下一次重裝就靜默吃到 breaking 版本。
     # 下界 1.27 = 實測過的最舊版。**實際跑過的組合會漂,這裡要跟著更新**:2026-08-09
@@ -37,7 +38,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 # Only the LOCAL login machine needs a browser; the 3 VMs auth via Doppler
 # (NOTEBOOKLM_AUTH_JSON) and never install this. After installing, run:
 #   uv run playwright install chromium
-login = ["notebooklm-py[browser]>=0.8.3,<0.9"]
+login = ["notebooklm-py[browser]>=0.8.4,<0.9"]
 
 [project.scripts]
 # ⚠️ 命令叫 `nblm-mcp` 而不是 `notebooklm-mcp`,是因為 **notebooklm-py 0.8.0 自己也宣告了一支

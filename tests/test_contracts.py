@@ -639,7 +639,9 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
         assert Version("0.8.1") not in requirement.specifier
         # 0.8.2 + 本版程式碼從沒測過(測試已改 import 0.8.3 的搬家位置),別讓消費端解析到它。
         assert Version("0.8.2") not in requirement.specifier
-        assert Version("0.8.3") in requirement.specifier
+        # 0.8.3 runs (lowest-direct was green) but is excluded so the tested version equals the installed one; 0.8.4 also changed sharing.set_users semantics.
+        assert Version("0.8.3") not in requirement.specifier
+        assert Version("0.8.4") in requirement.specifier
 
 
 def test_rotation_lock_and_file_lock_semantics_that_app_lifespan_depends_on(tmp_path):
