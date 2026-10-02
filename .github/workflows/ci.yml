@@ -1,6 +1,6 @@
 name: ci
 
-# retag-verified-latest.yml 依本 workflow(檔名 ci.yml)對 commit 的 run 結論移動 latest:別改名、別加 paths/schedule,時間變動的檢查放 deps-watch.yml。
+# retag-verified-latest.yml 依本 workflow(檔名 ci.yml)對 commit 的 run 結論移動 latest:別改名、別加 paths/schedule、別加 concurrency cancel-in-progress(被取消的 run 會讓 retag 拒絕移動 latest),時間變動的檢查放 deps-watch.yml。
 on:
   push:
     branches: ["master"]
@@ -47,7 +47,7 @@ jobs:
 
       - name: Install ffmpeg
         # 沒裝時 5 支 _embed_cover/MP3 正規化測試會靜默 skip(本 repo 歷來 CI 602 skipped 就是這樣)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+        run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends ffmpeg
 
       - name: Install project
         # --locked:lock 與 pyproject 不自洽就直接紅,而不是靜默重算 lock 再放行

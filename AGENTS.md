@@ -24,7 +24,7 @@ uv run --no-sync ruff check --fix . && uv run --no-sync ruff format .
 # CI 同款測試:覆蓋率門檻 + 「整支測試全 skip 就紅」守門(需要 ffmpeg/ffprobe 在 PATH)
 NBLM_STRICT_SKIPS=1 uv run --no-sync pytest -q -ra --cov --cov-report=term-missing:skip-covered
 # 每個 clone 做一次
-uvx pre-commit install && git config blame.ignoreRevsFile .git-blame-ignore-revs
+uv tool install pre-commit && pre-commit install && git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 # 消費端安裝(3 VM / podcast-lab 各裝一次;@latest = 最新發版,不追 master)
 uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
@@ -77,7 +77,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 [docs/design-notes.md](docs/design-notes.md) = 模組設計細節;`docs/gotchas-*.md` = 按需載入的雷區(路由表見 §Gotchas 末尾);
 `docs/superpowers/` = 設計/計畫/findings。**SKILL.md 路由層 + references 不在本 repo**,在 `audi-skill/notebooklm`。
 
-## Gotchas(notebooklm-py 0.8.2,pin `>=0.8.2,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
+## Gotchas(notebooklm-py 0.8.4,pin `>=0.8.4,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
 
 - **`mcp[cli]` 必須有上界(`>=1.28.1,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端每次安裝都自由解析成當下
   最新 —— 上界擋 2.0 被靜默吃進去。lock 與實裝之間的漂移會自己長回來(已量到三次,且曾帶行為差異),

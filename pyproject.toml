@@ -59,7 +59,7 @@ notebooklm-cover = "notebooklm_mcp.cover_cli:main"
 # PEP 735:uv sync / uv run 預設就會裝 dev group;不會進 wheel METADATA。
 # ruff 精確 pin:minor 版會改預設規則集與格式化風格(0.15→0.16 預設規則從 59 條變成 413 條),
 # 範圍 pin 會讓 CI 在沒改任何 code 時變紅、凍住 latest。升級時要和 .pre-commit-config.yaml 的 rev 一起改。
-dev = ["pytest>=9.0.3", "pytest-asyncio>=1.2", "pytest-cov>=7", "ruff==0.16.10"]
+dev = ["pytest>=9.0.3", "pytest-asyncio>=1.3", "pytest-cov>=7", "ruff==0.16.10"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -91,9 +91,8 @@ select = ["E", "W", "F", "I", "B", "UP", "C4", "SIM", "ASYNC", "RUF", "DTZ", "PL
 ignore = [
     "RUF001", "RUF002", "RUF003",  # 繁中全形標點是 house style
     "SIM105",                       # try/except/pass 底下常掛註解說明為何吞掉,suppress() 放不下
-    "C408",                         # dict(k=v) 在測試裡可讀
     "ASYNC109",                     # timeout/wait_timeout 是 MCP 工具的公開 inputSchema,不能改名
-    "ASYNC230", "ASYNC240",         # 刻意在 async 內做同步本地 I/O:中間沒有 await 點,manifest 讀改寫不會被插隊;改 to_thread 反而引入交錯
+    "ASYNC230", "ASYNC240",         # 單 client stdio server,本地小檔(manifest/artwork/講義/PDF)同步 I/O 可接受;manifest 讀改寫中間無 await 點,改 to_thread 反而引入交錯。新增「同步讀整支音檔」這類大檔 I/O 時要重新評估
 ]
 
 [tool.ruff.lint.pycodestyle]
@@ -104,7 +103,7 @@ known-first-party = ["notebooklm_mcp"]
 combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["RUF043"]  # match= 刻意寫 regex
+"tests/**" = ["RUF043", "C408"]  # RUF043: match= 刻意寫 regex;C408: dict(k=v) 在測試裡可讀
 "scripts/**" = ["BLE001", "SIM115"]  # 一次性 CLI/eval 工具,捕捉後印出
 
 [tool.hatch.build.targets.wheel]

@@ -144,3 +144,9 @@ pyproject 的 `ruff==` 與 `.pre-commit-config.yaml` 的 rev 一起改;升完重
 - **resolution/highest 紅**:消費端下次重裝就會拿到壞組合,收緊上界或修正後發版。
 - **resolution/lowest-direct 紅**:下界宣告不實,抬下界。
 - **第三方 warning 被 `filterwarnings=error` 升成錯誤**:用精確的 `ignore:<msg regex>:<Category>` 豁免並註明來源,不准全域放行。
+
+## ci.yml 因基礎設施抖動變紅(apt mirror、runner)
+
+ci.yml 有網路相依的 apt 步驟(裝 ffmpeg,已帶 `Acquire::Retries=3`),抖動時 retag 會 exit 1、`latest` 停在舊版
+(後果是沒出貨,不是裝到壞版)。救法:`gh run rerun <ci run id>` 到綠 → `gh workflow run retag-verified-latest.yml`。
+另注意:pre-commit 的 yaml/toml/私鑰/檔尾 hook 只在本機裝了 hook 時生效,CI 只強制 ruff。

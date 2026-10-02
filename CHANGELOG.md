@@ -97,7 +97,7 @@
 - **mcp 2.x**(阻擋點見上)。
 - **型別檢查閘**:pyright 64 筆,源自 `client: object` 的標註,要先動型別設計才有意義,不在本輪範圍。
 - **pytest-randomly**:未評估過現有測試的順序相依,不冒險。
-- **actions 的 SHA pin 與 concurrency**:交給 dependabot。
+- **actions 的 SHA pin 與 concurrency**:未做。dependabot 只升 tag 版本,不會改成 SHA pin,也與 concurrency 無關;且 ci.yml 不可加 cancel-in-progress(retag 讀到 cancelled 會拒絕移動 latest)。
 
 ### 最終數字(CI 同款指令)
 

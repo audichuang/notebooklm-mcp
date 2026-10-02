@@ -1,6 +1,6 @@
 # notebooklm-mcp
 
-Thin self-built MCP server over `notebooklm-py>=0.8.2,<0.9` for NotebookLM automation: notebooks, sources, zh_Hant-first audio overview, source-grounded chat, deterministic episodic podcast seasons, per-episode attachments, and RSS publishing.
+Thin self-built MCP server over `notebooklm-py>=0.8.4,<0.9` for NotebookLM automation: notebooks, sources, zh_Hant-first audio overview, source-grounded chat, deterministic episodic podcast seasons, per-episode attachments, and RSS publishing.
 
 ## Requirements
 

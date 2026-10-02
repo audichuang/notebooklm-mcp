@@ -949,7 +949,8 @@ def pytest_runtest_logreport(report):
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
-    if os.environ.get("NBLM_STRICT_SKIPS") != "1":
+    # Only judge a run that otherwise passed: -x / --maxfail / Ctrl-C aborts leave tests unrun, not dead.
+    if os.environ.get("NBLM_STRICT_SKIPS") != "1" or exitstatus != pytest.ExitCode.OK:
         return
     dead = sorted(f for f, o in _outcomes.items() if o == {"skipped"})
     if dead:
