@@ -25,7 +25,10 @@
   `get_status` 預檢會把已生效的帳號放進 `already_shared`。
 - email 大小寫:上游保留 local part 的大小寫,我方用 `casefold`。pool 的 email 來自 `get_account_email()`,
   預期不會不一致,但未實測。
-- **dev 帳號 live 驗證:未驗證(打 tag 前需在拋棄式 notebook 跑 `notebook_share_with_pool`)。**
+- **live 驗證(stg 前 3 個免費槽位,notebooklm-py 0.8.4):通過。** 建一本標明 THROWAWAY 的 notebook:`notebook_create` 分享給 2 個 peer 成功(readback 通過);
+  `notebook_share_with_pool` 重跑冪等(`shared_with` 0、`already_shared` 2);用原始 SDK 把一位 peer 降成 VIEWER 後再跑,正確補回 EDITOR;跑完已刪除。
+  **仍未實測**:email local part 大小寫不一致的 readback 比對(pool 的 email 來自 `get_account_email()`,預期一致)。
+  stg 第 8 槽(付費兜底,與 prd `_4` 同帳號)憑證已過期,與本版無關,未動。
 - **cookie 紅線仍成立**:0.8.4 的 `_auth/` 只動到 enterprise host 集合與 access-gate 錯誤訊息文字,
   keepalive / psidts_recovery 沒動。
 - `tests/test_contracts.py` 的 pin tripwire 改成 0.8.3 not in、0.8.4 in。
@@ -107,8 +110,8 @@
 
 ### 打 tag 前還欠的
 
-1. dev 帳號在拋棄式 notebook 跑 `notebook_share_with_pool`,驗 0.8.4 的 `set_users` 語意(**未驗證**)。
-2. 確認 Dependabot secret 已設。
+1. ~~live 驗 0.8.4 的 `set_users` 語意~~:已通過(見上)。
+2. Dependabot secret 仍未設(`gh secret set AUDI_SKILL_DEPLOY_KEY --app dependabot`);只影響 dependabot 開的 PR,不影響發版。
 3. 打 tag 後從中性目錄驗實裝的那一份並印 `module.__file__`(見 release-checklist)。
 
 ## v0.9.28 — 多 agent 稽核一輪:59 條候選、反駁式驗證後修掉 5 條 P1、11 條 P2,補回 8 條假綠的測試
