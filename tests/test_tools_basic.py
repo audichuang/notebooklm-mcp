@@ -336,7 +336,7 @@ async def test_auth_check_hints_relogin_for_real_sdk_auth_shapes(fake_client, er
 )
 async def test_auth_check_preserves_non_auth_error_type(fake_client, error):
     fake_client.notebooks.list = AsyncMock(side_effect=error)
-    with pytest.raises(type(error)) as caught:
+    with pytest.raises(type(error)):
         await t.auth_check()
 
 

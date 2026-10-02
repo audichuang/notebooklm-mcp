@@ -20,6 +20,7 @@ from conftest import FakeClient, bouncing_rotate_client, refuse_first
 
 from notebooklm_mcp import runtime, tools_artifacts as a
 from notebooklm_mcp._errors import NotebookAccessDenied
+from notebooklm_mcp._status import TerminalGenerationError
 
 
 def _manifest(tmp_path, episodes=None):
@@ -506,7 +507,7 @@ async def test_failed_generation_leaves_the_previous_provenance_untouched(
 
     fake_client.artifacts.wait_for_completion = failed_wait
 
-    with pytest.raises(Exception):
+    with pytest.raises(TerminalGenerationError):
         await a.generate_slides("nb-1", manifest_path, 1)
 
     episode = _episode(manifest_path)

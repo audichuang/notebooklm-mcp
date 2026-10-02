@@ -285,7 +285,7 @@ async def test_publish_is_idempotent(env, tmp_path, artwork_png, monkeypatch):
     await _publish(manifest, artwork_png)
     assert len(captured) == 16  # two identical publishes, 8 PUTs each (2 mp3 + 2 cover + artwork + show + feed + index)
     first, second = captured[:8], captured[8:]
-    for a, b in zip(first, second):
+    for a, b in zip(first, second, strict=True):
         assert a["name"] == b["name"]
         assert a["content"] == b["content"]  # byte-identical, incl. media filenames
 
@@ -314,7 +314,7 @@ async def test_publish_persists_show_config_then_manifest_path_alone_suffices(
     res2 = await tools_publish.publish_series(manifest_path=manifest)
     assert res2["token"] == identity.make_token("ai-news", "s3cret")
     first, second = captured[:8], captured[8:]
-    for a, b in zip(first, second):
+    for a, b in zip(first, second, strict=True):
         assert a["name"] == b["name"] and a["content"] == b["content"]  # byte-identical
 
 
@@ -922,7 +922,7 @@ async def test_attachments_hosted_and_linked(env, tmp_path, artwork_png, monkeyp
         "slides_pdf_path": pdf, "report_md_path": str(md),
     }], "att.json")
 
-    res = await _publish(manifest, artwork_png)
+    await _publish(manifest, artwork_png)
     names = [c["name"] for c in captured]
     assert any(n.startswith("EP01-") and n.endswith(".pdf") for n in names)
     assert any(n.startswith("EP01-") and n.endswith(".html") for n in names)
@@ -1103,6 +1103,7 @@ async def test_bad_episode_cover_fails_fast(env, tmp_path, artwork_png, monkeypa
     }], "badcover.json")
     with pytest.raises(ValueError):
         await _publish(manifest, artwork_png)
+    assert captured == []
 
 
 async def test_cover_embedded_into_published_mp3(env, tmp_path, artwork_png, monkeypatch):
@@ -1613,7 +1614,7 @@ async def test_later_episode_report_render_failure_uploads_nothing(env, tmp_path
         })
     manifest = _manifest(tmp_path, eps, "render.json")
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="不在允許清單"):
         await _publish(manifest, artwork_png, require_slides=True, require_report=True)
     assert captured == []            # EP01 一個 blob 都沒落地
 

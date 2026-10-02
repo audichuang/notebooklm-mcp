@@ -305,7 +305,7 @@ async def test_each_pooled_client_carries_its_own_credential_file(monkeypatch):
         paths = [c.path for c in built]
         assert all(p is not None for p in paths), "每個槽位都要有自己的憑證檔"
         assert len(set(paths)) == 2, "兩個槽位不能共用同一個檔"
-        for path, tag in zip(paths, ("1", "2")):
+        for path, tag in zip(paths, ("1", "2"), strict=True):
             assert path.read_text(encoding="utf-8") == _cred(tag)
             assert stat.S_IMODE(path.stat().st_mode) == 0o600, "憑證檔不能讓 umask 決定權限"
             assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700

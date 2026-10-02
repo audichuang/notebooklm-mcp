@@ -53,7 +53,6 @@ async def test_inline_resend_finalize_uses_the_rotated_client_not_the_stale_one(
     client_a.artifacts.generate_audio = a_always_refuses
     client_b.artifacts.generate_audio = a_always_refuses
     runtime.set_clients([("a@x", client_a), ("b@x", client_b)])
-    manifest_path = tmp_path / "series_manifest.json"
     stopped = await p.podcast_series(
         "nb-1", episodes=[{"title": "心法篇", "brief": "1"}],
         output_dir=str(tmp_path), start=1,
