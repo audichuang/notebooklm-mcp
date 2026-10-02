@@ -1,10 +1,10 @@
 # notebooklm-mcp v0.9.14 真實環境驗收 — FINDINGS
 
 驗收日期:2026-08-15
-工作區:`/home/user/research/audiskill/nblm-acceptance-v0.9.14`
+工作區:`$HOME/research/audiskill/nblm-acceptance-v0.9.14`
 帳號 pool:Doppler `notebooklm` / **`-c stg`**(測試帳號 pool,CLAUDE.md §一)
 實裝:`notebooklm-mcp 0.9.14` / `notebooklm-py 0.8.1` / `mcp 1.29.0`
-直譯器:`/home/user/.local/share/uv/tools/notebooklm-mcp/bin/python3`
+直譯器:`$HOME/.local/share/uv/tools/notebooklm-mcp/bin/python3`
 
 ---
 

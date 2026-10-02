@@ -1,10 +1,10 @@
 # notebooklm-mcp v0.9.0 真實環境驗收 — FINDINGS
 
 - 日期:2026-08-09
-- 工作區:`/home/user/research/audiskill/nblm-acceptance-v0.9.0`
+- 工作區:`$HOME/research/audiskill/nblm-acceptance-v0.9.0`
 - Doppler config:`notebooklm / stg`(9 槽位:`NOTEBOOKLM_AUTH_JSON` + `_2`…`_9`)
 - 實裝:`notebooklm-mcp 0.9.0` · `notebooklm-py 0.8.0` · `mcp 1.29.0`
-- 命令:`nblm-mcp`(shim → `/home/user/.local/share/uv/tools/notebooklm-mcp/bin/python`)
+- 命令:`nblm-mcp`(shim → `$HOME/.local/share/uv/tools/notebooklm-mcp/bin/python`)
 
 判定用詞:**PASS** 有可觀測事實支撐 / **FAIL** 與期望不符 /
 **INCONCLUSIVE** 判斷不了(絕不寫成 PASS)/ **N/A-刻意不測** 附理由。

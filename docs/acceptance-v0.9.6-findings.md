@@ -1,6 +1,6 @@
 # notebooklm-mcp v0.9.6 真實環境驗收 — FINDINGS
 
-- 工作區:`/home/user/research/audiskill/nblm-acceptance-v0.9.6`
+- 工作區:`$HOME/research/audiskill/nblm-acceptance-v0.9.6`
 - 涵蓋版本:v0.9.4 / v0.9.5 / v0.9.6(判定 **full**)
 - 帳號:`doppler -p notebooklm -c stg`(測試帳號 pool,9 槽)
 - 開跑:2026-08-10

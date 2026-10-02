@@ -1,7 +1,7 @@
 # notebooklm-mcp v0.9.25-rc 真實環境驗收 — FINDINGS
 
 開始時間:2026-09-03 12:00 (+08:00)
-工作區:`/home/user/research/audiskill/nblm-acceptance-v0.9.25-rc`
+工作區:`$HOME/research/audiskill/nblm-acceptance-v0.9.25-rc`
 帳號 pool:`doppler -p notebooklm -c stg`(測試帳號,CLAUDE.md §一)
 
 ---
@@ -12,9 +12,9 @@
 
 ```
 $ command -v nblm-mcp
-/home/user/.local/bin/nblm-mcp
+$HOME/.local/bin/nblm-mcp
 $ head -1 $(command -v nblm-mcp)
-#!/home/user/.local/share/uv/tools/notebooklm-mcp/bin/python3
+#!$HOME/.local/share/uv/tools/notebooklm-mcp/bin/python3
 $ ~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "...m.version(...)"
 0.9.24 0.8.1 1.29.1        # notebooklm-mcp / notebooklm-py / mcp
 ```
@@ -55,9 +55,9 @@ Claude Code 列出的 `mcp__notebooklm__*` deferred tools **沒有 `source_searc
 ### 0.4 安裝 rc build
 
 ```
-$ uv tool install --python 3.12 --force /home/user/research/audiskill/notebooklm-mcp
+$ uv tool install --python 3.12 --force $HOME/research/audiskill/notebooklm-mcp
  - notebooklm-mcp==0.9.24 (from git+https://github.com/audichuang/notebooklm-mcp.git@61789f5080ce29071d9ad68df3c0d6ed13df4509)
- + notebooklm-mcp==0.9.24 (from file:///home/user/research/audiskill/notebooklm-mcp)
+ + notebooklm-mcp==0.9.24 (from file://$HOME/research/audiskill/notebooklm-mcp)
  - notebooklm-py==0.8.1
  + notebooklm-py==0.8.2
 Installed 2 executables: nblm-mcp, notebooklm-cover
@@ -2456,7 +2456,7 @@ slot 8 有 20 本」—— 那不只是「別人的 notebook 看不到」,還包
 
 ```
 $ uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
- - notebooklm-mcp==0.9.24 (from file:///home/user/research/audiskill/notebooklm-mcp)
+ - notebooklm-mcp==0.9.24 (from file://$HOME/research/audiskill/notebooklm-mcp)
  + notebooklm-mcp==0.9.24 (from git+…@61789f5080ce29071d9ad68df3c0d6ed13df4509)
 Installed 2 executables: nblm-mcp, notebooklm-cover
 ```

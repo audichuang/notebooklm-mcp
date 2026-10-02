@@ -1,10 +1,10 @@
 # notebooklm-mcp v0.9.16 真實環境驗收 — FINDINGS
 
 驗收日期:**2026-08-17**(19:37 – 21:06 CST / UTC+8)
-工作區:`/home/user/research/audiskill/nblm-acceptance-v0.9.16`
+工作區:`$HOME/research/audiskill/nblm-acceptance-v0.9.16`
 帳號 pool:Doppler `notebooklm` / **`-c stg`**(9 槽,全程未動 Doppler)
 實裝:`notebooklm-mcp 0.9.16` / `notebooklm-py 0.8.1` / `mcp 1.29.0`
-直譯器:`/home/user/.local/share/uv/tools/notebooklm-mcp/bin/python`
+直譯器:`$HOME/.local/share/uv/tools/notebooklm-mcp/bin/python`
 驗收 notebook:`66f31068-5997-4c43-9960-0973084269d1` — **已刪除**(21:08)
 額外素材 notebook:`bddb2202-0f5b-483a-8d4b-74e9d00e6d02`(權限測試用,刻意不分享)— **已刪除**
 兩本刪除後 owner(槽位 1)的 `notebooks.list()` = `[]`,遠端無殘留。

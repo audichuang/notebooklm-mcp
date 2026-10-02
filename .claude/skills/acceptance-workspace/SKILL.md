@@ -60,7 +60,7 @@ skill 文件的每一條「然後跑 X」都是一次可執行的斷言。
 
 ```bash
 SKILL_DIR=<本 skill 的目錄>            # .claude/skills/acceptance-workspace
-WS=/home/user/research/audiskill/nblm-acceptance-<版本>
+WS=$HOME/research/audiskill/nblm-acceptance-<版本>
 cp -r "$SKILL_DIR/template" "$WS"
 
 # 佔位符：__VERSION__(v0.9.1)、__VERSION_BARE__(0.9.1)、
@@ -70,7 +70,7 @@ grep -rl '__VERSION__\|__VERSION_BARE__\|__TOOL_COUNT__\|__WORKSPACE_PATH__' "$W
                   s|__TOOL_COUNT__|35|g; s|__WORKSPACE_PATH__|$WS|g"
 
 # skill 快照（範本刻意不含，必須從上游現拉；git 不追蹤空目錄，所以自己 mkdir）
-UP=/home/user/research/audi-skill/notebooklm
+UP=$HOME/research/audi-skill/notebooklm
 mkdir -p "$WS/.claude/skills/notebooklm" "$WS/sources" "$WS/output"
 cp -r "$UP/SKILL.md" "$UP/references" "$WS/.claude/skills/notebooklm/"
 cp "$UP/.mcp.example.json" "$WS/.claude/skills/notebooklm/" 2>/dev/null || true

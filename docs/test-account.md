@@ -38,7 +38,7 @@ bash scripts/setup-test-config.sh          # 寫進 notebooklm/stg
 > (在 repo 目錄下),版本才跟 MCP 實裝的一致。
 
 ```bash
-cd /home/user/research/audiskill/notebooklm-mcp
+cd $HOME/research/audiskill/notebooklm-mcp
 uv sync --extra login && uv run playwright install chromium   # 僅登入機需要,已完成
 uv run notebooklm profile create test                                # 已完成
 uv run notebooklm -p test login     # 瀏覽器開啟 → 用「測試用」Google 帳號登入
@@ -74,7 +74,7 @@ doppler run -p notebooklm -c prd -- notebooklm list        # 正式(多帳號 po
 跟主力帳號一樣的老化問題,重登一次即可:
 
 ```bash
-cd /home/user/research/audiskill/notebooklm-mcp
+cd $HOME/research/audiskill/notebooklm-mcp
 uv run notebooklm -p test login
 bash scripts/sync-auth.sh --profile test --config stg
 ```
@@ -89,7 +89,7 @@ bash scripts/sync-auth.sh --profile test --config stg
 ## 登入與同步
 
 ```bash
-cd /home/user/research/audiskill/notebooklm-mcp
+cd $HOME/research/audiskill/notebooklm-mcp
 uv run notebooklm -p test login
 bash scripts/sync-auth.sh --profile test --config stg
 ```

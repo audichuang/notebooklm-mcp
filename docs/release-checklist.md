@@ -9,7 +9,7 @@
 
 ## Cross-Repo Sync Checklist
 
-MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `/home/user/research/audi-skill/notebooklm/SKILL.md` 的工具表與 `/home/user/research/audi-skill/notebooklm/references/tool-reference.md`。
+MCP repo 與 skill repo 是一組配置。改動 MCP tools 時,同步更新 `$HOME/research/audi-skill/notebooklm/SKILL.md` 的工具表與 `$HOME/research/audi-skill/notebooklm/references/tool-reference.md`。
 
 新增、移除或改名工具時,commit message 要明講 skill repo 是否已同步;若尚未同步,不要 push MCP release tag。
 

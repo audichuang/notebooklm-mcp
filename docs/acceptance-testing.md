@@ -108,7 +108,7 @@ nblm-acceptance-vX.Y.Z/
 **① skill 快照必須逐字等於上游 —— 不准為了方便改它。**
 
 ```bash
-SRC=/home/user/research/audi-skill/notebooklm
+SRC=$HOME/research/audi-skill/notebooklm
 cp "$SRC/SKILL.md" "$SRC/.mcp.example.json" .claude/skills/notebooklm/
 cp -r "$SRC/references" .claude/skills/notebooklm/
 diff -rq "$SRC" .claude/skills/notebooklm --exclude=.mcp.json   # 必須無輸出
@@ -265,7 +265,7 @@ v0.7.0 把配額拒絕從「回傳 failed status」改成「拋例外」。離�
 **未安裝的程式碼**,而且全部 PASS。
 
 ```bash
-TOOL_PY="/home/user/.local/share/uv/tools/notebooklm-mcp/bin/python -P"
+TOOL_PY="$HOME/.local/share/uv/tools/notebooklm-mcp/bin/python -P"
 SITE=$($TOOL_PY -c 'import notebooklm_mcp,os;print(os.path.dirname(notebooklm_mcp.__file__))')
 case "$SITE" in
   */uv/tools/notebooklm-mcp/*) ok "sitepackages 在 tool venv" ;;

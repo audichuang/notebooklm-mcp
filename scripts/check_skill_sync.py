@@ -10,7 +10,7 @@ from notebooklm_mcp import app
 
 ROOT = Path(__file__).resolve().parents[1]
 CI_SKILL_DIR = ROOT / "audi-skill" / "notebooklm"
-LOCAL_SKILL_DIR = Path("/home/user/research/audi-skill/notebooklm")
+LOCAL_SKILL_DIR = Path.home() / "research" / "audi-skill" / "notebooklm"
 SKILL_DIR = CI_SKILL_DIR if CI_SKILL_DIR.exists() else LOCAL_SKILL_DIR
 SKILL_MD = SKILL_DIR / "SKILL.md"
 TOOL_REFERENCE = SKILL_DIR / "references" / "tool-reference.md"
