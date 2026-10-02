@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -136,7 +136,7 @@ async def test_legacy_missing_audio_resumes_without_duplicate_adopted_source(
             id="legacy-artifact",
             title="EP01 心法篇",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
     source_id = fake_client.sources._add("EP01 心法篇", kind="media")
@@ -220,7 +220,7 @@ async def test_acceptance_unknown_can_adopt_late_verified_artifact(
             id="late-artifact",
             title="Audio Overview",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -261,7 +261,7 @@ async def test_acceptance_unknown_adoption_uses_episode_notebook_in_rolling_mani
             id="late-episode-artifact",
             title="Audio Overview",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -311,7 +311,7 @@ async def test_published_legacy_output_blocks_implicit_supersede_after_failed_re
             id="legacy-artifact",
             title="EP01 心法篇",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
     fake_client.artifacts.fail_complete = True
@@ -403,7 +403,7 @@ async def test_legacy_source_is_not_carried_to_a_different_artifact(
             id="replacement-artifact",
             title="Audio Overview",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -447,7 +447,7 @@ async def test_legacy_output_resume_to_the_same_artifact_still_succeeds(
             id="legacy-artifact",
             title="EP01 心法篇",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
     source_boundary = len(fake_client.sources.calls)

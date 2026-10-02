@@ -1,13 +1,12 @@
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import tools_basic as b
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import tools_basic as b, tools_podcast as p
 
 
 async def test_attempt_is_dispatching_before_generate_audio_side_effect(fake_client, tmp_path):
@@ -104,7 +103,7 @@ def _remote_audio(artifact_id: str):
         id=artifact_id,
         title="Audio Overview",
         kind=ArtifactType.AUDIO,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -200,14 +199,14 @@ async def test_reconcile_with_no_candidate_past_the_window_offers_retract(
     `podcast_attempt_retract`。用 `_attempt_record` 直接把 `dispatched_at` 往回撥
     2 小時,模擬「窗早就關了」而不必真的等 `wait_timeout` 秒。
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     manifest_path, attempt_id = await _leave_acceptance_unknown(
         fake_client, tmp_path, []
     )
     store = p.ManifestStore(str(manifest_path))
     stale_dispatched_at = (
-        datetime.now(timezone.utc) - timedelta(hours=2)
+        datetime.now(UTC) - timedelta(hours=2)
     ).isoformat()
 
     def backdate(manifest: dict) -> None:
@@ -250,7 +249,7 @@ async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller
         def _mutate(manifest: dict) -> None:
             _, attempt = p._attempt_record(manifest, 1, attempt_id)
             attempt["dispatch"]["dispatched_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=seconds)
+                datetime.now(UTC) - timedelta(seconds=seconds)
             ).isoformat()
 
         store.update(_mutate)
@@ -332,7 +331,7 @@ async def test_reconcile_does_not_auto_bind_when_another_attempt_is_still_unreso
         def _mutate(manifest: dict) -> None:
             _, attempt = p._attempt_record(manifest, episode_n, attempt_id)
             attempt["dispatch"]["dispatched_at"] = (
-                datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+                datetime.now(UTC) - timedelta(seconds=seconds_ago)
             ).isoformat()
 
         store.update(_mutate)
@@ -647,7 +646,7 @@ async def test_reconcile_honors_the_original_promise_over_a_smaller_retry_timeou
     def backdate(manifest: dict) -> None:
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=4000)
+            datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
 
     store.update(backdate)
@@ -683,7 +682,7 @@ async def test_legacy_attempt_without_a_persisted_promise_still_uses_the_floor(
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         del attempt["dispatch"]["wait_timeout"]  # 模擬 legacy manifest 沒有這個欄位
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=4000)
+            datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
 
     store.update(strip_and_backdate)
@@ -725,7 +724,7 @@ async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(
     def backdate(manifest: dict) -> None:
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=1500)
+            datetime.now(UTC) - timedelta(seconds=1500)
         ).isoformat()
 
     store.update(backdate)
@@ -773,7 +772,7 @@ async def test_candidate_window_also_honors_the_original_promise(
     def backdate(manifest: dict) -> None:
         _, attempt = p._attempt_record(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=4000)
+            datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
 
     store.update(backdate)

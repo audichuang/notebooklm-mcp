@@ -4,7 +4,13 @@
 
 分數只有在兩臂用**同一組 expectations**、且評分者拿不到版本資訊時才可比。
 """
-import collections, concurrent.futures, glob, json, os, subprocess, sys
+import collections
+import concurrent.futures
+import glob
+import json
+import os
+import subprocess
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.environ.get("NBLM_EVAL_WORK", os.path.join(os.environ.get("TMPDIR", "/tmp"), "nblm-eval"))

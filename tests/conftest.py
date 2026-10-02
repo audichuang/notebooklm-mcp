@@ -1,9 +1,8 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from notebooklm.exceptions import RPCError, ValidationError
 from notebooklm._types.research import (
     RESEARCH_RESULT_TYPE_REPORT,
     ResearchSource,
@@ -11,6 +10,7 @@ from notebooklm._types.research import (
     ResearchStatus,
     ResearchTask,
 )
+from notebooklm.exceptions import RPCError, ValidationError
 from notebooklm.rpc.types import SharePermission
 from notebooklm.types import (
     ArtifactType,
@@ -70,7 +70,7 @@ class FakeArtifacts:
         # 原子換檔必須讓既有的完整檔案毫髮無傷(v0.3.3)。
         self.download_slides_bytes = b"%PDF-1.4 fake"
         self.download_slides_exc = None
-        self.download_report_bytes = "# 假講義\n\n- 重點一\n".encode("utf-8")
+        self.download_report_bytes = "# 假講義\n\n- 重點一\n".encode()
         self.download_report_exc = None
         # 設成別的字串,模擬 REVISE_SLIDE 回一個「不等於傳入 artifact_id」的 id
         # (SDK 沒有保證相等,只是 parse 回傳值)。
@@ -91,7 +91,7 @@ class FakeArtifacts:
             is_completed=completed, is_failed=failed,
             status_str=status or ("failed" if failed else
                                   "completed" if completed else "processing"),
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             source_ids=tuple(source_ids),
         )
         self.artifacts.append(art)
@@ -149,7 +149,7 @@ class FakeArtifacts:
                 id=task_id,
                 title="Audio Overview",
                 kind=ArtifactType.AUDIO,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 source_ids=(),
             )
         )
@@ -312,7 +312,7 @@ class FakeSources:
                 # naive,而那次 naive/aware 的落差讓 reconciliation 在測試綠、production
                 # 卻濾掉每一筆 source —— 所以這裡必須跟著實裝版本走,不能兩邊各猜一個。
                 # `_created_at_utc` 對 naive/aware 都正確(有專屬測試鎖著),換版本不會再爆。
-                "created_at": created_at or datetime.now(timezone.utc),
+                "created_at": created_at or datetime.now(UTC),
                 "is_ready": is_ready,
             }
         )

@@ -35,10 +35,9 @@ def test_failure_inside_the_body_preserves_the_existing_file(tmp_path):
     target = tmp_path / "artifact.bin"
     target.write_bytes(b"old")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with prepared_replacement(str(target)) as temp_path:
-            _write(temp_path)
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), prepared_replacement(str(target)) as temp_path:
+        _write(temp_path)
+        raise RuntimeError("boom")
 
     assert target.read_bytes() == b"old"
     assert list(tmp_path.iterdir()) == [target]
@@ -51,10 +50,9 @@ def test_cancellation_also_cleans_the_temp_file(tmp_path):
     target = tmp_path / "artifact.bin"
     target.write_bytes(b"old")
 
-    with pytest.raises(asyncio.CancelledError):
-        with prepared_replacement(str(target)) as temp_path:
-            _write(temp_path)
-            raise asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError), prepared_replacement(str(target)) as temp_path:
+        _write(temp_path)
+        raise asyncio.CancelledError()
 
     assert target.read_bytes() == b"old"
     assert list(tmp_path.iterdir()) == [target]
@@ -65,9 +63,8 @@ def test_empty_output_is_refused(tmp_path):
     target = tmp_path / "artifact.bin"
     target.write_bytes(b"old")
 
-    with pytest.raises(ValueError, match="empty file"):
-        with prepared_replacement(str(target)):
-            pass
+    with pytest.raises(ValueError, match="empty file"), prepared_replacement(str(target)):
+        pass
 
     assert target.read_bytes() == b"old"
     assert list(tmp_path.iterdir()) == [target]
@@ -150,9 +147,8 @@ def test_directory_fsync_failure_says_the_file_was_already_replaced(tmp_path, mo
 
     monkeypatch.setattr(os, "fsync", failing_dir_fsync)
 
-    with pytest.raises(OSError, match="already replaced"):
-        with prepared_replacement(str(target)) as temp_path:
-            _write(temp_path)
+    with pytest.raises(OSError, match="already replaced"), prepared_replacement(str(target)) as temp_path:
+        _write(temp_path)
 
     # 換檔本身已經成功 —— 錯誤訊息必須說得出這件事,而檔案就是新的。
     assert target.read_bytes() == b"new"

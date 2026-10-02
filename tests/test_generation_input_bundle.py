@@ -840,6 +840,7 @@ def test_binding_sidecar_is_group_readable(tmp_path):
     """mkstemp 給 0600,而 os.link 會把 temp 的 mode 帶到最終檔——證據檔不該悄悄
     變成只有本人讀得到(同 _atomic 的教訓,那邊用 chmod 修掉)。"""
     import stat
+
     from notebooklm_mcp.generation_input import write_attempt_binding
 
     prepared = _prepared(tmp_path)
@@ -852,6 +853,7 @@ def test_unsupported_directory_fsync_does_not_undo_the_binding(tmp_path, monkeyp
     """有些 filesystem 不支援 directory fsync(EINVAL/ENOTSUP)。那不是失敗——
     舊版把 fsync 放在 try 裡,一拋就把剛建立的綁定刪掉,整個 dispatch 陪葬。"""
     import errno
+
     from notebooklm_mcp import generation_input as gi
 
     prepared = _prepared(tmp_path)
@@ -870,6 +872,7 @@ def test_real_directory_fsync_error_says_the_binding_already_exists(tmp_path, mo
     """真 IO 錯誤仍要 raise,但訊息必須講明綁定已經建立——否則呼叫端會當成
     「沒綁到」而重試,結果撞上 FileExistsError。"""
     import errno
+
     from notebooklm_mcp import generation_input as gi
 
     prepared = _prepared(tmp_path)
@@ -903,6 +906,7 @@ def test_cleanup_failure_does_not_mask_the_real_error(tmp_path, monkeypatch):
     """pre-commit 清 temp 失敗時,呼叫端要看到的是原本那個有操作指引的錯誤,
     不是 unlink 的 PermissionError。"""
     import errno
+
     from notebooklm_mcp import generation_input as gi
 
     prepared = _prepared(tmp_path)
@@ -930,6 +934,7 @@ def test_second_write_never_overwrites_an_existing_binding(tmp_path):
 def test_post_publish_temp_cleanup_failure_keeps_the_binding(tmp_path, monkeypatch):
     """發布之後清 temp 失敗不得回滾 —— 刪掉成功的綁定會讓重跑誤以為沒綁過而重建 attempt。"""
     import errno
+
     from notebooklm_mcp import generation_input as gi
 
     prepared = _prepared(tmp_path)

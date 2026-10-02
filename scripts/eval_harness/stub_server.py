@@ -15,7 +15,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 sys.path.insert(0, os.environ["NBLM_REPO"])
-from notebooklm_mcp.app import mcp as real_mcp  # noqa: E402
+from notebooklm_mcp.app import mcp as real_mcp
 
 LOG = os.environ.get("NBLM_EVAL_LOG", "/dev/null")
 server = Server("notebooklm")

@@ -2,14 +2,13 @@
 
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from notebooklm.types import ArtifactType
 
 from notebooklm_mcp import tools_podcast as p
-
 
 EPS3 = [
     {"title": "心法篇", "brief": "1"},
@@ -28,7 +27,7 @@ def _generate_briefs(fake_client, start: int = 0) -> list[str]:
 
 
 async def test_safe_next_action_vocabulary_names_public_mcp_tools():
-    assert p.SAFE_NEXT_ACTIONS == {
+    assert {
         "podcast_attempt_adopt",
         # 來源筆數守門的停點:series 生不出帶 `source_ids` 的 settings,所以下一步
         # 只能換工具。指回 `podcast_series` 會叫呼叫端撞回同一道牆,而 `attempt_count`
@@ -46,13 +45,13 @@ async def test_safe_next_action_vocabulary_names_public_mcp_tools():
         "podcast_attempt_retract",
         "podcast_series",
         "source_delete",
-    }
+    } == p.SAFE_NEXT_ACTIONS
     # 白名單的意義是「一定是真的 MCP 工具名」,不是「一定在本模組」——source_delete 住在
     # tools_basic,所以對真正的工具註冊表驗,而不是對模組屬性。
     from notebooklm_mcp import app
 
     registered = {tool.name for tool in await app.mcp.list_tools()}
-    assert p.SAFE_NEXT_ACTIONS <= registered
+    assert registered >= p.SAFE_NEXT_ACTIONS
 
 
 
@@ -662,7 +661,7 @@ async def test_attempt_backed_adopt_with_matching_title_directs_via_caps(
     assert adopted["observed_state"] == "continuity_verified"
     assert adopted["complete"] is False
     assert adopted["safe_next_action"] == "podcast_episode_resume"
-    assert "next_step" in adopted and adopted["next_step"]
+    assert adopted.get("next_step")
     assert adopted["safe_next_attempt_id"] == attempt_id
     assert adopted["safe_next_artifact_id"] == "task-123"
     assert "stale_source_ids" not in adopted
@@ -713,7 +712,7 @@ async def test_attempt_backed_adopt_needing_rename_directs_via_caps(
     assert adopted["complete"] is False
     assert adopted["stale_source_ids"], "未選中的同名候選必須進清理義務"
     assert adopted["safe_next_action"] == "source_delete"
-    assert "next_step" in adopted and adopted["next_step"]
+    assert adopted.get("next_step")
     assert "source_delete" in adopted["next_step"]
     # caps 原本教的續完 finalize 不能被覆寫掉——先刪、刪完之後照這句做。
     assert "podcast_episode_resume" in adopted["next_step"]
@@ -939,7 +938,7 @@ async def test_legacy_audio_missing_hands_off_to_adopt_when_not_yet_adopted(
             id="legacy-artifact",
             title="EP01 心法篇",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
     add_file_boundary = len(
@@ -1019,7 +1018,7 @@ async def test_legacy_audio_missing_hands_off_to_resume_when_already_adopted(
             id="legacy-artifact",
             title="EP01 心法篇",
             kind=ArtifactType.AUDIO,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -1194,7 +1193,7 @@ async def test_series_repair_path_promotion_refusal_becomes_a_structured_stop(
     assert out["observed_state"] == "promotion_refused"
     # 這顆是已完成的 output attempt,caps 給的下一步是免旗標 retract。
     assert out["safe_next_action"] == p.ACTION_RETRACT
-    assert "next_step" in out and out["next_step"]
+    assert out.get("next_step")
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert stored["episodes"][0]["output_attempt_id"] is not None, (
         "促進被拒絕,既有 output 指標不能被動到"
@@ -1233,4 +1232,4 @@ async def test_series_active_attempt_promotion_refusal_becomes_a_structured_stop
     # 這顆還沒 promote、但 finalize 已完成(remote.artifact_id 落盤),caps 給的下
     # 一步是 resume 續完(不重新生成)。
     assert out["safe_next_action"] == p.ACTION_RESUME
-    assert "next_step" in out and out["next_step"]
+    assert out.get("next_step")

@@ -3,7 +3,6 @@ faked via httpx.MockTransport injected through the tools_publish._make_client se
 (monkeypatched) — zero real sockets, zero NAS mount, zero NotebookLM calls (every
 episode here already has a local mp3_path, so _ensure_local_mp3's re-download
 branch, which needs fake_client, is never exercised)."""
-from pathlib import Path
 import hashlib
 import json
 import os
@@ -12,6 +11,7 @@ import struct
 import subprocess
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import httpx
 import pytest

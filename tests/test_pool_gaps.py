@@ -22,12 +22,11 @@ from conftest import FakeClient
 from notebooklm.exceptions import RateLimitError
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_podcast as p
-
 # repo 測試自己的 helper:讓前 N 次 generate_audio 以配額拒絕收場,
 # 並記下每次「當下作用中的帳號」。
 from test_quota_failover import _flaky_generate
+
+from notebooklm_mcp import runtime, tools_podcast as p
 
 
 def _episode(manifest_path, episode_n=1):

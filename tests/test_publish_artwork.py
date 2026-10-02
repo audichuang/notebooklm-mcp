@@ -1,5 +1,6 @@
 import pytest
 from PIL import Image
+
 from notebooklm_mcp.publish import artwork
 
 

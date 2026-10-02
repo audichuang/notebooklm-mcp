@@ -421,7 +421,8 @@ async def test_episode_terminal_failure_not_labeled_resumable(fake_client, tmp_p
 async def test_episode_writes_manifest_stub(fake_client, tmp_path):
     """傳 manifest_path:生成受理後 stub 立即進 manifest(fresh 檔自動建),帶
     決定性 mp3_path + 每集自己的 notebook_id/artifact_id——滾動 feed 免手動補步。"""
-    import json, os
+    import json
+    import os
     mpath = tmp_path / "series_manifest.json"
     await p.podcast_episode(
         "nb-9", episode_n=3, title="紀律篇", brief="b",

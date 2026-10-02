@@ -1,10 +1,10 @@
 """Pin notebooklm-py PUBLIC API signatures. Breaks loudly if the SDK changes
 under us - our single tripwire against silent upstream API drift."""
 import inspect
+from datetime import UTC
 
 import httpx
 import pytest
-
 from notebooklm.rpc.types import AudioFormat, AudioLength
 
 
@@ -46,10 +46,10 @@ def test_default_backend_is_still_web():
     # 在 `app._INLINE_AUTH_ENV_OVERRIDES` 把 `NOTEBOOKLM_BACKEND` 刪掉 —— 那道護欄綁的是
     # **字面字串**(上游沒有導出常數),所以名字要在這裡對回 SDK,否則上游改名之後我們的
     # 覆寫會靜默變成 no-op,而症狀是「某天 pool 整個換 backend」。
-    from notebooklm_mcp.app import _BACKEND_ENV, _INLINE_AUTH_ENV_OVERRIDES
-
     # 0.8.3 把讀環境變數那一行從 `_client_assembly` 搬到 `_client_options`(from_storage 的 normalizer)。
     from notebooklm import _client_options
+
+    from notebooklm_mcp.app import _BACKEND_ENV, _INLINE_AUTH_ENV_OVERRIDES
 
     assert f'os.environ.get("{_BACKEND_ENV}")' in _inspect.getsource(
         _client_options
@@ -244,8 +244,8 @@ def test_generation_kickoff_refuses_by_raising():
     """
     import inspect as _inspect
 
-    from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
     from notebooklm._web.artifact import generation
+    from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
 
     assert issubclass(RateLimitError, Exception)
     assert issubclass(ArtifactFeatureUnavailableError, Exception)
@@ -338,14 +338,14 @@ def test_source_created_at_is_timezone_aware():
     acceptance_unknown。上游哪天再翻回 naive,這裡先紅,提醒同步改 fake。
     (`_created_at_utc` 本身兩種都吃,有專屬單元測試——這條鎖的是「fake 有沒有說謊」。)
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from notebooklm._types.common import _datetime_from_timestamp
 
     stamped = _datetime_from_timestamp(1_785_000_000)
     assert isinstance(stamped, datetime)
     assert stamped.tzinfo is not None, "上游翻回 naive 了 —— conftest 的 fake 要跟著改"
-    assert stamped.utcoffset() == timezone.utc.utcoffset(None)
+    assert stamped.utcoffset() == UTC.utcoffset(None)
 
 
 def test_notebook_signatures_and_fields():
@@ -414,7 +414,7 @@ def test_report_signatures():
 
 
 def test_slide_and_report_enum_members():
-    from notebooklm.types import SlideDeckFormat, SlideDeckLength, ReportFormat
+    from notebooklm.types import ReportFormat, SlideDeckFormat, SlideDeckLength
 
     assert SlideDeckFormat.DETAILED_DECK == 1 and SlideDeckFormat.PRESENTER_SLIDES == 2
     assert SlideDeckLength.DEFAULT == 1 and SlideDeckLength.SHORT == 2
@@ -560,8 +560,8 @@ def test_artifact_exposes_source_ids():
     from datetime import datetime
     from typing import get_type_hints
 
-    from notebooklm.types import Artifact
     import notebooklm.types as notebooklm_types
+    from notebooklm.types import Artifact
 
     assert "source_ids" in {f.name for f in dataclasses.fields(Artifact)}
     hints = get_type_hints(
@@ -718,7 +718,7 @@ def test_share_status_and_shared_user_fields():
     `ShareStatus.shared_users[].email` / `.permission` 這兩個欄位形狀。"""
     import dataclasses
 
-    from notebooklm.types import ShareStatus, SharedUser
+    from notebooklm.types import SharedUser, ShareStatus
 
     assert "shared_users" in {f.name for f in dataclasses.fields(ShareStatus)}
     assert {"email", "permission"} <= {f.name for f in dataclasses.fields(SharedUser)}
@@ -770,7 +770,12 @@ def test_import_identity_differs_from_citation_identity():
 def test_research_task_and_source_fields():
     import dataclasses
 
-    from notebooklm._types.research import ResearchSource, ResearchStart, ResearchStatus, ResearchTask
+    from notebooklm._types.research import (
+        ResearchSource,
+        ResearchStart,
+        ResearchStatus,
+        ResearchTask,
+    )
 
     assert {"task_id", "status", "query", "sources", "summary", "report"} <= {
         f.name for f in dataclasses.fields(ResearchTask)
@@ -862,8 +867,8 @@ def test_sync_auth_uses_the_sdk_profile_path_resolver():
 
 def test_auth_probe_matches_the_sdk_http_auth_error_shape():
     """The compatibility shim must follow the HTTP cause retained by SDK 0.8.0."""
-    from notebooklm._web.transport.executor import RpcExecutor
     from notebooklm._runtime import is_auth_error
+    from notebooklm._web.transport.executor import RpcExecutor
     from notebooklm.exceptions import RPCError
     from notebooklm.rpc.types import RPCMethod
 

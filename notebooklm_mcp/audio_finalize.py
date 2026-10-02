@@ -11,14 +11,14 @@ import hashlib
 import os
 import stat
 import tempfile
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta, timezone
 from email.utils import format_datetime
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from notebooklm.types import ArtifactType
 
-from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE
-from ._atomic import fsync_parent as _fsync_parent
+from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE, fsync_parent as _fsync_parent
 from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
 from .manifest_store import ManifestStore
 from .naming import episode_label
@@ -252,7 +252,7 @@ def _created_at_utc(value: object) -> datetime | None:
     0.8 起改回 aware,這裡對 aware/naive 都正確。"""
     if not isinstance(value, datetime):
         return None
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def unresolved_upload_descriptor(attempt: dict) -> dict | None:
@@ -282,7 +282,7 @@ def _dispatched_at_utc(upload: dict) -> datetime:
     dispatched_at = datetime.fromisoformat(dispatched_raw)
     if dispatched_at.tzinfo is None:
         raise ValueError("feedback source dispatch time must include timezone")
-    return dispatched_at.astimezone(timezone.utc)
+    return dispatched_at.astimezone(UTC)
 
 
 def upload_dispatch_window_closed(upload: dict, *, now: datetime | None = None) -> bool:
@@ -291,7 +291,7 @@ def upload_dispatch_window_closed(upload: dict, *, now: datetime | None = None) 
     **只有關上之後,「零候選」才等於「遠端真的沒有多出東西」**;窗還開著時零候選
     可能只是 source 還沒出現在 list 裡,那時候清掉清理義務就是把孤兒放生。
     """
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     return moment > _dispatched_at_utc(upload) + UPLOAD_DISPATCH_WINDOW
 
 
@@ -568,7 +568,7 @@ async def finalize_attempt(
                     {
                         "status": terminal_status,
                         "status_origin": "remote",
-                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                        "observed_at": datetime.now(UTC).isoformat(),
                         "error": error_text,
                     }
                 )
@@ -581,7 +581,7 @@ async def finalize_attempt(
                 {
                     "status": "completed",
                     "status_origin": "remote",
-                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "observed_at": datetime.now(UTC).isoformat(),
                 }
             )
 
@@ -773,7 +773,7 @@ async def finalize_attempt(
             for source in sources
             if isinstance(getattr(source, "id", None), str)
         ]
-        dispatched_at = datetime.now(timezone.utc).isoformat()
+        dispatched_at = datetime.now(UTC).isoformat()
         expected_title = os.path.basename(mp3_path)
 
         def claim_upload(manifest: dict) -> bool:
@@ -900,7 +900,7 @@ async def finalize_attempt(
         )
 
     def source_completed(_episode: dict, current: dict) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         current["finalize"]["feedback_source_upload"]["status"] = "completed"
         current["finalize"]["feedback_source_rename"].update(
             {

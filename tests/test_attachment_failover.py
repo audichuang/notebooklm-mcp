@@ -12,14 +12,13 @@ v0.9.16 之前只有音檔會換帳號:`_rotate_for_quota` 只長在 `tools_podc
 真的接上去了**、以及附件家族專屬的稽核面(episode 級,因為附件沒有 durable attempt)。
 每一條都同時是「不補一半」的反向鎖:三支工具各驗一次,不是只驗 slides。
 """
-from pathlib import Path
 import json
+from pathlib import Path
 
 import pytest
 from conftest import FakeClient, bouncing_rotate_client, refuse_first
 
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_artifacts as a
+from notebooklm_mcp import runtime, tools_artifacts as a
 from notebooklm_mcp._errors import NotebookAccessDenied
 
 
@@ -751,8 +750,9 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
     轉換才是第一個爆點。劇本沿用 `test_series_failover` 既有的 resend 佈置
     (attempt 先 claim 再 `not_accepted`,podcast_series 會 re-arm 它並重送)。
     """
-    from notebooklm_mcp import tools_podcast as p
     from notebooklm.exceptions import RateLimitError
+
+    from notebooklm_mcp import tools_podcast as p
 
     manifest_path = tmp_path / "series_manifest.json"
     store = p.ManifestStore(str(manifest_path))

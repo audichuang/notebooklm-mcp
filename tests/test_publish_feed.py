@@ -1,5 +1,7 @@
 import xml.etree.ElementTree as ET
+
 import pytest
+
 from notebooklm_mcp.publish import feed
 
 NS = {

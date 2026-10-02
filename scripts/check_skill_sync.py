@@ -7,7 +7,6 @@ from pathlib import Path
 
 from notebooklm_mcp import app
 
-
 ROOT = Path(__file__).resolve().parents[1]
 CI_SKILL_DIR = ROOT / "audi-skill" / "notebooklm"
 LOCAL_SKILL_DIR = Path("/home/user/research/audi-skill/notebooklm")

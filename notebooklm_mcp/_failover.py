@@ -25,14 +25,15 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from notebooklm.exceptions import ArtifactFeatureUnavailableError, RateLimitError
 
 from . import runtime
 from ._errors import access_denied_error, is_permission_denied
-from .manifest_store import ManifestPostCommitError
 from ._status import ensure_started
+from .manifest_store import ManifestPostCommitError
 
 # 生成 kickoff 的例外裡,**契約上保證「伺服器沒有建出任何 task」**的那幾種。
 # notebooklm-py 0.8.0(ADR-0019 / #1342)把同步拒絕從「回傳 status='failed'」改成
@@ -136,8 +137,8 @@ async def dispatch_with_failover(
     client: Any,
     record_failover: RecordFailover | None,
     notebook_id: str | None = None,
-    on_clean_refusal: Callable[[object, "str | None"], None] | None = None,
-    on_acceptance_unknown: Callable[[object, "str | None"], None] | None = None,
+    on_clean_refusal: Callable[[object, str | None], None] | None = None,
+    on_acceptance_unknown: Callable[[object, str | None], None] | None = None,
 ) -> tuple[str, str | None, Any]:
     """送出一次生成;配額拒絕就換帳號原地重送。回 `(artifact_id, account, client)`。
 

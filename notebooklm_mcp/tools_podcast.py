@@ -10,16 +10,24 @@ import hashlib
 import math
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from email.utils import format_datetime
 
 from mcp.types import ToolAnnotations
+
 # `RateLimitError` / `ArtifactFeatureUnavailableError` 的分類已隨 failover 迴圈移到
 # `_failover.py`(本檔只透過 `_REFUSED_WITHOUT_DISPATCH` 這個別名用它們)。
 from notebooklm.exceptions import NetworkError, RateLimitError
 from notebooklm.types import ArtifactType
 
 from . import runtime
+from ._errors import NotebookAccessDenied, reconcile_hint_if_unconfirmed
+from ._failover import (
+    REFUSED_WITHOUT_DISPATCH as _REFUSED_WITHOUT_DISPATCH,
+    describe_refusal,
+    dispatch_with_failover,
+    rotate_for_quota,
+)
 from ._sources import (
     TooManySourcesError,
     assert_source_count_is_safe,
@@ -27,6 +35,7 @@ from ._sources import (
     to_source_ids,
 )
 from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
+from .app import mcp
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
     RemoteArtifactUnverifiableError,
@@ -39,14 +48,6 @@ from .audio_finalize import (
     unresolved_upload_descriptor,
     upload_dispatch_window_closed,
 )
-from ._errors import NotebookAccessDenied, reconcile_hint_if_unconfirmed
-from ._failover import (
-    REFUSED_WITHOUT_DISPATCH as _REFUSED_WITHOUT_DISPATCH,
-    describe_refusal,
-    dispatch_with_failover,
-    rotate_for_quota,
-)
-from .app import mcp
 from .auth_probe import _AuthProbeError, probe_auth
 from .enums import to_audio_format, to_audio_length
 from .generation_input import (
@@ -875,7 +876,7 @@ def _artifact_created_at_utc(value: object) -> datetime | None:
     """Normalize the SDK's local-naive artifact timestamp to aware UTC."""
     if not isinstance(value, datetime):
         return None
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _attempt_record(
@@ -947,7 +948,7 @@ def _create_audio_attempt(
     attempt_id = attempt_id or str(uuid.uuid4())
     attempt = {
         "attempt_id": attempt_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "notebook_id": notebook_id,
         "episode": episode_n,
         "title": title.strip(),
@@ -1296,7 +1297,7 @@ def _ensure_resume_attempt(
                 f"({existing_title!r}); resume cannot rename an episode"
             )
         attempt_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         finalize = new_finalize_state()
         # legacy_artifact_id 已經在上面算過(判斷「是否同一顆合法 artifact」要用),
         # 這裡不再重算第二份。
@@ -1388,7 +1389,7 @@ def _claim_prepared_dispatch(
             {
                 "status": "dispatching",
                 "artifact_ids_before": artifact_ids,
-                "dispatched_at": datetime.now(timezone.utc).isoformat(),
+                "dispatched_at": datetime.now(UTC).isoformat(),
                 "wait_timeout": float(wait_timeout),
             }
         )
@@ -1428,7 +1429,7 @@ def _record_dispatch_failover(
                 "message": message,
                 "from_account": from_account,
                 "to_account": to_account,
-                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "recorded_at": datetime.now(UTC).isoformat(),
             }
         )
 
@@ -1574,7 +1575,7 @@ def _mark_acceptance_unknown(
                 "phase": "dispatch",
                 "type": error_type,
                 "message": message,
-                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "recorded_at": datetime.now(UTC).isoformat(),
             }
         )
 
@@ -1600,7 +1601,7 @@ def _mark_not_accepted(
         _, attempt = _attempt_record(manifest, episode_n, attempt_id)
         if attempt["dispatch"]["status"] != "dispatching":
             return
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if isinstance(status, BaseException):
             # 例外沒有 .error/.error_code;不轉換的話 manifest 會留下一條只寫著
             # "failed" 的紀錄,把「為什麼被拒」這個唯一有用的資訊丟掉。
@@ -1892,7 +1893,7 @@ def _reconciliation_subject(
         raise ValueError("attempt dispatched_at is invalid") from None
     if dispatched.tzinfo is None:
         raise ValueError("attempt dispatched_at must include a timezone")
-    return attempt, notebook_id, set(baseline), dispatched.astimezone(timezone.utc)
+    return attempt, notebook_id, set(baseline), dispatched.astimezone(UTC)
 
 
 def _bind_reconciled_artifact(
@@ -1921,7 +1922,7 @@ def _bind_reconciled_artifact(
             # RPC 前的 snapshot 只是廉價早退；歸屬會在 await 期間變動，
             # 所以真正的綁定許可必須與 claimed 重驗共用這次原子 update。
             return blocking_attempt_ids
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         attempt["dispatch"]["status"] = "accepted"
         attempt["dispatch"]["accepted_at"] = now
         remote.update(
@@ -1989,7 +1990,7 @@ def _bind_accepted_artifact(
             manifest, attempt_id
         ):
             raise ValueError(f"artifact {artifact_id!r} is already claimed")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         attempt["dispatch"]["status"] = "accepted"
         attempt["dispatch"]["accepted_at"] = now
         attempt["remote"].update(
@@ -2100,7 +2101,7 @@ def _promote_attempt_output(
                 attempt_id=attempt_id,
             )
         attempt["remote"]["status"] = "completed"
-        attempt["remote"]["observed_at"] = datetime.now(timezone.utc).isoformat()
+        attempt["remote"]["observed_at"] = datetime.now(UTC).isoformat()
         episode["artifact_id"] = output["artifact_id"]
         episode["mp3_path"] = os.path.abspath(output["mp3_path"])
         episode["output_attempt_id"] = attempt_id
@@ -2493,7 +2494,7 @@ async def _assert_source_cleanup_done(
     ]
 
     # 純計算:全部累積,迴圈裡一律不 raise(docstring ②)。
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     discovered: dict[object, list[str]] = {}
     waiting: list[tuple[object, str]] = []
     unreconcilable: list[str] = []
@@ -3417,7 +3418,7 @@ async def _podcast_episode_reconcile(
         + _RECONCILIATION_CLOCK_SKEW
     )
     reconciliation_window_closed = (
-        datetime.now(timezone.utc) > reconciliation_window_end
+        datetime.now(UTC) > reconciliation_window_end
     )
     # **action 與窗狀態說明都不在這裡手寫**(P2 修復,docs/gotchas-attempt.md 的
     # 紅線):`_attempt_capabilities()` 直接產生 `safe_next_action`,
@@ -3854,7 +3855,7 @@ async def podcast_attempt_adopt(
             if not (
                 dispatched_at - _RECONCILIATION_CLOCK_SKEW
                 <= created_at
-                <= datetime.now(timezone.utc) + _RECONCILIATION_CLOCK_SKEW
+                <= datetime.now(UTC) + _RECONCILIATION_CLOCK_SKEW
             ):
                 raise ValueError("explicit artifact is outside the dispatch window")
 
@@ -3889,7 +3890,7 @@ async def podcast_attempt_adopt(
                 raise ValueError(f"artifact {artifact_id!r} is already claimed")
             if current["remote"].get("artifact_id") is not None:
                 raise ValueError("attempt already has a remote artifact mapping")
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             current_dispatch["status"] = "accepted"
             current_dispatch["accepted_at"] = now
             current["remote"].update(
@@ -3999,7 +4000,7 @@ async def podcast_attempt_adopt(
             raise ValueError(
                 f"feedback source {feedback_source_id!r} is already claimed"
             )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if attempt_id is None:
             if current_episode.get("attempts") or not has_durable_output_evidence(
                 current_episode
@@ -4398,7 +4399,7 @@ async def podcast_attempt_retract(
         retraction = {
             "episode": episode_n,
             "attempt_id": attempt_id,
-            "retracted_at": datetime.now(timezone.utc).isoformat(),
+            "retracted_at": datetime.now(UTC).isoformat(),
             "reason": reason.strip(),
             "retracted_output": retracted_output,
             "stale_artifact_id": retracted_output.get("artifact_id")

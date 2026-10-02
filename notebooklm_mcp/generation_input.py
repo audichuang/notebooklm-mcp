@@ -7,7 +7,7 @@ import os
 import re
 import stat
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -322,8 +322,8 @@ def load_frozen_generation_input(
         raise ValueError("generation request metadata is invalid")
     frozen_at = datetime.fromisoformat(
         request["frozen_at"].replace("Z", "+00:00")
-    ).astimezone(timezone.utc)
-    if frozen_at > datetime.now(timezone.utc):
+    ).astimezone(UTC)
+    if frozen_at > datetime.now(UTC):
         raise ValueError("generation request timestamp order is invalid")
     files = request.get("files")
     if not isinstance(files, dict) or set(files) != set(_BUNDLE_FILES):
@@ -403,10 +403,10 @@ def write_attempt_binding(
     _reverify_bundle_containment(prepared)
     bundle = prepared["bundle"]
     record_base = prepared["record_base"]
-    bound_at = datetime.now(timezone.utc)
+    bound_at = datetime.now(UTC)
     frozen_at = datetime.fromisoformat(
         prepared["frozen_at"].replace("Z", "+00:00")
-    ).astimezone(timezone.utc)
+    ).astimezone(UTC)
     if bound_at < frozen_at:
         raise ValueError("attempt binding timestamp order is invalid")
     binding = {
@@ -522,8 +522,8 @@ def read_attempt_binding(
     frozen_timestamp = datetime.fromisoformat(
         prepared["frozen_at"].replace("Z", "+00:00")
     )
-    if bound_timestamp.astimezone(timezone.utc) < frozen_timestamp.astimezone(
-        timezone.utc
+    if bound_timestamp.astimezone(UTC) < frozen_timestamp.astimezone(
+        UTC
     ):
         raise ValueError("attempt binding timestamp order is invalid")
     record = dict(record_base)

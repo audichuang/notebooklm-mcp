@@ -38,4 +38,4 @@ def episode_guid(show_id: str, episode_n: int) -> str:
     (show_id, episode_n) -> same GUID forever, so regenerating an episode reads
     as an update, not a new item. (Moved here from the deleted state.py.)"""
     validate_show_id(show_id)
-    return hashlib.sha1(f"{show_id}:{episode_n}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{show_id}:{episode_n}".encode()).hexdigest()

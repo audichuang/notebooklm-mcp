@@ -13,7 +13,6 @@ import pytest
 
 from notebooklm_mcp import tools_podcast as p
 
-
 EPS3 = [
     {"title": "心法篇", "brief": "1"},
     {"title": "實戰篇", "brief": "2"},

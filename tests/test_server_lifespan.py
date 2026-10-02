@@ -15,7 +15,6 @@ import pytest
 
 from notebooklm_mcp import app, runtime
 
-
 DISABLE_KEEPALIVE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
 HEADLESS_REAUTH_ENV = "NOTEBOOKLM_HEADLESS_REAUTH"
 

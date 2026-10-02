@@ -9,12 +9,10 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeClient
 from notebooklm.exceptions import ClientError
-from notebooklm_mcp._errors import NotebookAccessDenied
-
 from notebooklm.rpc.types import SharePermission
 
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_basic as basic
+from notebooklm_mcp import runtime, tools_basic as basic
+from notebooklm_mcp._errors import NotebookAccessDenied
 
 
 async def test_notebook_create_shares_with_the_rest_of_the_pool(fake_client):

@@ -1,12 +1,11 @@
-from pathlib import Path
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from conftest import FakeClient
 
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_artifacts as a
+from notebooklm_mcp import runtime, tools_artifacts as a
 
 
 def _manifest(tmp_path, episodes):
@@ -630,7 +629,8 @@ async def test_invalid_utf8_report_is_rejected_and_old_file_kept(fake_client, tm
 async def test_atomic_replace_preserves_existing_file_mode(fake_client, tmp_path):
     """mkstemp 建的 temp 是 0600,os.replace 會把它帶到最終檔——既有 0644 的講義被重生後
     別人就讀不到了(下一次 publish_series 拿到 PermissionError)。換檔要保留原 mode。"""
-    import os, stat
+    import os
+    import stat
     m, existing = _episode_with_existing(tmp_path, "ep01-report.md", "# 舊\n".encode())
     os.chmod(existing, 0o644)
     await a.generate_report("nb-1", m, 1)
@@ -639,7 +639,8 @@ async def test_atomic_replace_preserves_existing_file_mode(fake_client, tmp_path
 
 async def test_atomic_replace_new_file_is_not_private(fake_client, tmp_path):
     """首次生成沒有舊檔可繼承 mode,也不該落成 mkstemp 的 0600。"""
-    import os, stat
+    import os
+    import stat
     m = _manifest(tmp_path, [{"episode": 1, "title": "EP01"}])
     res = await a.generate_slides("nb-1", m, 1)
     assert stat.S_IMODE(os.stat(res["slides_pdf_path"]).st_mode) == 0o644
@@ -649,6 +650,7 @@ async def test_unsupported_directory_fsync_does_not_fail_the_download(fake_clien
     """os.replace 之後就是 commit point。有些 filesystem 不支援 directory fsync
     (EINVAL/ENOTSUP)——那不是失敗,不該讓已經成功的換檔回報成錯誤。"""
     import errno
+
     from notebooklm_mcp import _atomic
     m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 OLD")
     fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 NEW"
@@ -666,6 +668,7 @@ async def test_post_commit_failure_says_the_file_was_already_replaced(fake_clien
     """真正的 IO 錯誤仍要 raise,但訊息必須講明「檔案已經換掉了」——否則呼叫端會照
     docstring 以為舊檔還在,做出錯誤的復原決定。"""
     import errno
+
     from notebooklm_mcp import _atomic
     m, existing = _episode_with_existing(tmp_path, "ep01-slides.pdf", b"%PDF-1.4 OLD")
     fake_client.artifacts.download_slides_bytes = b"%PDF-1.4 NEW"

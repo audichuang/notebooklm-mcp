@@ -9,22 +9,19 @@ guard 沒保護 manifest,只是把寫入趕出工具外。
 紀錄不會消失、以及被作廢的 attempt **不可能再被復活**——不論是 retract 之前就啟動的
 in-flight finalizer、還是任何把指標寫回去的 writer。
 """
-from pathlib import Path
 import asyncio
 import copy
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import audio_finalize
-from notebooklm_mcp import tools_basic as b
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import audio_finalize, tools_basic as b, tools_podcast as p
 from notebooklm_mcp._status import TerminalGenerationError
 from notebooklm_mcp.manifest_store import ManifestStore
-
 
 EP = {"title": "心法篇", "brief": "1"}
 
@@ -41,7 +38,7 @@ class _TickingDatetime(datetime):
     @classmethod
     def now(cls, tz=None):
         _TickingDatetime._tick += 1
-        moment = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
+        moment = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(
             hours=_TickingDatetime._tick
         )
         return moment.astimezone(tz) if tz else moment
@@ -775,7 +772,7 @@ async def _split_with_guarded_candidate(
                 "dispatch": {
                     "status": "acceptance_unknown",
                     "artifact_ids_before": [before["artifact_id"]],
-                    "dispatched_at": datetime.now(timezone.utc).isoformat(),
+                    "dispatched_at": datetime.now(UTC).isoformat(),
                     "wait_timeout": 1200.0,
                 },
             }
@@ -1063,7 +1060,7 @@ def _attempt_next_step_for(manifest_path, attempt_id):
 
 def _age_the_dispatch_window(manifest_path, attempt_id):
     """把 dispatched_at 推到候選窗之外(等真實時間過去是不可行的測法)。"""
-    old = datetime.now(timezone.utc) - (
+    old = datetime.now(UTC) - (
         audio_finalize.UPLOAD_DISPATCH_WINDOW + timedelta(minutes=1)
     )
 
@@ -2384,8 +2381,8 @@ async def test_a_retracted_frozen_bundle_is_not_offered_for_reuse(
     attempt —— 沿用同一份 bundle 重生會撞 `was retracted`,**新 dispatch 數 = 0**。
     v0.9.5 的 `next_step` 卻寫著「或同一份 frozen bundle」,照做完全生不出東西。
     """
-    from test_generation_input_bundle import _write_bundle
     from notebooklm.exceptions import RateLimitError
+    from test_generation_input_bundle import _write_bundle
 
     workspace = tmp_path / "workspace"
     manifest_path = workspace / "manifest" / "series_manifest.json"
@@ -2623,7 +2620,7 @@ async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_vio
                 "attempts": [
                     {
                         "attempt_id": ep2_attempt_id,
-                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "created_at": datetime.now(UTC).isoformat(),
                         "notebook_id": "nb-1",
                         "episode": 2,
                         "title": "實戰篇",

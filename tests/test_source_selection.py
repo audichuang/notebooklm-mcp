@@ -9,8 +9,7 @@ import json
 import pytest
 from test_generation_input_bundle import _write_bundle
 
-from notebooklm_mcp import tools_basic as b
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import tools_basic as b, tools_podcast as p
 
 
 def _audio_call(fake_client):

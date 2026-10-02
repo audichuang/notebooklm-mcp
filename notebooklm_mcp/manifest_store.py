@@ -11,12 +11,12 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
-from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE
-from ._atomic import fsync_parent as _fsync_parent
+from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE, fsync_parent as _fsync_parent
 
 
 class ManifestConflictError(RuntimeError):

@@ -5,8 +5,7 @@ not authorize implicit regeneration or replacement of durable output.
 """
 import pytest
 
-from notebooklm_mcp import tools_basic as t
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import tools_basic as t, tools_podcast as p
 
 
 async def test_source_delete_removes_the_source(fake_client):

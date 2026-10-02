@@ -40,9 +40,9 @@ import tempfile
 from PIL import Image
 
 from notebooklm_mcp._atomic import prepared_replacement
-from notebooklm_mcp.publish.artwork import validate_artwork
 from notebooklm_mcp.manifest_store import ManifestStore
 from notebooklm_mcp.naming import bare_episode_title
+from notebooklm_mcp.publish.artwork import validate_artwork
 
 _ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 _CHROME_CANDIDATES = ["google-chrome", "google-chrome-stable", "chromium",

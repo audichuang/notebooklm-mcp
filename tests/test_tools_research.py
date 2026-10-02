@@ -7,9 +7,7 @@ import pytest
 from conftest import FakeClient
 from notebooklm._types.research import ResearchStatus
 
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_research as r
-
+from notebooklm_mcp import runtime, tools_research as r
 
 # ---- start:先落地 task_id,再等 ---------------------------------------------------
 

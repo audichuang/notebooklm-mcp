@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from conftest import FakeClient, _structured_document
 from notebooklm.exceptions import (
     AuthError,
     ClientError,
@@ -21,8 +22,6 @@ from notebooklm.types import (
     TextSpan,
     utf16_len,
 )
-
-from conftest import FakeClient, _structured_document
 
 from notebooklm_mcp import runtime, tools_basic as t
 from notebooklm_mcp._errors import NotebookAccessDenied
@@ -759,7 +758,8 @@ async def test_chat_ask_exclude_references(fake_client):
 async def test_source_add_file_wrapping_does_not_block_the_event_loop(fake_client, tmp_path, monkeypatch):
     """包裝會做 stat + 最多 25 MiB 的 read/write。同步跑在 async 工具裡會卡住整個 MCP
     event loop——其他 request、取消、長跑狀態查詢全被凍住,外層 client 可能先 timeout。"""
-    import asyncio, time
+    import asyncio
+    import time
 
     def slow_wrap(file_path, tmpdir):
         time.sleep(0.2)                      # 模擬慢速掛載上的大檔 I/O
@@ -916,6 +916,7 @@ class TestSourceSearch:
 
     async def test_passes_every_argument_through_untouched(self, fake_client):
         from notebooklm.types import RelevantChunk
+
         from notebooklm_mcp import tools_basic as t
 
         fake_client.sources.search_results = [
@@ -954,6 +955,7 @@ class TestSourceSearch:
     async def test_sdk_validation_error_is_not_swallowed(self, fake_client):
         """空 query 必須爆,不可以變成「查無結果」——那會讓呼叫端以為來源裡沒有。"""
         from notebooklm.exceptions import ValidationError
+
         from notebooklm_mcp import tools_basic as t
 
         with pytest.raises(ValidationError):

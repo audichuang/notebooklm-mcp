@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from mcp.types import ToolAnnotations
 
@@ -12,13 +12,13 @@ from ._atomic import download_atomically
 from ._failover import describe_refusal, dispatch_with_failover
 from ._sources import assert_sources_exist, to_source_ids
 from ._status import ensure_completed, wait_for_artifact
+from ._text import strip_citations as _strip_citations, strip_inline_emphasis
+from .app import mcp
 from .enums import to_report_format, to_slide_format, to_slide_length
 from .languages import resolve_language
-from .app import mcp
-from ._text import strip_citations as _strip_citations, strip_inline_emphasis
 from .manifest_store import ManifestStore
-from .publish import feed as feed_mod
-from .publish import notes_html
+from .publish import feed as feed_mod, notes_html
+
 # 白名單的正本在 publish/state.py(那個模組的 docstring 解釋為什麼不能放 tools_publish)。
 from .publish.state import WITHHELD_PUBLICATION_STATES
 
@@ -79,7 +79,7 @@ def _append_attachment_event(
                 "kind": kind,
                 "type": reason_type,
                 "message": message,
-                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "recorded_at": datetime.now(UTC).isoformat(),
                 **extra,
             }
         )
@@ -258,7 +258,7 @@ async def episode_set_publication_state(
         # 以為那句話留在 manifest 裡了。
         raise ValueError("reason is only meaningful when setting a state, not clearing it")
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     def mutate(data: dict) -> dict:
         ep = _episode_in(data, episode_n, manifest_path)

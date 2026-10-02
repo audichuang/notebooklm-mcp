@@ -13,14 +13,12 @@ retract 的正主檔案 `test_attempt_retract.py` 不在允許清單裡,所以�
 """
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_podcast as p
-
 from conftest import FakeClient
+
+from notebooklm_mcp import runtime, tools_podcast as p
 
 
 def _episode(manifest_path, episode_n=1):
@@ -567,7 +565,7 @@ async def test_series_auth_expiry_stops_before_pending_cleanup_rpc(
     fake_client, tmp_path, monkeypatch
 ):
     """每集的認證守門排在清理義務之前,且保住已完成集的結果。"""
-    from notebooklm.exceptions import RPCError, RateLimitError
+    from notebooklm.exceptions import RateLimitError, RPCError
 
     episodes = [
         {"title": "心法篇", "brief": "1"},
@@ -729,7 +727,7 @@ async def test_retract_can_abandon_an_accepted_attempt_that_was_never_promoted(
         # "accepted"、remote.artifact_id 指向與 legacy 硬證據不同的第三顆
         # artifact、未 promote),繞過現在會 fail-fast 擋下這個組合的建立路徑本身。
         episode = manifest["episodes"][0]
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         episode["attempts"].append(
             {
                 "attempt_id": bad_attempt_id,

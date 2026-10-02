@@ -1,14 +1,12 @@
 """Coverage for error / edge paths: bad language, generation timeout, malformed input."""
-from pathlib import Path
 import json
 import os
+from pathlib import Path
 
 import pytest
 from notebooklm.exceptions import ClientError, NetworkError
 
-from notebooklm_mcp import _errors
-from notebooklm_mcp import tools_basic as t
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import _errors, tools_basic as t, tools_podcast as p
 
 
 async def test_bad_language_raises_before_any_sdk_call(fake_client):
@@ -239,8 +237,7 @@ async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(
     """
     import json
 
-    from notebooklm_mcp import runtime
-    from notebooklm_mcp import tools_podcast as p
+    from notebooklm_mcp import runtime, tools_podcast as p
 
     class _AcceptedThenFailed:
         task_id = "art-123"

@@ -1,10 +1,10 @@
 import asyncio
 import json
+from datetime import UTC
 
 import pytest
 
-from notebooklm_mcp import tools_basic as b
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import tools_basic as b, tools_podcast as p
 
 
 def _visible_audio(artifact_id: str, title: str):
@@ -851,7 +851,7 @@ def test_created_at_utc_normalises_both_naive_and_aware():
 
     from notebooklm_mcp.audio_finalize import _created_at_utc
 
-    instant = datetime(2026, 8, 8, 4, 30, tzinfo=timezone.utc)
+    instant = datetime(2026, 8, 8, 4, 30, tzinfo=UTC)
     # 0.8.0 形狀:已經是 aware UTC,原樣通過。
     assert _created_at_utc(instant) == instant
     # 0.7.x 形狀:同一個 epoch 的 host-local naive 值,必須折回同一個 instant。

@@ -19,7 +19,6 @@ import pytest
 
 from notebooklm_mcp import tools_podcast as p
 
-
 DISPATCH_STATES = (
     "prepared",
     "not_accepted",

@@ -74,8 +74,7 @@ def test_auth_cli_and_pool_precheck_share_one_cookie_policy(tmp_path, monkeypatc
     那邊會被改到。共用 `_cookies` 之後,同一個 tripwire 自然涵蓋兩處,而這條測試鎖住
     「真的共用」這件事本身(有人把判準抄回 CLI 裡就紅)。
     """
-    from notebooklm_mcp import app
-    from notebooklm_mcp import _cookies
+    from notebooklm_mcp import _cookies, app
 
     assert auth_cli.assert_usable_storage_state is _cookies.assert_usable_storage_state
     assert app.assert_usable_storage_state is _cookies.assert_usable_storage_state

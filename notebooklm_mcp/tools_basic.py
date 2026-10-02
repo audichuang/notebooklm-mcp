@@ -26,11 +26,10 @@ from ._sources import (
 )
 from ._status import ensure_completed, ensure_started, wait_for_artifact
 from ._text import norm as _norm, strip_citations as _strip_citations, strip_inline_emphasis
+from .app import mcp
 from .auth_probe import RELOGIN_HINT, _AuthProbeError, probe_auth
 from .enums import to_audio_format, to_audio_length
 from .languages import resolve_language
-from .app import mcp
-
 
 # 不該「只改成 .md」就送上去的副檔名。三類、三個理由,合成一份是因為行為相同
 # (原樣交給 SDK):
@@ -304,7 +303,7 @@ async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object
     for label, client in ordered:
         try:
             status = await client.sharing.get_status(notebook_id)
-        except Exception as exc:  # noqa: BLE001 —— 下一行就把非權限問題原樣拋回去
+        except Exception as exc:
             if not is_permission_denied(exc):
                 raise
             denied.append(label)

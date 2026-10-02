@@ -10,12 +10,10 @@
 import json
 
 import pytest
+from conftest import bouncing_rotate_client, refuse_first
 from notebooklm.exceptions import RateLimitError
 
-from conftest import bouncing_rotate_client, refuse_first
-
-from notebooklm_mcp import runtime
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import runtime, tools_podcast as p
 
 
 def _flaky_generate(fake_client, calls, fail_first_n):
