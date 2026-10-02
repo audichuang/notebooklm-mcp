@@ -1,0 +1,49 @@
+name: deps-watch
+
+# Time-varying checks live here, NOT in ci.yml: results change with upstream releases and
+# advisory databases while our code stays the same, and ci.yml gates `latest`
+# (retag-verified-latest.yml). A red run here never blocks a release; act on it per
+# docs/release-checklist.md.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Audit everything pinned in uv.lock
+        run: |
+          uv export --frozen --all-extras --no-emit-project --no-hashes -o "$RUNNER_TEMP/req.txt"
+          uvx pip-audit@2.10.1 --disable-pip --no-deps -r "$RUNNER_TEMP/req.txt"
+
+  resolution:
+    # highest = what `uv tool install git+…@latest` resolves today (ignores uv.lock);
+    # lowest-direct = our declared floors. Transitive deps still float, so neither is deterministic.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        resolution: [highest, lowest-direct]
+    env:
+      UV_RESOLUTION: ${{ matrix.resolution }}
+      NBLM_STRICT_SKIPS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv python install 3.12
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+      - name: Re-resolve (not committed), install, test
+        run: |
+          uv lock --upgrade
+          uv sync
+          uv pip list
+          uv run --no-sync pytest -q -ra
