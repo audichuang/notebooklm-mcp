@@ -108,11 +108,12 @@ grep -rEn "notebooklm-mcp\.git@v[0-9]" --include="*.md" . ../podcast-lab \
 (走 stderr 沒破壞 stdio 協定,但證明實裝版本有 CI 從沒跑過的行為)。2026-08-30 又漂成 1.29.0 / 1.29.1。
 
 ```sh
-grep -A1 'name = "mcp"' uv.lock | grep version                       # lock 鎖的
-~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('mcp'))"   # 實裝的
+diff <(uv export --frozen --no-hashes --no-emit-project --no-header --no-annotate | grep -v '^#' | sort) \
+     <(uv pip compile pyproject.toml --python-version 3.12 --no-header --no-annotate -q | sort)
 ```
 
-漂了就:`uv lock --upgrade-package mcp && uv sync && uv run pytest -q`,全綠再 commit uv.lock;
+涵蓋全部依賴(只看 mcp 會漏掉像 filelock 3→4 這種傳遞依賴漂移)。只剩平台 marker(colorama/pywin32)的差異才算對齊;
+有差就 `uv lock --upgrade && uv sync && uv run pytest -q`,全綠再 commit uv.lock;deps-watch 的 highest job 每週替你跑這件事。
 必要時同步更新 `pyproject.toml` 的下界。**對齊要用 `uv sync`,不是 `uv pip install -e .`** —— 後者不會把
 venv 拉到 lock 的版本。
 
@@ -122,6 +123,24 @@ venv 拉到 lock 的版本。
 用法與四個區塊各防什麼,寫在該檔的 docstring。**新增 SDK 呼叫點時把它加進腳本的 `_CALLS`** ——
 那份清單就是「我們的依賴表面」的定義,沒加進去的呼叫,升級時不會被比對到。
 
+surface 腳本只比簽名/enum/欄位,**簽名沒變、語意變了它看不到**。所以還要把兩個獨立 venv 的
+`diff -r -x __pycache__ <old>/notebooklm/_web <new>/notebooklm/_web` 逐檔讀過,`_CALLS` 涉及的模組一定要讀
+(0.8.4 的 set_users 就是這種,見 CHANGELOG v0.9.29)。
+
 **要對某個特定依賴版本跑測試**(例如試 notebooklm-py 的新版):開一個獨立 venv、用它自己的 `bin/python -m pytest`。
 別在共用 venv 上 `uv pip install X==版本` 之後跑 `uv run`(即使帶 `--no-sync`)—— 它可能把 venv 拉回 lock 的版本,
 而你以為在測 X。
+
+## ruff 升版
+
+pyproject 的 `ruff==` 與 `.pre-commit-config.yaml` 的 rev 一起改;升完重跑 `ruff check .` 與 `ruff format --check .`;
+格式變動要獨立成 commit,並把 SHA 加進 `.git-blame-ignore-revs`。
+
+## deps-watch 紅了怎麼辦
+
+前提:Dependabot PR 要能過 CI,必須先設 Dependabot secret `AUDI_SKILL_DEPLOY_KEY`。
+
+- **pip-audit 紅**:抬 pyproject 的下界或上界(每條附理由)→ `uv lock` → 全套 → 發版。不發版等於沒修。
+- **resolution/highest 紅**:消費端下次重裝就會拿到壞組合,收緊上界或修正後發版。
+- **resolution/lowest-direct 紅**:下界宣告不實,抬下界。
+- **第三方 warning 被 `filterwarnings=error` 升成錯誤**:用精確的 `ignore:<msg regex>:<Category>` 豁免並註明來源,不准全域放行。
