@@ -1,4 +1,5 @@
 name: retag-verified-latest
+# (2026-10-02 轉公開並重建 repo 後,GitHub 沒索引到本檔;碰一下檔案讓它重新註冊。)
 
 # Moving pointer for consumers (`uv tool install …@latest`).
 # Triggered by a release tag; also runnable by hand to repair a stale pointer.

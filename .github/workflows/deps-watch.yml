@@ -1,4 +1,5 @@
 name: deps-watch
+# (2026-10-02 轉公開並重建 repo 後,GitHub 沒索引到本檔;碰一下檔案讓它重新註冊。)
 
 # Time-varying checks live here, NOT in ci.yml: results change with upstream releases and
 # advisory databases while our code stays the same, and ci.yml gates `latest`
