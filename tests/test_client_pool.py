@@ -6,6 +6,7 @@
 **`get_client()` 的語意刻意不變**(「當前作用中的 client」),所以 46 個呼叫點
 一行都不用改;pool 在 `runtime.py` 之上是隱形的。
 """
+
 import json
 import logging
 import stat
@@ -624,9 +625,7 @@ def test_precheck_agrees_with_the_sdk_strict_loader(tmp_path):
         )
 
 
-def test_precheck_warns_but_accepts_expired_psidts_that_would_trigger_heal(
-    tmp_path, caplog
-):
+def test_precheck_warns_but_accepts_expired_psidts_that_would_trigger_heal(tmp_path, caplog):
     """routability 只代表能否 refresh,不代表這份憑證能否使用。"""
     from notebooklm_mcp import _cookies
 
@@ -888,16 +887,17 @@ def test_heal_reason_splits_the_or_that_got_misread():
 
     def psidts(domain=".google.com", expires=-1):
         return {
-            "name": "__Secure-1PSIDTS", "value": "t",
-            "domain": domain, "path": "/", "expires": expires,
+            "name": "__Secure-1PSIDTS",
+            "value": "t",
+            "domain": domain,
+            "path": "/",
+            "expires": expires,
         }
 
     assert _cookies.describe_inline_heal_reason(state(psidts())) == ""
     assert _cookies.describe_inline_heal_reason(state(psidts(".youtube.com"))) == "wrong_scope"
     assert _cookies.describe_inline_heal_reason(state(psidts(expires=1))) == "expired"
-    assert _cookies.describe_inline_heal_reason(
-        state(psidts(expires=1), psidts())
-    ) == "expired"
+    assert _cookies.describe_inline_heal_reason(state(psidts(expires=1), psidts())) == "expired"
     assert _cookies.describe_inline_heal_reason(state()) == "missing"
 
     # domain 是 wrong_scope 唯一可操作的證據,而它不是秘密(值才是)。
@@ -980,7 +980,7 @@ async def test_startup_diagnostic_never_breaks_startup(monkeypatch, caplog):
 
     with caplog.at_level(logging.DEBUG, logger=app.logger.name):
         async with app._lifespan(app.mcp):
-            assert runtime.account_count() == 2          # 啟動沒有被診斷拖垮
+            assert runtime.account_count() == 2  # 啟動沒有被診斷拖垮
             rows = runtime.slot_diagnostics()
 
     assert [row["refreshable"] for row in rows] == [None, None]  # 誠實回「沒量」
@@ -1003,12 +1003,28 @@ def test_mixed_identity_wrong_scope_does_not_claim_nothing_expired():
     from notebooklm_mcp import _cookies
 
     now = time.time()
-    state = {"cookies": [
-        {"name": "__Secure-1PSIDTS", "value": "a", "domain": ".google.com",
-         "path": "/", "expires": now - 10, "httpOnly": True, "secure": True},
-        {"name": "__Secure-1PSIDTS", "value": "b", "domain": ".youtube.com",
-         "path": "/", "expires": -1, "httpOnly": True, "secure": True},
-    ]}
+    state = {
+        "cookies": [
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "a",
+                "domain": ".google.com",
+                "path": "/",
+                "expires": now - 10,
+                "httpOnly": True,
+                "secure": True,
+            },
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "b",
+                "domain": ".youtube.com",
+                "path": "/",
+                "expires": -1,
+                "httpOnly": True,
+                "secure": True,
+            },
+        ]
+    }
 
     assert _cookies.describe_inline_heal_reason(state) == "wrong_scope"
     detail = _cookies.heal_warning_detail(state)

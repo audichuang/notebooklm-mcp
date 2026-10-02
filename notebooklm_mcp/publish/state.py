@@ -10,6 +10,7 @@
 **各寫一份的後果**:「可以設的狀態」與「會被扣下的狀態」會各自漂 —— 設得進去、發布卻不認
 (那一集照樣公開),或反過來。所以正本只有這一份。
 """
+
 from __future__ import annotations
 
 #: host 寫在 manifest episode 上的「刻意不公開」狀態:集數留在 manifest 當 audit,但不進

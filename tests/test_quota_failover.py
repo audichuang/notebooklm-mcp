@@ -7,6 +7,7 @@
 **已 dispatch 之後的失敗一律不換帳號**(那要 retract + 取代版,自動做等於讓 MCP 在背後
 改寫 manifest 的因果紀錄,ADR-0009 禁止)。
 """
+
 import json
 
 import pytest
@@ -62,9 +63,7 @@ async def test_quota_refusal_rotates_and_reuses_the_same_attempt(fake_client, tm
     assert "每日配額已用盡" in failovers[0]["message"]
 
 
-async def test_all_accounts_exhausted_keeps_the_legacy_not_accepted_terminal(
-    fake_client, tmp_path
-):
+async def test_all_accounts_exhausted_keeps_the_legacy_not_accepted_terminal(fake_client, tmp_path):
     """全部帳號都被拒 → 完全維持既有行為(not_accepted + raise)。
 
     series 圈靠 `dispatch.status == "not_accepted"` 決定要不要回結構化安全停點,
@@ -181,9 +180,7 @@ async def test_has_id_but_failed_is_not_zero_side_effect_so_it_does_not_rotate(
     del original
 
 
-async def test_generic_runtime_error_still_gets_the_reconcile_hint(
-    fake_client, tmp_path
-):
+async def test_generic_runtime_error_still_gets_the_reconcile_hint(fake_client, tmp_path):
     """普通 `RuntimeError`(非 ensure_started 判定的 not_accepted)一樣要拿到續跑指引。
 
     `_dispatch_audio_with_failover` 的泛用 except 分支把它標成 acceptance_unknown、
@@ -226,8 +223,11 @@ async def test_status_shaped_refusal_also_rotates(fake_client, tmp_path):
     async def refuse_by_status(*args, **kwargs):
         calls.append(runtime.active_account())
         if len(calls) == 1:
-            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed",
-                                  "error": "quota exhausted"})()
+            return type(
+                "S",
+                (),
+                {"task_id": "", "is_failed": True, "status": "failed", "error": "quota exhausted"},
+            )()
         return await original(*args, **kwargs)
 
     fake_client.artifacts.generate_audio = refuse_by_status
@@ -267,9 +267,9 @@ async def test_rotation_persists_across_the_rest_of_a_series(fake_client, tmp_pa
 
     # a 被拒一次 → b 成功;第二集直接就是 b。
     assert calls == ["a@x", "b@x", "b@x"]
-    episodes = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )["episodes"]
+    episodes = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))[
+        "episodes"
+    ]
     assert [e["attempts"][-1]["dispatch"]["account"] for e in episodes] == ["b@x", "b@x"]
 
 
@@ -291,9 +291,7 @@ async def test_resend_path_rotates_and_records_the_account_too(fake_client, tmp_
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     calls: list = []
     _flaky_generate(fake_client, calls, fail_first_n=99)
-    stopped = await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    stopped = await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
     assert stopped["observed_state"] == "not_accepted"
     assert calls == ["a@x", "b@x"]
 
@@ -301,9 +299,7 @@ async def test_resend_path_rotates_and_records_the_account_too(fake_client, tmp_
     runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
     calls.clear()
     _flaky_generate(fake_client, calls, fail_first_n=1)
-    await p.podcast_series(
-        "nb-1", episodes=episodes, output_dir=str(tmp_path), start=1
-    )
+    await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), start=1)
 
     assert calls == ["a@x", "b@x"], "重送路徑也必須 failover,否則 pool 對重試無效"
     attempts = _attempts(manifest_path)
@@ -311,9 +307,7 @@ async def test_resend_path_rotates_and_records_the_account_too(fake_client, tmp_
     dispatch = attempts[0]["dispatch"]
     # 過期值比缺漏危險:缺漏看得出來,錯的帳號看不出來。
     assert dispatch["account"] == "b@x", "重送要記下**這次**實際送出的帳號"
-    failovers = [
-        e for e in attempts[0]["errors"] if e["phase"] == "dispatch_failover"
-    ]
+    failovers = [e for e in attempts[0]["errors"] if e["phase"] == "dispatch_failover"]
     assert failovers[-1]["from_account"] == "a@x"
     assert failovers[-1]["to_account"] == "b@x"
 
@@ -343,8 +337,12 @@ async def test_permission_denied_is_not_acceptance_unknown(fake_client, tmp_path
 
     with pytest.raises(p.NotebookAccessDenied, match="分享") as excinfo:
         await p.podcast_episode(
-            "nb-1", episode_n=1, title="心法篇", brief="第一集",
-            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
         )
     assert "notebook_share_with_pool" in str(excinfo.value), (
         "訊息要指名補分享的正門工具,不能只說『手動補分享』"
@@ -352,13 +350,11 @@ async def test_permission_denied_is_not_acceptance_unknown(fake_client, tmp_path
 
     assert calls == ["a@x"], "權限問題不該一個一個帳號試過去"
     attempt = _attempts(manifest_path)[0]
-    assert attempt["dispatch"]["status"] == "not_accepted", (
-        "確定沒建出 task,不是受理不明"
-    )
+    assert attempt["dispatch"]["status"] == "not_accepted", "確定沒建出 task,不是受理不明"
     assert "permission denied" in attempt["remote"]["error"]
     assert "notebook_share_with_pool" in attempt["remote"]["error"], (
         "manifest 的 remote.error 要帶出補分享的下一步,不是只留原始的 "
-        "\"permission denied\"——原本 _mark_not_accepted 收到的是建 "
+        '"permission denied"——原本 _mark_not_accepted 收到的是建 '
         "NotebookAccessDenied **之前**的原始 ClientError,指引整條蒸發"
     )
 
@@ -392,8 +388,10 @@ async def test_permission_denied_in_series_returns_a_safe_stop(fake_client, tmp_
     fake_client.artifacts.generate_audio = denied
 
     out = await p.podcast_series(
-        "nb-1", episodes=[{"title": "心法篇", "brief": "1"}],
-        output_dir=str(tmp_path), start=1,
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "1"}],
+        output_dir=str(tmp_path),
+        start=1,
     )
     assert out["observed_state"] == "notebook_access_denied", (
         "不能跟『等配額』長得一樣——否則原樣重呼會在同一集永遠卡死而看不出來"
@@ -418,17 +416,20 @@ async def test_reset_for_resend_clears_the_stale_account(fake_client, tmp_path):
             "dispatched_at": "2026-08-09T00:00:00+00:00",
             "accepted_at": None,
         },
-        "remote": {"status": "failed", "error": "boom", "error_code": "RateLimitError",
-                   "artifact_id": None, "observed_at": "2026-08-09T00:00:00+00:00"},
+        "remote": {
+            "status": "failed",
+            "error": "boom",
+            "error_code": "RateLimitError",
+            "artifact_id": None,
+            "observed_at": "2026-08-09T00:00:00+00:00",
+        },
         "errors": [],
     }
     p._reset_attempt_for_resend(attempt)
     assert "account" not in attempt["dispatch"], "過期的帳號要 pop 掉,不是留著"
 
 
-async def test_single_account_records_the_account_without_any_failover(
-    fake_client, tmp_path
-):
+async def test_single_account_records_the_account_without_any_failover(fake_client, tmp_path):
     """單帳號(現行所有機器的樣子):照舊,但 dispatch 仍要記下是誰生的。"""
     runtime.set_clients([("solo@x", fake_client)])
     manifest_path = tmp_path / "series_manifest.json"
@@ -528,13 +529,10 @@ async def test_rotate_for_quota_does_not_give_up_when_the_first_scanned_slot_was
     runtime._ACTIVE = 3  # 模擬「並行 request 已經把游標推到 d」
     now["t"] += runtime._COOLDOWN_SECONDS + 1  # a 的冷卻剛好到期
 
-    result = p._rotate_for_quota(
-        store, 1, attempt_id, RuntimeError("quota"), "b@x", {"a@x", "b@x"}
-    )
+    result = p._rotate_for_quota(store, 1, attempt_id, RuntimeError("quota"), "b@x", {"a@x", "b@x"})
 
     assert result is not None, (
-        "c@x 從沒試過也沒冷卻——不該因為 rotate 掃到的第一個候選剛好是已試過的 "
-        "a@x 就整批放棄"
+        "c@x 從沒試過也沒冷卻——不該因為 rotate 掃到的第一個候選剛好是已試過的 a@x 就整批放棄"
     )
     account, _client = result
     assert account == "c@x"
@@ -582,13 +580,16 @@ async def test_dispatch_failover_terminates_even_if_rotate_never_reports_exhaust
 
     with pytest.raises(RateLimitError):
         await p._dispatch_audio_with_failover(
-            store, 1, attempt_id, always_refuse,
-            account="a@x", client=fake_client,
+            store,
+            1,
+            attempt_id,
+            always_refuse,
+            account="a@x",
+            client=fake_client,
         )
 
     assert len(calls) == 2, (
-        "終止性:一輪之內最多試『沒被 tried 過』的帳號數,不能靠 rotate_client "
-        "自己回 None 才停"
+        "終止性:一輪之內最多試『沒被 tried 過』的帳號數,不能靠 rotate_client 自己回 None 才停"
     )
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert stored["episodes"][0]["attempts"][0]["dispatch"]["status"] == "not_accepted"
@@ -637,8 +638,12 @@ async def test_dispatch_failover_terminates_via_the_ensure_started_path_too(
 
     with pytest.raises(RuntimeError, match="每日配額已用盡"):
         await p._dispatch_audio_with_failover(
-            store, 1, attempt_id, always_refuse,
-            account="a@x", client=fake_client,
+            store,
+            1,
+            attempt_id,
+            always_refuse,
+            account="a@x",
+            client=fake_client,
         )
 
     assert len(calls) == 2, (
@@ -693,8 +698,12 @@ async def test_tried_guard_does_not_leave_a_phantom_failover_record(
 
     with pytest.raises(RateLimitError):
         await p._dispatch_audio_with_failover(
-            store, 1, attempt_id, always_refuse,
-            account="a@x", client=fake_client,
+            store,
+            1,
+            attempt_id,
+            always_refuse,
+            account="a@x",
+            client=fake_client,
         )
 
     assert len(calls) == 2, "真正送出兩次——第二次 rotate 打回已試過的帳號,不該再送第三次"
@@ -762,14 +771,16 @@ async def test_record_failure_still_marks_terminal_state_before_reraising(
         raise OSError("disk full (ENOSPC)")
 
     monkeypatch.setattr(p, "_record_dispatch_failover", record_blows_up)
-    monkeypatch.setattr(
-        runtime, "rotate_client", lambda refused=None, skip=frozenset(): "b@x"
-    )
+    monkeypatch.setattr(runtime, "rotate_client", lambda refused=None, skip=frozenset(): "b@x")
 
     with pytest.raises(OSError, match="disk full"):
         await p._dispatch_audio_with_failover(
-            store, 1, attempt_id, dispatch_fn,
-            account="a@x", client=fake_client,
+            store,
+            1,
+            attempt_id,
+            dispatch_fn,
+            account="a@x",
+            client=fake_client,
         )
 
     attempt = _attempts(manifest_path)[0]
@@ -837,7 +848,11 @@ async def test_unconfirmed_feature_unavailable_still_rotates(fake_client, tmp_pa
     fake_client.artifacts.generate_audio = first_has_null_id
     manifest_path = tmp_path / "series_manifest.json"
     await p.podcast_episode(
-        "nb-1", episode_n=1, title="心法篇", brief="第一集",
-        output_dir=str(tmp_path), manifest_path=str(manifest_path),
+        "nb-1",
+        episode_n=1,
+        title="心法篇",
+        brief="第一集",
+        output_dir=str(tmp_path),
+        manifest_path=str(manifest_path),
     )
     assert calls == ["a@x", "b@x"]

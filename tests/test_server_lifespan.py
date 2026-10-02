@@ -9,6 +9,7 @@
    notebooklm_mcp.server` (the __main__ double-import trap) — the MCP came up
    with ZERO tools. Tools now live on `notebooklm_mcp.app.mcp`; assert they're there.
 """
+
 import logging
 
 import pytest

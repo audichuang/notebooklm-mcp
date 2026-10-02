@@ -27,20 +27,31 @@ def test_retag_uses_the_commit_that_passed_ci_even_if_a_newer_tag_exists(tmp_pat
     _git("push", "-q", "origin", "--tags", cwd=work)
 
     unchecked = subprocess.run(
-        ["bash", str(SCRIPT), "--push"], cwd=work, capture_output=True, text=True,
+        ["bash", str(SCRIPT), "--push"],
+        cwd=work,
+        capture_output=True,
+        text=True,
     )
     assert unchecked.returncode != 0, "直接 --push 不得跳過 CI 驗過的 commit"
 
     checked = subprocess.run(
         ["bash", str(SCRIPT), "--push", "v0.9.28", commits[0]],
-        cwd=work, capture_output=True, text=True,
+        cwd=work,
+        capture_output=True,
+        text=True,
     )
     assert checked.returncode == 0, checked.stderr
-    assert _git("--git-dir", str(remote), "rev-list", "-n", "1", "latest", cwd=tmp_path) == commits[0]
+    assert (
+        _git("--git-dir", str(remote), "rev-list", "-n", "1", "latest", cwd=tmp_path) == commits[0]
+    )
 
     moved = subprocess.run(
         ["bash", str(SCRIPT), "--push", "v0.9.28", commits[1]],
-        cwd=work, capture_output=True, text=True,
+        cwd=work,
+        capture_output=True,
+        text=True,
     )
     assert moved.returncode != 0
-    assert _git("--git-dir", str(remote), "rev-list", "-n", "1", "latest", cwd=tmp_path) == commits[0]
+    assert (
+        _git("--git-dir", str(remote), "rev-list", "-n", "1", "latest", cwd=tmp_path) == commits[0]
+    )

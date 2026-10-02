@@ -1,6 +1,7 @@
 """Render the authoritative show state into an RSS 2.0 feed (with the iTunes +
 atom namespaces Apple Podcasts needs) and a minimal index.html for <link>.
 Pure function of (show, base_url): no I/O, no clock — fully deterministic."""
+
 from __future__ import annotations
 
 from xml.sax.saxutils import escape, quoteattr
@@ -93,8 +94,8 @@ def build_feed_xml(show: dict, base_url: str) -> str:
         # 排、不看文件順序;而真的照文件順序顯示的播放器,現行的遞增正好是連載要的順序
         # —— 反轉只會把問題從 Apple 搬到它們身上,還讓每一個既有 feed 的 bytes 全變。
         f"    <itunes:type>{itunes_type}</itunes:type>",
-        f'    <itunes:category text={quoteattr(show.get("category", "Technology"))}/>',
-        f'    <itunes:image href={quoteattr(base + "/" + show["artwork_file"])}/>',
+        f"    <itunes:category text={quoteattr(show.get('category', 'Technology'))}/>",
+        f"    <itunes:image href={quoteattr(base + '/' + show['artwork_file'])}/>",
         "    <itunes:owner>",
         f"      <itunes:name>{escape(show['owner_name'])}</itunes:name>",
         f"      <itunes:email>{escape(show['owner_email'])}</itunes:email>",
@@ -129,7 +130,7 @@ def build_feed_xml(show: dict, base_url: str) -> str:
         # 層的節目封面(向後相容:舊 show 無此欄位即無單集圖)。
         ep_art = ep.get("artwork_file")
         if ep_art:
-            item.append(f'      <itunes:image href={quoteattr(base + "/" + ep_art)}/>')
+            item.append(f"      <itunes:image href={quoteattr(base + '/' + ep_art)}/>")
         duration = ep.get("duration")
         if duration:
             item.append(f"      <itunes:duration>{escape(str(duration))}</itunes:duration>")
@@ -153,7 +154,7 @@ def build_index_html(show: dict, base_url: str) -> str:
     # 這裡不該再維護第二份剝除 regex。RSS item title / GUID / 檔名都不經過這個函式。
     rows = "\n".join(
         f"    <li>EP{n:02d} — {escape(bare_episode_title(n, ep['title']))} "
-        f'(<a href={quoteattr(base + "/" + ep["media_file"])}>mp3</a>)</li>'
+        f"(<a href={quoteattr(base + '/' + ep['media_file'])}>mp3</a>)</li>"
         for n, ep in live_episodes(show)
     )
     return (
@@ -162,6 +163,6 @@ def build_index_html(show: dict, base_url: str) -> str:
         f"<title>{escape(show['title'])}</title></head>\n"
         f"<body>\n  <h1>{escape(show['title'])}</h1>\n"
         f"  <p>{escape(show['description'])}</p>\n"
-        f'  <p>RSS: <a href={quoteattr(base + "/feed.xml")}>{escape(base)}/feed.xml</a></p>\n'
+        f"  <p>RSS: <a href={quoteattr(base + '/feed.xml')}>{escape(base)}/feed.xml</a></p>\n"
         f"  <ul>\n{rows}\n  </ul>\n</body></html>\n"
     )

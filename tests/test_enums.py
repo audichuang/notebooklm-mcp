@@ -89,7 +89,12 @@ def test_report_format_whitelist_matches_what_the_web_backend_can_dispatch():
     def _web_can_build(fmt):
         try:
             build_report_artifact_params(
-                "nb", ["src"], report_format=fmt, language="en", custom_prompt=None, extra_instructions=None
+                "nb",
+                ["src"],
+                report_format=fmt,
+                language="en",
+                custom_prompt=None,
+                extra_instructions=None,
             )
         except ValueError:
             return False

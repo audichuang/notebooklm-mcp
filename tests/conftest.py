@@ -82,15 +82,27 @@ class FakeArtifacts:
         """Test helper: pre-populate the notebook's artifact set."""
         self.artifacts.extend(arts)
 
-    def seed_artifact(self, artifact_id, *, kind=ArtifactType.SLIDE_DECK, title="art",
-                      completed=True, failed=False, status=None, source_ids=()):
+    def seed_artifact(
+        self,
+        artifact_id,
+        *,
+        kind=ArtifactType.SLIDE_DECK,
+        title="art",
+        completed=True,
+        failed=False,
+        status=None,
+        source_ids=(),
+    ):
         """建一筆帶完整 preflight 欄位的 artifact(kind / is_completed / is_failed /
         status_str)——`get_or_none` 的 preflight 靠這四個判斷。"""
         art = SimpleNamespace(
-            id=artifact_id, title=title, kind=kind,
-            is_completed=completed, is_failed=failed,
-            status_str=status or ("failed" if failed else
-                                  "completed" if completed else "processing"),
+            id=artifact_id,
+            title=title,
+            kind=kind,
+            is_completed=completed,
+            is_failed=failed,
+            status_str=status
+            or ("failed" if failed else "completed" if completed else "processing"),
             created_at=datetime.now(UTC),
             source_ids=tuple(source_ids),
         )
@@ -100,8 +112,7 @@ class FakeArtifacts:
     async def get_or_none(self, notebook_id, artifact_id):
         # 鏡射真 SDK:「list 一次再比對 id」——所以它同時回答「存不存在」與
         # 「屬不屬於這個 notebook」。找不到回 None(sanctioned,不發 DeprecationWarning)。
-        self.calls.append(("get_or_none", dict(notebook_id=notebook_id,
-                                               artifact_id=artifact_id)))
+        self.calls.append(("get_or_none", dict(notebook_id=notebook_id, artifact_id=artifact_id)))
         return next((a for a in self.artifacts if a.id == artifact_id), None)
 
     # Signature mirrors notebooklm-py 0.3.4 ArtifactsAPI.list (filter by .kind).
@@ -141,7 +152,16 @@ class FakeArtifacts:
         # Faithful to the real SDK: GenerationStatus exposes ONLY task_id
         # (task_id IS the artifact id). No artifact_id attribute exists.
         if self.fail_generate:
-            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "simulated failure"})()
+            return type(
+                "S",
+                (),
+                {
+                    "task_id": "",
+                    "is_failed": True,
+                    "status": "failed",
+                    "error": "simulated failure",
+                },
+            )()
         self._generate_count += 1
         task_id = f"task-{122 + self._generate_count}"
         self.artifacts.append(
@@ -159,8 +179,15 @@ class FakeArtifacts:
     # 簽名鏡射 notebooklm-py 0.7.3:0.4.x 的 poll_interval 已移除、尾端新增 on_status_change。
     # 我方呼叫只用 (notebook_id, task_id, timeout=)。
     async def wait_for_completion(
-        self, notebook_id, task_id, initial_interval=2.0, max_interval=10.0, timeout=300.0,
-        max_not_found=5, min_not_found_window=10.0, on_status_change=None
+        self,
+        notebook_id,
+        task_id,
+        initial_interval=2.0,
+        max_interval=10.0,
+        timeout=300.0,
+        max_not_found=5,
+        min_not_found_window=10.0,
+        on_status_change=None,
     ):
         self.calls.append(("wait", dict(notebook_id=notebook_id, task_id=task_id, timeout=timeout)))
         self._wait_count += 1
@@ -172,17 +199,27 @@ class FakeArtifacts:
             return type(
                 "S",
                 (),
-                {"task_id": task_id, "is_failed": True, "status": "failed", "error": "simulated mid-poll failure"}
+                {
+                    "task_id": task_id,
+                    "is_failed": True,
+                    "status": "failed",
+                    "error": "simulated mid-poll failure",
+                },
             )()
         if self.fail_removed:
             return type(
-                "S", (), {"task_id": task_id, "is_failed": False, "is_removed": True, "status": "removed"}
+                "S",
+                (),
+                {"task_id": task_id, "is_failed": False, "is_removed": True, "status": "removed"},
             )()
         return type("S", (), {"task_id": task_id, "is_failed": False, "is_removed": False})()
 
     async def download_audio(self, notebook_id, output_path, artifact_id=None):
         self.calls.append(
-            ("download", dict(notebook_id=notebook_id, output_path=output_path, artifact_id=artifact_id))
+            (
+                "download",
+                dict(notebook_id=notebook_id, output_path=output_path, artifact_id=artifact_id),
+            )
         )
         output = Path(output_path)
         if self.download_audio_partial_bytes is not None:
@@ -194,8 +231,12 @@ class FakeArtifacts:
         return output_path
 
     async def rename(self, notebook_id, artifact_id, new_title, *, return_object=True):
-        self.calls.append(("rename", dict(artifact_id=artifact_id, new_title=new_title,
-                                          return_object=return_object)))
+        self.calls.append(
+            (
+                "rename",
+                dict(artifact_id=artifact_id, new_title=new_title, return_object=return_object),
+            )
+        )
         for artifact in self.artifacts:
             if artifact.id == artifact_id:
                 artifact.title = new_title
@@ -208,32 +249,75 @@ class FakeArtifacts:
 
         raise ArtifactNotFoundError(artifact_id)
 
-    async def generate_slide_deck(self, notebook_id, source_ids=None, language="en",
-                                  instructions=None, slide_format=None, slide_length=None):
-        self.calls.append(("generate_slide_deck", dict(
-            notebook_id=notebook_id, source_ids=source_ids, language=language,
-            instructions=instructions, slide_format=slide_format, slide_length=slide_length)))
+    async def generate_slide_deck(
+        self,
+        notebook_id,
+        source_ids=None,
+        language="en",
+        instructions=None,
+        slide_format=None,
+        slide_length=None,
+    ):
+        self.calls.append(
+            (
+                "generate_slide_deck",
+                dict(
+                    notebook_id=notebook_id,
+                    source_ids=source_ids,
+                    language=language,
+                    instructions=instructions,
+                    slide_format=slide_format,
+                    slide_length=slide_length,
+                ),
+            )
+        )
         if self.fail_generate:
-            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"})()
+            return type(
+                "S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"}
+            )()
         return type("S", (), {"task_id": "slide-task", "is_failed": False})()
 
-    async def download_slide_deck(self, notebook_id, output_path, artifact_id=None, output_format="pdf"):
-        self.calls.append(("download_slide_deck", dict(output_path=output_path,
-                          artifact_id=artifact_id, output_format=output_format)))
-        with open(output_path, "wb") as f:      # 落一個非空檔,讓 publish 的存在性檢查過
+    async def download_slide_deck(
+        self, notebook_id, output_path, artifact_id=None, output_format="pdf"
+    ):
+        self.calls.append(
+            (
+                "download_slide_deck",
+                dict(output_path=output_path, artifact_id=artifact_id, output_format=output_format),
+            )
+        )
+        with open(output_path, "wb") as f:  # 落一個非空檔,讓 publish 的存在性檢查過
             f.write(self.download_slides_bytes)
         if self.download_slides_exc is not None:
             raise self.download_slides_exc
         return output_path
 
-    async def generate_report(self, notebook_id, report_format=None, source_ids=None,
-                              language="en", custom_prompt=None, extra_instructions=None):
-        self.calls.append(("generate_report", dict(
-            notebook_id=notebook_id, report_format=report_format, source_ids=source_ids,
-            language=language, custom_prompt=custom_prompt,
-            extra_instructions=extra_instructions)))
+    async def generate_report(
+        self,
+        notebook_id,
+        report_format=None,
+        source_ids=None,
+        language="en",
+        custom_prompt=None,
+        extra_instructions=None,
+    ):
+        self.calls.append(
+            (
+                "generate_report",
+                dict(
+                    notebook_id=notebook_id,
+                    report_format=report_format,
+                    source_ids=source_ids,
+                    language=language,
+                    custom_prompt=custom_prompt,
+                    extra_instructions=extra_instructions,
+                ),
+            )
+        )
         if self.fail_generate:
-            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"})()
+            return type(
+                "S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"}
+            )()
         return type("S", (), {"task_id": "report-task", "is_failed": False})()
 
     async def revise_slide(self, notebook_id, artifact_id, slide_index, prompt):
@@ -241,13 +325,24 @@ class FakeArtifacts:
         # 回傳的 task_id 就是同一個 artifact,但 **SDK 並未強制**——它只是 parse RPC 回來的
         # 那個 id。所以工具端一律用回傳值,不假設相等;revise_slide_returns_id 讓測試能餵
         # 一個不同的 id,證明實作沒有依賴這個假設。
-        self.calls.append(("revise_slide", dict(
-            notebook_id=notebook_id, artifact_id=artifact_id,
-            slide_index=slide_index, prompt=prompt)))
+        self.calls.append(
+            (
+                "revise_slide",
+                dict(
+                    notebook_id=notebook_id,
+                    artifact_id=artifact_id,
+                    slide_index=slide_index,
+                    prompt=prompt,
+                ),
+            )
+        )
         if self.fail_generate:
-            return type("S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"})()
-        return type("S", (), {"task_id": self.revise_slide_returns_id or artifact_id,
-                              "is_failed": False})()
+            return type(
+                "S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "sim"}
+            )()
+        return type(
+            "S", (), {"task_id": self.revise_slide_returns_id or artifact_id, "is_failed": False}
+        )()
 
     async def retry_failed(self, notebook_id, artifact_id):
         # 0.7.3:同一個 artifact_id 原地重跑,回 status="in_progress"。**與 generate_* 不同**,
@@ -257,10 +352,14 @@ class FakeArtifacts:
         self.calls.append(("retry_failed", dict(notebook_id=notebook_id, artifact_id=artifact_id)))
         if self.retry_exc is not None:
             raise self.retry_exc
-        return type("S", (), {"task_id": artifact_id, "is_failed": False, "status": "in_progress"})()
+        return type(
+            "S", (), {"task_id": artifact_id, "is_failed": False, "status": "in_progress"}
+        )()
 
     async def download_report(self, notebook_id, output_path, artifact_id=None):
-        self.calls.append(("download_report", dict(output_path=output_path, artifact_id=artifact_id)))
+        self.calls.append(
+            ("download_report", dict(output_path=output_path, artifact_id=artifact_id))
+        )
         with open(output_path, "wb") as f:
             f.write(self.download_report_bytes)
         if self.download_report_exc is not None:
@@ -328,8 +427,17 @@ class FakeSources:
         for title in titles:
             self._add(title)
 
-    async def add_file(self, notebook_id, file_path, mime_type=None, *, wait=False,
-                       wait_timeout=120.0, title=None, on_progress=None):
+    async def add_file(
+        self,
+        notebook_id,
+        file_path,
+        mime_type=None,
+        *,
+        wait=False,
+        wait_timeout=120.0,
+        title=None,
+        on_progress=None,
+    ):
         # 鏡射 notebooklm-py 0.7.3:mime_type 之後的參數 keyword-only;title= 內部
         # 其實是 add→rename 兩步,rename 失敗只 log 不 raise(回傳舊 title 的 Source)。
         # title_lands=False 模擬那個靜默失敗,供 source_add_file 後檢的紅路徑測試。
@@ -369,8 +477,9 @@ class FakeSources:
         )()
 
     async def rename(self, notebook_id, source_id, new_title, *, return_object=True):
-        self.calls.append(("rename", dict(source_id=source_id, new_title=new_title,
-                                          return_object=return_object)))
+        self.calls.append(
+            ("rename", dict(source_id=source_id, new_title=new_title, return_object=return_object))
+        )
         for s in self.sources:
             if s["id"] == source_id:
                 s["title"] = new_title
@@ -385,9 +494,17 @@ class FakeSources:
     async def list(self, notebook_id):
         self.calls.append(("list", dict(notebook_id=notebook_id)))
         return [
-            type("Src", (), {"id": s["id"], "title": s["title"] or "",
-                             "kind": s["kind"], "created_at": s["created_at"],
-                             "is_ready": s["is_ready"]})()
+            type(
+                "Src",
+                (),
+                {
+                    "id": s["id"],
+                    "title": s["title"] or "",
+                    "kind": s["kind"],
+                    "created_at": s["created_at"],
+                    "is_ready": s["is_ready"],
+                },
+            )()
             for s in self.sources
         ]
 
@@ -395,9 +512,16 @@ class FakeSources:
         self.calls.append(("get_fulltext", dict(source_id=source_id)))
         if self.fulltext_raises:
             raise RuntimeError("simulated fulltext RPC failure")
-        return type("FT", (), {"source_id": source_id, "title": "來源標題",
-                               "content": self.fulltext_content,
-                               "char_count": len(self.fulltext_content)})()
+        return type(
+            "FT",
+            (),
+            {
+                "source_id": source_id,
+                "title": "來源標題",
+                "content": self.fulltext_content,
+                "char_count": len(self.fulltext_content),
+            },
+        )()
 
     # 鏡射 notebooklm-py 0.8.0:尾端加 title=(add 時直接命名;我們目前不傳)。
     async def add_url(self, notebook_id, url, *, wait=False, wait_timeout=120.0, title=None):
@@ -406,8 +530,9 @@ class FakeSources:
         )
         return type("Src", (), {"id": self._add(title or url)})()
 
-    async def add_text(self, notebook_id, title, content, *, wait=False,
-                       wait_timeout=120.0, idempotent=False):
+    async def add_text(
+        self, notebook_id, title, content, *, wait=False, wait_timeout=120.0, idempotent=False
+    ):
         self.calls.append(("add_text", dict(title=title, wait=wait)))
         return type("Src", (), {"id": self._add(title)})()
 
@@ -456,8 +581,18 @@ class FakeNotebooks:
         # 缺失/帶預期外 userRole 時就是 None,而 `is_owner` 會停在欄位預設 `True`
         # (上游 `__setattr__` 只在 `role is not None` 時同步兩者)。少了這個屬性,
         # 任何用預設 fake 寫的 `notebook_get` 測試會收到看不懂的 AttributeError 而不是斷言失敗。
-        return type("NB", (), {"id": notebook_id, "title": "Test", "sources_count": 2,
-                               "is_owner": True, "role": None, "created_at": None})()
+        return type(
+            "NB",
+            (),
+            {
+                "id": notebook_id,
+                "title": "Test",
+                "sources_count": 2,
+                "is_owner": True,
+                "role": None,
+                "created_at": None,
+            },
+        )()
 
 
 def _structured_document(*paragraphs: str) -> StructuredDocument:
@@ -494,14 +629,24 @@ class FakeChat:
 
     # Signature mirrors notebooklm-py 0.3.4 ChatAPI.ask (source_ids + conversation_id).
     async def ask(self, notebook_id, question, source_ids=None, conversation_id=None):
-        self.calls.append(("ask", dict(question=question, source_ids=source_ids,
-                                        conversation_id=conversation_id)))
-        refs = [type("Ref", (), {"source_id": "src-1", "citation_number": 1,
-                                 "cited_text": "引用片段"})()]
-        return type("R", (), {"answer": self.answer_override or f"answer to {question}",
-                              "answer_document": self.answer_document,
-                              "conversation_id": conversation_id or "conv-1",
-                              "references": refs})()
+        self.calls.append(
+            ("ask", dict(question=question, source_ids=source_ids, conversation_id=conversation_id))
+        )
+        refs = [
+            type(
+                "Ref", (), {"source_id": "src-1", "citation_number": 1, "cited_text": "引用片段"}
+            )()
+        ]
+        return type(
+            "R",
+            (),
+            {
+                "answer": self.answer_override or f"answer to {question}",
+                "answer_document": self.answer_document,
+                "conversation_id": conversation_id or "conv-1",
+                "references": refs,
+            },
+        )()
 
 
 class FakeResearch:
@@ -524,8 +669,10 @@ class FakeResearch:
             ResearchSource(url="https://b.example/spec", title="來源B"),
             ResearchSource(url="https://c.example/blog", title="來源C(未被引用)"),
             ResearchSource(
-                url="", title="Deep Research Report",
-                result_type=RESEARCH_RESULT_TYPE_REPORT, report_markdown="## 研究地圖\n",
+                url="",
+                title="Deep Research Report",
+                result_type=RESEARCH_RESULT_TYPE_REPORT,
+                report_markdown="## 研究地圖\n",
             ),
         )
         self.imported = [{"id": "src-r1", "title": "來源A"}]
@@ -536,36 +683,62 @@ class FakeResearch:
 
     def _task(self, task_id="res-1"):
         return ResearchTask(
-            task_id=task_id, status=self.status, query="advisor tool history forwarding",
-            sources=self.sources, summary="摘要", report=self.report,
+            task_id=task_id,
+            status=self.status,
+            query="advisor tool history forwarding",
+            sources=self.sources,
+            summary="摘要",
+            report=self.report,
         )
 
     async def start(self, notebook_id, query, source="web", mode="fast"):
-        self.calls.append(("start", dict(notebook_id=notebook_id, query=query,
-                                         source=source, mode=mode)))
-        return ResearchStart(task_id="res-1", report_id="rep-1", notebook_id=notebook_id,
-                             query=query, mode=mode.lower())
+        self.calls.append(
+            ("start", dict(notebook_id=notebook_id, query=query, source=source, mode=mode))
+        )
+        return ResearchStart(
+            task_id="res-1",
+            report_id="rep-1",
+            notebook_id=notebook_id,
+            query=query,
+            mode=mode.lower(),
+        )
 
     async def poll(self, notebook_id, task_id=None):
         self.calls.append(("poll", dict(notebook_id=notebook_id, task_id=task_id)))
         return self._task(task_id or "res-1")
 
-    async def wait_for_completion(self, notebook_id, task_id=None, *, timeout=1800,
-                                  interval=5, initial_interval=None):
-        self.calls.append(("wait", dict(notebook_id=notebook_id, task_id=task_id,
-                                        timeout=timeout)))
+    async def wait_for_completion(
+        self, notebook_id, task_id=None, *, timeout=1800, interval=5, initial_interval=None
+    ):
+        self.calls.append(("wait", dict(notebook_id=notebook_id, task_id=task_id, timeout=timeout)))
         if self.wait_exc is not None:
             raise self.wait_exc
         return self._task(task_id or "res-1")
 
-    async def import_sources_with_verification(self, notebook_id, task_id, sources, *,
-                                               max_elapsed=1800, initial_delay=5,
-                                               backoff_factor=2, max_delay=60):
-        self.calls.append(("import", dict(
-            notebook_id=notebook_id, task_id=task_id, max_elapsed=max_elapsed,
-            # 記標題而非物件:斷言看得懂,也證明「傳過去的就是候選裡那幾筆」。
-            titles=[s.title for s in sources],
-            is_report=[s.is_report for s in sources])))
+    async def import_sources_with_verification(
+        self,
+        notebook_id,
+        task_id,
+        sources,
+        *,
+        max_elapsed=1800,
+        initial_delay=5,
+        backoff_factor=2,
+        max_delay=60,
+    ):
+        self.calls.append(
+            (
+                "import",
+                dict(
+                    notebook_id=notebook_id,
+                    task_id=task_id,
+                    max_elapsed=max_elapsed,
+                    # 記標題而非物件:斷言看得懂,也證明「傳過去的就是候選裡那幾筆」。
+                    titles=[s.title for s in sources],
+                    is_report=[s.is_report for s in sources],
+                ),
+            )
+        )
         return list(self.imported)
 
 
@@ -659,11 +832,14 @@ class FakeSharing:
         for email, permission in grants:
             if email not in self.silently_ignore:
                 self.existing = [
-                    e for e in self.existing
-                    if self._entry(e)[0].casefold() != email.casefold()
+                    e for e in self.existing if self._entry(e)[0].casefold() != email.casefold()
                 ]
                 self.existing.append((email, permission))
-        return self.set_users_result if self.set_users_result is not None else await self.get_status(notebook_id)
+        return (
+            self.set_users_result
+            if self.set_users_result is not None
+            else await self.get_status(notebook_id)
+        )
 
     async def get_status(self, notebook_id):
         self.status_calls.append(notebook_id)
@@ -686,7 +862,6 @@ class FakeClient:
         self.chat = FakeChat()
         self.research = FakeResearch()
         self.sharing = FakeSharing()
-
 
 
 # ---- 配額 failover 用的共用假件 ------------------------------------------------------
@@ -721,9 +896,7 @@ def refuse_first(client, method_name, calls, fail_first_n, exc=None):
             # 這裡原本不帶 rpc_code(None),而 RateLimitError 還有另一個生產者——
             # transport 層的 HTTP 429,同樣 rpc_code=None——兩種都不像時,整套
             # failover 測試驗的其實是 decoder 產不出的形狀(round2 獨立複審 V-B)。
-            raise exc or RateLimitError(
-                "每日配額已用盡", rpc_code="USER_DISPLAYABLE_ERROR"
-            )
+            raise exc or RateLimitError("每日配額已用盡", rpc_code="USER_DISPLAYABLE_ERROR")
         return await original(*args, **kwargs)
 
     setattr(client.artifacts, method_name, flaky)

@@ -1,5 +1,6 @@
 """Pin notebooklm-py PUBLIC API signatures. Breaks loudly if the SDK changes
 under us - our single tripwire against silent upstream API drift."""
+
 import inspect
 from datetime import UTC
 
@@ -51,9 +52,9 @@ def test_default_backend_is_still_web():
 
     from notebooklm_mcp.app import _BACKEND_ENV, _INLINE_AUTH_ENV_OVERRIDES
 
-    assert f'os.environ.get("{_BACKEND_ENV}")' in _inspect.getsource(
-        _client_options
-    ), "SDK 讀的 backend 環境變數名改了,app 的 inline 覆寫要跟著改"
+    assert f'os.environ.get("{_BACKEND_ENV}")' in _inspect.getsource(_client_options), (
+        "SDK 讀的 backend 環境變數名改了,app 的 inline 覆寫要跟著改"
+    )
     assert _INLINE_AUTH_ENV_OVERRIDES[_BACKEND_ENV] is None
 
 
@@ -112,11 +113,19 @@ def test_read_surface_signatures_and_fields():
     assert _params(SourcesAPI.get_fulltext) == ["self", "notebook_id", "source_id", "output_format"]
     assert _params(NotebooksAPI.get) == ["self", "notebook_id"]
     # chat_ask focuses on a subset / continues a thread via these kwargs.
-    assert _params(ChatAPI.ask) == ["self", "notebook_id", "question", "source_ids", "conversation_id"]
+    assert _params(ChatAPI.ask) == [
+        "self",
+        "notebook_id",
+        "question",
+        "source_ids",
+        "conversation_id",
+    ]
 
     assert {"id", "title"} <= {f.name for f in dataclasses.fields(Source)}
     assert all(hasattr(Source, p) for p in ("kind", "is_ready"))
-    assert {"source_id", "content", "char_count"} <= {f.name for f in dataclasses.fields(SourceFulltext)}
+    assert {"source_id", "content", "char_count"} <= {
+        f.name for f in dataclasses.fields(SourceFulltext)
+    }
     # `role` 是 0.8.1 新增的,`notebook_get` 直取 `nb.role`(無 getattr 防護)——
     # 上游改名時要在這裡紅,而不是在生產拋 AttributeError。
     assert {"id", "title", "sources_count", "is_owner", "role"} <= {
@@ -159,7 +168,7 @@ def test_add_file_accepts_mime_wait_and_title():
     p = _params(SourcesAPI.add_file)
     assert p[:3] == ["self", "notebook_id", "file_path"]
     # 0.7.x:title= 存在但內部仍是 add→rename 兩步、改名失敗只 log 不 raise
-    #(podcast 流程因此維持顯式 rename;見 AGENTS.md gotcha)。on_progress 上傳進度 callback。
+    # (podcast 流程因此維持顯式 rename;見 AGENTS.md gotcha)。on_progress 上傳進度 callback。
     assert p == [
         "self",
         "notebook_id",
@@ -199,11 +208,26 @@ def test_rename_signatures_gained_return_object():
     from notebooklm._artifacts import ArtifactsAPI
     from notebooklm._sources import SourcesAPI
 
-    assert _params(ArtifactsAPI.rename) == ["self", "notebook_id", "artifact_id", "new_title", "return_object"]
-    assert _params(SourcesAPI.rename) == ["self", "notebook_id", "source_id", "new_title", "return_object"]
+    assert _params(ArtifactsAPI.rename) == [
+        "self",
+        "notebook_id",
+        "artifact_id",
+        "new_title",
+        "return_object",
+    ]
+    assert _params(SourcesAPI.rename) == [
+        "self",
+        "notebook_id",
+        "source_id",
+        "new_title",
+        "return_object",
+    ]
     # return_object 是 keyword-only:鎖住它,擋未來有人寫成位置參數(我方一律 keyword 傳 False)。
     for func in (ArtifactsAPI.rename, SourcesAPI.rename):
-        assert inspect.signature(func).parameters["return_object"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert (
+            inspect.signature(func).parameters["return_object"].kind
+            is inspect.Parameter.KEYWORD_ONLY
+        )
 
 
 def test_rename_false_no_longer_short_circuits():
@@ -250,9 +274,7 @@ def test_generation_kickoff_refuses_by_raising():
     assert issubclass(RateLimitError, Exception)
     assert issubclass(ArtifactFeatureUnavailableError, Exception)
     # 「artifact id 缺席 = 沒有建出 task」是我們把它歸成 not_accepted 的理由。
-    parse_src = _inspect.getsource(
-        generation.ArtifactGenerationService._parse_generation_result
-    )
+    parse_src = _inspect.getsource(generation.ArtifactGenerationService._parse_generation_result)
     assert "raise ArtifactFeatureUnavailableError" in parse_src
 
 
@@ -313,7 +335,13 @@ def test_chat_ask_signature_and_answer_field():
     from notebooklm import AskResult
     from notebooklm._chat import ChatAPI
 
-    assert _params(ChatAPI.ask) == ["self", "notebook_id", "question", "source_ids", "conversation_id"]
+    assert _params(ChatAPI.ask) == [
+        "self",
+        "notebook_id",
+        "question",
+        "source_ids",
+        "conversation_id",
+    ]
     assert "answer" in getattr(AskResult, "__dataclass_fields__", {})
 
 
@@ -323,7 +351,14 @@ def test_source_signatures_and_fields():
 
     # 0.8.0 add_url 尾端加 title(可在 add 時直接命名,省掉 add→rename 兩步;
     # podcast 流程目前仍走顯式兩步,因為 add_file 的 title= 內部就是那兩步且會靜默失敗)。
-    assert _params(SourcesAPI.add_url) == ["self", "notebook_id", "url", "wait", "wait_timeout", "title"]
+    assert _params(SourcesAPI.add_url) == [
+        "self",
+        "notebook_id",
+        "url",
+        "wait",
+        "wait_timeout",
+        "title",
+    ]
     # 0.7.x add_text 尾端加 idempotent(重試防重複;我們不傳,預設即可)
     assert _params(SourcesAPI.add_text) == [
         "self",
@@ -398,11 +433,21 @@ def test_slide_deck_signatures():
     from notebooklm._artifacts import ArtifactsAPI
 
     assert _params(ArtifactsAPI.generate_slide_deck) == [
-        "self", "notebook_id", "source_ids", "language",
-        "instructions", "slide_format", "slide_length",
+        "self",
+        "notebook_id",
+        "source_ids",
+        "language",
+        "instructions",
+        "slide_format",
+        "slide_length",
     ]
     assert _params(ArtifactsAPI.download_slide_deck) == [
-        "self", "notebook_id", "output_path", "artifact_id", "output_format", "artifacts_data",
+        "self",
+        "notebook_id",
+        "output_path",
+        "artifact_id",
+        "output_format",
+        "artifacts_data",
     ]
 
 
@@ -410,14 +455,27 @@ def test_report_signatures():
     from notebooklm._artifacts import ArtifactsAPI
 
     assert _params(ArtifactsAPI.generate_report) == [
-        "self", "notebook_id", "report_format", "source_ids",
-        "language", "custom_prompt", "extra_instructions",
+        "self",
+        "notebook_id",
+        "report_format",
+        "source_ids",
+        "language",
+        "custom_prompt",
+        "extra_instructions",
     ]
     assert _params(ArtifactsAPI.generate_study_guide) == [
-        "self", "notebook_id", "source_ids", "language", "extra_instructions",
+        "self",
+        "notebook_id",
+        "source_ids",
+        "language",
+        "extra_instructions",
     ]
     assert _params(ArtifactsAPI.download_report) == [
-        "self", "notebook_id", "output_path", "artifact_id", "artifacts_data",
+        "self",
+        "notebook_id",
+        "output_path",
+        "artifact_id",
+        "artifacts_data",
     ]
 
 
@@ -439,7 +497,11 @@ def test_quota_rescue_signatures():
     from notebooklm._artifacts import ArtifactsAPI
 
     assert _params(ArtifactsAPI.revise_slide) == [
-        "self", "notebook_id", "artifact_id", "slide_index", "prompt",
+        "self",
+        "notebook_id",
+        "artifact_id",
+        "slide_index",
+        "prompt",
     ]
     assert _params(ArtifactsAPI.retry_failed) == ["self", "notebook_id", "artifact_id"]
 
@@ -464,7 +526,12 @@ def test_add_user_permission_is_positional():
     from notebooklm._sharing import SharingAPI
 
     assert _params(SharingAPI.add_user) == [
-        "self", "notebook_id", "email", "permission", "notify", "welcome_message",
+        "self",
+        "notebook_id",
+        "email",
+        "permission",
+        "notify",
+        "welcome_message",
     ]
     kind = inspect.signature(SharingAPI.add_user).parameters["permission"].kind
     assert kind is not inspect.Parameter.KEYWORD_ONLY
@@ -483,7 +550,11 @@ def test_set_users_signature():
     from notebooklm.types import ShareStatus
 
     assert _params(SharingAPI.set_users) == [
-        "self", "notebook_id", "grants", "notify", "welcome_message",
+        "self",
+        "notebook_id",
+        "grants",
+        "notify",
+        "welcome_message",
     ]
     assert get_type_hints(SharingAPI.set_users)["return"] is ShareStatus
 
@@ -634,9 +705,9 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
     # 實際上只是 harness 位置不同。tripwire 給錯訊號比不給還糟。
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     metadata = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    requirements = metadata["project"]["dependencies"] + metadata["project"][
-        "optional-dependencies"
-    ]["login"]
+    requirements = (
+        metadata["project"]["dependencies"] + metadata["project"]["optional-dependencies"]["login"]
+    )
     notebooklm_requirements = [
         Requirement(spec) for spec in requirements if Requirement(spec).name == "notebooklm-py"
     ]
@@ -767,11 +838,11 @@ def test_import_identity_differs_from_citation_identity():
     from notebooklm.research import normalize_citation_url as cite_key
 
     frag = "https://Example.com/a/#section"
-    assert import_key(frag) == "https://example.com/a"        # fragment 丟掉
+    assert import_key(frag) == "https://example.com/a"  # fragment 丟掉
     assert cite_key(frag) == "https://example.com/a#section"  # fragment 保留
     dotted = "https://example.com/a."
-    assert import_key(dotted) == "https://example.com/a."     # 標點保留
-    assert cite_key(dotted) == "https://example.com/a"        # 標點 strip
+    assert import_key(dotted) == "https://example.com/a."  # 標點保留
+    assert cite_key(dotted) == "https://example.com/a"  # 標點 strip
     # 兩顆都不 strip 前後空白 —— 呼叫端傳進來的 URL 必須自己先 strip。
     assert import_key(" https://example.com/a ") != import_key("https://example.com/a")
 
@@ -794,8 +865,12 @@ def test_research_task_and_source_fields():
     }
     assert {"task_id", "report_id", "mode"} <= {f.name for f in dataclasses.fields(ResearchStart)}
     # research_wait 依 status 決定成功/fail-loud;這四個值都要在。
-    assert {ResearchStatus.COMPLETED, ResearchStatus.IN_PROGRESS,
-            ResearchStatus.FAILED, ResearchStatus.NOT_FOUND} <= set(ResearchStatus)
+    assert {
+        ResearchStatus.COMPLETED,
+        ResearchStatus.IN_PROGRESS,
+        ResearchStatus.FAILED,
+        ResearchStatus.NOT_FOUND,
+    } <= set(ResearchStatus)
     assert ResearchSource(url="u", title="t").is_report is False
 
 
@@ -869,9 +944,11 @@ def test_sync_auth_uses_the_sdk_profile_path_resolver():
     # 與上面 pyproject 那條同一個根因:用 `__file__` 定位,不吃 CWD
     # (從 `audiskill/` 容器層跑 `pytest notebooklm-mcp/tests/...` 會 FileNotFoundError,
     #  而那個症狀看起來像契約被違反)。
-    script = (Path(__file__).resolve().parents[1] / "scripts/sync-auth.sh").read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "scripts/sync-auth.sh").read_text(
+        encoding="utf-8"
+    )
     assert "get_storage_path" in script
-    assert 'NBLM_HOME=' not in script
+    assert "NBLM_HOME=" not in script
 
 
 def test_auth_probe_matches_the_sdk_http_auth_error_shape():
@@ -884,16 +961,16 @@ def test_auth_probe_matches_the_sdk_http_auth_error_shape():
     from notebooklm_mcp.auth_probe import _is_probe_auth_error
 
     assert callable(is_auth_error)
-    request = httpx.Request("POST", "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute")
+    request = httpx.Request(
+        "POST", "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute"
+    )
     for status in (401, 403):
         response = httpx.Response(status, request=request)
         http_error = httpx.HTTPStatusError(
             response.reason_phrase, request=request, response=response
         )
         with pytest.raises(RPCError) as caught:
-            RpcExecutor.raise_rpc_error_from_http_status(
-                None, http_error, RPCMethod.LIST_NOTEBOOKS
-            )
+            RpcExecutor.raise_rpc_error_from_http_status(None, http_error, RPCMethod.LIST_NOTEBOOKS)
         assert caught.value.__cause__ is http_error
         assert _is_probe_auth_error(caught.value)
 
@@ -939,9 +1016,9 @@ def test_generation_takes_its_source_list_from_the_notebook_not_the_server():
     )
 
     fulltext = inspect.getsource(SourceContentRenderer)
-    assert "[[source_id]" in fulltext and "notebook_id" not in fulltext.split("params =")[1][:120], (
-        "get_fulltext 開始帶 notebook_id 了 —— 那樣『刪掉還讀得回』就變成真的異常,要重查"
-    )
+    assert (
+        "[[source_id]" in fulltext and "notebook_id" not in fulltext.split("params =")[1][:120]
+    ), "get_fulltext 開始帶 notebook_id 了 —— 那樣『刪掉還讀得回』就變成真的異常,要重查"
 
 
 def test_source_search_signature_and_chunk_fields():
@@ -1022,7 +1099,9 @@ async def test_create_artifact_transport_429_is_marked_unconfirmed_but_decoded_r
             raise make()
 
         with pytest.raises(RateLimitError) as info:
-            await call_unconfirmed_on_transport_loss(call, method=RPCMethod.CREATE_ARTIFACT, what="x")
+            await call_unconfirmed_on_transport_loss(
+                call, method=RPCMethod.CREATE_ARTIFACT, what="x"
+            )
         return info.value
 
     transport = await _raised(lambda: RateLimitError("429 Too Many Requests"))

@@ -11,6 +11,7 @@ protocol). Importing the app from a dedicated module avoids that duplication.
 Owns one long-lived NotebookLMClient for each MCP process. Auth comes from
 NOTEBOOKLM_AUTH_JSON (typically Doppler).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -204,9 +205,7 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
         if would_trigger_inline_heal(storage_state):
             logger.warning("%s %s", name, heal_warning_detail(storage_state))
     except Exception as exc:  # ValueError(JSON / 缺 cookie / 空值)、型別不對…一律具名重拋
-        raise RuntimeError(
-            f"{name} 不是可用的 storage_state:{type(exc).__name__}: {exc}"
-        ) from exc
+        raise RuntimeError(f"{name} 不是可用的 storage_state:{type(exc).__name__}: {exc}") from exc
     # O_EXCL + 0600:目錄是 mkdtemp 建的(0700),但檔案模式要自己指定,
     # 別讓 umask 決定憑證的權限。
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -518,8 +517,7 @@ def main() -> None:
     else:
         if not args.allow_insecure_remote and not _is_loopback_host(args.host):
             raise SystemExit(
-                "HTTP/SSE transport 沒有認證；非 loopback host 必須明確傳入 "
-                "--allow-insecure-remote"
+                "HTTP/SSE transport 沒有認證；非 loopback host 必須明確傳入 --allow-insecure-remote"
             )
         mcp.settings.host = args.host
         mcp.settings.port = args.port

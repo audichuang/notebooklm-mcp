@@ -3,6 +3,7 @@
 Thin wrappers over the resident client, with zh_Hant default and enum mapping
 baked in. Each tool returns a plain JSON-able dict.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,11 +46,35 @@ from .languages import resolve_language
 # /etc/mime.types,同一支 .ts 在有/無該檔的機器上分類不同,3 VM + podcast-lab 會得到
 # 不決定性的轉換行為。
 _NO_AUTO_WRAP_SUFFIXES = {
-    ".pdf", ".txt", ".md", ".markdown", ".doc", ".docx", ".rtf", ".odt",
-    ".csv", ".tsv", ".epub", ".pptx",                                       # (a)
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg",                       # (b) 圖片
-    ".mp3", ".m4a", ".wav", ".aac", ".mp4", ".mov", ".webm",                # (b) 音訊/影片
-    ".html", ".htm", ".xhtml", ".xht",                                      # (c)
+    ".pdf",
+    ".txt",
+    ".md",
+    ".markdown",
+    ".doc",
+    ".docx",
+    ".rtf",
+    ".odt",
+    ".csv",
+    ".tsv",
+    ".epub",
+    ".pptx",  # (a)
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".svg",  # (b) 圖片
+    ".mp3",
+    ".m4a",
+    ".wav",
+    ".aac",
+    ".mp4",
+    ".mov",
+    ".webm",  # (b) 音訊/影片
+    ".html",
+    ".htm",
+    ".xhtml",
+    ".xht",  # (c)
 }
 _MAX_CONVERT_BYTES = 25 * 1024 * 1024
 
@@ -75,7 +100,7 @@ def _as_uploadable_text(file_path: str, tmpdir: str) -> tuple[str, str | None]:
         text = p.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return file_path, None
-    if "\x00" in text:      # NUL 是合法 UTF-8;二進位常見,decode 擋不掉
+    if "\x00" in text:  # NUL 是合法 UTF-8;二進位常見,decode 擋不掉
         return file_path, None
     dest = Path(tmpdir) / (p.name + ".md")
     dest.write_text(text, encoding="utf-8")
@@ -93,16 +118,18 @@ async def _probe_extraction(
         ft = await client.sources.get_fulltext(notebook_id, source_id)  # type: ignore[attr-defined]
         n = ft.char_count
     except Exception as exc:  # noqa: BLE001 — probe 是加值檢查,任何失敗都不該讓 add 白做
-        return {"char_count": None,
-                "note": "extraction probe failed (best-effort, source 已上傳): "
-                f"{type(exc).__name__}: {exc}"}
+        return {
+            "char_count": None,
+            "note": "extraction probe failed (best-effort, source 已上傳): "
+            f"{type(exc).__name__}: {exc}",
+        }
     out: dict = {"char_count": n}
     if not n:
         out["warning"] = (
             "extracted text is empty — 檔案可能是音檔/掃描 PDF(無文字層)或壞檔;"
             "若應為文字內容,請 source_delete 後改 source_add_text 貼全文"
-            if is_file else
-            "extracted text is empty — 疑似 paywall/登入牆/動態頁空殼;"
+            if is_file
+            else "extracted text is empty — 疑似 paywall/登入牆/動態頁空殼;"
             "請 source_delete 後抓全文改用 source_add_text/source_add_file"
         )
     return out
@@ -190,9 +217,7 @@ def _pool_peers(context: str, active_label: str) -> list[str]:
     `context` 只用來組錯誤訊息:`notebook_create` 的驗證在 create() 之前跑,
     還沒有 notebook_id,傳 title;`notebook_share_with_pool` 傳真正的 notebook_id。
     """
-    others = list(dict.fromkeys(
-        a for a in runtime.all_accounts() if a != active_label
-    ))
+    others = list(dict.fromkeys(a for a in runtime.all_accounts() if a != active_label))
     unresolved = [a for a in others if "@" not in a]
     if unresolved:
         raise RuntimeError(
@@ -261,11 +286,7 @@ def _owner_slot(status) -> tuple[str, object] | None:
     if not owner:
         return None
     return next(
-        (
-            (label, client)
-            for label, client in runtime.all_clients()
-            if label.casefold() == owner
-        ),
+        ((label, client) for label, client in runtime.all_clients() if label.casefold() == owner),
         None,
     )
 
@@ -293,11 +314,7 @@ async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object
     """
     active_label, active_client = runtime.snapshot()
     ordered: list[tuple[str, object]] = [(active_label, active_client)]
-    ordered += [
-        (label, client)
-        for label, client in runtime.all_clients()
-        if label != active_label
-    ]
+    ordered += [(label, client) for label, client in runtime.all_clients() if label != active_label]
 
     denied: list[str] = []
     for label, client in ordered:
@@ -497,7 +514,8 @@ async def source_add_file(
         # 會卡住整個 MCP server(其他 request、取消、長跑狀態查詢全停,外層 client 可能
         # 先 timeout),而這個 process 是常駐、跨長生成共用的。
         upload_path, converted_from = (
-            (file_path, None) if mime_type is not None       # 顯式宣告優先,不猜
+            (file_path, None)
+            if mime_type is not None  # 顯式宣告優先,不猜
             else await asyncio.to_thread(_as_uploadable_text, file_path, tmpdir)
         )
         with reconcile_hint_if_unconfirmed(notebook_id):
@@ -527,9 +545,7 @@ async def source_add_file(
     return out
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True)
-)
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True))
 async def source_delete(notebook_id: str, source_id: str) -> dict:
     """Delete a caller-selected source that is no longer needed.
 
@@ -630,7 +646,9 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
 async def artifact_wait(notebook_id: str, task_id: str, timeout: float = 1200.0) -> dict:
     """Wait for a generation task to complete —— 傳 `generate_*` 回的 `task_id`,不是
     notebook_id。SDK 回 failed status 時這裡 raise(fail-closed)。"""
-    status = await wait_for_artifact(runtime.get_client().artifacts, notebook_id, task_id, timeout=timeout)
+    status = await wait_for_artifact(
+        runtime.get_client().artifacts, notebook_id, task_id, timeout=timeout
+    )
     # Fail-closed: the SDK returns a FAILED status (not an exception) when generation
     # fails mid-poll; without this a failed wait would be reported as success.
     ensure_completed(status)
@@ -644,7 +662,9 @@ async def artifact_download_audio(
     artifact_id: str | None = None,
 ) -> dict:
     """Download an audio artifact to output_path."""
-    path = await runtime.get_client().artifacts.download_audio(notebook_id, output_path, artifact_id)
+    path = await runtime.get_client().artifacts.download_audio(
+        notebook_id, output_path, artifact_id
+    )
     return {"path": path}
 
 
@@ -657,9 +677,7 @@ async def artifact_rename(notebook_id: str, artifact_id: str, new_title: str) ->
             f"artifact {artifact_id} not in notebook {notebook_id}; "
             "(use artifact_list to select an artifact from that notebook)"
         )
-    await client.artifacts.rename(
-        notebook_id, artifact_id, new_title, return_object=False
-    )
+    await client.artifacts.rename(notebook_id, artifact_id, new_title, return_object=False)
     return {"artifact_id": artifact_id, "title": new_title}
 
 
@@ -722,7 +740,9 @@ def _dropped_blocks(document) -> list[str]:
         if kind in _TEXTLESS_BLOCK_KINDS:
             continue
         considered += 1
-        if not any((getattr(s, "text", "") or "").strip() for s in getattr(block, "spans", ()) or ()):
+        if not any(
+            (getattr(s, "text", "") or "").strip() for s in getattr(block, "spans", ()) or ()
+        ):
             dropped.append(kind)
     # **整份**都沒有文字 ≠ 部分丟失:那是「上游根本沒給結構化文件」,既有的
     # `render().strip()` fallback 會退回 `_strip_citations` 清 `res.answer`,那條路是對的
@@ -801,7 +821,9 @@ async def chat_ask(
                 "cited_text": getattr(r, "cited_text", None),
             }
             for r in getattr(res, "references", None) or []
-        ] if include_references else [],
+        ]
+        if include_references
+        else [],
     }
 
 

@@ -5,6 +5,7 @@ instance with the tools registered on it.
 
 Re-exports ``mcp`` / ``main`` / ``_lifespan`` for backwards-compatible imports.
 """
+
 from __future__ import annotations
 
 from .app import _lifespan, main, mcp  # noqa: F401

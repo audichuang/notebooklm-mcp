@@ -5,6 +5,7 @@
 fsync 放在 try 裡、沒容忍 `_DIR_FSYNC_UNSUPPORTED`)。這個檔把那幾件事逐條釘住,新的
 caller 接上來就自動有保障。
 """
+
 import errno
 import os
 import stat
@@ -117,7 +118,7 @@ def test_unsupported_directory_fsync_is_not_an_error(tmp_path, monkeypatch):
 
     def picky_fsync(fd):
         calls["n"] += 1
-        if calls["n"] > 1:                      # 第一次是檔案本身,第二次才是目錄
+        if calls["n"] > 1:  # 第一次是檔案本身,第二次才是目錄
             raise OSError(errno.EINVAL, "not supported")
         return real_fsync(fd)
 
@@ -147,7 +148,10 @@ def test_directory_fsync_failure_says_the_file_was_already_replaced(tmp_path, mo
 
     monkeypatch.setattr(os, "fsync", failing_dir_fsync)
 
-    with pytest.raises(OSError, match="already replaced"), prepared_replacement(str(target)) as temp_path:
+    with (
+        pytest.raises(OSError, match="already replaced"),
+        prepared_replacement(str(target)) as temp_path,
+    ):
         _write(temp_path)
 
     # 換檔本身已經成功 —— 錯誤訊息必須說得出這件事,而檔案就是新的。

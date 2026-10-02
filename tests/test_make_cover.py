@@ -3,6 +3,7 @@
 
 斷言鎖到 argparse error 的 exit code 2 + 特定錯誤訊息 + stderr 無 Traceback——
 只看 `returncode != 0` 會假綠(import 錯、語法錯、任何 traceback 都是非零)。"""
+
 import json
 import subprocess
 import sys
@@ -48,7 +49,7 @@ def test_string_episode_rejected_and_manifest_untouched(tmp_path):
     p = _write(tmp_path, [{"episode": "1", "title": "心法篇"}])
     before = p.read_text(encoding="utf-8")
     _assert_preflight_rejected(_run(p), "整數")
-    assert p.read_text(encoding="utf-8") == before   # 壞資料不半途覆寫(原子)
+    assert p.read_text(encoding="utf-8") == before  # 壞資料不半途覆寫(原子)
 
 
 def test_missing_title_rejected(tmp_path):

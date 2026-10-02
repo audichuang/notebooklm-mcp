@@ -7,6 +7,7 @@ Commit order (the uploader is a dumb landing zone, so the CLIENT enforces order)
 media (mp3 + artwork) -> show.json -> feed.xml/index.html. Combined with "the
 uploader never deletes", a reader on the public read port never sees a feed.xml
 that points at a missing enclosure."""
+
 from __future__ import annotations
 
 import asyncio
@@ -37,8 +38,8 @@ from .publish import (
 )
 from .publish.layout import attachment_filename, cover_filename, media_filename
 
-_TZ = timezone(timedelta(hours=8))          # Asia/Taipei, RFC-2822 +0800
-_TIMEOUT = 600.0                            # a season of mp3 PUTs can take a while
+_TZ = timezone(timedelta(hours=8))  # Asia/Taipei, RFC-2822 +0800
+_TIMEOUT = 600.0  # a season of mp3 PUTs can take a while
 # Deterministic fallback pubDate for legacy manifests without published_at:
 # a fixed base PLUS (n-1) days -> distinct per episode, higher episode = later
 # date (SAME direction as the published_at path: EP01 oldest, EPn newest), and
@@ -68,10 +69,7 @@ def _require_url_env(name: str) -> str:
 
 
 def _require_media_binaries() -> None:
-    missing = [
-        binary for binary in ("ffprobe", "ffmpeg")
-        if shutil.which(binary) is None
-    ]
+    missing = [binary for binary in ("ffprobe", "ffmpeg") if shutil.which(binary) is None]
     if missing:
         raise ValueError(f"required podcast media tool is missing: {', '.join(missing)}")
 
@@ -106,7 +104,7 @@ def _parse_pub_date(raw: object, n: int) -> datetime:
     字串)會讓播放器解不出時間、自己編一個或整條 item 掉,而 feed host 永不刪檔。
     單調性檢查本來就得 parse 才比得出大小,所以判準放這裡不多花一分錢。"""
     try:
-        dt = parsedate_to_datetime(raw)                     # type: ignore[arg-type]
+        dt = parsedate_to_datetime(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"episode {n}: published_at 不是可解析的 RFC-2822 時間({raw!r}):{exc}"
@@ -154,7 +152,8 @@ def _assert_pub_dates_ascend(eps: list[dict]) -> None:
     if bad:
         raise ValueError(
             "published_at 必須隨集號遞增,否則 Apple 與多數播放器(照 pubDate 排序)會把"
-            "集數顯示成亂序;以下相鄰對違反:\n  " + "\n  ".join(bad)
+            "集數顯示成亂序;以下相鄰對違反:\n  "
+            + "\n  ".join(bad)
             + "\n修法:把現有時間戳依集號重新配對(不發明新的),再重跑 publish_series"
             " —— GUID 不變,Apple 視為同集更新,媒體 URL 也不動。notebooklm-mcp 的 git clone 裡"
             "有 `uv run python scripts/reorder_published_at.py <manifest>`(dry-run 預設);"
@@ -207,7 +206,7 @@ async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None, staging_
         await download_atomically(
             staging,
             lambda dest: client.artifacts.download_audio(notebook_id, dest, artifact_id),
-            lambda _dest: None,   # 內容格式交給後面 _embed_cover 的 ffprobe 驗
+            lambda _dest: None,  # 內容格式交給後面 _embed_cover 的 ffprobe 驗
         )
     except ValueError as exc:
         # 只攔 _atomic 的「空檔案」語意(download_atomically 唯一會丟的 ValueError 形狀)。
@@ -280,8 +279,7 @@ async def _auth_precheck(client, base: str, upload_token: str) -> None:
 
     scheme 合法性(http/https)由呼叫端 `_require_url_env` 在讀 env 當下就驗過,這裡
     不重複做;故意不做 host allowlist(過度工程,且合法用途本來就允許任意內網 host)。"""
-    r = await client.get(f"{base}/healthz",
-                         headers={"Authorization": f"Bearer {upload_token}"})
+    r = await client.get(f"{base}/healthz", headers={"Authorization": f"Bearer {upload_token}"})
     if r.status_code != 200 or r.headers.get("X-Podcast-Uploader") != "1":
         raise ValueError(
             f"uploader auth precheck failed (status={r.status_code}, "
@@ -293,8 +291,7 @@ async def _auth_precheck(client, base: str, upload_token: str) -> None:
 
 async def _put(client, base: str, token: str, upload_token: str, name: str, data: bytes) -> None:
     url = f"{base}/feeds/{token}/{name}"
-    r = await client.put(url, content=data,
-                         headers={"Authorization": f"Bearer {upload_token}"})
+    r = await client.put(url, content=data, headers={"Authorization": f"Bearer {upload_token}"})
     if r.status_code != 201:
         raise ValueError(f"upload failed: PUT {name} -> {r.status_code} {r.text[:300]}")
 
@@ -313,19 +310,35 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
     cover_mime = "image/png" if cover[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
 
     try:
-        probe = json.loads(subprocess.check_output(
-            ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "format=format_name:stream=codec_name",
-             "-of", "json", mp3_path],
-            text=True,
-            timeout=30,
-        ))
+        probe = json.loads(
+            subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "format=format_name:stream=codec_name",
+                    "-of",
+                    "json",
+                    mp3_path,
+                ],
+                text=True,
+                timeout=30,
+            )
+        )
         formats = set(probe["format"]["format_name"].split(","))
         codec = probe["streams"][0]["codec_name"]
     except FileNotFoundError as exc:
         raise ValueError("ffprobe is required to inspect podcast audio") from exc
-    except (KeyError, IndexError, json.JSONDecodeError, subprocess.CalledProcessError,
-            subprocess.TimeoutExpired) as exc:
+    except (
+        KeyError,
+        IndexError,
+        json.JSONDecodeError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         raise ValueError(f"unsupported or unreadable audio: {mp3_path}") from exc
 
     if formats == {"mp3"} and codec == "mp3":
@@ -346,12 +359,30 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
         else:
             try:
                 subprocess.run(
-                    ["ffmpeg", "-v", "error", "-y", "-i", mp3_path,
-                     "-map", "0:a:0", "-vn", "-map_metadata", "-1",
-                     "-c:a", "libmp3lame", "-b:a", "256k", "-ar", "44100", "-ac", "2",
-                     tmp],
+                    [
+                        "ffmpeg",
+                        "-v",
+                        "error",
+                        "-y",
+                        "-i",
+                        mp3_path,
+                        "-map",
+                        "0:a:0",
+                        "-vn",
+                        "-map_metadata",
+                        "-1",
+                        "-c:a",
+                        "libmp3lame",
+                        "-b:a",
+                        "256k",
+                        "-ar",
+                        "44100",
+                        "-ac",
+                        "2",
+                        tmp,
+                    ],
                     check=True,
-                    timeout=600,   # ffprobe(30s)/Chrome(180s)都有 timeout,這是唯一沒有的
+                    timeout=600,  # ffprobe(30s)/Chrome(180s)都有 timeout,這是唯一沒有的
                 )
             except FileNotFoundError as exc:
                 raise ValueError("ffmpeg is required to normalize podcast audio") from exc
@@ -389,9 +420,13 @@ def _audio_duration_hms(path: str) -> str | None:
     try:
         out = subprocess.check_output(
             [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
                 path,
             ],
             text=True,
@@ -486,8 +521,7 @@ async def publish_series(
         # episodic:照 pubDate 由新到舊排、`itunes:episode` 基本被忽略,於是連載節目
         # 打開看到的第一集是最後一集。預設沿用 Apple 的隱含值,不替呼叫端改語意。
         "itunes_type": (
-            itunes_type if itunes_type is not None
-            else saved_show.get("itunes_type", "episodic")
+            itunes_type if itunes_type is not None else saved_show.get("itunes_type", "episodic")
         ),
         # notebook_id(重抓 fallback,選填)也要一起解析:它會進上傳的 show.json,
         # 不解析的話「首發有傳、之後沒傳」會讓 show.json bytes 不穩(null vs 值)。
@@ -496,16 +530,29 @@ async def publish_series(
         # True。不沿用的話,首發合法地用 require_slides=False 發完之後,照文件只傳
         # manifest_path 做滾動加集會回到 True、掃到缺簡報的舊集直接 raise。
         "require_slides": (
-            require_slides if require_slides is not None
+            require_slides
+            if require_slides is not None
             else bool(saved_show.get("require_slides", True))
         ),
         "require_report": (
-            require_report if require_report is not None
+            require_report
+            if require_report is not None
             else bool(saved_show.get("require_report", True))
         ),
     }
-    missing = [k for k in ("show_id", "show_title", "show_description", "author",
-                           "owner_name", "owner_email", "artwork_path") if not show_cfg[k]]
+    missing = [
+        k
+        for k in (
+            "show_id",
+            "show_title",
+            "show_description",
+            "author",
+            "owner_name",
+            "owner_email",
+            "artwork_path",
+        )
+        if not show_cfg[k]
+    ]
     if missing:
         raise ValueError(
             f"missing show fields: {', '.join(missing)} — 首次發布請顯式傳齊"
@@ -596,9 +643,7 @@ async def publish_series(
         else:
             manifest_eps.append(ep)
     if not manifest_eps:
-        raise ValueError(
-            f"manifest has no publishable episodes (all withheld): {manifest_path}"
-        )
+        raise ValueError(f"manifest has no publishable episodes (all withheld): {manifest_path}")
     # Preflight the WHOLE manifest before any upload, so bad data fails fast
     # instead of after some media already landed. EP\d{2} on the wire caps a feed
     # at 99 episodes; enforce that + integer + uniqueness + non-empty title here.
@@ -630,7 +675,9 @@ async def publish_series(
         # fallback 節目封面——否則漏生封面的集數會「發布成功」卻掛錯圖(EP03 就這樣漏掉)。
         # 這裡就驗(存在 + Apple 規格),讓缺檔/不合規在**任何 PUT 之前**就 fail,不留 orphan media。
         if not ep.get("cover_path"):
-            raise ValueError(f"episode {n}: cover_path is required (每集必做,不再 fallback 節目封面)")
+            raise ValueError(
+                f"episode {n}: cover_path is required (每集必做,不再 fallback 節目封面)"
+            )
         artwork_mod.validate_artwork(ep["cover_path"])
         # 單集 show notes 必做且不可等於標題:缺/等於標題都 fail,不再 fallback 成標題
         # (否則播放器上簡介跟標題一字不差、看起來像壞掉)。
@@ -676,9 +723,17 @@ async def publish_series(
     # (brief、錯誤訊息、本機路徑)刻意不管 —— 那些不會進 XML,拿它們擋發布是誤殺。
     # `build_feed_xml` 在它自己的公開邊界會再驗一次(這裡是 preflight,那裡是把關)。
     # show 層欄位一次驗完(不屬於任何一集,沒有集號可報)。
-    feed_mod.validate_xml_text((
-        base_url, show_title, show_description, author, owner_name, owner_email, category,
-    ))
+    feed_mod.validate_xml_text(
+        (
+            base_url,
+            show_title,
+            show_description,
+            author,
+            owner_name,
+            owner_email,
+            category,
+        )
+    )
     # 每一集各自驗、訊息包上集號 —— 原本攤平成一個 tuple 的單一呼叫,45 集的季度只知道
     # 「壞在某個地方」,同一支工具其他五處 guard(title/cover/description 等)都帶集號,
     # 這裡漏了。
@@ -724,7 +779,7 @@ async def publish_series(
                 with open(rpath, encoding="utf-8") as f:
                     try:
                         rendered = notes_html.render_report_html(f.read(), ep["title"])
-                    except ValueError as exc:      # 同上:訊息要指名是哪一集的講義
+                    except ValueError as exc:  # 同上:訊息要指名是哪一集的講義
                         raise ValueError(
                             f"episode {ep['episode']}: report_md_path {rpath} {exc}"
                         ) from exc
@@ -739,9 +794,9 @@ async def publish_series(
         async with _make_client() as client:
             await _auth_precheck(client, upload_url, upload_token)
 
-            for ep in manifest_eps:                                    # 1) media: mp3
+            for ep in manifest_eps:  # 1) media: mp3
                 n = int(ep["episode"])
-                local = resolved_mp3[n]                                # preflight 已 resolve
+                local = resolved_mp3[n]  # preflight 已 resolve
                 # 正規化成 true MP3 並內嵌 ID3/APIC:Apple/Spotify 常優先吃音檔內嵌圖,
                 # 不是 feed 的 <item> itunes:image。正規化/內嵌後 bytes 變 → content-hash/URL
                 # 變(預期一次性 churn,uploader 不刪舊 URL)。cover_path 已 preflight。
@@ -751,8 +806,8 @@ async def publish_series(
                 # autouse monkeypatch seam(`monkeypatch.setattr(tools_publish, "_embed_cover", …)`)
                 # 繼續有效——模組全域在呼叫當下才查名字,monkeypatch 換掉的正是這個全域。
                 mp3_bytes = await asyncio.to_thread(_embed_cover, local, ep["cover_path"])
-                mp3_len = len(mp3_bytes)                                # enclosure length 用內嵌後大小
-                hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]      # hash 內嵌後 bytes
+                mp3_len = len(mp3_bytes)  # enclosure length 用內嵌後大小
+                hash8 = hashlib.sha256(mp3_bytes).hexdigest()[:8]  # hash 內嵌後 bytes
                 mfile = media_filename(n, hash8)
                 await _put(client, upload_url, token, upload_token, mfile, mp3_bytes)
                 del mp3_bytes
@@ -764,7 +819,9 @@ async def publish_series(
                 with open(cpath, "rb") as f:
                     cover_bytes = f.read()
                 c_ext = "jpg" if c_info["format"] == "JPEG" else "png"
-                ep_artwork_file = cover_filename(n, hashlib.sha256(cover_bytes).hexdigest()[:8], c_ext)
+                ep_artwork_file = cover_filename(
+                    n, hashlib.sha256(cover_bytes).hexdigest()[:8], c_ext
+                )
                 await _put(client, upload_url, token, upload_token, ep_artwork_file, cover_bytes)
                 del cover_bytes
 
@@ -772,9 +829,9 @@ async def publish_series(
                 #     append 到單集 description。requirement 與缺檔都已在 preflight 擋掉;
                 #     這裡的檢查留作 defensive assertion(不 re-download)。
                 base_pub = base_url.rstrip("/")
-                desc_base = ep["description"].strip()   # preflight 已保證非空且不等於標題
-                attachments: list[tuple[str, str, str]] = []   # (emoji, label, url)
-                pdf_url = None      # 回傳給呼叫端,免其事後逆向 content-hash 檔名
+                desc_base = ep["description"].strip()  # preflight 已保證非空且不等於標題
+                attachments: list[tuple[str, str, str]] = []  # (emoji, label, url)
+                pdf_url = None  # 回傳給呼叫端,免其事後逆向 content-hash 檔名
                 html_url = None
 
                 spath = ep.get("slides_pdf_path")
@@ -793,11 +850,13 @@ async def publish_series(
                 if rpath:
                     if not (os.path.exists(rpath) and os.path.getsize(rpath) > 0):
                         raise ValueError(f"episode {n}: report_md_path missing file: {rpath}")
-                    html_bytes = rendered_reports[n]                    # preflight 已渲染 + 驗過
-                    hfile = attachment_filename(n, hashlib.sha256(html_bytes).hexdigest()[:8], "html")
+                    html_bytes = rendered_reports[n]  # preflight 已渲染 + 驗過
+                    hfile = attachment_filename(
+                        n, hashlib.sha256(html_bytes).hexdigest()[:8], "html"
+                    )
                     html_url = f"{base_pub}/feeds/{token}/{hfile}"
                     await _put(client, upload_url, token, upload_token, hfile, html_bytes)
-                    del html_bytes                                     # 只放掉區域名稱(正本在 rendered_reports)
+                    del html_bytes  # 只放掉區域名稱(正本在 rendered_reports)
                     attachments.append(("📖", "研讀講義", html_url))
 
                 # 純文字 <description>(fallback,含裸 URL)+ 富文字 <content:encoded>
@@ -814,41 +873,70 @@ async def publish_series(
                     "guid": identity.episode_guid(show_id, n),
                     "pub_date": _effective_pub_date(ep, n),
                     "media_file": mfile,
-                    "length": mp3_len,   # 內嵌封面後的大小(mp3_bytes 已 del)
+                    "length": mp3_len,  # 內嵌封面後的大小(mp3_bytes 已 del)
                 }
                 # ffprobe 是同步 subprocess,跟上面的 _embed_cover 同理丟到 thread,別讓
                 # 整季逐集探測期間卡住事件迴圈。
                 duration = await asyncio.to_thread(_audio_duration_hms, local)
                 if duration:
                     new_eps[str(n)]["duration"] = duration
-                new_eps[str(n)]["artwork_file"] = ep_artwork_file   # 每集必做,一定有單集封面
-                published.append({
-                    "n": n, "title": ep["title"], "guid": new_eps[str(n)]["guid"],
-                    "url": f"{base_pub}/feeds/{token}/{mfile}",
-                    "cover_url": f"{base_pub}/feeds/{token}/{ep_artwork_file}",
-                    "pdf_url": pdf_url,     # None 若該集無簡報
-                    "html_url": html_url,   # None 若該集無講義
-                    "duration": duration,   # 對帳用(HH:MM:SS;ffprobe 失敗為 None),免再抓整份 feed
-                })
+                new_eps[str(n)]["artwork_file"] = ep_artwork_file  # 每集必做,一定有單集封面
+                published.append(
+                    {
+                        "n": n,
+                        "title": ep["title"],
+                        "guid": new_eps[str(n)]["guid"],
+                        "url": f"{base_pub}/feeds/{token}/{mfile}",
+                        "cover_url": f"{base_pub}/feeds/{token}/{ep_artwork_file}",
+                        "pdf_url": pdf_url,  # None 若該集無簡報
+                        "html_url": html_url,  # None 若該集無講義
+                        "duration": duration,  # 對帳用(HH:MM:SS;ffprobe 失敗為 None),免再抓整份 feed
+                    }
+                )
 
-            await _put(client, upload_url, token, upload_token,         # 1) media: artwork
-                       artwork_file, art_bytes)                         # bytes 已在 preflight 讀好
+            await _put(
+                client,
+                upload_url,
+                token,
+                upload_token,  # 1) media: artwork
+                artwork_file,
+                art_bytes,
+            )  # bytes 已在 preflight 讀好
 
             show = {
-                "show_id": show_id, "token": token, "notebook_id": notebook_id,
-                "title": show_title.strip(), "description": show_description,
-                "language": "zh-Hant", "author": author,
-                "owner_name": owner_name, "owner_email": owner_email,
-                "category": category, "explicit": bool(explicit),
+                "show_id": show_id,
+                "token": token,
+                "notebook_id": notebook_id,
+                "title": show_title.strip(),
+                "description": show_description,
+                "language": "zh-Hant",
+                "author": author,
+                "owner_name": owner_name,
+                "owner_email": owner_email,
+                "category": category,
+                "explicit": bool(explicit),
                 "itunes_type": itunes_type,
-                "artwork_file": artwork_file, "episodes": new_eps,
+                "artwork_file": artwork_file,
+                "episodes": new_eps,
             }
             show_json = json.dumps(show, ensure_ascii=False, indent=2).encode("utf-8")
-            await _put(client, upload_url, token, upload_token, "show.json", show_json)    # 2) state
-            await _put(client, upload_url, token, upload_token,                            # 3) derived
-                       "feed.xml", feed_mod.build_feed_xml(show, base_url).encode("utf-8"))
-            await _put(client, upload_url, token, upload_token,
-                       "index.html", feed_mod.build_index_html(show, base_url).encode("utf-8"))
+            await _put(client, upload_url, token, upload_token, "show.json", show_json)  # 2) state
+            await _put(
+                client,
+                upload_url,
+                token,
+                upload_token,  # 3) derived
+                "feed.xml",
+                feed_mod.build_feed_xml(show, base_url).encode("utf-8"),
+            )
+            await _put(
+                client,
+                upload_url,
+                token,
+                upload_token,
+                "index.html",
+                feed_mod.build_index_html(show, base_url).encode("utf-8"),
+            )
 
     # 發布成功才在最新 snapshot 上回寫 show；store lock 不跨上方任何 HTTP await。
     persisted_show = {
@@ -884,7 +972,7 @@ async def feed_info(show_id: str) -> dict:
     **不含各集細節** —— 要看已發布的集就去抓 `feed_url`。"""
     base_url = _require_env("PODCAST_PUBLIC_BASE_URL")
     salt = _require_env("PODCAST_TOKEN_SALT")
-    token = identity.make_token(show_id, salt)     # also validates show_id
+    token = identity.make_token(show_id, salt)  # also validates show_id
     base = f"{base_url.rstrip('/')}/feeds/{token}"
     return {
         "show_id": show_id,

@@ -233,9 +233,7 @@ def _validate(manifest: Any, path: Path, *, on_write: bool = False) -> None:
         }
         for pointer in ("active_attempt_id", "output_attempt_id"):
             value = episode.get(pointer)
-            if value is not None and (
-                not isinstance(value, str) or value not in local_attempt_ids
-            ):
+            if value is not None and (not isinstance(value, str) or value not in local_attempt_ids):
                 raise ValueError(
                     f"manifest is corrupt: {pointer} does not reference this episode: {path}"
                 )

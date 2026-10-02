@@ -13,6 +13,7 @@
 所以這裡不挑情境寫,而是走**狀態組合的笛卡爾積**,對每一格驗**不變式**。不變式的好處是
 不必預先知道哪一格會出事:想不到的組合也在裡面。
 """
+
 import itertools
 
 import pytest
@@ -97,9 +98,7 @@ def _case(dispatch, remote, role, shape):
     return episode, attempt
 
 
-ALL_CASES = list(
-    itertools.product(DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES)
-)
+ALL_CASES = list(itertools.product(DISPATCH_STATES, REMOTE_STATES, ROLES, SETTINGS_SHAPES))
 
 # P2 修復加的時間性維度:候選窗有沒有關。跟其餘測試無關的地方(series 白名單、
 # resend/flag 語意……)不必跟著翻倍,只有這條核心不變式真的會讀 `can_reconcile`,
@@ -143,11 +142,7 @@ ALL_CASES_WITH_WINDOW = [
     # checkpoint 仍可能卡在 unresolved,而那正是「歷史紀錄」與「upload 未結案」兩個
     # 分支搶同一句話的那一格(分支順序回歸就長在這裡)。
     if case[-1] is None
-    or (
-        case[0] == "accepted"
-        and case[1] == "completed"
-        and case[2] in ("active", "historical")
-    )
+    or (case[0] == "accepted" and case[1] == "completed" and case[2] in ("active", "historical"))
 ]
 
 
@@ -210,9 +205,7 @@ def test_historical_attempt_wins_over_unresolved_upload(status):
     歷史 attempt——而 output guard 會擋掉,又是一句在它自己產生的狀態下不可執行的指引。
     """
     episode, attempt = _case("accepted", "completed", "historical", "series")
-    attempt["finalize"] = {
-        "feedback_source_upload": {"status": status, "source_id": None}
-    }
+    attempt["finalize"] = {"feedback_source_upload": {"status": status, "source_id": None}}
 
     caps = p._attempt_capabilities(episode, attempt, "att-me")
 
@@ -228,9 +221,7 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
     `safe_next_action` 必須是 `None`、指引必須講「等窗關上、gate 會自己對帳」。
     """
     episode, attempt = _case("accepted", "completed", "active", "series")
-    attempt["finalize"] = {
-        "feedback_source_upload": {"status": "dispatching", "source_id": None}
-    }
+    attempt["finalize"] = {"feedback_source_upload": {"status": "dispatching", "source_id": None}}
     attempt["retraction"] = {"source_cleanup_unresolved": True, "stale_source_ids": []}
     episode.pop("active_attempt_id", None)
 
@@ -250,7 +241,7 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
     assert attempt["retraction"]["stale_source_ids"] == []  # tombstone 沒有被改寫
     caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
     assert caps["cleanup_state"] == "pending_delete"
-    assert caps["source_cleanup_unresolved"] is True   # 窗還沒關,義務仍未全部結案
+    assert caps["source_cleanup_unresolved"] is True  # 窗還沒關,義務仍未全部結案
     assert caps["safe_next_action"] == p.ACTION_SOURCE_DELETE
     assert "source_delete" in p._attempt_next_step(caps)
 
@@ -263,8 +254,7 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
 
 
 @pytest.mark.parametrize(
-    "dispatch,remote,role,shape,window_closed,candidate_selection_required,"
-    "upload_status",
+    "dispatch,remote,role,shape,window_closed,candidate_selection_required,upload_status",
     ALL_CASES_WITH_WINDOW,
 )
 def test_every_state_combination_yields_executable_guidance(
@@ -328,17 +318,13 @@ def test_every_state_combination_yields_executable_guidance(
         assert caps["can_reconcile"], f"教了 reconcile 但這個狀態對不了帳:{step}"
         assert not window_closed, f"候選窗已經關了,卻還教 reconcile:{step}"
         if window_closed is None:
-            assert "候選窗" not in step, (
-                f"沒算過窗(None),卻在訊息裡宣稱窗狀態:{step}"
-            )
+            assert "候選窗" not in step, f"沒算過窗(None),卻在訊息裡宣稱窗狀態:{step}"
     if "不需要** abandon_in_flight" in step or "不需要 abandon_in_flight" in step:
         assert caps["authorization_basis"] is not None, (
             f"說不需要旗標,但這個狀態的 retract 沒有免旗標理由:{step}"
         )
     if "abandon_in_flight=true" in step:
-        assert caps["needs_abandon_flag"], (
-            f"教了帶旗標,但那顆 attempt 傳了也沒用({role}):{step}"
-        )
+        assert caps["needs_abandon_flag"], f"教了帶旗標,但那顆 attempt 傳了也沒用({role}):{step}"
 
 
 @pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
@@ -396,9 +382,7 @@ def test_settled_hint_never_mentions_series_when_the_entry_is_episode(
 
 
 @pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
-def test_resend_and_flag_free_retract_are_different_questions(
-    dispatch, remote, role, shape
-):
+def test_resend_and_flag_free_retract_are_different_questions(dispatch, remote, role, shape):
     """**第五次現形的直接回歸。**
 
     `failed`/`removed` 兩個問題的答案相反:免旗標 retract 可以(結果已定),原樣重送不行
@@ -417,9 +401,10 @@ def test_resend_and_flag_free_retract_are_different_questions(
         assert not caps["can_resend"], "遠端已終態要走 supersede／重生,不是沿用這顆重送"
 
 
-@pytest.mark.parametrize("dispatch,remote,shape", [
-    (d, r, s) for d in DISPATCH_STATES for r in REMOTE_STATES for s in SETTINGS_SHAPES
-])
+@pytest.mark.parametrize(
+    "dispatch,remote,shape",
+    [(d, r, s) for d in DISPATCH_STATES for r in REMOTE_STATES for s in SETTINGS_SHAPES],
+)
 def test_a_historical_attempt_is_never_offered_the_flag(dispatch, remote, shape):
     """歷史 attempt 誰都動不了它:`abandon_in_flight` 只放行 active 那一顆,
     傳 True 與 False 得到同一句話。教它傳旗標就是給一個永遠做不到的動作。"""
@@ -435,9 +420,7 @@ def test_a_historical_attempt_is_never_offered_the_flag(dispatch, remote, shape)
 @pytest.mark.parametrize(
     "dispatch,remote", [(d, r) for d in DISPATCH_STATES for r in REMOTE_STATES]
 )
-def test_every_state_that_trips_the_source_guard_retracts_without_a_flag(
-    dispatch, remote
-):
+def test_every_state_that_trips_the_source_guard_retracts_without_a_flag(dispatch, remote):
     """**單向包含:來源守門停在 retract 的每一個狀態,retract 都必須免旗標收下它。**
 
     這是「停點照著做走得通」的形式化。守門的觸發條件寫在 `podcast_series` 裡、免旗標
@@ -513,15 +496,12 @@ def test_can_resend_hint_never_forbids_the_source_change_it_just_offered(
 
     if caps["can_resend"] and "要換 brief 或來源就先" in step:
         assert "必須帶回原本那組" not in step, (
-            f"can_resend 分支已經提供「換來源」的選項,不該同時講死"
-            f"「必須帶回原本」自相矛盾:{step}"
+            f"can_resend 分支已經提供「換來源」的選項,不該同時講死「必須帶回原本」自相矛盾:{step}"
         )
 
 
 @pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
-def test_settled_and_output_still_require_the_original_sources_back(
-    dispatch, remote, role, shape
-):
+def test_settled_and_output_still_require_the_original_sources_back(dispatch, remote, role, shape):
     """**can_resend 為假時,`source_ids` 的警告不能被 P2 修復連帶弱化。**
 
     只有 can_resend 分支的措辭要改;is_output／settled 分支只有 retract 重生一條路,
@@ -540,8 +520,7 @@ def test_settled_and_output_still_require_the_original_sources_back(
 
 
 @pytest.mark.parametrize(
-    "dispatch,remote,role,shape,window_closed,candidate_selection_required,"
-    "upload_status",
+    "dispatch,remote,role,shape,window_closed,candidate_selection_required,upload_status",
     ALL_CASES_WITH_WINDOW,
 )
 def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
@@ -589,7 +568,9 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
         assert action == (
             p.ACTION_RESUME
             if caps["can_resume"]
-            else p.ACTION_RECONCILE if caps["can_reconcile"] else None
+            else p.ACTION_RECONCILE
+            if caps["can_reconcile"]
+            else None
         )
         if action == p.ACTION_RESUME:
             assert "podcast_episode_resume" in p._attempt_next_step(caps)
@@ -628,9 +609,7 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
         assert "podcast_attempt_adopt" in step, (
             f"safe_next_action 是 adopt,文字卻沒教這支工具:{step}"
         )
-        assert "podcast_episode_resume" not in step, (
-            f"adopt 優先序更高，文字不該再教 resume:{step}"
-        )
+        assert "podcast_episode_resume" not in step, f"adopt 優先序更高，文字不該再教 resume:{step}"
     elif action == p.ACTION_RESUME:
         assert "podcast_episode_resume" in step, step
 
@@ -650,9 +629,7 @@ def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
     if dispatch not in p._RECONCILABLE_DISPATCH_STATES:
         pytest.skip("這個 dispatch 狀態走不到窗關閉分支")
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(
-        episode, attempt, "att-me", reconciliation_window_closed=True
-    )
+    caps = p._attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
     if (
         caps["can_resend"]
         or caps["is_output"]
@@ -738,9 +715,10 @@ def test_the_default_reconciliation_window_state_is_unevaluated_not_open(
     )
 
 
-@pytest.mark.parametrize("dispatch,remote,shape", [
-    (d, r, s) for d in DISPATCH_STATES for r in REMOTE_STATES for s in SETTINGS_SHAPES
-])
+@pytest.mark.parametrize(
+    "dispatch,remote,shape",
+    [(d, r, s) for d in DISPATCH_STATES for r in REMOTE_STATES for s in SETTINGS_SHAPES],
+)
 def test_active_not_output_narrative_teaches_retracting_itself_not_resume_or_resend(
     dispatch, remote, shape
 ):
@@ -788,9 +766,7 @@ def test_window_open_narrative_names_the_closure_window_not_the_candidate_window
     突變驗證:把 `_attempt_next_step` 這句話的措辭改回「候選窗還沒關」就會紅。
     """
     episode, attempt = _case("dispatching", None, "active", "series")
-    caps = p._attempt_capabilities(
-        episode, attempt, "att-me", reconciliation_window_closed=False
-    )
+    caps = p._attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=False)
     step = p._attempt_next_step(caps)
 
     assert "候選窗" not in step, step
@@ -812,17 +788,13 @@ def test_window_closed_narrative_offers_the_widen_wait_timeout_rescue_not_an_abs
     「放大 wait_timeout」的揭露,這條就會紅。
     """
     episode, attempt = _case("dispatching", None, "active", "series")
-    caps = p._attempt_capabilities(
-        episode, attempt, "att-me", reconciliation_window_closed=True
-    )
+    caps = p._attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
     step = p._attempt_next_step(caps)
 
     assert "候選窗" not in step, step
     assert "已經關了" in step, step
     assert "未來任何 artifact 都會落在窗外" not in step, step
-    assert "放大" in step and "wait_timeout" in step, (
-        f"沒有揭露放大 wait_timeout 的救援路徑:{step}"
-    )
+    assert "放大" in step and "wait_timeout" in step, f"沒有揭露放大 wait_timeout 的救援路徑:{step}"
 
 
 def test_reconciliation_ambiguous_with_a_stray_remote_artifact_still_teaches_adopt():
@@ -843,9 +815,7 @@ def test_reconciliation_ambiguous_with_a_stray_remote_artifact_still_teaches_ado
     分支挪回 `can_resume` 之後)還原,這條就會紅。
     """
     episode, attempt = _case("reconciliation_ambiguous", "pending", "active", "series")
-    caps = p._attempt_capabilities(
-        episode, attempt, "att-me", candidate_selection_required=True
-    )
+    caps = p._attempt_capabilities(episode, attempt, "att-me", candidate_selection_required=True)
     step = p._attempt_next_step(caps)
 
     assert caps["safe_next_action"] == p.ACTION_ADOPT, caps
@@ -965,8 +935,7 @@ def test_post_retract_replacement_identity_wins_even_when_the_replacement_is_set
     assert caps["safe_next_action"] == p.ACTION_RETRACT, caps
     assert caps["safe_next_attempt_id"] == "att-b", caps
     assert caps["safe_next_attempt_id"] != "att-a", (
-        "目標身分仍是 A 的話,照著回傳冪等 retract A 會拿到一模一樣的回傳"
-        f":{caps}"
+        f"目標身分仍是 A 的話,照著回傳冪等 retract A 會拿到一模一樣的回傳:{caps}"
     )
 
 
@@ -1026,16 +995,24 @@ def test_post_retract_delegation_also_swaps_regeneration_source_ids():
         "attempt_id": "att-a",
         "dispatch": {"status": "accepted"},
         "remote": {"status": "completed", "artifact_id": "art-a"},
-        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
-                     "source_ids": ["s1", "s2"]},
+        "settings": {
+            "language": "zh",
+            "audio_format": None,
+            "audio_length": None,
+            "source_ids": ["s1", "s2"],
+        },
         "retraction": {"stale_source_ids": []},
     }
     attempt_b = {
         "attempt_id": "att-b",
         "dispatch": {"status": "acceptance_unknown"},
         "remote": {},
-        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
-                     "source_ids": ["s1", "s3"]},
+        "settings": {
+            "language": "zh",
+            "audio_format": None,
+            "audio_length": None,
+            "source_ids": ["s1", "s3"],
+        },
     }
     episode = {
         "episode": 1,
@@ -1069,17 +1046,27 @@ def test_regeneration_source_ids_follows_the_replacement_even_when_next_action_i
         "attempt_id": "att-a",
         "dispatch": {"status": "accepted"},
         "remote": {"status": "completed", "artifact_id": "art-a"},
-        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
-                     "source_ids": ["s1", "s2"]},
-        "retraction": {"stale_source_ids": ["src-old"],
-                       "source_cleanup_obligations": [{"notebook_id": "nb", "source_id": "src-old"}]},
+        "settings": {
+            "language": "zh",
+            "audio_format": None,
+            "audio_length": None,
+            "source_ids": ["s1", "s2"],
+        },
+        "retraction": {
+            "stale_source_ids": ["src-old"],
+            "source_cleanup_obligations": [{"notebook_id": "nb", "source_id": "src-old"}],
+        },
     }
     attempt_b = {
         "attempt_id": "att-b",
         "dispatch": {"status": "acceptance_unknown"},
         "remote": {},
-        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
-                     "source_ids": ["s1", "s3"]},
+        "settings": {
+            "language": "zh",
+            "audio_format": None,
+            "audio_length": None,
+            "source_ids": ["s1", "s3"],
+        },
     }
     episode = {
         "episode": 1,
@@ -1104,8 +1091,12 @@ def test_regeneration_source_ids_stays_own_when_there_is_no_replacement():
         "attempt_id": "att-a",
         "dispatch": {"status": "accepted"},
         "remote": {"status": "completed", "artifact_id": "art-a"},
-        "settings": {"language": "zh", "audio_format": None, "audio_length": None,
-                     "source_ids": ["s1", "s2"]},
+        "settings": {
+            "language": "zh",
+            "audio_format": None,
+            "audio_length": None,
+            "source_ids": ["s1", "s2"],
+        },
         "retraction": {"stale_source_ids": []},
     }
     episode = {"episode": 1, "active_attempt_id": "att-a", "attempts": [attempt_a]}

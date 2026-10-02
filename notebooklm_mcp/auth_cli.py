@@ -1,4 +1,5 @@
 """Headless-friendly helper to write storage_state.json from pasted JSON."""
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,10 @@ def main() -> None:
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     # 原子換檔走 `_atomic` 那一份(gotchas-files 的紅線:不准再自己寫一份)。
     # `mode=0o600` 是顯式的:憑證不繼承既有檔案的 mode,也不吃 `_NEW_FILE_MODE` 的 0644。
-    with prepared_replacement(out, mode=0o600) as temporary_path, open(temporary_path, "wb") as handle:
+    with (
+        prepared_replacement(out, mode=0o600) as temporary_path,
+        open(temporary_path, "wb") as handle,
+    ):
         handle.write(json.dumps(data).encode("utf-8"))
     print(f"Wrote {out} ({len(data['cookies'])} cookies)", file=sys.stderr)
 

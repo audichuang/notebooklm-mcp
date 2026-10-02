@@ -1,5 +1,6 @@
 """Content-addressed media naming. Atomic writes moved to the feed host's
 uploader: the MCP renders in memory and PUTs, so it never writes durable files."""
+
 from __future__ import annotations
 
 import hashlib

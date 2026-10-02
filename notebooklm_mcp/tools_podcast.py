@@ -3,6 +3,7 @@
 Continuity comes from NotebookLM transcribing the prior episode mp3 that we
 re-upload as a source. The generation loop is deterministic Python code.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -377,9 +378,9 @@ def _attempt_capabilities(
     # (`unresolved_upload_descriptor`),不在這裡重讀 checkpoint 發明第二套。
     unresolved_upload = unresolved_upload_descriptor(attempt)
     feedback_upload_unresolved = unresolved_upload is not None
-    feedback_upload_status = (
-        attempt.get("finalize", {}).get("feedback_source_upload", {})
-    ).get("status")
+    feedback_upload_status = (attempt.get("finalize", {}).get("feedback_source_upload", {})).get(
+        "status"
+    )
     # T1:候選一律來自 `unresolved_upload`(`_reconcile_source_upload` 寫入的同一份
     # checkpoint),非空即代表狀態是 `reconciliation_ambiguous`(該函式把「有候選」與
     # 「狀態設成 ambiguous」綁在同一次 mutate 裡,兩者不會分岔)。
@@ -394,17 +395,17 @@ def _attempt_capabilities(
 
     # 免旗標 retract 的理由。順序即優先序,第一個成立的就是稽核要記的那個。
     if is_output:
-        basis = "output_owner"          # 正常的 QA 拒收,本來就不需要旗標
+        basis = "output_owner"  # 正常的 QA 拒收,本來就不需要旗標
     elif not is_active:
-        basis = None                    # 歷史 attempt:誰都動不了它,旗標也無效
+        basis = None  # 歷史 attempt:誰都動不了它,旗標也無效
     elif output_attempt_id is not None:
-        basis = "output_owner"          # active/output 分岔,投影屬於現任 output
+        basis = "output_owner"  # active/output 分岔,投影屬於現任 output
     elif never_dispatched or remote_terminal:
-        basis = "settled"               # manifest 自己就知道結果
+        basis = "settled"  # manifest 自己就知道結果
     elif has_hard_output_evidence(episode):
         basis = "legacy_evidence"
     else:
-        basis = None                    # 真的不知道有沒有東西在跑 —— 要外部知識
+        basis = None  # 真的不知道有沒有東西在跑 —— 要外部知識
 
     # **只有從沒送出去的才重送得了。** 遠端已終態(`failed`/`removed`)雖然同樣
     # 「結果已定」,重送卻是走 supersede 建新 attempt,不是沿用這顆 ——
@@ -412,25 +413,20 @@ def _attempt_capabilities(
     can_resend = never_dispatched and not is_output
     can_resume = bool(remote.get("artifact_id")) and not is_output
     can_reconcile = (
-        dispatch_status in _RECONCILABLE_DISPATCH_STATES
-        and not reconciliation_window_closed
+        dispatch_status in _RECONCILABLE_DISPATCH_STATES and not reconciliation_window_closed
     )
     regeneration_entry = _regeneration_entry_point(attempt)
-    preserves_existing_output = (
-        post_retract
-        and episode.get("output_attempt_id") not in (None, attempt_id)
+    preserves_existing_output = post_retract and episode.get("output_attempt_id") not in (
+        None,
+        attempt_id,
     )
     pending_source_cleanup = False
     source_cleanup_unresolved = False
     cleanup_obligations: list[dict] = []
     if post_retract:
-        obligations = _cleanup_obligations(
-            episode, fallback_notebook=episode.get("notebook_id")
-        )
+        obligations = _cleanup_obligations(episode, fallback_notebook=episode.get("notebook_id"))
         pending_source_ids = {row["source_id"] for row in obligations}
-        retracted_source_ids = (
-            (attempt.get("retraction") or {}).get("stale_source_ids") or []
-        )
+        retracted_source_ids = (attempt.get("retraction") or {}).get("stale_source_ids") or []
         # **retract 可以作廢一顆 upload 還沒落盤的 attempt(abandon_in_flight),但不能
         # 忘掉它可能留下的孤兒。** 身分不確定的清理義務記在 tombstone 上,由生成前的
         # `_assert_source_cleanup_done` 用候選窗對帳結案——所以這裡不是「還有東西要刪」
@@ -448,9 +444,7 @@ def _attempt_capabilities(
         # 少了②,retract 的冪等回傳會說 `reconcile_after`／`safe_next_action=None`,而同一
         # 時刻生成 gate 正拿著具體 id 擋著要人刪 —— 兩個入口對同一狀態指向不同動作。
         covered = {
-            source_id
-            for source_id in retracted_source_ids
-            if source_id in pending_source_ids
+            source_id for source_id in retracted_source_ids if source_id in pending_source_ids
         }
         if source_cleanup_unresolved:
             covered |= pending_source_ids
@@ -524,9 +518,7 @@ def _attempt_capabilities(
             safe_next_action = ACTION_ADOPT
         else:
             safe_next_action = (
-                ACTION_RESUME
-                if can_resume
-                else ACTION_RECONCILE if can_reconcile else None
+                ACTION_RESUME if can_resume else ACTION_RECONCILE if can_reconcile else None
             )
     elif is_output:
         safe_next_action = ACTION_RETRACT
@@ -721,8 +713,7 @@ def _attempt_next_step(caps: dict) -> str:
             # `_assert_source_cleanup_done` 擋成 ValueError,教人重生就是教一條當下
             # 走不通的路。`safe_next_action` 在這一格是 `None`,兩邊一致。
             return (
-                cleanup
-                + "這顆的回錄 source 已經送出、但 source_id 沒落盤(upload 停在 "
+                cleanup + "這顆的回錄 source 已經送出、但 source_id 沒落盤(upload 停在 "
                 f"{caps['feedback_upload_status']!r}),notebook 裡可能多了一筆沒人記得的 "
                 "media。清理義務已經記進 tombstone,不會消失:等候選窗關上後直接重呼 "
                 f"{caps['regeneration_entry']},生成前的 gate 會自己去 notebook 對帳"
@@ -744,11 +735,7 @@ def _attempt_next_step(caps: dict) -> str:
                 + "替代 attempt 已經在飛（尚未成為正式輸出），不能再走「重生」："
                 + _attempt_next_step(replacement_caps)
             )
-        return (
-            cleanup
-            + f"用 {caps['regeneration_entry']} 重生。"
-            + caps["regeneration_hint"]
-        )
+        return cleanup + f"用 {caps['regeneration_entry']} 重生。" + caps["regeneration_hint"]
     if not caps["is_active"] and not caps["is_output"]:
         return "它已經被取代,是歷史紀錄 —— 要動的是現在的 active／output attempt。"
     if caps["feedback_upload_unresolved"]:
@@ -841,14 +828,12 @@ def _attempt_next_step(caps: dict) -> str:
             return (
                 "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完;"
                 "這次對帳依據的關閉判斷窗還沒關,過幾分鐘後重呼有機會撈到,現在重呼"
-                "未必是一模一樣的空結果)。"
-                + retract_hint
+                "未必是一模一樣的空結果)。" + retract_hint
             )
         # `None`:呼叫端沒算過窗(建立衝突／resume 停點／frozen 重呼卡住這四個
         # 呼叫點都是),不能宣稱「還沒關」——回到 v0.9.9 原文,一個字都不提窗。
         return (
-            "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完)。"
-            + retract_hint
+            "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完)。" + retract_hint
         )
     if caps["dispatch_status"] in _RECONCILABLE_DISPATCH_STATES:
         # can_reconcile 在這裡已經是 False,而 dispatch_status 仍落在可對帳的集合裡,
@@ -866,8 +851,7 @@ def _attempt_next_step(caps: dict) -> str:
             "關閉判斷窗(dispatch 到 wait_timeout 與 1 小時保守下限取大者,含時鐘容錯)"
             "已經關了——沿用原本的 wait_timeout 重呼只會拿到一模一樣的空結果;但"
             "**放大 wait_timeout 重呼有機會撈到更晚建立的 artifact**,不是「繼續等"
-            "就沒有用」。"
-            + retract_hint
+            "就沒有用」。" + retract_hint
         )
     return retract_hint
 
@@ -994,12 +978,9 @@ def _create_audio_attempt(
             # resume 新建分支的寫法與錯誤訊息風格)。
             existing_notebook = episode.get("notebook_id")
             if existing_notebook not in (None, notebook_id):
-                raise ValueError(
-                    f"episode {episode_n} belongs to another notebook"
-                )
-            legacy_preparatory_output = (
-                not episode.get("attempts")
-                and has_durable_output_evidence(episode)
+                raise ValueError(f"episode {episode_n} belongs to another notebook")
+            legacy_preparatory_output = not episode.get("attempts") and has_durable_output_evidence(
+                episode
             )
             if (
                 episode.get("output_attempt_id")
@@ -1051,25 +1032,22 @@ def _create_audio_attempt(
                         f"{active_attempt_id!r} (dispatch="
                         f"{prior['dispatch'].get('status')!r}); {way_out}"
                     )
-                _, prior_attempt = _attempt_record(
-                    manifest, episode_n, active_attempt_id
-                )
+                _, prior_attempt = _attempt_record(manifest, episode_n, active_attempt_id)
                 if prior_attempt.get("remote", {}).get("status") not in (
                     "failed",
                     "removed",
                 ):
                     raise ValueError(
-                        f"attempt {active_attempt_id!r} is not terminal and "
-                        "cannot be superseded"
+                        f"attempt {active_attempt_id!r} is not terminal and cannot be superseded"
                     )
             elif supersedes_attempt_id is not None:
                 raise ValueError("superseded attempt is no longer active")
             # 取代版不得改標題:episode 級 title／label 與 cover_path 都是 setdefault
             # 或既有值,改了會留著舊標題的 label 與封面去發布。標題綁 label／工作室
             # artifact 名／回錄來源名／發布標題,是另一件事,不能夾在重生裡做。
-            if (
-                episode.get("retracted_attempt_ids")
-                and episode.get("title") not in (None, title.strip())
+            if episode.get("retracted_attempt_ids") and episode.get("title") not in (
+                None,
+                title.strip(),
             ):
                 raise ValueError(
                     f"episode {episode_n} title cannot change in a retract "
@@ -1160,28 +1138,18 @@ def _ensure_resume_attempt(
             if attempt.get("remote", {}).get("artifact_id") == artifact_id
         ]
         if len(claimed) > 1:
-            raise ValueError(
-                f"artifact {artifact_id!r} is claimed by multiple attempts"
-            )
+            raise ValueError(f"artifact {artifact_id!r} is claimed by multiple attempts")
         if claimed:
             episode, discovered = claimed[0]
             if episode.get("episode") != episode_n:
-                raise ValueError(
-                    f"artifact {artifact_id!r} belongs to another episode"
-                )
+                raise ValueError(f"artifact {artifact_id!r} belongs to another episode")
             # 走 `_attempt_record` 而不是直接用掃到的那筆:tombstone 的 default-deny 在
             # 那裡,這條 claimed 分支曾是唯一繞過它的路。
-            episode, attempt = _attempt_record(
-                manifest, episode_n, discovered["attempt_id"]
-            )
+            episode, attempt = _attempt_record(manifest, episode_n, discovered["attempt_id"])
             if attempt.get("notebook_id") != notebook_id:
-                raise ValueError(
-                    f"artifact {artifact_id!r} belongs to another notebook"
-                )
+                raise ValueError(f"artifact {artifact_id!r} belongs to another notebook")
             if attempt.get("title") != title.strip():
-                raise ValueError(
-                    f"artifact {artifact_id!r} belongs to another title"
-                )
+                raise ValueError(f"artifact {artifact_id!r} belongs to another title")
             # 與新建分支同樣的兩道 gate。少了它們,一筆「歷史上曾被 claim 過」的 artifact
             # 就能把 active 從現任 output 手上搶走(active=B／output=A 的死鎖),或用不同
             # 標題把 episode 身分拆成兩半。
@@ -1193,10 +1161,7 @@ def _ensure_resume_attempt(
                     "delete the stale feedback source before resuming another artifact"
                 )
             existing_title = episode.get("title")
-            if (
-                isinstance(existing_title, str)
-                and existing_title.strip() != title.strip()
-            ):
+            if isinstance(existing_title, str) and existing_title.strip() != title.strip():
                 raise ValueError(
                     f"episode {episode_n} title does not match the manifest "
                     f"({existing_title!r}); resume cannot rename an episode"
@@ -1210,9 +1175,7 @@ def _ensure_resume_attempt(
                 # 這一支曾經無條件教「resume it」—— 但那顆 active 可能停在
                 # `not_accepted`(沒有 artifact 可續),照做走不通。與新建分支共用
                 # 同一顆指引產生器,「補一半」就不可能發生(v0.9.5 只修了新建那支)。
-                _, current_active = _attempt_record(
-                    manifest, episode_n, current_active_id
-                )
+                _, current_active = _attempt_record(manifest, episode_n, current_active_id)
                 raise ValueError(
                     f"episode {episode_n} has another active attempt "
                     f"{current_active_id!r}; "
@@ -1274,18 +1237,14 @@ def _ensure_resume_attempt(
             # (以及遠端已終態的)attempt,「reconcile or resume」兩條都走不了 ——
             # 沒有 artifact 可對帳、也沒有 artifact 可續。
             _, active = _attempt_record(manifest, episode_n, active_attempt_id)
-            hint = _attempt_next_step(
-                _attempt_capabilities(episode, active, active_attempt_id)
-            )
+            hint = _attempt_next_step(_attempt_capabilities(episode, active, active_attempt_id))
             raise ValueError(
                 f"episode {episode_n} has active attempt {active_attempt_id!r} "
                 f"(dispatch={active.get('dispatch', {}).get('status')!r}); {hint}"
             )
         existing_notebook = episode.get("notebook_id")
         if existing_notebook not in (None, notebook_id):
-            raise ValueError(
-                f"episode {episode_n} belongs to another notebook"
-            )
+            raise ValueError(f"episode {episode_n} belongs to another notebook")
         # 標題必須對得上 manifest。episode 級 title／label 是 setdefault 寫的,resume 帶一個
         # 不同標題只會讓 artifact／回錄 source 改名成新 label,而 episode 與發布仍用舊標題
         # ——身分就此分岔。既有 claimed 分支本來就擋「belongs to another title」,這裡補齊
@@ -1436,9 +1395,7 @@ def _record_dispatch_failover(
     store.update(mutate)
 
 
-def _attempt_failover_recorder(
-    store: ManifestStore | None, episode_n: int, attempt_id: str
-):
+def _attempt_failover_recorder(store: ManifestStore | None, episode_n: int, attempt_id: str):
     """音檔家族的稽核面:把「A 拒絕 → 換 B 重送」寫進**這個 attempt** 的 `errors[]`。
 
     回 `None` 代表「這個呼叫端沒有稽核面」——`_failover` 收到 `None` 就一律不換帳號:
@@ -1452,9 +1409,7 @@ def _attempt_failover_recorder(
         return None
 
     def record(reason: object, from_account: str | None, to_account: str) -> None:
-        _record_dispatch_failover(
-            store, episode_n, attempt_id, reason, from_account, to_account
-        )
+        _record_dispatch_failover(store, episode_n, attempt_id, reason, from_account, to_account)
 
     return record
 
@@ -1533,9 +1488,7 @@ async def _dispatch_audio_with_failover(
         on_clean_refusal=(
             None
             if store is None
-            else lambda reason, account: _mark_not_accepted(
-                store, episode_n, attempt_id, reason
-            )
+            else lambda reason, account: _mark_not_accepted(store, episode_n, attempt_id, reason)
         ),
         on_acceptance_unknown=(
             None
@@ -1674,7 +1627,9 @@ def _later_episode_has_output(snapshot: dict, episode_n: int, notebook_id: str) 
                 and attempt.get("notebook_id") == notebook_id
                 and not attempt.get("retraction")
                 and (
-                    ((attempt.get("finalize") or {}).get("feedback_source_upload") or {}).get("source_id")
+                    ((attempt.get("finalize") or {}).get("feedback_source_upload") or {}).get(
+                        "source_id"
+                    )
                     or unresolved_upload_descriptor(attempt) is not None
                 )
                 for attempt in row.get("attempts", [])
@@ -1773,9 +1728,7 @@ def _assert_series_owns_attempt(
         return
     caps = _series_handoff_caps(episode, attempt, attempt_id)
     owner_hint = (
-        " " + _attempt_next_step(caps)
-        if caps is not None
-        else " " + _SERIES_ARGUMENT_DRIFT_HINT
+        " " + _attempt_next_step(caps) if caps is not None else " " + _SERIES_ARGUMENT_DRIFT_HINT
     )
     raise ValueError(
         f"episode {episode_n} attempt {attempt_id!r} settings do not match this"
@@ -1845,6 +1798,7 @@ def _rearm_not_accepted_attempt(
 
     _, rearmed = store.update(mutate)
     return rearmed
+
 
 def _claimed_artifact_ids(manifest: dict, excluding_attempt_id: str) -> set[str]:
     claimed: set[str] = set()
@@ -2113,9 +2067,7 @@ def _promote_attempt_output(
         # ownership guard):取代版 B 帶著 A 的首發時間上任後,對 A 重打冪等 retract
         # 不會誤刪 B 的投影——那條 guard 只在 output_attempt_id in (None, attempt_id)
         # 時才動手,B 是現任 output 時整段會跳過。
-        episode.setdefault(
-            "published_at", _first_published_at(episode) or output["published_at"]
-        )
+        episode.setdefault("published_at", _first_published_at(episode) or output["published_at"])
         # 回寫進 output:這支函式的四個呼叫點都是 `_promote…(…, output); return output`,
         # 只改 manifest 會讓**回傳值**仍帶著「這次重生的時刻」——feed 對、呼叫端拿到的
         # 卻是錯的 pubDate(v0.6.0 實測抓到:manifest 12:07:20、回傳值 12:16:39)。
@@ -2171,9 +2123,7 @@ def _validate_wait_timeout(wait_timeout: float) -> None:
         raise ValueError("wait_timeout must be a finite number greater than zero")
 
 
-def _require_existing_manifest(
-    manifest_path: str, *, missing_hint: str | None = None
-) -> None:
+def _require_existing_manifest(manifest_path: str, *, missing_hint: str | None = None) -> None:
     """resume／reconcile／adopt／retract 動的一定是既有 attempt/episode。
 
     reconcile／adopt／retract 三個只做 ``ManifestStore.read()``(唯讀);缺檔時本來
@@ -2185,9 +2135,7 @@ def _require_existing_manifest(
     就地建一筆——路徑打錯就等於在錯的地方生出一份新 manifest,而且真的燒了下載與
     回錄上傳,不只是白讀一次。"""
     if os.path.isdir(manifest_path):
-        raise ValueError(
-            f"manifest_path is a directory, not a file: {manifest_path!r}"
-        )
+        raise ValueError(f"manifest_path is a directory, not a file: {manifest_path!r}")
     if not os.path.isfile(manifest_path):
         hint = f" ({missing_hint})" if missing_hint else ""
         raise ValueError(
@@ -2213,7 +2161,9 @@ async def _finalize_episode(
     os.makedirs(output_dir, exist_ok=True)
     label = _episode_label(episode_n, title)
 
-    final = await wait_for_artifact(client.artifacts, notebook_id, artifact_id, timeout=wait_timeout)
+    final = await wait_for_artifact(
+        client.artifacts, notebook_id, artifact_id, timeout=wait_timeout
+    )
     ensure_completed(final)
 
     # Rename the Studio artifact BEFORE downloading: name it in NotebookLM first so
@@ -2312,11 +2262,7 @@ def _settle_cleanup_state(
         fresh = store.read()
         claimed = claimed_source_ids(fresh)
         for ep_n in list(discovered):
-            still_orphan = [
-                source_id
-                for source_id in discovered[ep_n]
-                if source_id not in claimed
-            ]
+            still_orphan = [source_id for source_id in discovered[ep_n] if source_id not in claimed]
             if still_orphan:
                 discovered[ep_n] = still_orphan
             else:
@@ -2428,16 +2374,12 @@ async def _assert_source_cleanup_done(
     pending_here: list[tuple[object, str]] = []
     pending_identity_unknown: list[tuple[object, str]] = []
     for row in episodes:
-        for obligation in _cleanup_obligations(
-            row, fallback_notebook=canonical_notebook(row)
-        ):
+        for obligation in _cleanup_obligations(row, fallback_notebook=canonical_notebook(row)):
             owner = obligation["notebook_id"]
             if owner == notebook_id:
                 pending_here.append((row.get("episode"), obligation["source_id"]))
             elif owner is None:
-                pending_identity_unknown.append(
-                    (row.get("episode"), obligation["source_id"])
-                )
+                pending_identity_unknown.append((row.get("episode"), obligation["source_id"]))
 
     # 目標這一集自己的義務若屬於**別本** notebook,不該在這裡「順便放行」:那筆 source
     # 仍在原本那本污染它的 context,而這次生成不會去碰它。明確擋下來並說出是哪一本,
@@ -2510,9 +2452,7 @@ async def _assert_source_cleanup_done(
             # 對不出來就不能放行,但錯誤訊息要說得出是哪一顆,否則生成前突然冒出一句
             # 「dispatch time is missing」沒人查得動。**先記下來,不在這裡拋** ——
             # 前面幾顆撈到的候選還沒落盤。
-            unreconcilable.append(
-                f"episode {ep_n} attempt {unresolved_attempt_id!r}({exc})"
-            )
+            unreconcilable.append(f"episode {ep_n} attempt {unresolved_attempt_id!r}({exc})")
             continue
         if candidates:
             discovered.setdefault(ep_n, []).extend(candidates)
@@ -2623,9 +2563,7 @@ def _reuse_frozen_input_attempt(
     )
     if episode is None:
         return False
-    attempts = [
-        row for row in episode.get("attempts", []) if row.get("attempt_id") == attempt_id
-    ]
+    attempts = [row for row in episode.get("attempts", []) if row.get("attempt_id") == attempt_id]
     if not attempts:
         return False
     if len(attempts) != 1:
@@ -2636,8 +2574,7 @@ def _reuse_frozen_input_attempt(
         or episode.get("output_attempt_id") is not None
         or attempt.get("notebook_id") != notebook_id
         or attempt.get("title") != title.strip()
-        or attempt.get("brief_sha256")
-        != hashlib.sha256(brief.encode("utf-8")).hexdigest()
+        or attempt.get("brief_sha256") != hashlib.sha256(brief.encode("utf-8")).hexdigest()
         # source_ids 跟 brief 一樣是生成輸入:換了來源集合就不是同一次生成,沿用
         # 這個 attempt 會讓 binding 說謊(「哪一份輸入產出了哪一集」)。
         or attempt.get("settings") != settings
@@ -2700,9 +2637,7 @@ async def _run_episode(
             "把上一集的回錄 source id 直接放進 `source_ids`,不要再傳 "
             "`prior_mp3_path`;要靠 `prior_mp3_path` 自動上傳就不要指名"
         )
-    settings = _audio_settings(
-        resolved_language, audio_format, audio_length, selected_source_ids
-    )
+    settings = _audio_settings(resolved_language, audio_format, audio_length, selected_source_ids)
     # 兩道都在建 attempt 與任何副作用之前。**筆數先驗**:指名時它是純本地的 len(),
     # 超標可以連對帳那趟 RPC 都不打就秒退;沒指名時它自己去問筆記本現有幾筆。
     # `prior_mp3_path` 會在守門之後、生成之前再上傳一筆(下面那段 standalone 續集),
@@ -2943,9 +2878,7 @@ async def _run_episode(
         # 正是這整段存在的理由:呼叫端據此續完,不必再 artifact_list 撈 id。只留完整
         # 呼叫又會在「並行 retract 已經把這顆 tombstone 掉」時教一個做不到的動作。
         original_error = str(exc)
-        manifest_argument = (
-            f", manifest_path={manifest_path!r}" if manifest_path else ""
-        )
+        manifest_argument = f", manifest_path={manifest_path!r}" if manifest_path else ""
         resume_call = (
             f"podcast_episode_resume(notebook_id={notebook_id!r}, "
             f"episode_n={episode_n!r}, title={title.strip()!r}, "
@@ -3042,7 +2975,9 @@ async def podcast_episode(
         )
     prepared_generation_input = None
     if workspace_root is not None and input_bundle_path is None:
-        raise ValueError("workspace_root only applies to input_bundle_path (frozen generation input)")
+        raise ValueError(
+            "workspace_root only applies to input_bundle_path (frozen generation input)"
+        )
     if input_bundle_path is not None:
         if brief is not None:
             raise ValueError(
@@ -3124,10 +3059,7 @@ def _unresolved_attempt_ids(
     for episode in manifest.get("episodes", []):
         for attempt in episode.get("attempts", []):
             attempt_id = attempt.get("attempt_id")
-            if (
-                attempt_id == excluding_attempt_id
-                or attempt.get("notebook_id") != notebook_id
-            ):
+            if attempt_id == excluding_attempt_id or attempt.get("notebook_id") != notebook_id:
                 continue
             remote = attempt.get("remote") or {}
             if remote.get("artifact_id") is not None:
@@ -3214,12 +3146,11 @@ async def _podcast_episode_reconcile(
         "acceptance_unknown",
         "reconciliation_ambiguous",
     ):
-        raise ValueError(
-            f"attempt state {dispatch_status!r} cannot be reconciled"
-        )
+        raise ValueError(f"attempt state {dispatch_status!r} cannot be reconciled")
     if not auth_probed:
         await probe_auth(client)
     if dispatch_status == "dispatching":
+
         def mark_unknown(manifest: dict) -> None:
             _, current = _attempt_record(manifest, episode_n, attempt_id)
             if current["dispatch"].get("status") == "dispatching":
@@ -3234,13 +3165,9 @@ async def _podcast_episode_reconcile(
             "acceptance_unknown",
             "reconciliation_ambiguous",
         ):
-            raise ValueError(
-                f"attempt state {dispatch_status!r} cannot be reconciled"
-            )
+            raise ValueError(f"attempt state {dispatch_status!r} cannot be reconciled")
 
-    artifacts = await client.artifacts.list(
-        notebook_id, artifact_type=ArtifactType.AUDIO
-    )
+    artifacts = await client.artifacts.list(notebook_id, artifact_type=ArtifactType.AUDIO)
     claimed = _claimed_artifact_ids(snapshot, attempt_id)
     window_start = dispatched_at - _RECONCILIATION_CLOCK_SKEW
     # **候選 artifact 的篩選窗**:用 promised(原始承諾與這次呼叫取大),**不套
@@ -3253,9 +3180,7 @@ async def _podcast_episode_reconcile(
     candidate_window_end = (
         dispatched_at
         + timedelta(
-            seconds=_promised_reconciliation_window_seconds(
-                attempt["dispatch"], wait_timeout
-            )
+            seconds=_promised_reconciliation_window_seconds(attempt["dispatch"], wait_timeout)
         )
         + _RECONCILIATION_CLOCK_SKEW
     )
@@ -3263,9 +3188,7 @@ async def _podcast_episode_reconcile(
     for artifact in artifacts:
         artifact_id = getattr(artifact, "id", None)
         kind = getattr(getattr(artifact, "kind", None), "value", None)
-        created_at = _artifact_created_at_utc(
-            getattr(artifact, "created_at", None)
-        )
+        created_at = _artifact_created_at_utc(getattr(artifact, "created_at", None))
         if (
             not isinstance(artifact_id, str)
             or not artifact_id
@@ -3293,12 +3216,8 @@ async def _podcast_episode_reconcile(
             )
             if not blocking_attempt_ids:
                 latest = store.read()
-                episode_row, accepted_attempt = _attempt_record(
-                    latest, episode_n, attempt_id
-                )
-                caps = _attempt_capabilities(
-                    episode_row, accepted_attempt, attempt_id
-                )
+                episode_row, accepted_attempt = _attempt_record(latest, episode_n, attempt_id)
+                caps = _attempt_capabilities(episode_row, accepted_attempt, attempt_id)
                 return {
                     "complete": False,
                     "episode_n": episode_n,
@@ -3311,13 +3230,9 @@ async def _podcast_episode_reconcile(
         # 跟「真的有多筆候選」共用同一個安全停點(`reconciliation_ambiguous` +
         # `podcast_attempt_adopt`):道理相同,都是「manifest 自己分不出這顆屬於誰,
         # 需要呼叫端帶外部知識來指名」。
-        _mark_reconciliation_ambiguous(
-            store, episode_n, attempt_id, candidate_ids
-        )
+        _mark_reconciliation_ambiguous(store, episode_n, attempt_id, candidate_ids)
         latest = store.read()
-        episode_row, ambiguous_attempt = _attempt_record(
-            latest, episode_n, attempt_id
-        )
+        episode_row, ambiguous_attempt = _attempt_record(latest, episode_n, attempt_id)
         caps = _attempt_capabilities(
             episode_row,
             ambiguous_attempt,
@@ -3335,13 +3250,9 @@ async def _podcast_episode_reconcile(
             "next_step": _attempt_next_step(caps),
         }
     if len(candidate_ids) > 1:
-        _mark_reconciliation_ambiguous(
-            store, episode_n, attempt_id, candidate_ids
-        )
+        _mark_reconciliation_ambiguous(store, episode_n, attempt_id, candidate_ids)
         latest = store.read()
-        episode_row, ambiguous_attempt = _attempt_record(
-            latest, episode_n, attempt_id
-        )
+        episode_row, ambiguous_attempt = _attempt_record(latest, episode_n, attempt_id)
         caps = _attempt_capabilities(
             episode_row,
             ambiguous_attempt,
@@ -3364,9 +3275,7 @@ async def _podcast_episode_reconcile(
         }
 
     latest = store.read()
-    latest_attempt, _, _, _ = _reconciliation_subject(
-        latest, episode_n, attempt_id
-    )
+    latest_attempt, _, _, _ = _reconciliation_subject(latest, episode_n, attempt_id)
     latest_artifact_id = latest_attempt["remote"].get("artifact_id")
     if latest_artifact_id is not None:
         episode_row, _ = _attempt_record(latest, episode_n, attempt_id)
@@ -3413,17 +3322,13 @@ async def _podcast_episode_reconcile(
         dispatched_at
         + timedelta(
             seconds=max(
-                _promised_reconciliation_window_seconds(
-                    latest_attempt["dispatch"], wait_timeout
-                ),
+                _promised_reconciliation_window_seconds(latest_attempt["dispatch"], wait_timeout),
                 _RECONCILIATION_MIN_WINDOW.total_seconds(),
             )
         )
         + _RECONCILIATION_CLOCK_SKEW
     )
-    reconciliation_window_closed = (
-        datetime.now(UTC) > reconciliation_window_end
-    )
+    reconciliation_window_closed = datetime.now(UTC) > reconciliation_window_end
     # **action 與窗狀態說明都不在這裡手寫**(P2 修復,docs/gotchas-attempt.md 的
     # 紅線):`_attempt_capabilities()` 直接產生 `safe_next_action`,
     # `_attempt_next_step()` 從 `dispatch_status`/`can_reconcile` 推出窗狀態說明。
@@ -3491,9 +3396,7 @@ async def podcast_episode_resume(
         store = ManifestStore(manifest_path)
         # 與 `_run_episode` 同一道 gate:retract 留下的清理義務未結案前不得繼續產出。
         # resume 也會 upload 回錄 source,漏這道就等於留一條繞過去的路(舊版真的漏了)。
-        await _assert_source_cleanup_done(
-            client, store, notebook_id, episode_n
-        )
+        await _assert_source_cleanup_done(client, store, notebook_id, episode_n)
         attempt_id = _ensure_resume_attempt(
             store,
             notebook_id=notebook_id,
@@ -3608,10 +3511,7 @@ def _validate_adoption_identity(
     if attempt.get("episode") not in (None, episode_n):
         raise ValueError("attempt belongs to a different episode")
     attempt_title = attempt.get("title")
-    if (
-        not isinstance(attempt_title, str)
-        or attempt_title.strip() != title.strip()
-    ):
+    if not isinstance(attempt_title, str) or attempt_title.strip() != title.strip():
         raise ValueError("attempt title does not match the episode")
 
 
@@ -3632,9 +3532,7 @@ def _attempt_can_adopt_source(attempt: dict) -> bool:
     )
 
 
-def _cleanup_obligations(
-    episode: dict, *, fallback_notebook: object = None
-) -> list[dict]:
+def _cleanup_obligations(episode: dict, *, fallback_notebook: object = None) -> list[dict]:
     """讀出這一集未結案的清理義務,**每一筆都帶自己的 notebook 身分**。
 
     身分要跟著義務走,不能拿 episode 當下的 notebook 回推(盲審 P1):`manifest_store`
@@ -3662,9 +3560,7 @@ def _cleanup_obligations(
     return obligations
 
 
-def _record_cleanup_obligation(
-    episode: dict, source_id: str, notebook_id: object
-) -> None:
+def _record_cleanup_obligation(episode: dict, source_id: str, notebook_id: object) -> None:
     """把一筆帶身分的義務排進這一集(同一個 source_id 已在就不重複加)。
 
     只在真的有東西要排時才建 key,維持「沒有義務就沒有這個欄位」的既有形狀。
@@ -3682,8 +3578,7 @@ def _drop_cleanup_obligations(episode: dict, source_ids: set[str]) -> None:
     left = [
         row
         for row in episode.get("pending_source_cleanup") or []
-        if (row if isinstance(row, str) else (row or {}).get("source_id"))
-        not in source_ids
+        if (row if isinstance(row, str) else (row or {}).get("source_id")) not in source_ids
     ]
     if left:
         episode["pending_source_cleanup"] = left
@@ -3733,39 +3628,27 @@ async def podcast_attempt_adopt(
         raise ValueError("manifest_path must be a non-empty string")
     if not isinstance(episode_n, int) or isinstance(episode_n, bool) or episode_n < 1:
         raise ValueError("episode_n must be an int >= 1")
-    if attempt_id is not None and (
-        not isinstance(attempt_id, str) or not attempt_id
-    ):
+    if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id):
         raise ValueError("attempt_id must be a non-empty string when provided")
 
     remote_ids = [
-        value
-        for value in (artifact_id, feedback_source_id)
-        if isinstance(value, str) and value
+        value for value in (artifact_id, feedback_source_id) if isinstance(value, str) and value
     ]
-    if len(remote_ids) != 1 or (
-        artifact_id is not None
-        and (not isinstance(artifact_id, str) or not artifact_id)
-    ) or (
-        feedback_source_id is not None
-        and (
-            not isinstance(feedback_source_id, str)
-            or not feedback_source_id
+    if (
+        len(remote_ids) != 1
+        or (artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id))
+        or (
+            feedback_source_id is not None
+            and (not isinstance(feedback_source_id, str) or not feedback_source_id)
         )
     ):
-        raise ValueError(
-            "provide exactly one non-empty artifact_id or feedback_source_id"
-        )
+        raise ValueError("provide exactly one non-empty artifact_id or feedback_source_id")
     _require_existing_manifest(manifest_path)
 
     store = ManifestStore(manifest_path)
     snapshot = store.read()
     episode = next(
-        (
-            row
-            for row in snapshot["episodes"]
-            if row.get("episode") == episode_n
-        ),
+        (row for row in snapshot["episodes"] if row.get("episode") == episode_n),
         None,
     )
     if episode is None:
@@ -3791,10 +3674,7 @@ async def podcast_attempt_adopt(
         if attempt.get("episode") not in (None, episode_n):
             raise ValueError("attempt episode identity does not match the manifest")
         attempt_title = attempt.get("title")
-        if (
-            not isinstance(attempt_title, str)
-            or attempt_title.strip() != title.strip()
-        ):
+        if not isinstance(attempt_title, str) or attempt_title.strip() != title.strip():
             raise ValueError("attempt title does not match the episode")
 
     if (
@@ -3816,46 +3696,25 @@ async def podcast_attempt_adopt(
             "acceptance_unknown",
             "reconciliation_ambiguous",
         ):
-            raise ValueError(
-                "artifact adoption requires an unresolved reconciliation state"
-            )
+            raise ValueError("artifact adoption requires an unresolved reconciliation state")
         candidate_ids = dispatch.get("candidate_artifact_ids", [])
-        if (
-            dispatch_status == "reconciliation_ambiguous"
-            and artifact_id not in candidate_ids
-        ):
-            raise ValueError(
-                f"artifact {artifact_id!r} is not an ambiguity candidate"
-            )
-        artifacts = await client.artifacts.list(
-            notebook_id, artifact_type=ArtifactType.AUDIO
-        )
+        if dispatch_status == "reconciliation_ambiguous" and artifact_id not in candidate_ids:
+            raise ValueError(f"artifact {artifact_id!r} is not an ambiguity candidate")
+        artifacts = await client.artifacts.list(notebook_id, artifact_type=ArtifactType.AUDIO)
         matches = [
             artifact
             for artifact in artifacts
             if getattr(artifact, "id", None) == artifact_id
-            and _source_value(getattr(artifact, "kind", None))
-            == ArtifactType.AUDIO.value
+            and _source_value(getattr(artifact, "kind", None)) == ArtifactType.AUDIO.value
         ]
         if len(matches) != 1:
-            raise ValueError(
-                f"artifact {artifact_id!r} is not one unique audio artifact"
-            )
+            raise ValueError(f"artifact {artifact_id!r} is not one unique audio artifact")
 
         if dispatch_status == "acceptance_unknown":
-            _, _, baseline, dispatched_at = _reconciliation_subject(
-                snapshot, episode_n, attempt_id
-            )
-            created_at = _artifact_created_at_utc(
-                getattr(matches[0], "created_at", None)
-            )
-            if (
-                artifact_id in baseline
-                or created_at is None
-            ):
-                raise ValueError(
-                    "explicit artifact is not a post-dispatch candidate"
-                )
+            _, _, baseline, dispatched_at = _reconciliation_subject(snapshot, episode_n, attempt_id)
+            created_at = _artifact_created_at_utc(getattr(matches[0], "created_at", None))
+            if artifact_id in baseline or created_at is None:
+                raise ValueError("explicit artifact is not a post-dispatch candidate")
             if not (
                 dispatched_at - _RECONCILIATION_CLOCK_SKEW
                 <= created_at
@@ -3864,12 +3723,14 @@ async def podcast_attempt_adopt(
                 raise ValueError("explicit artifact is outside the dispatch window")
 
         def adopt_artifact(manifest: dict) -> dict:
-            current_episode, current = _attempt_record(
-                manifest, episode_n, attempt_id
-            )
+            current_episode, current = _attempt_record(manifest, episode_n, attempt_id)
             _validate_adoption_identity(
-                manifest, current_episode, current,
-                notebook_id=notebook_id, episode_n=episode_n, title=title,
+                manifest,
+                current_episode,
+                current,
+                notebook_id=notebook_id,
+                episode_n=episode_n,
+                title=title,
             )
             current_dispatch = current["dispatch"]
             current_status = current_dispatch.get("status")
@@ -3880,14 +3741,11 @@ async def podcast_attempt_adopt(
                 raise ValueError("attempt reconciliation state changed")
             if (
                 current_status == "reconciliation_ambiguous"
-                and artifact_id not in current_dispatch.get(
-                    "candidate_artifact_ids", []
-                )
+                and artifact_id not in current_dispatch.get("candidate_artifact_ids", [])
             ):
                 raise ValueError("artifact is no longer an ambiguity candidate")
-            if (
-                current_status == "acceptance_unknown"
-                and artifact_id in current_dispatch.get("artifact_ids_before", [])
+            if current_status == "acceptance_unknown" and artifact_id in current_dispatch.get(
+                "artifact_ids_before", []
             ):
                 raise ValueError("artifact was already present before dispatch")
             if artifact_id in _claimed_artifact_ids(manifest, attempt_id):
@@ -3922,14 +3780,11 @@ async def podcast_attempt_adopt(
 
     assert feedback_source_id is not None
     upload = (
-        attempt.get("finalize", {}).get("feedback_source_upload", {})
-        if attempt is not None
-        else {}
+        attempt.get("finalize", {}).get("feedback_source_upload", {}) if attempt is not None else {}
     )
-    candidate_pending_rename = (
-        upload.get("status") == "reconciliation_ambiguous"
-        and feedback_source_id in upload.get("candidate_source_ids", [])
-    )
+    candidate_pending_rename = upload.get(
+        "status"
+    ) == "reconciliation_ambiguous" and feedback_source_id in upload.get("candidate_source_ids", [])
     allowed_titles = {label}
     expected_upload_title = upload.get("expected_title")
     if (
@@ -3962,15 +3817,10 @@ async def podcast_attempt_adopt(
             ):
                 return True
             for current in row.get("attempts", []):
-                if (
-                    current.get("attempt_id") == attempt_id
-                    and row.get("episode") == episode_n
-                ):
+                if current.get("attempt_id") == attempt_id and row.get("episode") == episode_n:
                     continue
                 source_id = (
-                    current.get("finalize", {})
-                    .get("feedback_source_upload", {})
-                    .get("source_id")
+                    current.get("finalize", {}).get("feedback_source_upload", {}).get("source_id")
                 )
                 if source_id == feedback_source_id:
                     return True
@@ -3987,36 +3837,28 @@ async def podcast_attempt_adopt(
         對不上的猜測。
         """
         current_episode = next(
-            row
-            for row in manifest["episodes"]
-            if row.get("episode") == episode_n
+            row for row in manifest["episodes"] if row.get("episode") == episode_n
         )
         current_attempt = None
         if attempt_id is not None:
-            _, current_attempt = _attempt_record(
-                manifest, episode_n, attempt_id
-            )
+            _, current_attempt = _attempt_record(manifest, episode_n, attempt_id)
         _validate_adoption_identity(
-            manifest, current_episode, current_attempt,
-            notebook_id=notebook_id, episode_n=episode_n, title=title,
+            manifest,
+            current_episode,
+            current_attempt,
+            notebook_id=notebook_id,
+            episode_n=episode_n,
+            title=title,
         )
         if source_claimed_elsewhere(manifest):
-            raise ValueError(
-                f"feedback source {feedback_source_id!r} is already claimed"
-            )
+            raise ValueError(f"feedback source {feedback_source_id!r} is already claimed")
         now = datetime.now(UTC).isoformat()
         if attempt_id is None:
-            if current_episode.get("attempts") or not has_durable_output_evidence(
-                current_episode
-            ):
-                raise ValueError(
-                    "attempt_id may be omitted only for legacy durable output"
-                )
+            if current_episode.get("attempts") or not has_durable_output_evidence(current_episode):
+                raise ValueError("attempt_id may be omitted only for legacy durable output")
             previous = current_episode.get("feedback_source_id")
             if previous not in (None, feedback_source_id):
-                history = current_episode.setdefault(
-                    "previous_feedback_source_ids", []
-                )
+                history = current_episode.setdefault("previous_feedback_source_ids", [])
                 if previous not in history:
                     history.append(previous)
             current_episode["feedback_source_id"] = feedback_source_id
@@ -4035,27 +3877,20 @@ async def podcast_attempt_adopt(
             # 未結案義務的身分——這一集可能還留著別本 notebook 的舊義務(例如上次在
             # 別本筆記本 retract 留下的孤兒),`_cleanup_obligations` 逐筆讀回自己
             # 實際記錄的身分,只在真的沒身分(legacy 純字串)時才 fallback。
-            obligations = _cleanup_obligations(
-                current_episode, fallback_notebook=notebook_id
-            )
+            obligations = _cleanup_obligations(current_episode, fallback_notebook=notebook_id)
             return stale, None, has_durable_output_evidence(current_episode), obligations
 
         assert current_attempt is not None
         if not _attempt_can_adopt_source(current_attempt):
-            raise ValueError(
-                "feedback source adoption requires completed audio download"
-            )
+            raise ValueError("feedback source adoption requires completed audio download")
         current = current_attempt
         upload = current["finalize"]["feedback_source_upload"]
         if needs_rename and not (
             upload.get("status") == "reconciliation_ambiguous"
-            and feedback_source_id
-            in upload.get("candidate_source_ids", [])
+            and feedback_source_id in upload.get("candidate_source_ids", [])
             and upload.get("expected_title") == expected_upload_title
         ):
-            raise ValueError(
-                "feedback source is no longer an ambiguity candidate"
-            )
+            raise ValueError("feedback source is no longer an ambiguity candidate")
         previous = upload.get("source_id")
         # 未被選中的 candidate(reconciliation_ambiguous 遺留)與被取代的 previous 一樣是
         # 同名重複 source——`upload.update` 下面即將把 candidate_source_ids 清空,先在
@@ -4096,9 +3931,7 @@ async def podcast_attempt_adopt(
         )
         # T4(P3):同上一個分支——逐筆讀回自己的身分,不拿這次 adopt 的 notebook_id
         # 回推全部。
-        obligations = _cleanup_obligations(
-            current_episode, fallback_notebook=notebook_id
-        )
+        obligations = _cleanup_obligations(current_episode, fallback_notebook=notebook_id)
         caps = _attempt_capabilities(current_episode, current, attempt_id)
         return stale, caps, has_durable_output_evidence(current_episode), obligations
 
@@ -4113,9 +3946,7 @@ async def podcast_attempt_adopt(
         "episode_n": episode_n,
         "attempt_id": attempt_id,
         "feedback_source_id": feedback_source_id,
-        "observed_state": (
-            "accepted" if needs_rename else "continuity_verified"
-        ),
+        "observed_state": ("accepted" if needs_rename else "continuity_verified"),
         "safe_next_action": caps["safe_next_action"] if caps is not None else ACTION_SERIES,
     }
     if caps is not None:
@@ -4217,9 +4048,7 @@ async def podcast_attempt_retract(
     )
 
     def mutate(manifest: dict) -> tuple[dict, dict]:
-        episode, attempt = _attempt_record(
-            manifest, episode_n, attempt_id, allow_retracted=True
-        )
+        episode, attempt = _attempt_record(manifest, episode_n, attempt_id, allow_retracted=True)
         existing = attempt.get("retraction")
         if existing is not None:
             # 冪等,但**只對自己的殘留值**:此時 output 可能已經是取代版 B,無條件重跑
@@ -4319,7 +4148,7 @@ async def podcast_attempt_retract(
             raise ValueError(
                 f"attempt {attempt_id!r} is not episode {episode_n}'s durable output "
                 f"(dispatch.status={status!r}) —— 它可能還在遠端跑,所以預設不讓作廢。"
-                "確定要作廢的話:先用 artifact_list(notebook_id, kind=\"audio\") 查雲端"
+                '確定要作廢的話:先用 artifact_list(notebook_id, kind="audio") 查雲端'
                 "到底有沒有這一集的 artifact,再帶 abandon_in_flight=True 重呼本工具。"
                 "那個旗標的意思就是「我查過了,manifest 推導不出來的那件事我知道」。"
                 "(dispatch.status 是 prepared / not_accepted 時不需要旗標 —— 契約保證"
@@ -4393,9 +4222,7 @@ async def podcast_attempt_retract(
             # **身分綁 attempt 自己的 notebook**:tombstone 可以合法保留舊 notebook,
             # 而這筆 source 就躺在那一本裡 —— 記成 episode 當下的 default 的話,之後
             # 換本重生時會拿新本去查、查無此 source 就把義務誤清(盲審 P1)。
-            obligation_notebook = attempt.get("notebook_id") or episode.get(
-                "notebook_id"
-            )
+            obligation_notebook = attempt.get("notebook_id") or episode.get("notebook_id")
             for source_id in stale_source_ids:
                 if source_id not in history:
                     history.append(source_id)
@@ -4454,9 +4281,7 @@ async def podcast_attempt_retract(
             caps,
         )
 
-    _, (retraction, caps) = ManifestStore(
-        manifest_path
-    ).update(mutate)
+    _, (retraction, caps) = ManifestStore(manifest_path).update(mutate)
     return {
         **retraction,
         "observed_state": "retracted",
@@ -4574,21 +4399,15 @@ async def podcast_series(
     # 只驗證 candidate range，避免執行中途才因壞 plan 消耗 generation 額度。
     for i, ep in enumerate(episodes[start - 1 :], start=start):
         if not isinstance(ep, dict) or "brief" not in ep:
-            raise ValueError(
-                f"episode {i} must be a dict with a 'brief' key, got: {ep!r}"
-            )
+            raise ValueError(f"episode {i} must be a dict with a 'brief' key, got: {ep!r}")
         title = ep.get("title")
         if not isinstance(title, str) or not title.strip():
-            raise ValueError(
-                f"episode {i} must have a non-empty 'title' (got: {title!r})"
-            )
+            raise ValueError(f"episode {i} must have a non-empty 'title' (got: {title!r})")
         # brief=None 會撐到迴圈內 `.encode()` 才炸(EP1 已燒配額);brief="" 更會
         # 靜默生出空 brief 的一集。跟 title 同一道前驗、同一時機。
         brief = ep.get("brief")
         if not isinstance(brief, str) or not brief.strip():
-            raise ValueError(
-                f"episode {i} must have a non-empty 'brief' (got: {brief!r})"
-            )
+            raise ValueError(f"episode {i} must have a non-empty 'brief' (got: {brief!r})")
 
     os.makedirs(output_dir, exist_ok=True)
     manifest_path = os.path.join(output_dir, "series_manifest.json")
@@ -4597,16 +4416,12 @@ async def podcast_series(
     initial_snapshot = store.read()
     manifest_notebook_id = initial_snapshot.get("notebook_id")
     if manifest_notebook_id not in (None, notebook_id):
-        raise ValueError(
-            "series manifest belongs to a different notebook"
-        )
+        raise ValueError("series manifest belongs to a different notebook")
     account, client = runtime.snapshot()
     run_results: list[dict] = []
     # 整季共用一組生成設定,與集數無關 —— 接手守門與認證停點的交棒判準都要拿它比對,
     # 所以提到迴圈外算一次。
-    series_settings = _audio_settings(
-        resolve_language(language), audio_format, audio_length
-    )
+    series_settings = _audio_settings(resolve_language(language), audio_format, audio_length)
 
     def partial(
         episode_n: int,
@@ -4616,18 +4431,12 @@ async def podcast_series(
         **extra: object,
     ) -> dict:
         if safe_next_action not in SAFE_NEXT_ACTIONS:
-            raise ValueError(
-                f"unknown safe_next_action {safe_next_action!r}"
-            )
+            raise ValueError(f"unknown safe_next_action {safe_next_action!r}")
         # 每個安全停止都回報這一集已經燒掉幾個 attempt、其中幾個是自動 supersede。
         # 配額耗盡(removed)時 safe_next_action 會一直指回 podcast_series;呼叫端靠
         # 這兩個數字才看得出自己在原地打轉,而不是無限重呼再燒一次生成配額。
         row = next(
-            (
-                item
-                for item in store.read()["episodes"]
-                if item.get("episode") == episode_n
-            ),
+            (item for item in store.read()["episodes"] if item.get("episode") == episode_n),
             None,
         )
         attempts = row.get("attempts", []) if row else []
@@ -4658,24 +4467,20 @@ async def podcast_series(
         """
         current = store.read()
         attempt_id = _active_attempt_or_reraise(current, episode_n)
-        current_episode, stopped_attempt = _attempt_record(
-            current, episode_n, attempt_id
-        )
+        current_episode, stopped_attempt = _attempt_record(current, episode_n, attempt_id)
         if stopped_attempt["remote"].get("artifact_id") is None:
             # 這一格是「artifact 都還沒接受」——與回錄 source 上傳無關,維持原判準。
             observed = stopped_attempt["dispatch"]["status"]
             needs_artifact_reconcile = observed == "acceptance_unknown"
             action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
             return partial(episode_n, attempt_id, observed, action)
-        upload_state = stopped_attempt.get("finalize", {}).get(
-            "feedback_source_upload", {}
-        ).get("status")
+        upload_state = (
+            stopped_attempt.get("finalize", {}).get("feedback_source_upload", {}).get("status")
+        )
         # T1:回錄 source 上傳卡在這三種 unresolved 狀態時走 caps,理由與上面
         # active-attempt 分支那兩個 handler 相同(單一事實來源、候選一併帶出)。
         if upload_state in ("acceptance_unknown", "reconciliation_ambiguous"):
-            caps = _attempt_capabilities(
-                current_episode, stopped_attempt, attempt_id
-            )
+            caps = _attempt_capabilities(current_episode, stopped_attempt, attempt_id)
             return partial(
                 episode_n,
                 attempt_id,
@@ -4697,7 +4502,9 @@ async def podcast_series(
             current, exc.episode_n, exc.attempt_id, allow_retracted=True
         )
         caps = _attempt_capabilities(
-            episode, attempt, exc.attempt_id,
+            episode,
+            attempt,
+            exc.attempt_id,
             post_retract=bool(attempt.get("retraction")),
         )
         return partial(
@@ -4724,11 +4531,7 @@ async def podcast_series(
         if episode is None or attempt_id is None:
             return {"safe_next_action": ACTION_SERIES}
         attempt = next(
-            (
-                row
-                for row in episode.get("attempts", [])
-                if row.get("attempt_id") == attempt_id
-            ),
+            (row for row in episode.get("attempts", []) if row.get("attempt_id") == attempt_id),
             None,
         )
         if attempt is None:
@@ -4809,9 +4612,7 @@ async def podcast_series(
             await assert_source_count_is_safe(guard_client, notebook_id)
         except TooManySourcesError as exc:
             if attempt_id is None:
-                return partial(
-                    episode_n, None, "too_many_sources", ACTION_EPISODE, error=str(exc)
-                )
+                return partial(episode_n, None, "too_many_sources", ACTION_EPISODE, error=str(exc))
             return partial(
                 episode_n,
                 attempt_id,
@@ -4851,9 +4652,7 @@ async def podcast_series(
         # 沒有任何配額拒絕與稽核紀錄的情況下偷換帳號。
         plan = episodes[episode_n - 1]
         expected_title = plan["title"].strip()
-        expected_brief_hash = hashlib.sha256(
-            plan["brief"].encode("utf-8")
-        ).hexdigest()
+        expected_brief_hash = hashlib.sha256(plan["brief"].encode("utf-8")).hexdigest()
         snapshot = store.read()
         episode = next(
             (row for row in snapshot["episodes"] if row.get("episode") == episode_n),
@@ -4874,11 +4673,7 @@ async def podcast_series(
         await _assert_source_cleanup_done(client, store, notebook_id, episode_n)
         snapshot = store.read()
         episode = next(
-            (
-                row
-                for row in snapshot["episodes"]
-                if row.get("episode") == episode_n
-            ),
+            (row for row in snapshot["episodes"] if row.get("episode") == episode_n),
             None,
         )
 
@@ -4914,9 +4709,7 @@ async def podcast_series(
                 # 「already has durable active attempt」。純本機的 retract 才是唯一
                 # 打得通的出口:作廢它之後再用 podcast_episode 指名來源重生。
                 leak_action = ACTION_RETRACT
-            if about_to_redispatch and _later_episode_has_output(
-                snapshot, episode_n, notebook_id
-            ):
+            if about_to_redispatch and _later_episode_has_output(snapshot, episode_n, notebook_id):
                 if leak_action == ACTION_EPISODE:
                     next_step = (
                         f"episode {episode_n} 之後已有集數產出正式輸出或上傳回錄——這一集"
@@ -4946,18 +4739,12 @@ async def podcast_series(
         if episode is not None:
             output_attempt_id = episode.get("output_attempt_id")
             if output_attempt_id is not None:
-                _, output_attempt = _attempt_record(
-                    snapshot, episode_n, output_attempt_id
-                )
+                _, output_attempt = _attempt_record(snapshot, episode_n, output_attempt_id)
                 if output_attempt.get("title") != expected_title:
-                    raise ValueError(
-                        f"episode {episode_n} title differs from completed attempt"
-                    )
+                    raise ValueError(f"episode {episode_n} title differs from completed attempt")
                 stored_hash = output_attempt.get("brief_sha256")
                 if stored_hash not in (None, expected_brief_hash):
-                    raise ValueError(
-                        f"episode {episode_n} brief differs from completed attempt"
-                    )
+                    raise ValueError(f"episode {episode_n} brief differs from completed attempt")
                 try:
                     repaired = await finalize_attempt(
                         client,
@@ -4997,9 +4784,7 @@ async def podcast_series(
                     )
                 except RuntimeError:
                     current = store.read()
-                    _, stopped_attempt = _attempt_record(
-                        current, episode_n, output_attempt_id
-                    )
+                    _, stopped_attempt = _attempt_record(current, episode_n, output_attempt_id)
                     source_id = (
                         stopped_attempt.get("finalize", {})
                         .get("feedback_source_upload", {})
@@ -5007,10 +4792,7 @@ async def podcast_series(
                     )
                     if isinstance(source_id, str):
                         sources = await client.sources.list(notebook_id)
-                        if not any(
-                            getattr(source, "id", None) == source_id
-                            for source in sources
-                        ):
+                        if not any(getattr(source, "id", None) == source_id for source in sources):
                             return partial(
                                 episode_n,
                                 output_attempt_id,
@@ -5029,22 +4811,15 @@ async def podcast_series(
                         ACTION_SERIES,
                     )
                 try:
-                    _promote_attempt_output(
-                        store, episode_n, output_attempt_id, repaired
-                    )
+                    _promote_attempt_output(store, episode_n, output_attempt_id, repaired)
                 except PromotionRefusedError as exc:
                     return promotion_refused_stop(exc)
                 continue
 
-            is_legacy_output = (
-                not episode.get("attempts")
-                and has_durable_output_evidence(episode)
-            )
+            is_legacy_output = not episode.get("attempts") and has_durable_output_evidence(episode)
             if is_legacy_output:
                 if episode.get("title") not in (None, expected_title):
-                    raise ValueError(
-                        f"episode {episode_n} title differs from legacy output"
-                    )
+                    raise ValueError(f"episode {episode_n} title differs from legacy output")
                 legacy_path = episode.get("mp3_path")
                 try:
                     local_audio_ok = (
@@ -5055,14 +4830,13 @@ async def podcast_series(
                 except OSError:
                     local_audio_ok = False
                 legacy_source_id = episode.get("feedback_source_id")
-                source_verified = (
-                    isinstance(legacy_source_id, str)
-                    and await _continuity_source_verified(
-                        client,
-                        notebook_id,
-                        _episode_label(episode_n, expected_title),
-                        source_id=legacy_source_id,
-                    )
+                source_verified = isinstance(
+                    legacy_source_id, str
+                ) and await _continuity_source_verified(
+                    client,
+                    notebook_id,
+                    _episode_label(episode_n, expected_title),
+                    source_id=legacy_source_id,
                 )
                 if local_audio_ok and source_verified:
                     continue
@@ -5133,18 +4907,12 @@ async def podcast_series(
 
             active_attempt_id = episode.get("active_attempt_id")
             if active_attempt_id is not None:
-                _, attempt = _attempt_record(
-                    snapshot, episode_n, active_attempt_id
-                )
+                _, attempt = _attempt_record(snapshot, episode_n, active_attempt_id)
                 if attempt.get("title") != expected_title:
-                    raise ValueError(
-                        f"episode {episode_n} title changed during an active attempt"
-                    )
+                    raise ValueError(f"episode {episode_n} title changed during an active attempt")
                 stored_hash = attempt.get("brief_sha256")
                 if stored_hash not in (None, expected_brief_hash):
-                    raise ValueError(
-                        f"episode {episode_n} brief changed during an active attempt"
-                    )
+                    raise ValueError(f"episode {episode_n} brief changed during an active attempt")
 
                 dispatch_state = attempt.get("dispatch", {}).get("status")
                 remote = attempt.get("remote", {})
@@ -5172,9 +4940,7 @@ async def podcast_series(
                     # 回 partial(已跑完的集仍在 `episodes` 裡),新行為會丟掉整批
                     # `run_results`(Codex 獨立複審實跑抓到)。兩道守門都不改 manifest,
                     # 順序只影響「先講哪個理由」,那就讓保住進度的那個先講。
-                    stop = await refuse_if_too_many_sources(
-                        episode_n, active_attempt_id, client
-                    )
+                    stop = await refuse_if_too_many_sources(episode_n, active_attempt_id, client)
                     if stop is not None:
                         return stop
                     # **這一集已經有完成的輸出時,歸屬不是該講的那件事。**
@@ -5198,14 +4964,10 @@ async def podcast_series(
                             active_attempt_id,
                         )
                 if dispatch_state == "not_accepted":
-                    rearmed = _rearm_not_accepted_attempt(
-                        store, episode_n, active_attempt_id
-                    )
+                    rearmed = _rearm_not_accepted_attempt(store, episode_n, active_attempt_id)
                     if not rearmed:
                         latest = store.read()
-                        _, latest_attempt = _attempt_record(
-                            latest, episode_n, active_attempt_id
-                        )
+                        _, latest_attempt = _attempt_record(latest, episode_n, active_attempt_id)
                         return partial(
                             episode_n,
                             active_attempt_id,
@@ -5213,9 +4975,7 @@ async def podcast_series(
                             ACTION_SERIES,
                         )
                     snapshot = store.read()
-                    episode, attempt = _attempt_record(
-                        snapshot, episode_n, active_attempt_id
-                    )
+                    episode, attempt = _attempt_record(snapshot, episode_n, active_attempt_id)
                     dispatch_state = attempt["dispatch"]["status"]
                     remote = attempt["remote"]
                     remote_state = remote["status"]
@@ -5234,9 +4994,7 @@ async def podcast_series(
                         supersedes_attempt_id=superseded_attempt_id,
                     )
                     snapshot = store.read()
-                    episode, attempt = _attempt_record(
-                        snapshot, episode_n, active_attempt_id
-                    )
+                    episode, attempt = _attempt_record(snapshot, episode_n, active_attempt_id)
                     dispatch_state = attempt["dispatch"]["status"]
                     remote = attempt["remote"]
                     remote_state = remote["status"]
@@ -5285,15 +5043,14 @@ async def podcast_series(
                     )
                     if not claimed:
                         latest = store.read()
-                        _, latest_attempt = _attempt_record(
-                            latest, episode_n, active_attempt_id
-                        )
+                        _, latest_attempt = _attempt_record(latest, episode_n, active_attempt_id)
                         return partial(
                             episode_n,
                             active_attempt_id,
                             latest_attempt["dispatch"]["status"],
                             ACTION_SERIES,
                         )
+
                     async def _generate_resend(dispatch_client: object):
                         return await dispatch_client.artifacts.generate_audio(
                             notebook_id,
@@ -5382,9 +5139,7 @@ async def podcast_series(
                     # `client` 已由上面的三元組換成實際送出的那一個。這裡曾經是
                     # `client = runtime.get_client()` —— 以「殺掉分開讀全域」為目的的
                     # 那一輪修正,自己在這條路上又種了一顆同型的(補一半的又一例)。
-                    _bind_accepted_artifact(
-                        store, episode_n, active_attempt_id, artifact_id
-                    )
+                    _bind_accepted_artifact(store, episode_n, active_attempt_id, artifact_id)
 
                 if not artifact_id:
                     if dispatch_state not in (
@@ -5420,9 +5175,7 @@ async def podcast_series(
                         # 現形:直接呼叫 reconcile 的呼叫端看得到 next_step,經由
                         # series 重包的這條路卻看不到)。
                         extra = {
-                            "candidate_artifact_ids": reconciled.get(
-                                "candidate_artifact_ids", []
-                            )
+                            "candidate_artifact_ids": reconciled.get("candidate_artifact_ids", [])
                         }
                         if "next_step" in reconciled:
                             extra["next_step"] = reconciled["next_step"]
@@ -5445,9 +5198,7 @@ async def podcast_series(
                     )
                 except TerminalGenerationError:
                     current = store.read()
-                    _, failed_attempt = _attempt_record(
-                        current, episode_n, active_attempt_id
-                    )
+                    _, failed_attempt = _attempt_record(current, episode_n, active_attempt_id)
                     return partial(
                         episode_n,
                         active_attempt_id,
@@ -5459,9 +5210,11 @@ async def podcast_series(
                     current_episode, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
                     )
-                    upload_state = stopped_attempt.get("finalize", {}).get(
-                        "feedback_source_upload", {}
-                    ).get("status")
+                    upload_state = (
+                        stopped_attempt.get("finalize", {})
+                        .get("feedback_source_upload", {})
+                        .get("status")
+                    )
                     # T1:三種 unresolved upload 狀態一律走 caps(單一事實來源),不再
                     # 各自手寫 ACTION_SERIES——`acceptance_unknown` 之前寫死 series,
                     # 但 caps 算出的 resume 才是這個狀態真正走得通的路(can_resume 為
@@ -5495,9 +5248,11 @@ async def podcast_series(
                     current_episode, stopped_attempt = _attempt_record(
                         current, episode_n, active_attempt_id
                     )
-                    upload_state = stopped_attempt.get("finalize", {}).get(
-                        "feedback_source_upload", {}
-                    ).get("status")
+                    upload_state = (
+                        stopped_attempt.get("finalize", {})
+                        .get("feedback_source_upload", {})
+                        .get("status")
+                    )
                     # T1:刪掉手寫的 `ACTION_ADOPT if ambiguous else ACTION_SERIES`
                     # ——中央 caps 現在就會給正確答案(ambiguous+候選非空 → adopt,
                     # 且候選 / next_step 都由 caps 一併帶出),不必在呼叫點另組一份。
@@ -5518,9 +5273,7 @@ async def podcast_series(
                         )
                     raise
                 try:
-                    _promote_attempt_output(
-                        store, episode_n, active_attempt_id, result
-                    )
+                    _promote_attempt_output(store, episode_n, active_attempt_id, result)
                 except PromotionRefusedError as exc:
                     return promotion_refused_stop(exc)
                 run_results.append(result)
@@ -5567,9 +5320,7 @@ async def podcast_series(
         except TerminalGenerationError:
             current = store.read()
             attempt_id = _active_attempt_or_reraise(current, episode_n)
-            _, failed_attempt = _attempt_record(
-                current, episode_n, attempt_id
-            )
+            _, failed_attempt = _attempt_record(current, episode_n, attempt_id)
             return partial(
                 episode_n,
                 attempt_id,
@@ -5585,9 +5336,7 @@ async def podcast_series(
         except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH) as exc:
             current = store.read()
             attempt_id = _active_attempt_or_reraise(current, episode_n)
-            _, stopped_attempt = _attempt_record(
-                current, episode_n, attempt_id
-            )
+            _, stopped_attempt = _attempt_record(current, episode_n, attempt_id)
             recorded = stopped_attempt["dispatch"]["status"]
             if recorded != "not_accepted":
                 # 只接「拒絕型例外」(送出後的 429、輪詢限流)與受理不明:其餘是 finalize 段的

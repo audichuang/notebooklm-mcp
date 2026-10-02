@@ -4,6 +4,7 @@ failover 換帳號後是拿新帳號對**同一個 notebook_id** 送出 —— �
 的話,整條 pool 是空談。而 MCP 自己建的 notebook 預設只屬於建立它的帳號,**沒有任何
 機制建立那個前置狀態**:驗收時是人工用 SDK 補上才走得動,真實使用者不會知道要做這件事。
 """
+
 from types import SimpleNamespace
 
 import pytest
@@ -25,8 +26,11 @@ async def test_notebook_create_shares_with_the_rest_of_the_pool(fake_client):
     assert out["shared_with"] == ["b@x.com", "c@x.com"], "作用中的帳號自己不用分享"
     # notify=False:這是同一個人的帳號,不需要寄通知信。
     assert fake_client.sharing.calls == [
-        (out["notebook_id"], [("b@x.com", SharePermission.EDITOR),
-                               ("c@x.com", SharePermission.EDITOR)], False),
+        (
+            out["notebook_id"],
+            [("b@x.com", SharePermission.EDITOR), ("c@x.com", SharePermission.EDITOR)],
+            False,
+        ),
     ]
 
 
@@ -63,8 +67,7 @@ async def test_share_is_dispatched_by_the_client_that_created_the_notebook(fake_
         (out["notebook_id"], [("b@x.com", SharePermission.EDITOR)], False)
     ], "分享必須由建立 notebook 的 a@x.com 發出,不是 create() 之後遊標停的位置"
     assert account_b.sharing.calls == [], (
-        "b@x.com 只是被並行呼叫推到的游標位置,它自己還看不到剛建的 notebook,"
-        "不該參與這次分享"
+        "b@x.com 只是被並行呼叫推到的游標位置,它自己還看不到剛建的 notebook,不該參與這次分享"
     )
 
 
@@ -119,9 +122,7 @@ async def test_share_with_pool_backfills_an_existing_notebook(fake_client):
 
     assert out["shared_with"] == ["c@x.com"], "只補缺的那些"
     assert out["already_shared"] == ["b@x.com"]
-    assert fake_client.sharing.calls == [
-        ("nb-old", [("c@x.com", SharePermission.EDITOR)], False)
-    ]
+    assert fake_client.sharing.calls == [("nb-old", [("c@x.com", SharePermission.EDITOR)], False)]
 
 
 async def test_share_with_pool_is_idempotent(fake_client):
@@ -273,9 +274,13 @@ async def test_duplicate_pool_slots_are_deduped(fake_client):
     去重邏輯仍不會對同一個 email 打兩次 add_user、回報值也不會失真成
     `["b@x.com","b@x.com"]`」,不是在證明這個狀態會在真實 server 上出現。
     """
-    runtime.set_clients([
-        ("a@x.com", fake_client), ("b@x.com", fake_client), ("b@x.com", fake_client),
-    ])
+    runtime.set_clients(
+        [
+            ("a@x.com", fake_client),
+            ("b@x.com", fake_client),
+            ("b@x.com", fake_client),
+        ]
+    )
 
     out = await basic.notebook_create("重複槽位")
 
@@ -287,9 +292,13 @@ async def test_duplicate_pool_slots_are_deduped(fake_client):
 
 async def test_share_failure_message_reports_retry_guidance(fake_client):
     """單趟 set_users 失敗時仍要留下 notebook 與可重試的對帳指引。"""
-    runtime.set_clients([
-        ("a@x.com", fake_client), ("b@x.com", fake_client), ("c@x.com", fake_client),
-    ])
+    runtime.set_clients(
+        [
+            ("a@x.com", fake_client),
+            ("b@x.com", fake_client),
+            ("c@x.com", fake_client),
+        ]
+    )
     fake_client.sharing.set_users_exc = RuntimeError("boom")
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -330,9 +339,7 @@ async def test_set_users_postcheck_rejects_a_missing_email(fake_client):
     with pytest.raises(RuntimeError, match="b@x.com"):
         await basic.notebook_share_with_pool("nb-old")
 
-    assert fake_client.sharing.calls == [
-        ("nb-old", [("b@x.com", SharePermission.EDITOR)], False)
-    ]
+    assert fake_client.sharing.calls == [("nb-old", [("b@x.com", SharePermission.EDITOR)], False)]
 
 
 def _denied() -> ClientError:
@@ -351,11 +358,11 @@ async def test_share_runs_on_whichever_account_can_actually_see_the_notebook(fak
     典型情境正是文件描述的那種:既有 notebook 的 owner 通常是 slot 1,而 pool 會
     rotate 走 —— 所以「照著指引做」必須真的解得開。
     """
-    owner = fake_client                       # slot 1,notebook 的實際擁有者
-    rotated_to = FakeClient()                 # slot 2,配額 failover 換過去的那個
+    owner = fake_client  # slot 1,notebook 的實際擁有者
+    rotated_to = FakeClient()  # slot 2,配額 failover 換過去的那個
     rotated_to.sharing.get_status_exc = _denied()
     runtime.set_clients([("owner@x", owner), ("rotated@x", rotated_to)])
-    runtime.rotate_client()                   # 模擬「已經因為配額換到 slot 2」
+    runtime.rotate_client()  # 模擬「已經因為配額換到 slot 2」
     assert runtime.active_account() == "rotated@x", "前提:作用中的是看不到 notebook 那個"
 
     out = await basic.notebook_share_with_pool("nb-1")
@@ -388,12 +395,11 @@ async def test_share_is_executed_by_the_owner_not_merely_someone_who_can_see_it(
     owner_c, editor_c, third_c = fake_client, FakeClient(), FakeClient()
     # 作用中的 EDITOR 看得到 notebook,而它查回來的狀態帶著 owner 那一列。
     editor_c.sharing.existing = [
-        ("owner@x", SharePermission.OWNER), ("editor@x", SharePermission.EDITOR),
+        ("owner@x", SharePermission.OWNER),
+        ("editor@x", SharePermission.EDITOR),
     ]
     owner_c.sharing.existing = list(editor_c.sharing.existing)
-    runtime.set_clients(
-        [("owner@x", owner_c), ("editor@x", editor_c), ("third@x", third_c)]
-    )
+    runtime.set_clients([("owner@x", owner_c), ("editor@x", editor_c), ("third@x", third_c)])
     runtime.rotate_client()
     assert runtime.active_account() == "editor@x", "前提:作用中的是 EDITOR,不是 owner"
 
@@ -417,7 +423,8 @@ async def test_share_falls_back_to_a_viewer_when_the_owner_is_outside_the_pool(
     """
     outsider_owned = fake_client
     outsider_owned.sharing.existing = [
-        ("someone@else", SharePermission.OWNER), ("a@x", SharePermission.EDITOR),
+        ("someone@else", SharePermission.OWNER),
+        ("a@x", SharePermission.EDITOR),
     ]
     runtime.set_clients([("a@x", outsider_owned), ("b@x", FakeClient())])
 

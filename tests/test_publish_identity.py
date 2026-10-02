@@ -18,9 +18,7 @@ def test_make_token_differs_by_show_id():
 
 
 def test_make_token_differs_by_salt():
-    assert identity.make_token("ai-news", salt="s1") != identity.make_token(
-        "ai-news", salt="s2"
-    )
+    assert identity.make_token("ai-news", salt="s1") != identity.make_token("ai-news", salt="s2")
 
 
 def test_token_charset_is_base32_lower():
@@ -47,6 +45,7 @@ def test_validate_show_id_accepts_good(ok):
 
 def test_episode_guid_stable_and_source_decoupled():
     from notebooklm_mcp.publish import identity
+
     g1 = identity.episode_guid("ai-news", 1)
     assert g1 == identity.episode_guid("ai-news", 1)
     assert g1 != identity.episode_guid("ai-news", 2)

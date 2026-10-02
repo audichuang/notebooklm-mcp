@@ -4,6 +4,7 @@
 是否需要補做。這個 module 不負責 generation submit，也不改 compatibility
 projection；caller 只在本函式完整成功後才 promotion。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -43,8 +44,7 @@ def has_hard_output_evidence(episode: dict) -> bool:
     """已生成或發布的 legacy 證據；即使後來出現 attempt 也不可隱式覆寫。"""
     hard_fields = ("artifact_id", "task_id", "mp3_path", "published_at")
     return any(
-        isinstance(episode.get(field), str) and episode[field].strip()
-        for field in hard_fields
+        isinstance(episode.get(field), str) and episode[field].strip() for field in hard_fields
     )
 
 
@@ -61,11 +61,7 @@ def has_durable_output_evidence(episode: dict) -> bool:
     if isinstance(cover, str) and cover.strip():
         return True
     label = episode.get("label")
-    return (
-        not episode.get("attempts")
-        and isinstance(label, str)
-        and bool(label.strip())
-    )
+    return not episode.get("attempts") and isinstance(label, str) and bool(label.strip())
 
 
 def new_finalize_state() -> dict:
@@ -103,11 +99,7 @@ def _record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[dict, dict
     if episode is None:
         raise ValueError(f"episode {episode_n} is missing from the manifest")
     attempt = next(
-        (
-            row
-            for row in episode.get("attempts", [])
-            if row.get("attempt_id") == attempt_id
-        ),
+        (row for row in episode.get("attempts", []) if row.get("attempt_id") == attempt_id),
         None,
     )
     if attempt is None:
@@ -145,9 +137,7 @@ def _mutate(
     store.update(mutate)
 
 
-def _subject(
-    store: ManifestStore, episode_n: int, attempt_id: str
-) -> tuple[dict, dict]:
+def _subject(store: ManifestStore, episode_n: int, attempt_id: str) -> tuple[dict, dict]:
     snapshot = store.read()
     return _record(snapshot, episode_n, attempt_id)
 
@@ -211,9 +201,7 @@ def _file_matches(path: str, expected_size: int, expected_sha256: str) -> bool:
     return digest == expected_sha256
 
 
-def _completed_output(
-    episode: dict, attempt: dict, episode_n: int, attempt_id: str
-) -> dict | None:
+def _completed_output(episode: dict, attempt: dict, episode_n: int, attempt_id: str) -> dict | None:
     finalize = attempt["finalize"]
     statuses = (
         finalize["artifact_rename"]["status"],
@@ -234,8 +222,7 @@ def _completed_output(
         "task_id": artifact_id,
         "artifact_id": artifact_id,
         "mp3_path": path,
-        "published_at": episode.get("published_at")
-        or format_datetime(datetime.now(_TZ)),
+        "published_at": episode.get("published_at") or format_datetime(datetime.now(_TZ)),
         "attempt_id": attempt_id,
         "feedback_source_id": finalize["feedback_source_upload"]["source_id"],
     }
@@ -380,9 +367,7 @@ async def _reconcile_source_upload(
         def mutate(manifest: dict) -> None:
             _, current = _record(manifest, episode_n, attempt_id)
             if source_id in _claimed_source_ids(manifest, attempt_id):
-                raise ValueError(
-                    f"feedback source {source_id!r} was claimed during reconciliation"
-                )
+                raise ValueError(f"feedback source {source_id!r} was claimed during reconciliation")
             current_upload = current["finalize"]["feedback_source_upload"]
             if current_upload.get("source_id") not in (None, source_id):
                 raise ValueError("attempt already maps to another feedback source")
@@ -406,10 +391,7 @@ async def _reconcile_source_upload(
 
     _mutate(store, episode_n, attempt_id, unresolved)
     if candidates:
-        raise RuntimeError(
-            "feedback source reconciliation is ambiguous: "
-            + ", ".join(candidates)
-        )
+        raise RuntimeError("feedback source reconciliation is ambiguous: " + ", ".join(candidates))
     raise RuntimeError(
         "feedback source acceptance remains unknown; wait and resume the same attempt"
     )
@@ -447,9 +429,7 @@ class RemoteArtifactUnverifiableError(RuntimeError):
     """
 
     def __init__(self, artifact_id: str, attempt_id: str) -> None:
-        super().__init__(
-            f"artifact {artifact_id!r} cannot be verified in the remote list"
-        )
+        super().__init__(f"artifact {artifact_id!r} cannot be verified in the remote list")
         self.artifact_id = artifact_id
         self.attempt_id = attempt_id
 
@@ -465,11 +445,7 @@ async def _artifact_title_state(
     呼叫端將 None 視為無法證實 remote identity，並 fail-closed。
     """
     artifacts = await client.artifacts.list(notebook_id)
-    matches = [
-        artifact
-        for artifact in artifacts
-        if getattr(artifact, "id", None) == artifact_id
-    ]
+    matches = [artifact for artifact in artifacts if getattr(artifact, "id", None) == artifact_id]
     if not matches:
         return None
     return len(matches) == 1 and (
@@ -508,22 +484,16 @@ async def finalize_attempt(
             isinstance(download.get("path"), str)
             and isinstance(download.get("bytes"), int)
             and isinstance(download.get("sha256"), str)
-            and _file_matches(
-                download["path"], download["bytes"], download["sha256"]
-            )
+            and _file_matches(download["path"], download["bytes"], download["sha256"])
         ):
-            source_id = attempt["finalize"]["feedback_source_upload"].get(
-                "source_id"
-            )
+            source_id = attempt["finalize"]["feedback_source_upload"].get("source_id")
             artifact_title_state = await _artifact_title_state(
                 client, notebook_id, artifact_id, label
             )
             if (
                 artifact_title_state is True
                 and isinstance(source_id, str)
-                and await _feedback_source_verified(
-                    client, notebook_id, source_id, label
-                )
+                and await _feedback_source_verified(client, notebook_id, source_id, label)
             ):
                 return completed
 
@@ -541,13 +511,9 @@ async def finalize_attempt(
                 raise ValueError("attempt_id cannot be used as a path component")
             attempt_dir = os.path.join(output_dir, "attempts", attempt_id)
             os.makedirs(attempt_dir, exist_ok=True)
-            mp3_path = os.path.abspath(
-                os.path.join(attempt_dir, f"ep{episode_n:02d}.mp3")
-            )
+            mp3_path = os.path.abspath(os.path.join(attempt_dir, f"ep{episode_n:02d}.mp3"))
         else:
-            mp3_path = os.path.abspath(
-                os.path.join(output_dir, f"ep{episode_n:02d}.mp3")
-            )
+            mp3_path = os.path.abspath(os.path.join(output_dir, f"ep{episode_n:02d}.mp3"))
 
     if attempt["remote"].get("status") != "completed":
         final = await wait_for_artifact(
@@ -556,9 +522,7 @@ async def finalize_attempt(
         try:
             ensure_completed(final)
         except TerminalGenerationError as error:
-            terminal_status = (
-                "removed" if getattr(final, "is_removed", False) else "failed"
-            )
+            terminal_status = "removed" if getattr(final, "is_removed", False) else "failed"
             # except block 結束時 Python 會 `del error`,所以文字先取出來:閉包只在這個
             # block 內被 _mutate 同步呼叫過一次,但只要有人把那次呼叫搬出去就會 NameError。
             error_text = str(error)
@@ -589,9 +553,7 @@ async def finalize_attempt(
 
     _, attempt = _subject(store, episode_n, attempt_id)
     rename = attempt["finalize"]["artifact_rename"]
-    artifact_title_state = await _artifact_title_state(
-        client, notebook_id, artifact_id, label
-    )
+    artifact_title_state = await _artifact_title_state(client, notebook_id, artifact_id, label)
     if artifact_title_state is None:
         # T6:具名例外(比照 `_status.TerminalGenerationError` 的模式——RuntimeError
         # 子類,既有 `except RuntimeError`/`pytest.raises(RuntimeError)` 不必改)。
@@ -600,6 +562,7 @@ async def finalize_attempt(
         raise RemoteArtifactUnverifiableError(artifact_id, attempt_id)
 
     if artifact_title_state is True and rename["status"] != "completed":
+
         def adopt_rename(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "completed"
 
@@ -608,6 +571,7 @@ async def finalize_attempt(
         rename = attempt["finalize"]["artifact_rename"]
 
     if rename["status"] != "completed" or artifact_title_state is False:
+
         def rename_dispatching(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "dispatching"
 
@@ -617,25 +581,17 @@ async def finalize_attempt(
             current["finalize"]["artifact_rename"]["status"] = "outcome_unknown"
 
         try:
-            await client.artifacts.rename(
-                notebook_id, artifact_id, label, return_object=False
-            )
+            await client.artifacts.rename(notebook_id, artifact_id, label, return_object=False)
         except Exception:
-            landed = await _artifact_title_state(
-                client, notebook_id, artifact_id, label
-            )
+            landed = await _artifact_title_state(client, notebook_id, artifact_id, label)
             if landed is not True:
                 _mutate(store, episode_n, attempt_id, rename_unknown)
                 raise
         else:
-            landed = await _artifact_title_state(
-                client, notebook_id, artifact_id, label
-            )
+            landed = await _artifact_title_state(client, notebook_id, artifact_id, label)
             if landed is not True:
                 _mutate(store, episode_n, attempt_id, rename_unknown)
-                raise RuntimeError(
-                    f"artifact {artifact_id!r} rename postcondition failed"
-                )
+                raise RuntimeError(f"artifact {artifact_id!r} rename postcondition failed")
 
         def rename_completed(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "completed"
@@ -649,9 +605,7 @@ async def finalize_attempt(
         and isinstance(download.get("bytes"), int)
         and isinstance(download.get("sha256"), str)
         and isinstance(download.get("path"), str)
-        and _file_matches(
-            download["path"], download["bytes"], download["sha256"]
-        )
+        and _file_matches(download["path"], download["bytes"], download["sha256"])
     )
     if not download_complete:
         # process 被 SIGKILL(不像取消,連 finally 都沒機會跑)後,checkpoint 上
@@ -676,9 +630,7 @@ async def finalize_attempt(
         _mutate(store, episode_n, attempt_id, download_dispatching)
         replaced = False
         try:
-            await client.artifacts.download_audio(
-                notebook_id, temp_path, artifact_id
-            )
+            await client.artifacts.download_audio(notebook_id, temp_path, artifact_id)
             size = os.path.getsize(temp_path)
             if size <= 0:
                 raise ValueError("downloaded audio is empty")
@@ -696,6 +648,7 @@ async def finalize_attempt(
             os.replace(temp_path, mp3_path)
             replaced = True
         except Exception:
+
             def download_failed(_episode: dict, current: dict) -> None:
                 # 只准從自己 claim 的 "dispatching" 降級:併發 finalizer 若已經把這顆
                 # checkpoint 寫成 "completed"(例如更快完成的另一個 process),這裡
@@ -755,9 +708,7 @@ async def finalize_attempt(
     if isinstance(source_id, str) and source_id:
         sources = await client.sources.list(notebook_id)
         if not any(getattr(source, "id", None) == source_id for source in sources):
-            raise RuntimeError(
-                f"saved feedback source {source_id!r} no longer exists"
-            )
+            raise RuntimeError(f"saved feedback source {source_id!r} no longer exists")
     elif upload["status"] in (
         "dispatching",
         "acceptance_unknown",
@@ -768,11 +719,7 @@ async def finalize_attempt(
         )
     else:
         sources = await client.sources.list(notebook_id)
-        baseline = [
-            source.id
-            for source in sources
-            if isinstance(getattr(source, "id", None), str)
-        ]
+        baseline = [source.id for source in sources if isinstance(getattr(source, "id", None), str)]
         dispatched_at = datetime.now(UTC).isoformat()
         expected_title = os.path.basename(mp3_path)
 
@@ -813,6 +760,7 @@ async def finalize_attempt(
             # 刻意不寫 `except BaseException`:KeyboardInterrupt／SystemExit 不該在這裡
             # 被當成「上傳結果不明」處理。
             except (Exception, asyncio.CancelledError) as exc:
+
                 def upload_unknown(_episode: dict, current: dict) -> None:
                     # 只准從自己 claim 的 "dispatching" 降級:併發 finalizer(或
                     # `podcast_attempt_adopt`)若已經把這顆 checkpoint 寫成
@@ -846,23 +794,18 @@ async def finalize_attempt(
 
     _, attempt = _subject(store, episode_n, attempt_id)
     sources = await client.sources.list(notebook_id)
-    source = next(
-        (row for row in sources if getattr(row, "id", None) == source_id), None
-    )
+    source = next((row for row in sources if getattr(row, "id", None) == source_id), None)
     if source is None:
         raise RuntimeError(f"feedback source {source_id!r} cannot be verified")
     already_named = getattr(source, "title", None) == label and _source_ready(source)
     if not already_named:
+
         def source_rename_dispatching(_episode: dict, current: dict) -> None:
-            current["finalize"]["feedback_source_rename"][
-                "status"
-            ] = "dispatching"
+            current["finalize"]["feedback_source_rename"]["status"] = "dispatching"
 
         _mutate(store, episode_n, attempt_id, source_rename_dispatching)
         try:
-            await client.sources.rename(
-                notebook_id, source_id, label, return_object=False
-            )
+            await client.sources.rename(notebook_id, source_id, label, return_object=False)
         except Exception:
             check = await client.sources.list(notebook_id)
             landed = next(
@@ -876,10 +819,9 @@ async def finalize_attempt(
                 None,
             )
             if landed is None:
+
                 def source_rename_unknown(_episode: dict, current: dict) -> None:
-                    current["finalize"]["feedback_source_rename"][
-                        "status"
-                    ] = "outcome_unknown"
+                    current["finalize"]["feedback_source_rename"]["status"] = "outcome_unknown"
 
                 _mutate(store, episode_n, attempt_id, source_rename_unknown)
                 raise
@@ -895,9 +837,7 @@ async def finalize_attempt(
         None,
     )
     if verified is None:
-        raise RuntimeError(
-            f"feedback source {source_id!r} postcondition is not satisfied"
-        )
+        raise RuntimeError(f"feedback source {source_id!r} postcondition is not satisfied")
 
     def source_completed(_episode: dict, current: dict) -> None:
         now = datetime.now(UTC).isoformat()

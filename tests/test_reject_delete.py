@@ -3,6 +3,7 @@
 This compatibility case has no prior manifest-backed completed episode and does
 not authorize implicit regeneration or replacement of durable output.
 """
+
 import pytest
 
 from notebooklm_mcp import tools_basic as t, tools_podcast as p
@@ -33,9 +34,7 @@ async def test_source_delete_replayed_after_success_stays_idempotent(fake_client
     assert len([c for c in fake_client.sources.calls if c[0] == "delete"]) == delete_calls
 
 
-async def test_source_delete_never_touches_an_id_from_another_notebook(
-    fake_client, monkeypatch
-):
+async def test_source_delete_never_touches_an_id_from_another_notebook(fake_client, monkeypatch):
     """DELETE_SOURCE 只送 source_id；歸屬無法確認時**不發那個 RPC**。
 
     這是 fail-loud 換成 `was_present=False` 之後仍然必須成立的那個安全性質:別本筆記本
@@ -85,7 +84,9 @@ async def test_delete_source_then_generate_fresh_standalone_episode(fake_client,
     assert fake_client.sources.titles() == ["EP01 心法篇", "Seed"]
 
     # EP01 is already a source and must not be duplicated.
-    await p.podcast_episode("nb-1", episode_n=2, title="實戰篇", brief="重生第二集", output_dir=str(tmp_path))
+    await p.podcast_episode(
+        "nb-1", episode_n=2, title="實戰篇", brief="重生第二集", output_dir=str(tmp_path)
+    )
 
     assert fake_client.sources.titles() == ["EP01 心法篇", "EP02 實戰篇", "Seed"]
     add_files = [c for c in fake_client.sources.calls if c[0] == "add_file"]

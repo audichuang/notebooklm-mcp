@@ -9,6 +9,7 @@
 provenance / 日期 / 版本 / 重複性判斷,再把選中的 URL 交給 `research_import`。
 `cited` 只是**事實標記**(該 URL 有沒有出現在報告的引用裡),不是 MCP 幫你做的篩選決定。
 """
+
 from __future__ import annotations
 
 # 兩個 normalizer 不能混用,SDK 自己的 docstring 就寫明「Distinct from
@@ -122,9 +123,7 @@ async def research_start(
     # 記帳與送出同源:snapshot() 一次取 (label, client),之後任何 rotate 都影響不到
     # 這一次——分兩次讀會讓回傳的 account 記到別人身上(同 ADR-0010 ③)。
     account, client = runtime.snapshot()
-    res = await client.research.start(
-        notebook_id, query, source=source, mode=mode
-    )
+    res = await client.research.start(notebook_id, query, source=source, mode=mode)
     if res.mode == "deep":
         if not isinstance(res.report_id, str) or not res.report_id.strip():
             raise DecodingError(
@@ -192,9 +191,7 @@ async def research_wait(
     report_importable = any(
         getattr(s, "is_report", False) and getattr(s, "report_markdown", "") for s in sources
     )
-    candidates = [
-        _candidate(s, cited_urls) for s in sources if not getattr(s, "is_report", False)
-    ]
+    candidates = [_candidate(s, cited_urls) for s in sources if not getattr(s, "is_report", False)]
     body = report[:max_report_chars] if max_report_chars else ""
     return {
         "status": status_str,
@@ -240,7 +237,7 @@ async def research_import(
     bad = [u for u in raw_urls if not isinstance(u, str) or not u.strip()]
     if bad:
         raise ValueError(f"urls 含空字串/非字串項目:{bad!r}")
-    clean_urls = [u.strip() for u in raw_urls]        # normalizer 不 strip 空白,先處理掉
+    clean_urls = [u.strip() for u in raw_urls]  # normalizer 不 strip 空白,先處理掉
     if not clean_urls and not include_report:
         raise ValueError("urls 為空且 include_report=False —— 沒有任何東西要匯入")
 
@@ -279,7 +276,7 @@ async def research_import(
     seen: set[str] = set()
     for url in clean_urls:
         key = _import_url_key(url)
-        if key in seen:      # 呼叫端重複指名同一筆,去重(不是錯誤)
+        if key in seen:  # 呼叫端重複指名同一筆,去重(不是錯誤)
             continue
         seen.add(key)
         matches = by_url.get(key) or []
@@ -304,7 +301,8 @@ async def research_import(
 
     if include_report:
         report_entries = [
-            s for s in sources
+            s
+            for s in sources
             if getattr(s, "is_report", False) and getattr(s, "report_markdown", "")
         ]
         if not report_entries:
@@ -320,8 +318,7 @@ async def research_import(
         )
     return {
         "imported": [
-            {"source_id": entry.get("id"), "title": entry.get("title")}
-            for entry in imported
+            {"source_id": entry.get("id"), "title": entry.get("title")} for entry in imported
         ],
         # 重呼時上游先對 baseline 去重:已經在 notebook 裡的不再匯入、只從這裡回報。
         "already_present": [

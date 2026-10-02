@@ -29,6 +29,7 @@
 exception 階層沒有做成獨立區塊,因為它已經在 ③ 之後由 `tests/test_contracts.py` 釘住;
 這裡只列名字與父類別,足夠讓 diff 顯示「有沒有人被移除或改父類別」。
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -40,29 +41,77 @@ import json
 _ENUMS = [
     # 一律走**兩版都在**的匯出點:`ArtifactStatus` 0.8.2 搬到 `_types.enums`,但
     # `rpc.types` 兩版都 re-export —— 挑會搬家的那個路徑只會產生「模組不存在」的假訊號。
-    ("notebooklm.rpc.types", ["AudioFormat", "AudioLength", "SharePermission", "GrpcStatusCode",
-                              "ShareViewLevel", "ArtifactStatus"]),
+    (
+        "notebooklm.rpc.types",
+        [
+            "AudioFormat",
+            "AudioLength",
+            "SharePermission",
+            "GrpcStatusCode",
+            "ShareViewLevel",
+            "ArtifactStatus",
+        ],
+    ),
     (
         "notebooklm.types",
-        ["SlideDeckFormat", "SlideDeckLength", "ReportFormat", "ArtifactType", "SourceType", "VideoFormat"],
+        [
+            "SlideDeckFormat",
+            "SlideDeckLength",
+            "ReportFormat",
+            "ArtifactType",
+            "SourceType",
+            "VideoFormat",
+        ],
     ),
 ]
 
 _TYPES = [
-    ("notebooklm.types", ["Artifact", "Notebook", "Source", "SourceFulltext", "ShareStatus",
-                          "SharedUser", "AskResult", "GenerationStatus", "RelevantChunk"]),
-    ("notebooklm._types.research", ["ResearchSource", "ResearchStart", "ResearchStatus", "ResearchTask"]),
+    (
+        "notebooklm.types",
+        [
+            "Artifact",
+            "Notebook",
+            "Source",
+            "SourceFulltext",
+            "ShareStatus",
+            "SharedUser",
+            "AskResult",
+            "GenerationStatus",
+            "RelevantChunk",
+        ],
+    ),
+    (
+        "notebooklm._types.research",
+        ["ResearchSource", "ResearchStart", "ResearchStatus", "ResearchTask"],
+    ),
 ]
 
 #: 我們真的會呼叫的東西。新增呼叫點時**請一起加進來** —— 這份清單就是「依賴表面」的定義。
 _CALLS = {
     "notebooklm._artifacts:ArtifactsAPI": [
-        "download_audio", "download_report", "download_slide_deck", "generate_audio",
-        "generate_report", "generate_slide_deck", "generate_study_guide", "get_or_none",
-        "list", "rename", "retry_failed", "revise_slide", "wait_for_completion",
+        "download_audio",
+        "download_report",
+        "download_slide_deck",
+        "generate_audio",
+        "generate_report",
+        "generate_slide_deck",
+        "generate_study_guide",
+        "get_or_none",
+        "list",
+        "rename",
+        "retry_failed",
+        "revise_slide",
+        "wait_for_completion",
     ],
     "notebooklm._sources:SourcesAPI": [
-        "add_file", "add_url", "add_text", "delete", "get_fulltext", "list", "rename", "search",
+        "add_file",
+        "add_url",
+        "add_text",
+        "delete",
+        "get_fulltext",
+        "list",
+        "rename",
+        "search",
     ],
     "notebooklm._notebooks:NotebooksAPI": ["create", "list", "get", "get_source_ids", "get_raw"],
     "notebooklm._chat:ChatAPI": ["ask"],
@@ -129,8 +178,10 @@ def main() -> int:
                 print(f"{module}.{name}: UNAVAILABLE {exc!r}")
                 continue
             if dataclasses.is_dataclass(t):
-                print(f"{module}.{name} fields: " + json.dumps(
-                    sorted(f.name for f in dataclasses.fields(t)), ensure_ascii=False))
+                print(
+                    f"{module}.{name} fields: "
+                    + json.dumps(sorted(f.name for f in dataclasses.fields(t)), ensure_ascii=False)
+                )
             props = sorted(k for k, v in vars(t).items() if isinstance(v, property))
             print(f"{module}.{name} props: {props}")
 

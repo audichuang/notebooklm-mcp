@@ -1,5 +1,6 @@
 """按需生成單集附加產物(簡報 slide deck / 研讀 report),路徑回寫 series_manifest.json。
 不碰音檔迴圈;想幫哪集加就對哪集跑。產物只餵傳入的 source_ids(不傳則 SDK 用全部來源)。"""
+
 from __future__ import annotations
 
 import os
@@ -27,7 +28,8 @@ def _episode_in(data: dict, episode_n: int, manifest_path: str) -> dict:
     """從 snapshot 裡取出該集,取不到就 fail loud(不 setdefault 生一個空的出來)。"""
     ep = next(
         (
-            e for e in data.get("episodes", [])
+            e
+            for e in data.get("episodes", [])
             if isinstance(e, dict) and e.get("episode") == episode_n
         ),
         None,
@@ -135,15 +137,28 @@ async def _dispatch_attachment(
         client=client,
         notebook_id=notebook_id,
         record_failover=lambda reason, from_account, to_account: _append_attachment_event(
-            manifest_path, episode_n, kind, "attachment_dispatch_failover", reason,
-            from_account=from_account, to_account=to_account,
+            manifest_path,
+            episode_n,
+            kind,
+            "attachment_dispatch_failover",
+            reason,
+            from_account=from_account,
+            to_account=to_account,
         ),
         on_clean_refusal=lambda reason, refused: _append_attachment_event(
-            manifest_path, episode_n, kind, "attachment_dispatch_refused", reason,
+            manifest_path,
+            episode_n,
+            kind,
+            "attachment_dispatch_refused",
+            reason,
             account=refused,
         ),
         on_acceptance_unknown=lambda reason, used: _append_attachment_event(
-            manifest_path, episode_n, kind, "attachment_acceptance_unknown", reason,
+            manifest_path,
+            episode_n,
+            kind,
+            "attachment_acceptance_unknown",
+            reason,
             account=used,
         ),
     )
@@ -152,6 +167,7 @@ async def _dispatch_attachment(
 
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
     """在 locked fresh snapshot 上合併單集欄位，避免其他 writer 的更新被覆蓋。"""
+
     def mutate(data):
         ep = _episode_in(data, episode_n, manifest_path)
         if "description" in fields:
@@ -277,7 +293,9 @@ async def episode_set_publication_state(
             complete = all(field in ep for field in _PUBLICATION_STATE_FIELDS) and _is_utc_stamp(
                 ep.get("publication_state_at")
             )
-            same = previous == state and (ep.get("publication_state_reason") or "") == reason.strip()
+            same = (
+                previous == state and (ep.get("publication_state_reason") or "") == reason.strip()
+            )
             if complete and same:
                 raise _NoChange({"previous_state": previous})
             ep["publication_state"] = state
@@ -355,8 +373,7 @@ async def _require_completed_slide_deck(client: object, notebook_id: str, artifa
     art = await client.artifacts.get_or_none(notebook_id, artifact_id)  # type: ignore[attr-defined]
     if art is None:
         raise ValueError(
-            f"artifact {artifact_id} 不在 notebook {notebook_id}"
-            "(用 artifact_list 確認 ID 與筆記本)"
+            f"artifact {artifact_id} 不在 notebook {notebook_id}(用 artifact_list 確認 ID 與筆記本)"
         )
     kind = getattr(art.kind, "value", str(art.kind))
     if kind != "slide_deck":
@@ -392,10 +409,14 @@ async def _finish_slides(
     的人看得出要另尋線索,比留著上一次的帳號好(那個值看起來是權威的,而它講的是別的成品)。
     provenance 與 `slides_pdf_path` **同一次 `update`**,理由見上方那段紀律。"""
     # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
-    final = await wait_for_artifact(client.artifacts, notebook_id, artifact_id, timeout=wait_timeout)
+    final = await wait_for_artifact(
+        client.artifacts, notebook_id, artifact_id, timeout=wait_timeout
+    )
     ensure_completed(final)
 
-    out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-slides.pdf")
+    out = os.path.join(
+        os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-slides.pdf"
+    )
     # 固定檔名 → 重生就是就地覆寫。原子換檔,失敗時舊那份完整簡報原封不動。
     await download_atomically(
         out,
@@ -405,8 +426,11 @@ async def _finish_slides(
         _validate_pdf,
     )
     _load_ep_and_write(
-        manifest_path, episode_n,
-        slides_pdf_path=out, slides_account=account, slides_artifact_id=artifact_id,
+        manifest_path,
+        episode_n,
+        slides_pdf_path=out,
+        slides_account=account,
+        slides_artifact_id=artifact_id,
     )
     return {"episode": episode_n, "slides_pdf_path": out, "artifact_id": artifact_id}
 
@@ -432,7 +456,7 @@ async def generate_slides(
     `slides_account`,每次換人往 `attachment_errors` append 一筆);**拋出配額錯誤 =
     整個 pool 都被拒,不要自己再重試**。"""
     selected = to_source_ids(source_ids)
-    _require_episode(manifest_path, episode_n)      # 打錯集號別燒一次生成配額
+    _require_episode(manifest_path, episode_n)  # 打錯集號別燒一次生成配額
     # 記帳與送出同源:`snapshot()` 一次取 `(label, client)`,之後任何並行的 rotate 都
     # 影響不到這一次(ADR-0010——分兩次讀全域會讓紀錄記下 A、實際由 B 送出)。
     account, client = runtime.snapshot()
@@ -474,7 +498,12 @@ async def generate_slides(
         notebook_id=notebook_id,
     )
     return await _finish_slides(
-        client, notebook_id, manifest_path, episode_n, artifact_id, wait_timeout,
+        client,
+        notebook_id,
+        manifest_path,
+        episode_n,
+        artifact_id,
+        wait_timeout,
         account=account,
     )
 
@@ -561,7 +590,12 @@ async def artifact_revise_slide(
     # `<原標題> (2)`,舊的留著。當初若照 docstring 寫死用輸入的 artifact_id,下載到的
     # 會是**沒改過的舊那份**,而且看起來完全成功。
     out = await _finish_slides(
-        client, notebook_id, manifest_path, episode_n, revised_id, wait_timeout,
+        client,
+        notebook_id,
+        manifest_path,
+        episode_n,
+        revised_id,
+        wait_timeout,
         account=account,
     )
     out["slide_index"] = slide_index
@@ -584,10 +618,14 @@ async def _finish_report(
 ) -> dict:
     """生成之後的共用尾段(同 `_finish_slides`,`account` 的語意也同那裡)。"""
     # client 是 public tool 入口固定下來的同一個帳號，不回頭讀全域 active slot。
-    final = await wait_for_artifact(client.artifacts, notebook_id, artifact_id, timeout=wait_timeout)
+    final = await wait_for_artifact(
+        client.artifacts, notebook_id, artifact_id, timeout=wait_timeout
+    )
     ensure_completed(final)
 
-    out = os.path.join(os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-report.md")
+    out = os.path.join(
+        os.path.dirname(os.path.abspath(manifest_path)), f"ep{episode_n:02d}-report.md"
+    )
     # 同 _finish_slides:固定檔名的就地覆寫換成原子換檔。
     await download_atomically(
         out,
@@ -595,11 +633,19 @@ async def _finish_report(
         _validate_utf8_text,
     )
     _load_ep_and_write(
-        manifest_path, episode_n,
-        report_md_path=out, report_format=report_format,
-        report_account=account, report_artifact_id=artifact_id,
+        manifest_path,
+        episode_n,
+        report_md_path=out,
+        report_format=report_format,
+        report_account=account,
+        report_artifact_id=artifact_id,
     )
-    return {"episode": episode_n, "report_md_path": out, "report_format": report_format, "artifact_id": artifact_id}
+    return {
+        "episode": episode_n,
+        "report_md_path": out,
+        "report_format": report_format,
+        "artifact_id": artifact_id,
+    }
 
 
 def _validate_report_prompt(
@@ -658,8 +704,8 @@ async def generate_report(
     整個 pool 都被拒,不要自己再重試**。"""
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
     selected = to_source_ids(source_ids)
-    _require_episode(manifest_path, episode_n)      # 同上
-    account, client = runtime.snapshot()            # 同 generate_slides:記帳與送出同源
+    _require_episode(manifest_path, episode_n)  # 同上
+    account, client = runtime.snapshot()  # 同 generate_slides:記帳與送出同源
     if selected is not None:
         # 同 generate_slides:打錯/已刪的 source_id 伺服器不擋,先唯讀對帳。
         await assert_sources_exist(client, notebook_id, selected)

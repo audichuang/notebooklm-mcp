@@ -22,6 +22,7 @@
 它的終態就是原樣拋給呼叫端 —— 遠端什麼都沒建出來,沒有東西要對帳。差別只在傳不傳
 `on_clean_refusal` / `on_acceptance_unknown`,迴圈本身一個字都不分岔。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -168,6 +169,7 @@ async def dispatch_with_failover(
         on_acceptance_unknown: `(reason, account)` —— 「受理結果不明」的終態(同上)。
             附件家族也要記:遠端可能已經有一顆沒人綁得到的 artifact,留一筆才看得出來。
     """
+
     def _mark(callback, reason: object, used: str | None) -> None:
         """呼叫終態 callback,但**不讓稽核的 post-commit 失敗遮蔽主要例外**。
 
@@ -228,9 +230,7 @@ async def dispatch_with_failover(
                 # 的 reconcile。**不 rotate**(紅線③)。
                 # 用這次 dispatch 實際持有的 `account`,不重讀全域:並行 rotate 會讓訊息
                 # 指認錯的帳號,而這條訊息會被寫進稽核紀錄。
-                denied = access_denied_error(
-                    exc, notebook_id=notebook_id, account=account
-                )
+                denied = access_denied_error(exc, notebook_id=notebook_id, account=account)
                 # 先建好帶指引的例外、再標終態 —— 紀錄下來的要是**這份帶著下一步動作**的
                 # 訊息,不是上游原始的 "permission denied"。呼叫端事後只看得到紀錄時
                 # (例如 podcast_series 的結構化 partial 只回訊息不回原始例外),

@@ -4,6 +4,7 @@ SDK 的 ``generate_audio`` 早就吃 ``source_ids``,不傳就 fallback 抓筆記
 我們只是把那個洞往上開;「重生 EP05 時排除 EP06+ 的來源」這種 Audicast 操作政策
 不進 capability layer。
 """
+
 import json
 
 import pytest
@@ -13,9 +14,7 @@ from notebooklm_mcp import tools_basic as b, tools_podcast as p
 
 
 def _audio_call(fake_client):
-    return next(
-        call for call in fake_client.artifacts.calls if call[0] == "generate_audio"
-    )[1]
+    return next(call for call in fake_client.artifacts.calls if call[0] == "generate_audio")[1]
 
 
 async def test_generate_audio_forwards_the_caller_selection(fake_client):
@@ -30,9 +29,7 @@ async def test_generate_audio_without_selection_keeps_sdk_fallback(fake_client):
     assert _audio_call(fake_client)["source_ids"] is None
 
 
-@pytest.mark.parametrize(
-    "bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"]
-)
+@pytest.mark.parametrize("bad", [[], ["src-1", "src-1"], ["src-1", ""], ["src-1", 2], "src-1"])
 async def test_generate_audio_rejects_a_malformed_selection(fake_client, bad):
     """空清單/重複/非字串在打 RPC 之前就退——生成是燒配額的不可逆副作用。"""
     with pytest.raises(ValueError):
@@ -62,9 +59,7 @@ async def test_episode_pins_the_selection_into_attempt_settings(fake_client, tmp
     assert attempt["settings"]["source_ids"] == ["src-1", "src-2"]
 
 
-async def test_unpinned_settings_stay_shaped_like_pre_source_ids_manifests(
-    fake_client, tmp_path
-):
+async def test_unpinned_settings_stay_shaped_like_pre_source_ids_manifests(fake_client, tmp_path):
     """沒選來源時 settings 不得多長出 key —— `podcast_series` 的 prepared-attempt
     比對是逐字等值,多一個 key 會讓既有 manifest 被判成「設定變了」。"""
     manifest_path = tmp_path / "series_manifest.json"
@@ -84,9 +79,7 @@ async def test_unpinned_settings_stay_shaped_like_pre_source_ids_manifests(
     assert _audio_call(fake_client)["source_ids"] is None
 
 
-async def test_episode_rejects_an_absent_source_before_burning_a_generation(
-    fake_client, tmp_path
-):
+async def test_episode_rejects_an_absent_source_before_burning_a_generation(fake_client, tmp_path):
     """打錯/已被刪掉的 source_id 會靜默生出「看不到那幾筆來源」的音檔,燒完 20 分鐘
     才發現(同 `_validate_report_prompt` 的情境)。上線前用 source_list 對帳。"""
     fake_client.sources.seed("EP05 題目")
@@ -107,9 +100,7 @@ async def test_episode_rejects_an_absent_source_before_burning_a_generation(
     assert not manifest_path.exists()
 
 
-async def test_frozen_bundle_replay_rejects_a_changed_selection(
-    fake_client, tmp_path, monkeypatch
-):
+async def test_frozen_bundle_replay_rejects_a_changed_selection(fake_client, tmp_path, monkeypatch):
     """frozen bundle 重跑沿用同一 attempt,但換了來源集合就不再是同一次生成——
     binding 會在說謊。"""
     fake_client.sources.seed("EP01 題目", "EP01 附錄")
@@ -163,11 +154,12 @@ async def test_frozen_bundle_replay_rejects_a_changed_selection(
 # 唯一脫出是手改 manifest —— ADR-0009 明令禁止。修法:讓建立它的那支工具原樣重呼即可
 # 沿用同一個 attempt 重送。
 
+
 async def _quota_blocked_episode(fake_client, tmp_path):
     """製造一個「帶 source_ids、撞到配額拒絕」的 active attempt,回傳呼叫參數。"""
     from notebooklm.exceptions import RateLimitError
 
-    manifest_path = tmp_path / "series_manifest.json"   # podcast_episode 會自己建
+    manifest_path = tmp_path / "series_manifest.json"  # podcast_episode 會自己建
     fake_client.sources.seed("EP01 題目", "EP01 補充")
     args = dict(
         episode_n=1,
@@ -215,9 +207,7 @@ async def test_refusal_error_tells_the_caller_how_to_resume(fake_client, tmp_pat
     assert "沒有" in message and "artifact" in message, "訊息沒說清楚遠端什麼都沒建"
 
 
-async def test_identical_recall_resends_the_quota_refused_attempt(
-    fake_client, tmp_path
-):
+async def test_identical_recall_resends_the_quota_refused_attempt(fake_client, tmp_path):
     """原樣重呼 = 沿用同一個 attempt 重送,不建新的、不多燒一次配額。"""
     args, manifest_path, attempt_id = await _quota_blocked_episode(fake_client, tmp_path)
 
@@ -234,9 +224,7 @@ async def test_identical_recall_resends_the_quota_refused_attempt(
     # 但**為什麼被拒**留在 errors[](只 append、從不清除)。
     # 註:errors[].type 是寫死的 "not_accepted"(例外型別名放在 remote.error_code),
     # 所以這裡驗訊息本身,不驗型別欄位。
-    refusals = [
-        e for e in episode["attempts"][0]["errors"] if e["phase"] == "dispatch"
-    ]
+    refusals = [e for e in episode["attempts"][0]["errors"] if e["phase"] == "dispatch"]
     assert any("配額" in e["message"] for e in refusals), refusals
 
 
@@ -269,7 +257,7 @@ async def test_series_names_podcast_episode_as_the_owner(fake_client, tmp_path):
         await p.podcast_series(
             "nb-1",
             episodes=[{"title": "心法篇", "brief": "第一集"}],
-            output_dir=str(tmp_path),   # series 由 output_dir 推導 manifest 路徑
+            output_dir=str(tmp_path),  # series 由 output_dir 推導 manifest 路徑
         )
 
 
@@ -294,18 +282,14 @@ async def _remotely_failed_pinned_episode(fake_client, tmp_path):
             source_ids=["src-1"],
         )
     fake_client.artifacts.fail_complete = False
-    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
-        "attempts"
-    ][0]
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "accepted"
     assert attempt["remote"]["status"] == "failed"
     assert attempt["settings"]["source_ids"] == ["src-1"]
     return manifest_path, attempt["attempt_id"]
 
 
-async def test_series_refuses_to_supersede_an_attempt_it_does_not_own(
-    fake_client, tmp_path
-):
+async def test_series_refuses_to_supersede_an_attempt_it_does_not_own(fake_client, tmp_path):
     """**內容錯置**:series 不得把指名來源的 attempt supersede 成不指名的。
 
     實測形狀(v0.9.12 與更早皆可重現):`podcast_episode(source_ids=["src-1"])` 遠端
@@ -318,9 +302,7 @@ async def test_series_refuses_to_supersede_an_attempt_it_does_not_own(
     not_accepted 那兩格。
     """
     await _remotely_failed_pinned_episode(fake_client, tmp_path)
-    before = sum(
-        1 for c in fake_client.artifacts.calls if c[0] == "generate_audio"
-    )
+    before = sum(1 for c in fake_client.artifacts.calls if c[0] == "generate_audio")
 
     with pytest.raises(ValueError, match="podcast_attempt_retract"):
         await p.podcast_series(
@@ -329,20 +311,14 @@ async def test_series_refuses_to_supersede_an_attempt_it_does_not_own(
             output_dir=str(tmp_path),
         )
 
-    generated = [
-        c[1] for c in fake_client.artifacts.calls if c[0] == "generate_audio"
-    ]
+    generated = [c[1] for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
     assert len(generated) == before, "series 又送出了一次不指名來源的生成"
-    stored = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     # 拒絕必須在任何 manifest mutation 之前(F-7 同一條紀律)。
     assert len(stored["episodes"][0]["attempts"]) == 1
 
 
-async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(
-    fake_client, tmp_path
-):
+async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(fake_client, tmp_path):
     """訊息必須由 `_attempt_capabilities()` 產生 —— 手寫的那句在這一格是**假的**。
 
     `_assert_series_owns_attempt` 原本的 owner_hint 無條件說「re-calling
@@ -351,9 +327,7 @@ async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(
     只收 `_NEVER_DISPATCHED`),照做會撞 `already has durable active attempt`。
     那正是 docs/gotchas-attempt.md 紅線列的「指引在它自己產生的狀態下不可執行」。
     """
-    manifest_path, attempt_id = await _remotely_failed_pinned_episode(
-        fake_client, tmp_path
-    )
+    manifest_path, attempt_id = await _remotely_failed_pinned_episode(fake_client, tmp_path)
     with pytest.raises(ValueError) as caught:
         await p.podcast_series(
             "nb-1",
@@ -380,9 +354,9 @@ async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(
     for row in retracted.get("source_cleanup_obligations", []):
         await b.source_delete(row["notebook_id"], row["source_id"])
     assert retracted["safe_next_action"] == "podcast_episode"
-    assert retracted["regeneration_source_ids"] == [
-        "src-1"
-    ], "retract 教人「帶回原本那組 source_ids」,回傳卻沒給那組"
+    assert retracted["regeneration_source_ids"] == ["src-1"], (
+        "retract 教人「帶回原本那組 source_ids」,回傳卻沒給那組"
+    )
     out = await p.podcast_episode(
         "nb-1",
         episode_n=1,
@@ -396,9 +370,7 @@ async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(
     assert _audio_call(fake_client)["source_ids"] == ["src-1"]
 
 
-async def test_series_does_not_supersede_a_frozen_bundle_attempt(
-    fake_client, tmp_path
-):
+async def test_series_does_not_supersede_a_frozen_bundle_attempt(fake_client, tmp_path):
     """歸屬不能只比 settings —— frozen bundle 的三個音訊設定可以剛好與整季相同。
 
     `_regeneration_entry_point()` 看的是 `input_bundle`(有 bundle 就一定是
@@ -427,9 +399,7 @@ async def test_series_does_not_supersede_a_frozen_bundle_attempt(
         )
     fake_client.artifacts.fail_complete = False
 
-    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0][
-        "attempts"
-    ][0]
+    attempt = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"][0]
     assert attempt["input_bundle"] is not None
     # 前提:settings 與整季逐字相同 —— 這正是捷徑會誤判的形狀。
     assert set(attempt["settings"]) == {"language", "audio_format", "audio_length"}
@@ -444,10 +414,9 @@ async def test_series_does_not_supersede_a_frozen_bundle_attempt(
             output_dir=str(output_dir),
         )
 
-    assert (
-        sum(1 for c in fake_client.artifacts.calls if c[0] == "generate_audio")
-        == before
-    ), "series 又送出了一次不帶 frozen bundle 的生成"
+    assert sum(1 for c in fake_client.artifacts.calls if c[0] == "generate_audio") == before, (
+        "series 又送出了一次不帶 frozen bundle 的生成"
+    )
     final = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert len(final["episodes"][0]["attempts"]) == 1
 
@@ -507,17 +476,13 @@ async def test_series_still_supersedes_its_own_failed_attempt(fake_client, tmp_p
         output_dir=str(tmp_path),
     )
     assert out["complete"] is True
-    stored = json.loads(
-        (tmp_path / "series_manifest.json").read_text(encoding="utf-8")
-    )
+    stored = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
     attempts = stored["episodes"][0]["attempts"]
     assert len(attempts) == 2, "series 自己的 attempt 沒有被 supersede"
     assert attempts[1]["supersedes_attempt_id"] == attempts[0]["attempt_id"]
 
 
-async def test_failed_series_call_does_not_wipe_the_refusal_evidence(
-    fake_client, tmp_path
-):
+async def test_failed_series_call_does_not_wipe_the_refusal_evidence(fake_client, tmp_path):
     """F-7:mutate-before-validate。註定失敗的 series 呼叫**不得**先把診斷抹掉。
 
     舊行為:rearm 先跑(清掉 remote.error / error_code / dispatched_at、把 status 設成
@@ -533,7 +498,7 @@ async def test_failed_series_call_does_not_wipe_the_refusal_evidence(
         await p.podcast_series(
             "nb-1",
             episodes=[{"title": "心法篇", "brief": "第一集"}],
-            output_dir=str(tmp_path),   # series 由 output_dir 推導 manifest 路徑
+            output_dir=str(tmp_path),  # series 由 output_dir 推導 manifest 路徑
         )
 
     after = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -622,16 +587,12 @@ async def test_series_stops_structurally_instead_of_throwing_away_finished_episo
     assert out["episodes"][0]["episode"] == 1
     # 停在 EP02 之前:第二集連 attempt 都沒建,generate_audio 只發生過一次。
     assert out["attempt_id"] is None
-    assert len(
-        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
-    ) == 1
+    assert len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]) == 1
     # 訊息要留在回傳值裡 —— 裸拋時指引在 exception,回 partial 就只剩這個欄位。
     assert "source_ids" in out["error"]
 
 
-async def test_the_count_guard_still_wins_over_the_ownership_guard(
-    fake_client, tmp_path
-):
+async def test_the_count_guard_still_wins_over_the_ownership_guard(fake_client, tmp_path):
     """兩道守門的**順序**是進度保全的一部分。
 
     接手歸屬是純本機判斷,擺在筆數守門(要打一趟 RPC)之前看起來更划算 —— 但那會把
@@ -671,9 +632,7 @@ async def test_the_count_guard_still_wins_over_the_ownership_guard(
     assert len(out["episodes"]) == 1, "EP01 已經跑完,結果不可以被丟掉"
 
 
-async def test_the_count_guard_also_covers_the_series_resend_path(
-    fake_client, tmp_path
-):
+async def test_the_count_guard_also_covers_the_series_resend_path(fake_client, tmp_path):
     """**兩條 dispatch 路徑都要守。** 全新一集走 `_run_episode`,重送/supersede 是
     `podcast_series` 自己 inline —— v0.8.0 的 failover 只補了前者,於是 pool 對「重試」
     這條最需要它的路完全無效(ADR-0010 紀律①)。同一個形狀在這裡會重演:筆記本的
@@ -790,7 +749,12 @@ async def test_naming_the_sources_lifts_the_count_guard(fake_client, tmp_path):
 
     assert out["artifact_id"]
     assert _audio_call(fake_client)["source_ids"] == [
-        "src-1", "src-2", "src-3", "src-4", "src-5", "src-6",
+        "src-1",
+        "src-2",
+        "src-3",
+        "src-4",
+        "src-5",
+        "src-6",
     ]
 
 
@@ -861,9 +825,7 @@ async def test_a_pending_prior_upload_counts_toward_the_limit(fake_client, tmp_p
     assert not fake_client.artifacts.calls
 
 
-async def test_prior_mp3_path_and_named_source_ids_are_mutually_exclusive(
-    fake_client, tmp_path
-):
+async def test_prior_mp3_path_and_named_source_ids_are_mutually_exclusive(fake_client, tmp_path):
     """P2:`prior_mp3_path` 會把上一集的回錄真的上傳進筆記本、改名,但 dispatch 只帶
     呼叫端指名的 `source_ids`——那筆新上傳的 source 沒有任何 attempt 引用它,
     `ok=true` 回傳,那筆變成無人認領的孤兒,吃掉 ≤9 上限裡的一格卻沒人記得。
@@ -920,9 +882,7 @@ async def test_a_preflight_permission_error_still_becomes_a_structured_stop(
     assert not fake_client.artifacts.calls
 
 
-async def test_nine_sources_still_pass_so_early_episodes_keep_working(
-    fake_client, tmp_path
-):
+async def test_nine_sources_still_pass_so_early_episodes_keep_working(fake_client, tmp_path):
     """邊界要落在實測值上。9 筆是量到「乾淨」的上緣 —— 擋在這裡以下會把 EP01–05
     的正常整季流程一起關掉,而那條路徑實測 0 教錯 0 捏造。
     """
@@ -967,9 +927,7 @@ async def test_the_guard_does_not_block_an_attempt_that_only_needs_finalizing(
     attempt = stored["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "accepted", attempt["dispatch"]
     assert stored["episodes"][0].get("output_attempt_id") is None
-    dispatched = len(
-        [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"]
-    )
+    dispatched = len([c for c in fake_client.artifacts.calls if c[0] == "generate_audio"])
 
     # 中斷期間又上傳了幾集回錄,筆記本現在遠遠超標(3 + 12 = 15 筆)。
     fake_client.artifacts.wait_exc = None
@@ -988,9 +946,7 @@ async def test_the_guard_does_not_block_an_attempt_that_only_needs_finalizing(
     assert after == dispatched, "續跑只做 finalize,不得再 dispatch 一次"
 
 
-async def test_the_stop_for_a_terminal_remote_attempt_is_actually_walkable(
-    fake_client, tmp_path
-):
+async def test_the_stop_for_a_terminal_remote_attempt_is_actually_walkable(fake_client, tmp_path):
     """**守門的指引在 `failed`/`removed` 那條路徑上必須真的走得通。**
 
     守門條件涵蓋 `remote_state in ("failed", "removed")` —— 而那時 `dispatch.status`
@@ -1002,7 +958,7 @@ async def test_the_stop_for_a_terminal_remote_attempt_is_actually_walkable(
     """
     manifest_path = tmp_path / "series_manifest.json"
     _seed_sources(fake_client, 3)
-    fake_client.artifacts.fail_complete = True       # 遠端回終態失敗
+    fake_client.artifacts.fail_complete = True  # 遠端回終態失敗
     first = await p.podcast_series(
         "nb-1", episodes=[{"title": "心法篇", "brief": "第一集"}], output_dir=str(tmp_path)
     )
@@ -1013,7 +969,7 @@ async def test_the_stop_for_a_terminal_remote_attempt_is_actually_walkable(
     assert attempt["dispatch"]["status"] == "accepted", attempt["dispatch"]
 
     fake_client.artifacts.fail_complete = False
-    _seed_sources(fake_client, 12)          # 筆記本超標
+    _seed_sources(fake_client, 12)  # 筆記本超標
 
     stop = await p.podcast_series(
         "nb-1", episodes=[{"title": "心法篇", "brief": "第一集"}], output_dir=str(tmp_path)
@@ -1058,9 +1014,7 @@ async def test_the_permission_stop_points_at_the_tool_that_fixes_it(
     assert "notebook_share_with_pool" in out["error"]
 
 
-async def test_the_zero_candidate_reconcile_stop_carries_a_way_out(
-    fake_client, tmp_path
-):
+async def test_the_zero_candidate_reconcile_stop_carries_a_way_out(fake_client, tmp_path):
     """**`acceptance_unknown` 零候選、候選窗還開著:出路要寫在回傳裡。**
 
     v0.9.6 驗收 FINDING-1:這條路的 `safe_next_action` 曾經指回本工具自己,連呼兩次的
@@ -1082,8 +1036,12 @@ async def test_the_zero_candidate_reconcile_stop_carries_a_way_out(
     fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
     with pytest.raises(TimeoutError, match="response lost"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title="心法篇", brief="第一集",
-            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
         )
     fake_client.artifacts.generate_audio_exc = None
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1126,8 +1084,12 @@ async def test_series_does_not_drop_the_reconcile_way_out_when_repacking_the_sto
     fake_client.artifacts.generate_audio_exc = TimeoutError("response lost")
     with pytest.raises(TimeoutError, match="response lost"):
         await p.podcast_episode(
-            "nb-1", episode_n=1, title="心法篇", brief="第一集",
-            output_dir=str(tmp_path), manifest_path=str(manifest_path),
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
         )
     fake_client.artifacts.generate_audio_exc = None
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))

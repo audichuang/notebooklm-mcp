@@ -8,6 +8,7 @@ v0.9.6 真實驗收量到的:同一個 slot 1 被拒後 **26 分鐘**在另一�
 原 docstring 把它留成已知取捨,理由是「代價只是那一輪少試一個帳號」—— 26 分鐘那個
 觀測推翻了這個前提:代價是**那個 process 餘生**。
 """
+
 import time
 
 import pytest
@@ -48,13 +49,11 @@ def test_a_throttled_slot_comes_back_after_the_cooldown(monkeypatch):
     now = {"t": 1000.0}
     monkeypatch.setattr(time, "monotonic", lambda: now["t"])
 
-    assert runtime.rotate_client() == "a1@x"      # a0 被拒 → 冷卻
-    assert runtime.rotate_client() is None        # a1 也被拒 → 兩個都在冷卻
+    assert runtime.rotate_client() == "a1@x"  # a0 被拒 → 冷卻
+    assert runtime.rotate_client() is None  # a1 也被拒 → 兩個都在冷卻
 
-    now["t"] += runtime._COOLDOWN_SECONDS + 1     # 等過冷卻期
-    assert runtime.rotate_client() is not None, (
-        "冷卻期過了還是不肯回頭試 —— 瞬時限流被當成當日耗盡"
-    )
+    now["t"] += runtime._COOLDOWN_SECONDS + 1  # 等過冷卻期
+    assert runtime.rotate_client() is not None, "冷卻期過了還是不肯回頭試 —— 瞬時限流被當成當日耗盡"
 
 
 def test_a_slot_skipped_by_a_stale_snapshot_rotate_is_not_burned(monkeypatch):

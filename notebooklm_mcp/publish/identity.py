@@ -1,6 +1,7 @@
 """Stable feed identity. The feed's token is derived deterministically from a
 stable ``show_id`` via HMAC, so the same show always maps to the same URL with
 NO global registry (hence no multi-VM read-modify-write race)."""
+
 from __future__ import annotations
 
 import base64

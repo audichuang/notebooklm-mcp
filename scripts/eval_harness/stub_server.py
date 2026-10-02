@@ -4,6 +4,7 @@
 每次 tools/call 記進 $NBLM_EVAL_LOG(JSONL),回一句 DRY RUN —— 受測 agent 看到的
 schema 與正式 server 逐字相同(直接從 notebooklm_mcp.app.mcp 讀回)。
 """
+
 from __future__ import annotations
 
 import json
@@ -30,11 +31,13 @@ async def list_tools() -> list[types.Tool]:
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"tool": name, "args": arguments}, ensure_ascii=False) + "\n")
-    return [types.TextContent(
-        type="text",
-        text=f"DRY RUN —— 這是規劃用的離線環境,{name} 沒有真的執行。"
-             f"已記錄參數:{json.dumps(arguments, ensure_ascii=False)[:400]}",
-    )]
+    return [
+        types.TextContent(
+            type="text",
+            text=f"DRY RUN —— 這是規劃用的離線環境,{name} 沒有真的執行。"
+            f"已記錄參數:{json.dumps(arguments, ensure_ascii=False)[:400]}",
+        )
+    ]
 
 
 async def main() -> None:
@@ -44,4 +47,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     import anyio
+
     anyio.run(main)

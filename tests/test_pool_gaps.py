@@ -14,6 +14,7 @@
    finalize 的下載是以新帳號的身分發出」。實跑驗不到這一項:自動分享讓 pool
    全員都看得到 notebook,錯的身分照樣下載成功。
 """
+
 import json
 import os
 
@@ -45,9 +46,7 @@ async def _run(tmp_path, manifest_path, episode_n=1, title="心法篇"):
     )
 
 
-async def test_three_accounts_exhausted_leaves_two_failovers_in_one_attempt(
-    fake_client, tmp_path
-):
+async def test_three_accounts_exhausted_leaves_two_failovers_in_one_attempt(fake_client, tmp_path):
     """三個帳號全部耗盡 → 同一個 attempt 裡兩筆 failover + 一筆 dispatch。
 
     v0.8.0 的驗收結論寫「同一 attempt 不可能有兩筆 failover」,那個結論的前提是
@@ -58,9 +57,7 @@ async def test_three_accounts_exhausted_leaves_two_failovers_in_one_attempt(
     只有 2 個帳號的測試永遠看不到「第二筆 failover 的 from_account 是第一筆的
     to_account」這個鏈,而那正是「不回頭撞舊帳號」的證據。
     """
-    runtime.set_clients(
-        [("a@x", fake_client), ("b@x", fake_client), ("c@x", fake_client)]
-    )
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client), ("c@x", fake_client)])
     calls: list = []
     _flaky_generate(fake_client, calls, fail_first_n=99)
     manifest_path = tmp_path / "series_manifest.json"
@@ -126,9 +123,7 @@ async def test_rotation_persists_across_separate_tool_calls(fake_client, tmp_pat
 
     這裡**只裝一次 pool**,連續呼叫兩次工具 —— 第二集必須直接從 b@x 出發。
     """
-    runtime.set_clients(
-        [("a@x", fake_client), ("b@x", fake_client), ("c@x", fake_client)]
-    )
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client), ("c@x", fake_client)])
     calls: list = []
     _flaky_generate(fake_client, calls, fail_first_n=1)
     manifest_path = tmp_path / "series_manifest.json"
@@ -185,9 +180,7 @@ async def test_download_after_failover_runs_on_the_new_accounts_client(
         return [c for c in client.artifacts.calls if c[0] == "download"]
 
     assert downloads(account_b), "下載必須由實際生成那一集的 client 發出"
-    assert not downloads(fake_client), (
-        "停在 a@x 就是「B 生的、A 抓的」那種事後查不回來的稽核失真"
-    )
+    assert not downloads(fake_client), "停在 a@x 就是「B 生的、A 抓的」那種事後查不回來的稽核失真"
     # 身分不再是 process 全域狀態 —— pool 從頭到尾不碰這個 env。
     assert os.environ["NOTEBOOKLM_AUTH_JSON"] == "CRED_ORIGINAL"
 
@@ -232,9 +225,7 @@ async def test_episode_dispatch_uses_the_client_that_passed_auth_probe(fake_clie
     assert account_b.artifacts.calls == []
 
 
-async def test_series_dispatch_uses_the_client_that_passed_per_episode_probe(
-    fake_client, tmp_path
-):
+async def test_series_dispatch_uses_the_client_that_passed_per_episode_probe(fake_client, tmp_path):
     account_b = FakeClient()
     runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
     original = fake_client.notebooks.list
@@ -294,9 +285,7 @@ async def test_series_carries_its_own_failover_client_to_the_next_episode(fake_c
     account_b = FakeClient()
     account_c = FakeClient()
     account_c.artifacts._generate_count = 200
-    runtime.set_clients(
-        [("a@x", fake_client), ("b@x", account_b), ("c@x", account_c)]
-    )
+    runtime.set_clients([("a@x", fake_client), ("b@x", account_b), ("c@x", account_c)])
     calls: list[str] = []
 
     async def refuse_a(*_args, **_kwargs):
@@ -378,9 +367,7 @@ async def test_resume_pins_client_after_auth_probe(fake_client, tmp_path):
     """fake `rename` 0.8.2 起對查無 id 的 artifact raise(見 test_rename_not_found.py)
     ——resume 的前提是這顆 artifact 已經在遠端存在,所以先 seed 在 account A 上
     (這支測試的重點正是「account B 全程沒被動過」,不能 seed 在 account_b)。"""
-    fake_client.artifacts.seed_artifact(
-        "art-1", kind=ArtifactType.AUDIO, title="Audio Overview"
-    )
+    fake_client.artifacts.seed_artifact("art-1", kind=ArtifactType.AUDIO, title="Audio Overview")
     account_b = FakeClient()
     runtime.set_clients([("a@x", fake_client), ("b@x", account_b)])
     original = fake_client.notebooks.list
@@ -392,9 +379,7 @@ async def test_resume_pins_client_after_auth_probe(fake_client, tmp_path):
 
     fake_client.notebooks.list = probe_then_rotate
 
-    await p.podcast_episode_resume(
-        "nb-1", 1, "心法篇", "art-1", str(tmp_path)
-    )
+    await p.podcast_episode_resume("nb-1", 1, "心法篇", "art-1", str(tmp_path))
 
     assert account_b.artifacts.calls == []
     assert any(call[0] == "download" for call in fake_client.artifacts.calls)

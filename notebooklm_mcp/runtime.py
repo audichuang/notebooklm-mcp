@@ -14,6 +14,7 @@ incoming message `tg.start_soon`),而 `_ACTIVE` 是全域的 —— 但 pool 的
 把 label 和 client 分兩次讀**(中間夾著 await,並行的 rotate 落在縫裡 → manifest 記 A、
 實際 B 送出)。那個縫由 `snapshot()` 一次取用關掉,見它的 docstring。
 """
+
 from __future__ import annotations
 
 import time
@@ -127,9 +128,7 @@ def all_clients() -> list[tuple[str, Any]]:
     return list(_POOL)
 
 
-def rotate_client(
-    refused: str | None = None, skip: frozenset[str] = frozenset()
-) -> str | None:
+def rotate_client(refused: str | None = None, skip: frozenset[str] = frozenset()) -> str | None:
     """把**真正被拒**的那個槽位標成冷卻中,切到下一個**不在冷卻中且不在 `skip` 裡**
     的帳號;繞完一圈都沒有就回 None。
 

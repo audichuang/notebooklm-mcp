@@ -5,6 +5,7 @@
 讀回**實際**掛的 annotations,而不是重新猜一份,逐一與 AGENTS.md/審查報告核准的
 清單做等值比對——新工具或改動忘了加/加錯 annotations 時測試要紅。
 """
+
 from __future__ import annotations
 
 from notebooklm_mcp import app
@@ -102,7 +103,8 @@ async def _annotations_by_name() -> dict[str, object]:
 
 def _names_with(annotations: dict[str, object], field: str) -> set[str]:
     return {
-        name for name, ann in annotations.items()
+        name
+        for name, ann in annotations.items()
         if ann is not None and getattr(ann, field, None) is True
     }
 
@@ -131,7 +133,8 @@ async def test_explicit_not_open_world_matches_approved_list():
     """顯式 `openWorldHint=False` 的那幾支 —— 刪掉標註要會紅(見清單上方註解)。"""
     annotations = await _annotations_by_name()
     explicit_false = {
-        name for name, ann in annotations.items()
+        name
+        for name, ann in annotations.items()
         if ann is not None and getattr(ann, "openWorldHint", None) is False
     }
     assert explicit_false == EXPECTED_NOT_OPEN_WORLD
@@ -152,8 +155,7 @@ async def test_destructive_and_idempotent_hints_only_on_non_read_only_tools():
     確保沒有工具同時被標成兩種互斥語意,避免未來合併 annotations 時標錯。"""
     annotations = await _annotations_by_name()
     read_only = _names_with(annotations, "readOnlyHint")
-    destructive_or_idempotent = (
-        _names_with(annotations, "destructiveHint")
-        | _names_with(annotations, "idempotentHint")
+    destructive_or_idempotent = _names_with(annotations, "destructiveHint") | _names_with(
+        annotations, "idempotentHint"
     )
     assert not (read_only & destructive_or_idempotent)

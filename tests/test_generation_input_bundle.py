@@ -87,9 +87,10 @@ async def test_manifest_episode_dispatches_exact_frozen_brief_and_binds_before_r
     assert attempt["input_bundle"]["generation_request_id"] == "request-1"
     binding = json.loads((bundle / "attempt-binding.json").read_text(encoding="utf-8"))
     assert binding["attempt_id"] == attempt["attempt_id"]
-    assert attempt["input_bundle"]["attempt_binding_sha256"] == hashlib.sha256(
-        (bundle / "attempt-binding.json").read_bytes()
-    ).hexdigest()
+    assert (
+        attempt["input_bundle"]["attempt_binding_sha256"]
+        == hashlib.sha256((bundle / "attempt-binding.json").read_bytes()).hexdigest()
+    )
     assert list(bundle.glob(".attempt-binding.*.tmp")) == []
 
 
@@ -149,9 +150,7 @@ def test_schema_version_boolean_is_rejected(target, tmp_path):
             json.dumps(request, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
     else:
-        request = json.loads(
-            (bundle / "generation-request.json").read_text(encoding="utf-8")
-        )
+        request = json.loads((bundle / "generation-request.json").read_text(encoding="utf-8"))
         filename = request["files"][target]["path"]
         payload = json.loads((bundle / filename).read_text(encoding="utf-8"))
         payload["schema_version"] = True
@@ -323,9 +322,7 @@ async def test_future_frozen_request_is_rejected_before_binding_auth_or_rpc(
     assert fake_client.artifacts.calls == []
 
 
-async def test_attempt_binding_must_not_precede_frozen_request(
-    fake_client, tmp_path, monkeypatch
-):
+async def test_attempt_binding_must_not_precede_frozen_request(fake_client, tmp_path, monkeypatch):
     manifest = tmp_path / "manifest" / "series_manifest.json"
     bundle, _ = _write_bundle(tmp_path)
     bundle_relative = bundle.relative_to(tmp_path)
@@ -338,12 +335,8 @@ async def test_attempt_binding_must_not_precede_frozen_request(
         "episode_id": "ep01",
         "generation_request_id": prepared["record_base"]["generation_request_id"],
         "attempt_id": "attempt-backdated",
-        "generation_request_sha256": prepared["record_base"][
-            "generation_request_sha256"
-        ],
-        "manifest_workspace_sha256": prepared["record_base"][
-            "manifest_workspace_sha256"
-        ],
+        "generation_request_sha256": prepared["record_base"]["generation_request_sha256"],
+        "manifest_workspace_sha256": prepared["record_base"]["manifest_workspace_sha256"],
         "bound_at": "2026-07-27T23:59:59+00:00",
     }
     (bundle / "attempt-binding.json").write_text(
@@ -414,9 +407,10 @@ async def test_bound_bundle_copied_to_another_manifest_workspace_cannot_replay(
         )
     assert not second_manifest.exists()
     assert auth_calls == 1
-    assert len(
-        [call for call in fake_client.artifacts.calls if call[0] == "generate_audio"]
-    ) == calls_before
+    assert (
+        len([call for call in fake_client.artifacts.calls if call[0] == "generate_audio"])
+        == calls_before
+    )
 
 
 async def test_pre_dispatch_baseline_failure_keeps_frozen_attempt_prepared_and_retryable(
@@ -767,9 +761,7 @@ async def test_bundle_outside_the_workspace_is_still_rejected(fake_client, tmp_p
             brief=None,
             output_dir=str(workspace / "output"),
             manifest_path=str(manifest_path),
-            input_bundle_path=(
-                "../elsewhere/" + bundle.relative_to(outsider).as_posix()
-            ),
+            input_bundle_path=("../elsewhere/" + bundle.relative_to(outsider).as_posix()),
         )
     assert fake_client.artifacts.calls == []
 
@@ -799,9 +791,14 @@ async def test_rebinding_the_same_bundle_reuses_the_attempt(fake_client, tmp_pat
     manifest_path = workspace / "output/series_manifest.json"
     manifest_path.parent.mkdir(parents=True)
     bundle, _ = _write_bundle(workspace)
-    args = dict(episode_n=1, title="心法篇", brief=None,
-                output_dir=str(workspace / "output"),
-                manifest_path=str(manifest_path), input_bundle_path=str(bundle.relative_to(workspace)))
+    args = dict(
+        episode_n=1,
+        title="心法篇",
+        brief=None,
+        output_dir=str(workspace / "output"),
+        manifest_path=str(manifest_path),
+        input_bundle_path=str(bundle.relative_to(workspace)),
+    )
 
     await p.podcast_episode("nb-1", **args)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -830,10 +827,12 @@ def _prepared(tmp_path):
         # 凍結時刻(load_frozen_generation_input 也是這樣把它塞進 prepared 的)。
         "frozen_at": "2026-07-28T00:00:00+00:00",
         "record_base": {
-            "generation_request_id": "request-1", "path": "bundle",
+            "generation_request_id": "request-1",
+            "path": "bundle",
             "generation_request_sha256": "x",
             "manifest_workspace_sha256": "z",
-            "runtime_brief_sha256": "y", "runtime_brief_bytes": 1,
+            "runtime_brief_sha256": "y",
+            "runtime_brief_bytes": 1,
         },
     }
 
@@ -860,12 +859,13 @@ def test_unsupported_directory_fsync_does_not_undo_the_binding(tmp_path, monkeyp
 
     prepared = _prepared(tmp_path)
     monkeypatch.setattr(
-        gi, "fsync_parent",
+        gi,
+        "fsync_parent",
         lambda path: (_ for _ in ()).throw(OSError(errno.EINVAL, "Invalid argument")),
     )
     record, encoded = gi.write_attempt_binding(prepared, attempt_id="a1")
     binding_path = prepared["bundle"] / "attempt-binding.json"
-    assert binding_path.read_bytes() == encoded          # 綁定還在
+    assert binding_path.read_bytes() == encoded  # 綁定還在
     assert record["attempt_binding_sha256"]
     assert list(prepared["bundle"].glob(".attempt-binding.*.tmp")) == []
 
@@ -879,12 +879,13 @@ def test_real_directory_fsync_error_says_the_binding_already_exists(tmp_path, mo
 
     prepared = _prepared(tmp_path)
     monkeypatch.setattr(
-        gi, "fsync_parent",
+        gi,
+        "fsync_parent",
         lambda path: (_ for _ in ()).throw(OSError(errno.EIO, "I/O error")),
     )
     with pytest.raises(OSError, match="已經建立"):
         gi.write_attempt_binding(prepared, attempt_id="a1")
-    assert (prepared["bundle"] / "attempt-binding.json").exists()   # 誠實反映:沒回滾
+    assert (prepared["bundle"] / "attempt-binding.json").exists()  # 誠實反映:沒回滾
     assert list(prepared["bundle"].glob(".attempt-binding.*.tmp")) == []
 
 
@@ -912,13 +913,13 @@ def test_cleanup_failure_does_not_mask_the_real_error(tmp_path, monkeypatch):
     from notebooklm_mcp import generation_input as gi
 
     prepared = _prepared(tmp_path)
-    gi.write_attempt_binding(prepared, attempt_id="a1")      # 先佔住 → 第二次會撞 link
+    gi.write_attempt_binding(prepared, attempt_id="a1")  # 先佔住 → 第二次會撞 link
 
     def refuse(self, missing_ok=False):
         raise PermissionError(errno.EACCES, "read-only filesystem")
 
     monkeypatch.setattr(Path, "unlink", refuse)
-    with pytest.raises(ValueError, match="併發搶先綁定"):     # 不是 PermissionError
+    with pytest.raises(ValueError, match="併發搶先綁定"):  # 不是 PermissionError
         gi.write_attempt_binding(prepared, attempt_id="a2")
 
 
@@ -966,9 +967,7 @@ def _multi_show_container(tmp_path, *, hidden=False):
     # 資料夾」,不是刪掉——一次 `mv shows/old shows/.old` 就是這裡)。
     sibling_show = ".archive/audicast" if hidden else "audicast"
     (shows / sibling_show / "output").mkdir(parents=True)
-    (shows / sibling_show / "output" / "series_manifest.json").write_text(
-        "{}", encoding="utf-8"
-    )
+    (shows / sibling_show / "output" / "series_manifest.json").write_text("{}", encoding="utf-8")
     return shows
 
 
@@ -1042,6 +1041,9 @@ async def test_podcast_episode_passes_workspace_root_through(fake_client, tmp_pa
     generate = next(c for c in fake_client.artifacts.calls if c[0] == "generate_audio")
     assert generate[1]["instructions"] == brief
     binding = json.loads((own / "attempt-binding.json").read_text(encoding="utf-8"))
-    assert binding["manifest_workspace_sha256"] == hashlib.sha256(
-        str((shows / "graphify" / "series_manifest.json").resolve()).encode("utf-8")
-    ).hexdigest()
+    assert (
+        binding["manifest_workspace_sha256"]
+        == hashlib.sha256(
+            str((shows / "graphify" / "series_manifest.json").resolve()).encode("utf-8")
+        ).hexdigest()
+    )

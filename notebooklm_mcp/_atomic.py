@@ -5,6 +5,7 @@ manifest 仍指向同一路徑,publish 的「存在且非空」檢查也抓不�
 下載到 ep{n:02d}-slides.pdf / -report.md,重生期間 publish 可能讀到半份)。所以一律
 temp → 驗 → fsync → os.replace:並發讀者只會看到「舊的完整版」或「新的完整版」。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -17,7 +18,8 @@ from collections.abc import Awaitable, Callable, Iterator
 #: directory fsync 在某些 filesystem(部分 network/overlay mount)本來就不支援。那不是
 #: 失敗,只是拿不到額外的持久性保證 —— 不該讓它把一次成功的換檔回報成錯誤。
 _DIR_FSYNC_UNSUPPORTED = frozenset(
-    getattr(errno, name) for name in ("EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOTTY")
+    getattr(errno, name)
+    for name in ("EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOTTY")
     if hasattr(errno, name)
 )
 #: 新檔沒有舊 mode 可繼承時用這個。**不能**留 mkstemp 的 0600:產物要讓其他帳號
@@ -75,7 +77,7 @@ def prepared_replacement(
         os.chmod(temp_path, resolved_mode)
         with open(temp_path, "rb") as handle:
             os.fsync(handle.fileno())
-        os.replace(temp_path, final_path)          # ← commit point
+        os.replace(temp_path, final_path)  # ← commit point
     except BaseException:
         # 清掉 partial;清理本身失敗不得蓋掉真正的錯誤(CancelledError 也要清,故用
         # BaseException)。

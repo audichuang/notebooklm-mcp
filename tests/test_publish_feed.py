@@ -109,13 +109,18 @@ def test_index_html_lists_live_episodes_only():
 
 
 def test_content_encoded_emitted_when_description_html_present():
-    show = {**SHOW, "episodes": {
-        "1": {**SHOW["episodes"]["1"],
-              "description_html": (
-                  '<p>鉤子</p><ul><li>一</li></ul>'
-                  '<p>📄 <a href="https://h/x.pdf">本集簡報 (PDF)</a></p>'
-              )},
-    }}
+    show = {
+        **SHOW,
+        "episodes": {
+            "1": {
+                **SHOW["episodes"]["1"],
+                "description_html": (
+                    "<p>鉤子</p><ul><li>一</li></ul>"
+                    '<p>📄 <a href="https://h/x.pdf">本集簡報 (PDF)</a></p>'
+                ),
+            },
+        },
+    }
     item = feed.build_feed_xml(show, BASE)
     # content:encoded 有出現且含 CDATA
     assert "<content:encoded><![CDATA[" in item
@@ -134,12 +139,18 @@ def test_no_content_encoded_when_absent():
 def test_item_itunes_image_only_when_episode_has_artwork():
     # EP01 有自己的封面 → <item> 內帶 itunes:image;EP02 沒有 → 該集省略,
     # 由播放器 fallback 到 channel 層的節目封面(向後相容:舊 show 無此欄位即無 item image)。
-    show = {**SHOW, "episodes": {
-        "1": {**SHOW["episodes"]["1"], "artwork_file": "EP01-cover-abcd1234.jpg"},
-        "2": SHOW["episodes"]["2"],
-    }}
+    show = {
+        **SHOW,
+        "episodes": {
+            "1": {**SHOW["episodes"]["1"], "artwork_file": "EP01-cover-abcd1234.jpg"},
+            "2": SHOW["episodes"]["2"],
+        },
+    }
     items = ET.fromstring(feed.build_feed_xml(show, BASE)).find("channel").findall("item")
-    assert items[0].find("itunes:image", NS).get("href") == f"{BASE}/feeds/tok123/EP01-cover-abcd1234.jpg"
+    assert (
+        items[0].find("itunes:image", NS).get("href")
+        == f"{BASE}/feeds/tok123/EP01-cover-abcd1234.jpg"
+    )
     assert items[1].find("itunes:image", NS) is None
 
 
@@ -150,7 +161,7 @@ def test_content_encoded_escapes_cdata_end_marker():
     raw = feed.build_feed_xml(show, BASE)
     assert "]]]]><![CDATA[>" in raw
     ce = ET.fromstring(raw).findtext("channel/item/content:encoded", namespaces=NS)
-    assert ce == html          # round-trip 還原
+    assert ce == html  # round-trip 還原
 
 
 # ---- itunes:type(連載 vs 時事):channel 層一律輸出 --------------------------------
@@ -200,10 +211,13 @@ def test_itunes_type_allowlist_is_exactly_two_values():
 def test_index_html_strips_serial_ep_prefix_from_title_display_only():
     """serial 節目 title 帶「EP{NN}. 」命名前綴;index.html 自己又加一次 EP{NN} —,
     修法只在顯示層剝前綴。RSS item title 不經過這裡,必須原封不動。"""
-    show = {**SHOW, "episodes": {
-        "1": {**SHOW["episodes"]["1"], "title": "EP01. 心法篇"},
-        "2": {**SHOW["episodes"]["2"], "title": "EP02 實戰篇"},
-    }}
+    show = {
+        **SHOW,
+        "episodes": {
+            "1": {**SHOW["episodes"]["1"], "title": "EP01. 心法篇"},
+            "2": {**SHOW["episodes"]["2"], "title": "EP02 實戰篇"},
+        },
+    }
     html = feed.build_index_html(show, BASE)
     assert "EP01 — 心法篇" in html
     assert "EP02 — 實戰篇" in html
@@ -228,9 +242,12 @@ def test_index_html_delegates_ep_prefix_strip_to_naming(monkeypatch):
         return "SENTINEL"
 
     monkeypatch.setattr(feed, "bare_episode_title", fake_bare)
-    show = {**SHOW, "episodes": {
-        "1": {**SHOW["episodes"]["1"], "title": "EP01. 心法篇"},
-    }}
+    show = {
+        **SHOW,
+        "episodes": {
+            "1": {**SHOW["episodes"]["1"], "title": "EP01. 心法篇"},
+        },
+    }
     html = feed.build_index_html(show, BASE)
     assert calls == [(1, "EP01. 心法篇")]
     assert "EP01 — SENTINEL" in html

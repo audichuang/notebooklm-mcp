@@ -5,6 +5,7 @@
 被改壞的句子仍然通順,所以**沒有任何東西會告訴呼叫端內容被動過** —— 這正是
 需要 false-positive 測試的理由:原本的測試只驗「該清的有清掉」。
 """
+
 from notebooklm_mcp._text import strip_citations as _strip_citations_impl, strip_inline_emphasis
 
 
@@ -14,13 +15,19 @@ def _strip_citations(text: str) -> str:
 
 # --- _EMPHASIS_RE:單星號不是強調標記 ---
 
+
 def test_emphasis_leaves_cjk_adjacent_single_stars_alone():
     """`A*搜尋` / `B*樹`:演算法名稱裡的星號,兩個湊成一對被整段吃掉。
 
     界線只認 `\\s`,而 CJK 不用空格分詞,所以西文那套邊界判斷在這裡完全失效。
     """
-    assert strip_inline_emphasis("他說「A*搜尋」與「B*樹」的差別") == "他說「A*搜尋」與「B*樹」的差別"
-    assert strip_inline_emphasis("A*搜尋比較快,但 A*需要 heuristic") == "A*搜尋比較快,但 A*需要 heuristic"
+    assert (
+        strip_inline_emphasis("他說「A*搜尋」與「B*樹」的差別") == "他說「A*搜尋」與「B*樹」的差別"
+    )
+    assert (
+        strip_inline_emphasis("A*搜尋比較快,但 A*需要 heuristic")
+        == "A*搜尋比較快,但 A*需要 heuristic"
+    )
 
 
 def test_emphasis_leaves_c_pointer_stars_alone():
@@ -41,8 +48,11 @@ def test_emphasis_leaves_underscores_alone():
 
 # --- _CITATION_RE:緊貼識別碼的方括號是索引,不是引用 ---
 
+
 def test_citation_leaves_array_indexing_alone():
-    assert _strip_citations("陣列索引 arr[0] 與 arr[1] 的差別") == "陣列索引 arr[0] 與 arr[1] 的差別"
+    assert (
+        _strip_citations("陣列索引 arr[0] 與 arr[1] 的差別") == "陣列索引 arr[0] 與 arr[1] 的差別"
+    )
     assert _strip_citations("數學式 a[1][2] 表示矩陣元素") == "數學式 a[1][2] 表示矩陣元素"
 
 
@@ -54,6 +64,7 @@ def test_citation_still_strips_real_citation_markers():
 
 
 # --- 反向:別為了擋誤傷而漏清真引用(v0.9.26 獨立複審抓到的回歸) ---
+
 
 def test_citation_strips_markers_glued_to_cjk():
     r"""`重點[1]。` —— 中文不用空格,標記緊貼正文是**最常見**的形狀,不是邊角案例。

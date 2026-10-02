@@ -3,6 +3,7 @@
 核心不變式:**候選與匯入是兩件事**。wait 不匯入任何東西,import 只匯入 host 指名的
 URL——研究能力進來的同時,不能讓 NotebookLM 自己找到的來源一股腦落進筆記本。
 """
+
 import pytest
 from conftest import FakeClient
 from notebooklm._types.research import ResearchStatus
@@ -38,9 +39,7 @@ async def test_deep_research_threads_report_id_from_start_into_wait(fake_client)
 
 
 @pytest.mark.parametrize("report_id", [None, "", "   "])
-async def test_deep_research_fails_loud_without_a_report_id(
-    fake_client, monkeypatch, report_id
-):
+async def test_deep_research_fails_loud_without_a_report_id(fake_client, monkeypatch, report_id):
     from notebooklm import DecodingError, ResearchStart
 
     async def start_without_report_id(notebook_id, query, source="web", mode="deep"):
@@ -75,7 +74,9 @@ async def test_research_wait_returns_candidates_and_never_imports(fake_client):
     assert out["status"] == "completed"
     # 報告 entry 不混進 candidates(它沒有 URL,無法用 URL 指名),獨立成旗標。
     assert [c["url"] for c in out["candidates"]] == [
-        "https://a.example/post", "https://b.example/spec", "https://c.example/blog",
+        "https://a.example/post",
+        "https://b.example/spec",
+        "https://c.example/blog",
     ]
     assert out["report_importable"] is True
     # 預設不回報告本文,但字數是**全文**長度(決定要不要調高上限的依據)。
@@ -89,9 +90,9 @@ async def test_research_wait_marks_cited_urls(fake_client):
     """cited 是**事實標記**(URL 有沒有出現在報告引用裡),不是 MCP 幫忙做的篩選。"""
     out = await r.research_wait("nb-1", "res-1")
     cited = {c["url"]: c["cited"] for c in out["candidates"]}
-    assert cited["https://a.example/post"] is True      # markdown 連結
-    assert cited["https://b.example/spec"] is True      # 裸 URL
-    assert cited["https://c.example/blog"] is False     # 報告沒引用
+    assert cited["https://a.example/post"] is True  # markdown 連結
+    assert cited["https://b.example/spec"] is True  # 裸 URL
+    assert cited["https://c.example/blog"] is False  # 報告沒引用
     assert out["cited_url_count"] == 2
 
 
@@ -126,7 +127,7 @@ async def test_research_wait_propagates_the_typed_timeout(fake_client):
     )
     with pytest.raises(ResearchTimeoutError):
         await r.research_wait("nb-1", "res-1", timeout=1800)
-    with pytest.raises(TimeoutError):        # 子類關係也鎖住
+    with pytest.raises(TimeoutError):  # 子類關係也鎖住
         await r.research_wait("nb-1", "res-1", timeout=1800)
 
 
@@ -136,7 +137,7 @@ async def test_research_wait_propagates_the_typed_timeout(fake_client):
 async def test_research_import_only_imports_named_urls(fake_client):
     out = await r.research_import("nb-1", task_id="res-1", urls=["https://c.example/blog"])
     call = next(c[1] for c in fake_client.research.calls if c[0] == "import")
-    assert call["titles"] == ["來源C(未被引用)"]        # A/B 沒被指名就不進來
+    assert call["titles"] == ["來源C(未被引用)"]  # A/B 沒被指名就不進來
     assert call["is_report"] == [False]
     assert out["imported"] == [{"source_id": "src-r1", "title": "來源A"}]
     assert out["requested"] == 1
@@ -161,7 +162,8 @@ async def test_research_import_pins_client_between_poll_and_import(fake_client):
 
 async def test_research_import_dedupes_and_keeps_caller_order(fake_client):
     out = await r.research_import(
-        "nb-1", "res-1",
+        "nb-1",
+        "res-1",
         urls=["https://b.example/spec", "https://a.example/post", "https://b.example/spec"],
     )
     call = next(c[1] for c in fake_client.research.calls if c[0] == "import")
@@ -172,8 +174,9 @@ async def test_research_import_dedupes_and_keeps_caller_order(fake_client):
 async def test_research_import_rejects_urls_not_in_the_candidate_set(fake_client):
     """寧可爆掉,也不要靜默少匯入幾筆讓呼叫端以為都進去了。"""
     with pytest.raises(ValueError, match="不在 task res-1 的候選清單裡"):
-        await r.research_import("nb-1", "res-1", urls=["https://a.example/post",
-                                                       "https://typo.example/x"])
+        await r.research_import(
+            "nb-1", "res-1", urls=["https://a.example/post", "https://typo.example/x"]
+        )
     assert not [c for c in fake_client.research.calls if c[0] == "import"]
 
 
@@ -184,18 +187,15 @@ async def test_research_import_needs_something_to_import(fake_client):
 
 
 async def test_research_import_can_include_the_report_entry(fake_client):
-    await r.research_import("nb-1", "res-1", urls=["https://a.example/post"],
-                            include_report=True)
+    await r.research_import("nb-1", "res-1", urls=["https://a.example/post"], include_report=True)
     call = next(c[1] for c in fake_client.research.calls if c[0] == "import")
-    assert call["is_report"] == [True, False]           # 報告排在前面
+    assert call["is_report"] == [True, False]  # 報告排在前面
     assert call["titles"] == ["Deep Research Report", "來源A"]
 
 
 async def test_research_import_report_without_a_report_entry_fails(fake_client):
     """fast mode 不產報告;要求 include_report 卻沒有,是呼叫端弄錯 mode。"""
-    fake_client.research.sources = tuple(
-        s for s in fake_client.research.sources if not s.is_report
-    )
+    fake_client.research.sources = tuple(s for s in fake_client.research.sources if not s.is_report)
     with pytest.raises(ValueError, match="沒有可匯入的報告"):
         await r.research_import("nb-1", "res-1", urls=[], include_report=True)
 
@@ -208,8 +208,15 @@ async def test_research_import_on_an_empty_task_blames_the_task_not_the_urls(fak
     assert not [c for c in fake_client.research.calls if c[0] == "import"]
 
 
-@pytest.mark.parametrize("status", [ResearchStatus.IN_PROGRESS, ResearchStatus.FAILED,
-                                    ResearchStatus.NO_RESEARCH, ResearchStatus.NOT_FOUND])
+@pytest.mark.parametrize(
+    "status",
+    [
+        ResearchStatus.IN_PROGRESS,
+        ResearchStatus.FAILED,
+        ResearchStatus.NO_RESEARCH,
+        ResearchStatus.NOT_FOUND,
+    ],
+)
 async def test_research_import_refuses_a_task_that_is_not_completed(fake_client, status):
     """沒有這道 gate 就能繞過 research_wait:in_progress 收到半套候選,
     **failed 的 task 仍可能留著解析出來的 sources** —— 兩種都會靜默匯入錯東西。"""
@@ -324,23 +331,19 @@ async def test_research_wait_polls_the_account_that_started_it(fake_client):
     other = FakeClient()
     runtime.set_clients([("a@x", fake_client), ("b@x", other)])
     started = await r.research_start("nb-1", "some query")
-    runtime.rotate_client()                      # 配額 failover 把游標推到 b@x
+    runtime.rotate_client()  # 配額 failover 把游標推到 b@x
 
-    await r.research_wait(
-        "nb-1", task_id=started["task_id"], account=started["account"]
-    )
+    await r.research_wait("nb-1", task_id=started["task_id"], account=started["account"])
 
     assert [c[0] for c in fake_client.research.calls] == ["start", "wait"]
     assert other.research.calls == []
-    assert runtime.active_account() == "b@x"     # 游標不動:這裡不是配額輪替
+    assert runtime.active_account() == "b@x"  # 游標不動:這裡不是配額輪替
 
 
 async def test_research_import_uses_the_account_that_owns_the_handle(fake_client):
     other = FakeClient()
     runtime.set_clients([("a@x", other), ("b@x", fake_client)])
-    await r.research_import(
-        "nb-1", task_id="res-1", urls=["https://c.example/blog"], account="b@x"
-    )
+    await r.research_import("nb-1", task_id="res-1", urls=["https://c.example/blog"], account="b@x")
     assert [c[0] for c in fake_client.research.calls] == ["poll", "import"]
     assert other.research.calls == []
 
@@ -365,11 +368,11 @@ async def test_research_wait_explains_no_research_on_timeout(fake_client, monkey
     with pytest.raises(RuntimeError) as excinfo:
         await r.research_wait("nb-1", task_id="res-1", account="b@x")
     msg = str(excinfo.value)
-    assert "no_research" in msg                     # 原訊息保留,不是換掉
-    assert "b@x" in msg                             # 這次用了誰
-    assert "research_start" in msg                  # 怎麼修
-    assert "a@x" in msg                             # pool 裡還有誰
-    assert "不要重新 research_start" in msg          # 別再燒一次配額
+    assert "no_research" in msg  # 原訊息保留,不是換掉
+    assert "b@x" in msg  # 這次用了誰
+    assert "research_start" in msg  # 怎麼修
+    assert "a@x" in msg  # pool 裡還有誰
+    assert "不要重新 research_start" in msg  # 別再燒一次配額
     assert isinstance(excinfo.value.__cause__, TimeoutError)
 
 
@@ -402,7 +405,7 @@ async def test_research_refuses_an_account_that_is_not_in_this_pool(fake_client,
     )
     with pytest.raises(ValueError, match="gone@x") as excinfo:
         await call
-    assert "a@x" in str(excinfo.value)           # 可用的有哪些要講出來
+    assert "a@x" in str(excinfo.value)  # 可用的有哪些要講出來
     assert fake_client.research.calls == []
 
 

@@ -1,4 +1,5 @@
 """共用文字處理(零依賴,供 tools_basic / tools_artifacts 匯入,避免循環 import)。"""
+
 from __future__ import annotations
 
 import re

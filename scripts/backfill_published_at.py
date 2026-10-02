@@ -17,6 +17,7 @@ EP05/EP09)。修好的 code 只影響**之後**的 promote;既有 manifest 要�
 冪等:跑第二次不會再改(值已正確)。回填後重跑 publish_series 讓 feed.xml 重渲染
 (媒體 content-hash 不變,enclosure URL 不動)。
 """
+
 from __future__ import annotations
 
 import copy
@@ -51,7 +52,7 @@ def _breaks_ordering(manifest: dict, planned: list[tuple[int, str, str]]) -> str
     自己看得出來。**實際踩到**:podcast-lab 那份 50 集的 EP42/EP43,頂層修好之後歷史值
     仍是 07:18:43 / 07:17:36(EP42 晚於 EP43)。
     """
-    simulated = copy.deepcopy(manifest)          # 只模擬,不動真 manifest
+    simulated = copy.deepcopy(manifest)  # 只模擬,不動真 manifest
     by_n = {int(ep["episode"]): ep for ep in simulated.get("episodes", []) if "episode" in ep}
     for n, _current, first in planned:
         if n in by_n:
@@ -92,13 +93,15 @@ def main() -> int:
     # 回填會把排序再拆掉,而那要等到下次 publish 才會發現(preflight 擋下整季)。
     broken = _breaks_ordering(store.read(), planned)
     if broken:
-        sys.stdout.flush()          # 讓上面那份清單先落地,拒絕訊息才不會插到它前面
-        print("\n拒絕回填:這樣會讓 pubDate 不再隨集號遞增,整季會被 publish_series 擋下。\n"
-              f"{broken}\n"
-              "這通常代表頂層 published_at 已經被 scripts/reorder_published_at.py 重新配對過,"
-              "而 attempt 首發歷史記著的是原本(也是亂序的)那組值 —— 那就不要回填。\n"
-              "真的需要回填時,先決定要放棄哪一個不變式:重生不漂移,還是集序正確。",
-              file=sys.stderr)
+        sys.stdout.flush()  # 讓上面那份清單先落地,拒絕訊息才不會插到它前面
+        print(
+            "\n拒絕回填:這樣會讓 pubDate 不再隨集號遞增,整季會被 publish_series 擋下。\n"
+            f"{broken}\n"
+            "這通常代表頂層 published_at 已經被 scripts/reorder_published_at.py 重新配對過,"
+            "而 attempt 首發歷史記著的是原本(也是亂序的)那組值 —— 那就不要回填。\n"
+            "真的需要回填時,先決定要放棄哪一個不變式:重生不漂移,還是集序正確。",
+            file=sys.stderr,
+        )
         return 2
 
     if not apply:
