@@ -111,7 +111,10 @@ def test_index_html_lists_live_episodes_only():
 def test_content_encoded_emitted_when_description_html_present():
     show = {**SHOW, "episodes": {
         "1": {**SHOW["episodes"]["1"],
-              "description_html": '<p>鉤子</p><ul><li>一</li></ul><p>📄 <a href="https://h/x.pdf">本集簡報 (PDF)</a></p>'},
+              "description_html": (
+                  '<p>鉤子</p><ul><li>一</li></ul>'
+                  '<p>📄 <a href="https://h/x.pdf">本集簡報 (PDF)</a></p>'
+              )},
     }}
     item = feed.build_feed_xml(show, BASE)
     # content:encoded 有出現且含 CDATA

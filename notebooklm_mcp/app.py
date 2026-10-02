@@ -249,7 +249,7 @@ async def _account_label(client: object, slot: int) -> str:
     """
     try:
         email = await client.get_account_email()  # type: ignore[attr-defined]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 取不到 email 只退回槽位編號,不讓啟動失敗
         logger.warning(
             "第 %d 個帳號取不到 email,退回槽位編號 #%d(pool 的稽核標籤會少一個真名,"
             "分享/對帳工具會據此要求人工介入):%s: %s",

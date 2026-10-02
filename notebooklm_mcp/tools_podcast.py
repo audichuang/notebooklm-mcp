@@ -2863,7 +2863,7 @@ async def _run_episode(
                 current = store.read()
                 _, stopped_attempt = _attempt_record(current, episode_n, attempt_id)
                 recorded = stopped_attempt["dispatch"]["status"]
-            except Exception:
+            except Exception:  # noqa: BLE001 —— manifest 讀不到就視為沒有紀錄(recorded=None)
                 recorded = None
             refused = isinstance(exc, _REFUSED_WITHOUT_DISPATCH) and (
                 recorded == "not_accepted"
@@ -2876,18 +2876,22 @@ async def _run_episode(
                 # 被 429 打回),`_failover` 把它標成 acceptance_unknown —— 這裡若照型別
                 # 貼「已標記 not_accepted」,訊息就跟 manifest 互相矛盾。
                 exc.args = (
-                    f"{exc}\n伺服器拒絕了這次生成(attempt_id={attempt_id!r},已標記 "
-                    "not_accepted),沒有建立任何 artifact(送出後結果不明的 429 會標成 "
-                    "acceptance_unknown,不會落在這裡)。配額/限流回復後,用"
-                    "**完全相同的參數**重呼 podcast_episode 即可沿用同一個 attempt "
-                    "重送——不會新建 attempt。",
+                    (
+                        f"{exc}\n伺服器拒絕了這次生成(attempt_id={attempt_id!r},已標記 "
+                        "not_accepted),沒有建立任何 artifact(送出後結果不明的 429 會標成 "
+                        "acceptance_unknown,不會落在這裡)。配額/限流回復後,用"
+                        "**完全相同的參數**重呼 podcast_episode 即可沿用同一個 attempt "
+                        "重送——不會新建 attempt。"
+                    ),
                 )
             elif recorded is not None and recorded != "not_accepted":
                 exc.args = (
-                    f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
-                    "先對帳，禁止直接重生："
-                    f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
-                    f"episode_n={episode_n}, attempt_id={attempt_id!r})",
+                    (
+                        f"{exc}\n生成受理結果不明(attempt_id={attempt_id!r})；"
+                        "先對帳，禁止直接重生："
+                        f"podcast_episode_reconcile(manifest_path={manifest_path!r}, "
+                        f"episode_n={episode_n}, attempt_id={attempt_id!r})"
+                    ),
                 )
         raise
     # `client` 已由上面的三元組換成**實際送出這次生成的**那一個。這裡曾經是
@@ -2971,7 +2975,7 @@ async def _run_episode(
                     "**只有下面這句仍指向 resume 時才執行上面那個呼叫**："
                     + _attempt_next_step(caps)
                 )
-            except Exception as state_error:
+            except Exception as state_error:  # noqa: BLE001 —— 讀不到最新狀態就降級成未核對的提示,不讓上層白做
                 # 讀不到最新狀態時**不能留空**(舊版在這裡回空字串,於是訊息以一個
                 # 分號結尾、什麼都沒教)。完整呼叫照給,但要說清楚它未經狀態核對。
                 next_step = (
@@ -3526,7 +3530,7 @@ async def podcast_episode_resume(
                     post_retract=bool(stopped_attempt.get("retraction")),
                 )
                 guidance = _retract_hint(caps) + caps["regeneration_hint"]
-            except Exception as state_error:
+            except Exception as state_error:  # noqa: BLE001 —— 讀不到最新狀態就降級成未核對的提示,不讓上層白做
                 guidance = (
                     f"無法計算最新狀態({state_error});先確認 manifest_path="
                     f"{manifest_path!r} 裡 episode {episode_n} 的 attempt "
@@ -3647,7 +3651,7 @@ def _cleanup_obligations(
     for row in episode.get("pending_source_cleanup") or []:
         if isinstance(row, str) and row:
             obligations.append({"source_id": row, "notebook_id": fallback_notebook})
-        elif isinstance(row, dict) and isinstance(row.get("source_id"), str):
+        elif isinstance(row, dict) and isinstance(row.get("source_id"), str):  # noqa: SIM102 —— 巢狀 if 刻意分開,與上一個分支的語意並列
             if row["source_id"]:
                 obligations.append(
                     {
@@ -4496,7 +4500,7 @@ def _active_attempt_or_reraise(current: dict, episode_n: int) -> str:
     )
     attempt_id = row.get("active_attempt_id") if row else None
     if attempt_id is None:
-        raise
+        raise  # noqa: PLE0704 —— docstring 已寫明的刻意裸 raise
     return attempt_id
 
 
@@ -5294,9 +5298,9 @@ async def podcast_series(
                         return await dispatch_client.artifacts.generate_audio(
                             notebook_id,
                             language=series_settings["language"],
-                            instructions=plan["brief"],
-                            audio_format=resend_audio_format,
-                            audio_length=resend_audio_length,
+                            instructions=plan["brief"],  # noqa: B023 —— closure 在同一輪迴圈內就被 _dispatch_audio_with_failover await 掉,不會延遲綁定
+                            audio_format=resend_audio_format,  # noqa: B023 —— closure 在同一輪迴圈內就被 _dispatch_audio_with_failover await 掉,不會延遲綁定
+                            audio_length=resend_audio_length,  # noqa: B023 —— closure 在同一輪迴圈內就被 _dispatch_audio_with_failover await 掉,不會延遲綁定
                         )
 
                     # 與 `_run_episode` 共用同一個 dispatch helper —— 它負責配額
@@ -5349,7 +5353,7 @@ async def podcast_series(
                                 current, episode_n, active_attempt_id
                             )
                             recorded = stopped_attempt["dispatch"]["status"]
-                        except Exception:
+                        except Exception:  # noqa: BLE001 —— manifest 讀不到就視為沒有紀錄(recorded=None)
                             recorded = None
                         if recorded is None:
                             raise
@@ -5368,7 +5372,7 @@ async def podcast_series(
                             action,
                             **extra,
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 —— 刻意 blind except:失敗降級成 acceptance_unknown,不讓上層白做
                         return partial(
                             episode_n,
                             active_attempt_id,

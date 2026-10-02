@@ -825,7 +825,7 @@ async def finalize_attempt(
 
                 try:
                     _mutate(store, episode_n, attempt_id, upload_unknown)
-                except Exception as checkpoint_error:
+                except Exception as checkpoint_error:  # noqa: BLE001 —— checkpoint 寫入失敗不該蓋掉呼叫端真正要讀的例外
                     # 並行 retract 已經 tombstone 掉這顆(`_record` default-deny),或
                     # manifest 根本寫不進去。兩種都不該蓋掉呼叫端真正要讀的那個例外
                     # ——retract 那條路自己會留下 unresolved 清理義務。

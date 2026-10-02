@@ -1387,7 +1387,7 @@ async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(
     captured = _install_mock(monkeypatch)
     monkeypatch.setattr(tools_publish, "_embed_cover", _real_embed)
     src = tmp_path / "notebooklm.mp3"
-    subprocess.run(
+    subprocess.run(  # noqa: ASYNC221 —— 測試內刻意用同步 subprocess 取得真實 ffmpeg/ffprobe 產物
         [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
          "-t", "1", "-c:a", "aac",
          "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", str(src)],
@@ -1403,7 +1403,7 @@ async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(
                  if c["name"].startswith("EP01-") and c["name"].endswith(".mp3"))
     published = tmp_path / media["name"]
     published.write_bytes(media["content"])
-    probe = subprocess.check_output(
+    probe = subprocess.check_output(  # noqa: ASYNC221 —— 測試內刻意用同步 subprocess 取得真實 ffmpeg/ffprobe 產物
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
          "-show_entries", "format=format_name:stream=codec_name",
          "-of", "default=nw=1", str(published)], text=True)
@@ -2155,7 +2155,7 @@ async def test_rendered_pub_date_is_the_same_value_the_preflight_checked(
         "same_value.json",
     )
     await _publish(manifest, artwork_png)
-    eps = [json.loads(c["content"]) for c in captured if c["name"] == "show.json"][0]["episodes"]
+    eps = next(iter(json.loads(c["content"]) for c in captured if c["name"] == "show.json"))["episodes"]
     assert eps["1"]["pub_date"] == tools_publish._fallback_pub_date(1)
     assert eps["2"]["pub_date"] == explicit                 # 逐字,不是「解析後相等」
     feed = _feed_of(captured)

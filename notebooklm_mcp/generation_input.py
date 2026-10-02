@@ -229,7 +229,7 @@ def _other_series_manifests(workspace: Path, manifest: Path) -> list[Path]:
     的同形狀)。podcast-lab 的 ``shows/`` 底下唯一的隱藏目錄是 ``.venv*``,不會有套件在
     裡面 ship ``series_manifest.json``,所以拿掉這個排除不會誤傷真實佈局。"""
     others: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
+    for dirpath, _dirnames, filenames in os.walk(workspace, followlinks=False):
         if "series_manifest.json" in filenames:
             found = Path(dirpath, "series_manifest.json")
             if found.resolve(strict=False) != manifest:

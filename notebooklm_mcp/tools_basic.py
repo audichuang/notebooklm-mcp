@@ -339,9 +339,11 @@ async def _share_each(notebook_id: str, emails: list[str], client) -> list[str]:
         status = await client.sharing.set_users(notebook_id, grants, notify=False)
     except (Exception, asyncio.CancelledError) as exc:
         exc.args = (
-            f"notebook {notebook_id!r} set_users 分享失敗({exc})。"
-            "沒分享到的帳號在 failover 換過去時會 permission denied。"
-            "請改跑 notebook_share_with_pool 重試對帳。",
+            (
+                f"notebook {notebook_id!r} set_users 分享失敗({exc})。"
+                "沒分享到的帳號在 failover 換過去時會 permission denied。"
+                "請改跑 notebook_share_with_pool 重試對帳。"
+            ),
         )
         raise
     for email in emails:
@@ -606,7 +608,7 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
         artifact_type = ArtifactType(kind) if kind else None
     except ValueError:
         valid = ", ".join(e.value for e in ArtifactType if e.value != "unknown")
-        raise ValueError(f"unknown kind {kind!r}; use one of: {valid}")
+        raise ValueError(f"unknown kind {kind!r}; use one of: {valid}")  # noqa: B904 —— 保留隱式 exception chaining;不為 lint 改執行期行為
     arts = await runtime.get_client().artifacts.list(notebook_id, artifact_type=artifact_type)
     return {
         "artifacts": [

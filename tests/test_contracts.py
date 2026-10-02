@@ -325,7 +325,15 @@ def test_source_signatures_and_fields():
     # podcast 流程目前仍走顯式兩步,因為 add_file 的 title= 內部就是那兩步且會靜默失敗)。
     assert _params(SourcesAPI.add_url) == ["self", "notebook_id", "url", "wait", "wait_timeout", "title"]
     # 0.7.x add_text 尾端加 idempotent(重試防重複;我們不傳,預設即可)
-    assert _params(SourcesAPI.add_text) == ["self", "notebook_id", "title", "content", "wait", "wait_timeout", "idempotent"]
+    assert _params(SourcesAPI.add_text) == [
+        "self",
+        "notebook_id",
+        "title",
+        "content",
+        "wait",
+        "wait_timeout",
+        "idempotent",
+    ]
     assert _params(SourcesAPI.delete) == ["self", "notebook_id", "source_id"]
     assert "id" in getattr(Source, "__dataclass_fields__", {})
 
@@ -639,7 +647,8 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
         assert Version("0.8.1") not in requirement.specifier
         # 0.8.2 + 本版程式碼從沒測過(測試已改 import 0.8.3 的搬家位置),別讓消費端解析到它。
         assert Version("0.8.2") not in requirement.specifier
-        # 0.8.3 runs (lowest-direct was green) but is excluded so the tested version equals the installed one; 0.8.4 also changed sharing.set_users semantics.
+        # 0.8.3 runs (lowest-direct was green) but is excluded so the tested version equals the installed one;
+        # 0.8.4 also changed sharing.set_users semantics.
         assert Version("0.8.3") not in requirement.specifier
         assert Version("0.8.4") in requirement.specifier
 

@@ -515,8 +515,8 @@ def test_importing_tools_publish_first_does_not_deadlock_on_the_whitelist():
     import sys
 
     proc = subprocess.run(
-        [sys.executable, "-c", "import notebooklm_mcp.tools_publish as t; "
-                              "assert t.state_mod.WITHHELD_PUBLICATION_STATES"],
+        [sys.executable, "-c", ("import notebooklm_mcp.tools_publish as t; "
+                                "assert t.state_mod.WITHHELD_PUBLICATION_STATES")],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stderr

@@ -170,7 +170,9 @@ class FakeArtifacts:
             )
         if self.fail_complete:
             return type(
-                "S", (), {"task_id": task_id, "is_failed": True, "status": "failed", "error": "simulated mid-poll failure"}
+                "S",
+                (),
+                {"task_id": task_id, "is_failed": True, "status": "failed", "error": "simulated mid-poll failure"}
             )()
         if self.fail_removed:
             return type(

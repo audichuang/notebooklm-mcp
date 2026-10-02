@@ -242,7 +242,7 @@ async def test_identical_recall_resends_the_quota_refused_attempt(
 
 async def test_recall_with_different_selection_still_fails_loud(fake_client, tmp_path):
     """**只有逐字相同的請求**才沿用。設定變了還沿用 = 靜默改掉生成輸入,比死鎖更糟。"""
-    args, manifest_path, _ = await _quota_blocked_episode(fake_client, tmp_path)
+    args, _manifest_path, _ = await _quota_blocked_episode(fake_client, tmp_path)
     fake_client.artifacts.generate_audio_exc = None
 
     with pytest.raises(ValueError, match="already has durable active attempt"):
@@ -262,7 +262,7 @@ async def test_series_names_podcast_episode_as_the_owner(fake_client, tmp_path):
     驗收當時 troubleshooting 對 not_accepted 的指示是「重呼 podcast_series」,而那對
     這種 attempt 恰好是唯一會把狀態改壞的動作。訊息只講「設定變了」會把人卡死。
     """
-    args, manifest_path, _ = await _quota_blocked_episode(fake_client, tmp_path)
+    _args, _manifest_path, _ = await _quota_blocked_episode(fake_client, tmp_path)
     fake_client.artifacts.generate_audio_exc = None
 
     with pytest.raises(ValueError, match="podcast_episode"):
@@ -524,7 +524,7 @@ async def test_failed_series_call_does_not_wipe_the_refusal_evidence(
     unknown),settings 才驗、才 raise。抹完的 manifest 長得正好像「分類從未生效過」,
     真相只剩 errors[]。
     """
-    args, manifest_path, _ = await _quota_blocked_episode(fake_client, tmp_path)
+    _args, manifest_path, _ = await _quota_blocked_episode(fake_client, tmp_path)
     before = json.loads(manifest_path.read_text(encoding="utf-8"))
     before_remote = before["episodes"][0]["attempts"][0]["remote"]
     assert before_remote["error_code"] == "RateLimitError"

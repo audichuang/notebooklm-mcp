@@ -397,8 +397,8 @@ def _audio_duration_hms(path: str) -> str | None:
             text=True,
             timeout=15,
         ).strip()
-        seconds = max(0, int(round(float(out))))
-    except Exception:
+        seconds = max(0, round(float(out)))
+    except Exception:  # noqa: BLE001 —— ffprobe 任何失敗都只是少一個時長,不讓發布白做
         return None
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
@@ -447,7 +447,7 @@ async def publish_series(
     某集帶 `publication_state: "deferred"` 就**不進 feed**:集號回在 `deferred_episodes`,
     `episode_count` 只算真的發出去的(manifest 50 集、扣下 1 集 → 回 49,不是漏集)。
 
-    完整回傳欄位與 preflight 涵蓋範圍見 skill `references/tool-reference.md`(**參數的正本是這支的 inputSchema**,不必為了湊參數去讀那份)。"""
+    完整回傳欄位與 preflight 涵蓋範圍見 skill `references/tool-reference.md`(**參數的正本是這支的 inputSchema**,不必為了湊參數去讀那份)。"""  # noqa: E501 —— tool description 正本,折行會改 inputSchema 描述
     base_url = _require_url_env("PODCAST_PUBLIC_BASE_URL")
     # return_episodes 只是回傳過濾器,但舊版拖到所有 PUT + manifest 回寫都完成後才
     # `set(return_episodes)`——傳個 [[1]] 之類的壞型別會在「發布其實已成功」之後才

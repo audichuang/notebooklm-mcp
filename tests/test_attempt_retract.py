@@ -2681,7 +2681,7 @@ async def test_blocked_gate_does_not_bump_the_revision(fake_client, tmp_path, mo
     `ManifestStore.update` 的 revision 是無條件 +1,所以 blocked/waiting 每跑一次就 bump
     —— 除了無效寫盤,還會平白撞掉另一個 process 正在做的 discovery CAS。
     """
-    manifest_path, attempt_id = await _abandon_an_unresolved_upload(
+    manifest_path, _attempt_id = await _abandon_an_unresolved_upload(
         fake_client, tmp_path, monkeypatch
     )
     before = ManifestStore(manifest_path).read()["revision"]

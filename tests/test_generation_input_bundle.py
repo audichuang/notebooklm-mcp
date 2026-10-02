@@ -217,13 +217,15 @@ def test_bundle_directory_swap_cannot_redirect_frozen_reads(tmp_path):
         return result
 
     try:
-        with patch("notebooklm_mcp.generation_input.os.fstat", side_effect=swap_after_pin):
-            with pytest.raises(ValueError, match="changed or became a symlink"):
-                load_frozen_generation_input(
-                    manifest_path=manifest,
-                    input_bundle_path=bundle.relative_to(tmp_path),
-                    episode_n=1,
-                )
+        with (
+            patch("notebooklm_mcp.generation_input.os.fstat", side_effect=swap_after_pin),
+            pytest.raises(ValueError, match="changed or became a symlink"),
+        ):
+            load_frozen_generation_input(
+                manifest_path=manifest,
+                input_bundle_path=bundle.relative_to(tmp_path),
+                episode_n=1,
+            )
     finally:
         shutil.rmtree(outside_root, ignore_errors=True)
 

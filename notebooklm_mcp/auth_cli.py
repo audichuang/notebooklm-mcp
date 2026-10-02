@@ -27,7 +27,7 @@ def main() -> None:
     # 上游改語義時只有其中一邊會被改到,而 tripwire 只守著 app 那一邊。
     try:
         assert_usable_storage_state(data)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 任何驗證失敗都轉成同一個 SystemExit 訊息
         raise SystemExit(f"Invalid storage_state: {exc}") from None
 
     out = os.path.expanduser(args.out)

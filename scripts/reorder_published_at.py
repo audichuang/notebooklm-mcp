@@ -84,7 +84,7 @@ def _plan(manifest: dict) -> list[tuple[int, str, str]]:
         )
     return [
         (int(ep["episode"]), ep["published_at"], raw)
-        for ep, (_dt, raw) in zip(eps, pool)
+        for ep, (_dt, raw) in zip(eps, pool, strict=False)
     ]
 
 

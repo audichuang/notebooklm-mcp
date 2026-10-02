@@ -42,7 +42,10 @@ _ENUMS = [
     # `rpc.types` 兩版都 re-export —— 挑會搬家的那個路徑只會產生「模組不存在」的假訊號。
     ("notebooklm.rpc.types", ["AudioFormat", "AudioLength", "SharePermission", "GrpcStatusCode",
                               "ShareViewLevel", "ArtifactStatus"]),
-    ("notebooklm.types", ["SlideDeckFormat", "SlideDeckLength", "ReportFormat", "ArtifactType", "SourceType", "VideoFormat"]),
+    (
+        "notebooklm.types",
+        ["SlideDeckFormat", "SlideDeckLength", "ReportFormat", "ArtifactType", "SourceType", "VideoFormat"],
+    ),
 ]
 
 _TYPES = [
@@ -63,7 +66,12 @@ _CALLS = {
     ],
     "notebooklm._notebooks:NotebooksAPI": ["create", "list", "get", "get_source_ids", "get_raw"],
     "notebooklm._chat:ChatAPI": ["ask"],
-    "notebooklm._research:BaseResearchAPI": ["start", "poll", "wait_for_completion", "import_sources_with_verification"],
+    "notebooklm._research:BaseResearchAPI": [
+        "start",
+        "poll",
+        "wait_for_completion",
+        "import_sources_with_verification",
+    ],
     "notebooklm._sharing:SharingAPI": ["get_status", "set_users", "add_user"],
     "notebooklm.client:NotebookLMClient": ["from_storage"],
 }

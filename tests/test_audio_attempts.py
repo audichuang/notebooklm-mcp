@@ -153,7 +153,7 @@ async def test_reconcile_accepts_sdk_naive_local_artifact_timestamp(
     fake_client, tmp_path
 ):
     artifact = _remote_audio("remote-audio-naive")
-    artifact.created_at = datetime.now()
+    artifact.created_at = datetime.now()  # noqa: DTZ005 —— 刻意構造 naive datetime(0.7.x host-local 舊值)
     manifest_path, attempt_id = await _leave_acceptance_unknown(
         fake_client, tmp_path, [artifact]
     )

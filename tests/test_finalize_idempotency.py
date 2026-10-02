@@ -855,7 +855,7 @@ def test_created_at_utc_normalises_both_naive_and_aware():
     # 0.8.0 形狀:已經是 aware UTC,原樣通過。
     assert _created_at_utc(instant) == instant
     # 0.7.x 形狀:同一個 epoch 的 host-local naive 值,必須折回同一個 instant。
-    naive_local = datetime.fromtimestamp(instant.timestamp())
+    naive_local = datetime.fromtimestamp(instant.timestamp())  # noqa: DTZ006 —— 刻意構造 naive datetime(0.7.x host-local 舊值)
     assert naive_local.tzinfo is None
     assert _created_at_utc(naive_local) == instant
     # 非 datetime(SDK 回 None / 解析失敗)不能爆,回 None 讓呼叫端 fail-closed。

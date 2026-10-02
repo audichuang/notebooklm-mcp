@@ -34,7 +34,11 @@ def to_audio_length(value: str | None) -> AudioLength | None:
         raise ValueError(f"Invalid audio length {value!r}. Choose from: {', '.join(_LENGTH)}") from None
 
 
-from notebooklm.types import ReportFormat, SlideDeckFormat, SlideDeckLength
+from notebooklm.types import (  # noqa: E402 —— 刻意放在 audio 對照表之後,維持既有 import 位置
+    ReportFormat,
+    SlideDeckFormat,
+    SlideDeckLength,
+)
 
 _SLIDE_FORMAT = {
     "detailed": SlideDeckFormat.DETAILED_DECK,

@@ -627,53 +627,6 @@ async def test_series_resend_closure_does_not_hold_local_conversions(fake_client
     )
 
 
-async def test_series_resend_closure_does_not_hold_local_conversions(fake_client, tmp_path):
-    """**系統裡第三個 dispatch closure** 也不准在 closure 內做純本地轉換。
-
-    v0.9.16 把 `generate_slides` / `generate_report` 的 `resolve_language` / enum 轉換移到
-    closure 外(否則 `ValueError` 會被寫成一筆假的「遠端受理不明」),但漏了
-    `podcast_series` 的 `_generate_resend` —— 而音檔那條的後果比附件嚴重:不是多一行假
-    log,是**一個 durable attempt 被推進 `acceptance_unknown` 而遠端一次都沒被碰到**,
-    而 ADR-0009 會把呼叫端從那個狀態導去 reconcile,那裡什麼都撈不到。
-
-    ⚠️ **那條路是可達的** —— 本測試第一版的 docstring 寫「目前碰不到,靠 `_assert_series_owns_attempt`
-    擋著」,獨立複審用 probe 證明是錯的:`_audio_settings` 只保存**原始字串**,所以 prepared
-    attempt 與本次呼叫帶同一個「目前 mapper 不認得的舊值」時,ownership 等值檢查會通過。
-    行為面由 `test_series_resend_converts_before_the_durable_claim` 守;這條是**結構鎖**,
-    守住三個 closure 都不准把本地轉換關進去(AST 看得到而行為測試看不到的那一半)。
-    """
-    import ast
-    import inspect
-
-    from notebooklm_mcp import tools_artifacts, tools_podcast
-
-    LOCAL_CONVERSIONS = {
-        "resolve_language", "to_slide_format", "to_slide_length",
-        "to_report_format", "to_audio_format", "to_audio_length",
-    }
-    offenders = []
-    for module in (tools_podcast, tools_artifacts):
-        tree = ast.parse(inspect.getsource(module))
-        for node in ast.walk(tree):
-            # dispatch closure = 傳給共用迴圈的那個 `async def`,一律叫 _generate* / _revise*
-            if not isinstance(node, ast.AsyncFunctionDef):
-                continue
-            if not (node.name.startswith("_generate") or node.name.startswith("_revise")):
-                continue
-            for call in ast.walk(node):
-                if (
-                    isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name)
-                    and call.func.id in LOCAL_CONVERSIONS
-                ):
-                    offenders.append(f"{module.__name__}.{node.name} -> {call.func.id}()")
-
-    assert offenders == [], (
-        "dispatch closure 內做純本地轉換 —— 它拋的 ValueError 會落進共用迴圈的泛用 "
-        f"except,被記成從未發生的遠端事件:{offenders}"
-    )
-
-
 async def test_identical_refusals_stay_as_separate_entries(fake_client, tmp_path):
     """`attachment_errors` 是**逐筆原始事件**,不是壓縮摘要 —— 四次一樣的拒絕留四筆。
 
