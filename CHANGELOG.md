@@ -6,6 +6,111 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.29 — 跟上 notebooklm-py 0.8.4、依賴安全升級(Pillow 12)、建立 ruff 與更嚴的 CI
+
+起因:上游 0.8.4 發版後,消費端重裝 `@latest` 會落在沒測過的組合;Pillow 11.3 帶著 18 筆 advisory;
+3aefaaa 的錯誤訊息修正停在 master 沒出貨(消費端裝的是 tag,`latest` 只指最高 semver,沒發版的修正只修給自己看)。
+本輪同時把 ruff / pre-commit / 更嚴的 CI 一次建起來。
+
+### notebooklm-py 0.8.4
+
+- **下界抬到 `>=0.8.4`**,主依賴與 `login` extra 兩處。理由:消費端重裝 `@latest` 已經會解析到 0.8.4,
+  維持舊下界等於留著未測組合。
+- `scripts/compare_sdk_surface.py` 只看到多一個 `Source.experimental_failure_code`(我方沒用到)。
+  簽名沒變不代表語意沒變,所以另外讀了原始碼 diff,發現下面這條。
+- **可見行為改變:`_share_each` 呼叫的 `sharing.set_users` 改了兩件事。**
+  ① 回應是 null 結果加非 OK 狀態時直接 raise(0.8.3 只在 DEBUG 吞掉);上游的 cassette 顯示這個形狀出現在
+  一般 share 流量裡,是否良性上游仍無定論。② 新增 `_verify_grants`:讀回的權限必須剛好是 EDITOR,否則拋 `RPCError`。
+- 我方的 except 會把錯誤包成帶 notebook id 與「改跑 `notebook_share_with_pool` 對帳」的訊息;重跑時
+  `get_status` 預檢會把已生效的帳號放進 `already_shared`。
+- email 大小寫:上游保留 local part 的大小寫,我方用 `casefold`。pool 的 email 來自 `get_account_email()`,
+  預期不會不一致,但未實測。
+- **dev 帳號 live 驗證:未驗證(打 tag 前需在拋棄式 notebook 跑 `notebook_share_with_pool`)。**
+- **cookie 紅線仍成立**:0.8.4 的 `_auth/` 只動到 enterprise host 集合與 access-gate 錯誤訊息文字,
+  keepalive / psidts_recovery 沒動。
+- `tests/test_contracts.py` 的 pin tripwire 改成 0.8.3 not in、0.8.4 in。
+
+### 依賴安全升級
+
+- **Pillow `>=12.3,<13`**:11.3.0 有 18 筆 advisory,修正只出在 12.x(舊上界 `<12` 擋住了)。我們只用
+  open / convert / save JPEG,12.0 移除的 API 都沒用到。合成圖探測 JPEG bytes 相同,**真實 Chrome 封面沒驗過**;
+  已發布的 JPEG 是事實來源,不受影響,只有重產封面才可能換 content-hash URL。
+- **下界跟著安全修正走**:`mcp[cli]>=1.28.1`(原允許的 1.27.0 有 3 筆 GHSA)、`markdown>=3.8.1`(CVE-2025-69534)、
+  dev 的 `pytest>=9.0.3`(CVE-2025-71176)。`hatchling>=1.27,<2` 補上下界(消費端從原始碼建 wheel,build 環境同樣不讀 lock;
+  1.27 與 1.32.4 建出的 wheel 檔案清單實測相同)。
+- **filelock 4.0.9**:先前記的「被 FastMCP 擋住」是誤讀 —— 上游延後的是它自己 extra 裡的 fastmcp,我們的依賴樹沒有 fastmcp。
+  消費端早已裝到 4.0.9,現在 lock 跟上,「測的」等於「裝的」。
+- **mcp 維持 `<2`**。2.x 的阻擋點:`fastmcp` 模組移除、streamable-http 的 lifespan 語意改變(牽動 pool 紅線)、
+  eval_harness 用到的 lowlevel `Server`。
+- **uv.lock 實際變動**:pillow 11.3.0→12.3.0、filelock 3.32.7→4.0.9、cryptography 50.0.1→50.0.2、pyjwt 2.15.0→2.15.1、
+  python-dotenv 1.2.3→1.2.4、sse-starlette 3.4.11→3.5.0;mcp 仍 1.30.0。另外 notebooklm-py 0.8.3→0.8.4、本套件 0.9.28→0.9.29。
+- pip-audit 對 lock 匯出:「No known vulnerabilities found」。
+
+### 錯誤訊息:published_at 亂序的修法(3aefaaa)
+
+原本的訊息只指向 `scripts/reorder_published_at.py`,而照 `@latest` 安裝的機器沒有這支腳本。改成先講修法本身
+(依集號重新配對),再分別指向 git clone 的腳本與 skill 的等價寫法。`3817179` 補了斷言守住修法那半段,
+已用突變(還原 3aefaaa)確認會紅。**這條修正不發版就等於沒出貨** —— 這也是本版存在的原因之一。
+
+### 開發工具鏈與 CI
+
+- **ruff 0.16.10 精確 pin**(`dependency-groups`)。不用範圍 pin:0.16 的預設規則集從 59 條暴增到 413 條,minor 版還會改格式化風格,
+  範圍 pin 會讓 CI 在 code 沒變時無故變紅、凍住 `latest`。規則集明列
+  `E W F I B UP C4 SIM ASYNC RUF DTZ PLE BLE001 ISC004`,每條 ignore 附理由(繁中全形標點、`ASYNC109` 是公開 inputSchema 等)。
+  line-length 100,E501 硬上限 120。
+- **自動修正與手修的原則**:啟用後 202 筆違規。先只跑 `ruff check --fix`(不帶 `--unsafe-fixes`)修掉 169 筆,逐規則說明語意不變;
+  剩 52 筆手修,**不能證明等價的一律 `noqa` 並附理由**,不為了 lint 改執行期行為(B904 保留隱式 chaining、scripts 的 zip 明寫 `strict=False`)。
+  測試端有三處是真缺陷而非風格:`test_bad_episode_cover_fails_fast` 建了 `captured` 卻從沒斷言、兩處 `pytest.raises(Exception)`;
+  已補斷言並用突變確認會紅。
+- **`ruff format` 重排 78 個檔案**(+3842/-3121),每個檔案用 `ast.dump` 比對前後一致,MCP `tools/list` 快照(37 支工具的
+  name/description/inputSchema/annotations、instructions、註冊順序)逐 byte 相同。`.git-blame-ignore-revs` 記錄該 commit
+  (GitHub 自動讀;本機要 `git config blame.ignoreRevsFile .git-blame-ignore-revs`)。
+- **pre-commit**:ruff 用自己的隔離環境(不觸發共用 venv sync,避開並行假紅),加 yaml/toml 檢查、`detect-private-key`、
+  large-files、merge-conflict、檔尾與空白衛生(排除凍結的封面 template 與 `docs/superpowers`)。rev 要與 pyproject 的 `ruff==` 同步。
+- **dev 改成 PEP 735 `dependency-groups`**(不再進 wheel METADATA)。**`uv sync --extra dev` 已失效,改用 `uv sync`。**
+- **pytest `strict = true` 加 `filterwarnings = error`**。為此清掉測試自身的問題:`-W error` 原本會紅 186 支,全是 `open().read()` 不關檔的
+  ResourceWarning,機械式改成 pathlib 的 `read_text` / `read_bytes` / `write_text`;docstring 的 invalid escape 改 raw string;
+  參數 ID 撞名(`7` 與 `"7"`)加 `pytest.param(id=)`。`make_cover` 測試改用 `sys.executable -m notebooklm_mcp.cover_cli`,
+  不再在 pytest 途中巢狀 `uv run`(它會 re-sync 共用 venv,lowest-direct 實測時 pillow 10 中途被換成 11.3)。
+  唯一的第三方豁免:mcp 1.28.1(lowest-direct 下界)的 `Settings.lifespan` 前向參照在 pydantic-settings 2.15.0 下丟
+  `IncompleteFieldDefinitionWarning`,以訊息加完整類別路徑精確豁免,鎖定的 mcp 1.30.x 不會觸發。
+- **CI 加裝 ffmpeg**:CI 一直是 602 skipped、本機 597。多出的 5 支是 MP4 轉真 MP3 加 ID3 封面內嵌 —— 四台生產機都在跑的路徑,
+  CI 卻從沒驗過,而且沒人發現(`-q` 不顯示 skip 理由)。skip 條件同時改成 ffmpeg 與 ffprobe 都要有(原本只有 ffmpeg 時會 FAILED)。
+- **`NBLM_STRICT_SKIPS` 守門**(conftest):任何一支測試函式的所有 case 都 skip 就判紅。它問的是「有沒有測試其實什麼都沒斷言」,
+  不釘 skip 總數。**597 個 skip 判定健康**:全部來自參數化笛卡兒積裡「這個狀態不會觸發…」的自我 skip
+  (`test_attempt_capabilities.py` 的 12 + 300 + 240 + 45),設計如此,有 meta test 鎖住。已用拿掉 ffmpeg 的 PATH 突變確認會紅並列出那 5 支。
+- **覆蓋率**:branch 模式,實測 **91.54%**(含 ffmpeg 路徑),`fail_under = 91`(實測值取整數下限,只准往上調)。`--cov` 只在 CI 指令帶,
+  本機跑單一檔案不會判紅。
+- **lint job** 在 `ci.yml` 裡(紅了會擋 retag),不 checkout audi-skill;加 `permissions: contents: read` 與 `timeout-minutes`
+  (小於 retag 的 25 分鐘等待)。workflow 名稱 `ci`、檔名與觸發條件都沒改,retag 的輪詢不受影響。
+- **`deps-watch.yml`**(每週加手動):`pip-audit`,以及 highest / lowest-direct 兩種解析的全套測試(重新解析的 lock 不 commit)。
+  實測 lowest-direct 的舊下界本身就是壞的:`pytest-asyncio>=0.23` 解出 0.23.0,不認得 `asyncio_default_fixture_loop_scope`,
+  整個 pytest 起不來,所以下界抬到 `>=1.2`。本機 lowest-direct(notebooklm-py 0.8.4 / mcp 1.28.1 / pillow 12.3.0 /
+  markdown 3.8.1 / pytest 9.0.3)與 highest 都 13175 passed、597 skipped。
+- **dependabot 只管 github-actions**(每月一次、合成一組 PR)。Python 依賴維持人工 pin,因為每條 pin 都有寫理由,升 notebooklm-py 還要做 SDK 原始碼 diff。
+  **前提:repo 必須先設 Dependabot secret `AUDI_SKILL_DEPLOY_KEY`**,否則 dependabot PR 的 `ci.yml` 會卡在 audi-skill checkout。**此 secret 是否已設:未驗證。**
+- **為何時間變動的檢查不進 `ci.yml`**:retag 依 `ci.yml` 的結論移動 `latest`,漏洞資料庫或上游發版造成的紅燈會凍住與我們改動無關的版本。
+  所以放 deps-watch,紅了不擋發版,處理方式見 release-checklist。
+
+### 刻意沒做的
+
+- **mcp 2.x**(阻擋點見上)。
+- **型別檢查閘**:pyright 64 筆,源自 `client: object` 的標註,要先動型別設計才有意義,不在本輪範圍。
+- **pytest-randomly**:未評估過現有測試的順序相依,不冒險。
+- **actions 的 SHA pin 與 concurrency**:交給 dependabot。
+
+### 最終數字(CI 同款指令)
+
+`NBLM_STRICT_SKIPS=1 uv run --no-sync pytest -q -ra --cov --cov-report=term-missing:skip-covered`:
+**13175 passed、597 skipped**,TOTAL 覆蓋率 **91.54%**(門檻 91)。`ruff check .` 通過、`ruff format --check .` 86 個檔案已格式化、
+`check_skill_sync.py` 通過(37 支工具)。
+
+### 打 tag 前還欠的
+
+1. dev 帳號在拋棄式 notebook 跑 `notebook_share_with_pool`,驗 0.8.4 的 `set_users` 語意(**未驗證**)。
+2. 確認 Dependabot secret 已設。
+3. 打 tag 後從中性目錄驗實裝的那一份並印 `module.__file__`(見 release-checklist)。
+
 ## v0.9.28 — 多 agent 稽核一輪:59 條候選、反駁式驗證後修掉 5 條 P1、11 條 P2,補回 8 條假綠的測試
 
 ### notebooklm-py 0.8.3(同版加入,2026-09-26 上游發版當天)
