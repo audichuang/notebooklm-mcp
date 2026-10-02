@@ -90,8 +90,7 @@
   實測 lowest-direct 的舊下界本身就是壞的:`pytest-asyncio>=0.23` 解出 0.23.0,不認得 `asyncio_default_fixture_loop_scope`,
   整個 pytest 起不來,所以下界抬到 `>=1.2`。本機 lowest-direct(notebooklm-py 0.8.4 / mcp 1.28.1 / pillow 12.3.0 /
   markdown 3.8.1 / pytest 9.0.3)與 highest 都 13175 passed、597 skipped。
-- **dependabot 只管 github-actions**(每月一次、合成一組 PR)。Python 依賴維持人工 pin,因為每條 pin 都有寫理由,升 notebooklm-py 還要做 SDK 原始碼 diff。
-  **前提:repo 必須先設 Dependabot secret `AUDI_SKILL_DEPLOY_KEY`**,否則 dependabot PR 的 `ci.yml` 會卡在 audi-skill checkout。**已驗證(`gh secret list --app dependabot` 為空,僅 Actions 有):Dependabot secret 尚未設;合併前需執行 `gh secret set AUDI_SKILL_DEPLOY_KEY --app dependabot`(值同 Actions secret,由使用者操作),否則第一個 dependabot PR 的 test-build-smoke 會因 checkout 失敗而紅。**
+- **不使用 dependabot**(事後移除):原先加了 github-actions 的月更設定,但它的 PR 讀不到 Actions secret、clone audi-skill 會紅,且 repo 為單人維護,CI 外掛版本改為手動管。Python 依賴維持人工 pin,因為每條 pin 都有寫理由,升 notebooklm-py 還要做 SDK 原始碼 diff。
 - **為何時間變動的檢查不進 `ci.yml`**:retag 依 `ci.yml` 的結論移動 `latest`,漏洞資料庫或上游發版造成的紅燈會凍住與我們改動無關的版本。
   所以放 deps-watch,紅了不擋發版,處理方式見 release-checklist。
 
@@ -111,7 +110,7 @@
 ### 打 tag 前還欠的
 
 1. ~~live 驗 0.8.4 的 `set_users` 語意~~:已通過(見上)。
-2. Dependabot secret 仍未設(`gh secret set AUDI_SKILL_DEPLOY_KEY --app dependabot`);只影響 dependabot 開的 PR,不影響發版。
+2. ~~Dependabot secret~~:不使用 dependabot,此項作廢。
 3. 打 tag 後從中性目錄驗實裝的那一份並印 `module.__file__`(見 release-checklist)。
 
 ## v0.9.28 — 多 agent 稽核一輪:59 條候選、反駁式驗證後修掉 5 條 P1、11 條 P2,補回 8 條假綠的測試

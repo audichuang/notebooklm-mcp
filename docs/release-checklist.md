@@ -138,8 +138,6 @@ pyproject 的 `ruff==` 與 `.pre-commit-config.yaml` 的 rev 一起改;升完重
 
 ## deps-watch 紅了怎麼辦
 
-前提:Dependabot PR 要能過 CI,必須先設 Dependabot secret `AUDI_SKILL_DEPLOY_KEY`。
-
 - **pip-audit 紅**:抬 pyproject 的下界或上界(每條附理由)→ `uv lock` → 全套 → 發版。不發版等於沒修。
 - **resolution/highest 紅**:消費端下次重裝就會拿到壞組合,收緊上界或修正後發版。
 - **resolution/lowest-direct 紅**:下界宣告不實,抬下界。
