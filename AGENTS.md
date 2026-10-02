@@ -1,7 +1,7 @@
 # AGENTS.md — notebooklm-mcp
 
 自建薄 MCP server(建在 `notebooklm-py` 之上)+ 確定性續集 podcast 工具。**本 repo 只含 MCP 程式碼**,
-發布成 private repo `github.com/audichuang/notebooklm-mcp`,靠 `uv tool install` 裝成 console 命令
+發布成公開 repo `github.com/audichuang/notebooklm-mcp`(舊的完整歷史在私有的 `notebooklm-mcp-archive`),靠 `uv tool install` 裝成 console 命令
 `nblm-mcp`(server)/ `notebooklm-cover`(封面 CLI)。薄 `SKILL.md` 路由層 + `references/` **在 skill repo
 `audi-skill/notebooklm`(docs-only)**;兩者是一組配置,同步規則見 [docs/release-checklist.md](docs/release-checklist.md)。
 完整設計理由與 live 驗證踩坑見 `docs/superpowers/notebooklm-mcp-findings.md`(經驗庫,值得先讀)。
@@ -117,6 +117,9 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
   **commit 的內容 = 驗證過的內容,比 commit 粒度重要。**
 - lint/format 修正與語意修正分開 commit;新的 noqa 必須附理由(`# noqa: CODE —— 為何`);不為了 lint 改執行期行為。
 - `ci.yml` 是 latest 的閘(lint + 測試 + 覆蓋率 + wheel 冒煙),任何會隨日期或上游發版變動的檢查放 `deps-watch.yml`,不准放進 `ci.yml`。
+- 🔴 **這是公開 repo,而 git 歷史一旦公開就收不回**:不得提交真實帳號 email、區網 IP、家目錄絕對路徑、cookie/token、
+  真實 notebook 內容。驗收紀錄裡的 pool 帳號一律寫 `pool-account-N`,路徑用 `$HOME`/`Path.home()`。
+  commit 作者用 GitHub noreply。2026-10-02 轉公開前已用 `git filter-repo` 洗過一次歷史——不要讓它再髒回去。
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
 - **驗收分三層,而且三層都自己跑 —— 不要產出「可貼的啟動 prompt」叫使用者開 session。**
   headless `claude -p --model sonnet` 每題約 $0.2,所以跑得起「每題 n 次取平均 + 盲評 + 每次改完重跑」;
