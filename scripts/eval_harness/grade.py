@@ -38,6 +38,9 @@ def grade(path):
             "claude",
             "-p",
             prompt,
+            # 不指定就吃 session 的預設模型(可能是最貴的那個);評分跟受測臂一樣用 sonnet。
+            "--model",
+            os.environ.get("NBLM_GRADE_MODEL", "sonnet"),
             "--output-format",
             "json",
             "--dangerously-skip-permissions",
