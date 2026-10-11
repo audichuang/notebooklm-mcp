@@ -3,13 +3,13 @@
 Install the tagged MCP package on each machine first:
 
 ```bash
-uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
+uv tool install --python 3.12 --force --reinstall "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
 ```
 
 `latest` is a moving pointer to the newest `vMAJOR.MINOR.PATCH` release. Roll
-back with `@vX.Y.Z`. After a new release, `--force` may still hit uv's git
-cache; if the metadata version is stale, `uv cache clean notebooklm-mcp` and
-reinstall.
+back with `@vX.Y.Z`. Keep `--reinstall`: `--force` alone keeps the dependency
+versions already in the tool venv. If the metadata version is still stale,
+`uv cache clean notebooklm-mcp` and run the install again.
 
 Register the MCP server with Claude Code using stdio transport and Doppler auth injection.
 NOTE: on Claude CLI 2.1.201 the `claude mcp add … -- …` form treats everything after `--` as a

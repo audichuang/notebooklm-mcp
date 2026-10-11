@@ -65,7 +65,9 @@ v0.9.26 的修正在 master 躺著,而四台機器裝到的全是壞的。**reta
    Python 把 cwd 排在 `sys.path` 最前面,在 repo 目錄下跑 tool venv 的 python 會載到
    **repo 副本**,行為看起來全對(v0.9.27 實際差點據此誤判成「已修好」)。
    **「裝完」要驗版本號,不能只看它印 `Installed 2 executables`**:uv 的 git cache
-   對移動 tag 不敏感,`--force` 也可能裝成舊 SHA(v0.8.1 實測是 cache 壞掉裝成舊版)。
+   對移動 tag 不敏感,`--force` 也可能裝成舊 SHA(v0.8.1 實測是 cache 壞掉裝成舊版);
+   **只帶 `--force` 還會沿用 tool venv 裡的舊依賴**(v0.9.30 實測 pydantic 停在 2.13.5,
+   lock 已是 2.14.0),所以安裝指令一律帶 `--reinstall`,驗收時連依賴版本一起印。
    收工前跑
    `~/.local/share/uv/tools/notebooklm-mcp/bin/python -c "import importlib.metadata as m; print(m.version('notebooklm-mcp'))"`;
    數字不對就 `uv cache clean notebooklm-mcp` 再 `--force --reinstall`。

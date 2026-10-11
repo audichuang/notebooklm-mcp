@@ -27,7 +27,7 @@ NBLM_STRICT_SKIPS=1 uv run --no-sync pytest -q -ra --cov --cov-report=term-missi
 uv tool install pre-commit && pre-commit install && git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 # 消費端安裝(3 VM / podcast-lab 各裝一次;@latest = 最新發版,不追 master)
-uv tool install --python 3.12 --force "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
+uv tool install --python 3.12 --force --reinstall "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
 
 # 跑 MCP server(認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON);repo 內開發用 uv run python -m notebooklm_mcp.server
 doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
