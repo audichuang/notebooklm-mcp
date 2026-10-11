@@ -11,6 +11,7 @@ import hashlib
 import math
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from email.utils import format_datetime
 
@@ -1555,6 +1556,107 @@ def _mark_not_accepted(
     store.update(mutate)
 
 
+# ───────────────────────── 派送 prepared attempt(單一入口)─────────────────────────
+# 「baseline → claim → failover 派送 → 失敗時讀回 manifest 的 dispatch 狀態 → 綁定 artifact」
+# 原本在 `_run_episode` 與 `podcast_series` 的 inline 重送各寫一份,而且每次修一份(RateLimitError、
+# unconfirmed 429、post-send RuntimeError、CancelledError)另一份就落後一步 —— 典型的「補一半」。
+# 現在只有這裡讀 manifest 做分類;呼叫端只把結果翻成自己的契約(`_run_episode` 補指引後 raise,
+# `podcast_series` 回結構化 partial)。**這裡不是第二個 failover 迴圈**:迴圈仍只有
+# `_failover.dispatch_with_failover`(ADR-0010),這裡只在它外面做 claim / 讀回 / bind。
+
+
+@dataclass(frozen=True)
+class DispatchAccepted:
+    """伺服器受理了:`account` / `client` 是**實際送出的那一個**(failover 後會換),finalize 必須用它們。"""
+
+    artifact_id: str
+    account: str | None
+    client: object
+
+
+@dataclass(frozen=True)
+class DispatchNotClaimed:
+    """attempt 已不是 prepared(被並行呼叫搶先 claim),什麼都沒送。"""
+
+
+@dataclass(frozen=True)
+class DispatchStopped:
+    """派送沒有拿到 artifact。`exc` 是原例外(含 CancelledError),**未改寫**;
+    `recorded` 是 manifest 當下記的 `dispatch.status`,讀不到(standalone / tombstone / 讀檔失敗)為 None。
+
+    判準是 `recorded`,例外型別只是入場券:`RuntimeError` 既可能是乾淨的 not_accepted,
+    也可能是泛用分支標成 acceptance_unknown 的普通失敗。
+    """
+
+    exc: BaseException
+    recorded: str | None
+
+
+DispatchOutcome = DispatchAccepted | DispatchNotClaimed | DispatchStopped
+
+
+def _recorded_dispatch_status(store: ManifestStore, episode_n: int, attempt_id: str) -> str | None:
+    """讀回 attempt 的 `dispatch.status`;讀不到回 None。
+
+    讀 manifest 只為了分類,不能自己變成新的失敗來源:`abandon_in_flight` 讓「並行 retract
+    掉在飛的 attempt」成為受支援操作,`_attempt_record` 對 tombstone 會 raise,在 except
+    handler 裡再拋會蓋掉真正該讓人看到的那個例外。
+    """
+    try:
+        _, attempt = _attempt_record(store.read(), episode_n, attempt_id)
+        return attempt["dispatch"]["status"]
+    except Exception:  # noqa: BLE001 —— manifest 讀不到就視為沒有紀錄(None)
+        return None
+
+
+async def _dispatch_prepared_attempt(
+    store: ManifestStore | None,
+    notebook_id: str,
+    episode_n: int,
+    attempt_id: str | None,
+    generate,
+    *,
+    account: str | None,
+    client: object,
+    wait_timeout: float,
+) -> DispatchOutcome:
+    """派送一顆 prepared attempt,回結構化結果而不是讓呼叫端各自讀 manifest。
+
+    順序即 ADR-0001 的紀律:baseline(唯讀)→ `_claim_prepared_dispatch`(durable,先於任何
+    遠端副作用)→ failover 派送 → 成功才 `_bind_accepted_artifact`。`store is None`
+    (standalone)略過 claim / bind / 讀回。`bind` 的失敗不在 try 內,原樣往外拋。
+    """
+    if store is not None:
+        baseline = await client.artifacts.list(notebook_id, artifact_type=ArtifactType.AUDIO)
+        if not _claim_prepared_dispatch(
+            store,
+            episode_n,
+            attempt_id,
+            [artifact.id for artifact in baseline],
+            account=account,
+            wait_timeout=wait_timeout,
+        ):
+            return DispatchNotClaimed()
+    try:
+        artifact_id, account, client = await _dispatch_audio_with_failover(
+            store,
+            episode_n,
+            attempt_id,
+            generate,
+            account=account,
+            client=client,
+            notebook_id=notebook_id,
+        )
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 —— 刻意 blind:任何失敗都轉成結構化 Stopped,由呼叫端依 manifest 分類
+        recorded = (
+            None if store is None else _recorded_dispatch_status(store, episode_n, attempt_id)
+        )
+        return DispatchStopped(exc, recorded)
+    if store is not None:
+        _bind_accepted_artifact(store, episode_n, attempt_id, artifact_id)
+    return DispatchAccepted(artifact_id, account, client)
+
+
 def _series_will_redispatch(attempt: dict) -> bool:
     """series 走到這顆 attempt 時,會不會產生**新的一次 dispatch**。
 
@@ -2709,23 +2811,7 @@ async def _run_episode(
     # preflight / baseline / 記帳 / 實際送出四者必須同源。分開讀全域狀態時,並行的
     # 另一個工具呼叫在那個縫裡 rotate,就會變成 baseline 是 A 看到的、manifest 記 A、
     # 實際卻由 B 送出(ADR-0010 §Transparency:manifest 是唯一的稽核憑據)。
-    dispatch_account, dispatch_client = account, client
-    if store is not None:
-        baseline = await dispatch_client.artifacts.list(
-            notebook_id, artifact_type=ArtifactType.AUDIO
-        )
-        claimed = _claim_prepared_dispatch(
-            store,
-            episode_n,
-            attempt_id,
-            [artifact.id for artifact in baseline],
-            account=dispatch_account,
-            wait_timeout=wait_timeout,
-        )
-        if not claimed:
-            raise RuntimeError(
-                f"attempt {attempt_id!r} is no longer prepared; retry by its durable state"
-            )
+    dispatch_account = account
 
     async def _generate(dispatch_client: object):
         return await dispatch_client.artifacts.generate_audio(
@@ -2737,40 +2823,30 @@ async def _run_episode(
             audio_length=resolved_audio_length,
         )
 
-    try:
-        # 三元組的後兩個是**實際送出這次生成的**帳號與 client(failover 換過就是換過
-        # 之後那個)。finalize 一定要用它們 —— 見下方 `client = …` 那行的註解。
-        artifact_id, dispatch_account, client = await _dispatch_audio_with_failover(
-            store,
-            episode_n,
-            attempt_id,
-            _generate,
-            account=dispatch_account,
-            client=dispatch_client,
-            notebook_id=notebook_id,
+    # 後兩個是**實際送出這次生成的**帳號與 client(failover 換過就是換過之後那個)。
+    # finalize 一定要用它們:數十分鐘的 finalize 期間並行的另一集 rotate 掉游標是常態,
+    # 讀「此刻游標指到誰」給不出「這次是誰送的」的保證。
+    outcome = await _dispatch_prepared_attempt(
+        store,
+        notebook_id,
+        episode_n,
+        attempt_id,
+        _generate,
+        account=dispatch_account,
+        client=client,
+        wait_timeout=wait_timeout,
+    )
+    if isinstance(outcome, DispatchNotClaimed):
+        raise RuntimeError(
+            f"attempt {attempt_id!r} is no longer prepared; retry by its durable state"
         )
-    except (Exception, asyncio.CancelledError) as exc:
-        # 是不是「乾淨的 not_accepted」不能只看例外型別:`RuntimeError` 既是
-        # `ensure_started`/`NotebookAccessDenied` 判定的 not_accepted(訊息已經自帶
-        # 指引,bare raise 即可),也可能是 `_dispatch_audio_with_failover` 的泛用
-        # except 分支剛好撞上這個型別、被標成 acceptance_unknown 的失敗 —— 只看型別
-        # 分不出來,會讓後者的續跑指引被前者的 bare-raise 攔住(v0.7.2 舊碼走
-        # `except Exception` 才拿得到這段指引,這是重構帶進來的回歸)。真正的
-        # 判準是 manifest 裡記下的 dispatch 狀態,例外型別只是入場券——not_accepted
-        # 才 bare-raise,其餘一律補上 reconcile 指引。
+    if isinstance(outcome, DispatchStopped):
+        exc = outcome.exc
+        recorded = outcome.recorded
+        # 是不是「乾淨的 not_accepted」不能只看例外型別,判準是 manifest 裡記下的 dispatch
+        # 狀態(`outcome.recorded`),例外型別只是入場券 —— 理由見 `DispatchStopped`:
+        # not_accepted 才 bare-raise(訊息已自帶指引),其餘一律補上 reconcile 指引。
         if store is not None:
-            # 讀 manifest 只為了「要不要貼指引」,不能讓它自己變成新的失敗來源:
-            # `_attempt_record` 對已 retract 的 attempt 會 raise,而
-            # `abandon_in_flight` 讓「並行 retract 掉一個還在飛的 attempt」成為**受支援
-            # 的操作**——`_active_attempt_or_reraise` 當初判定「可達性極低」的前提不再
-            # 成立。在 except handler 裡再拋會蓋掉真正該讓人看到的那個例外
-            # (與 `generation_input.rollback` 的清理失敗同一條紀律)。
-            try:
-                current = store.read()
-                _, stopped_attempt = _attempt_record(current, episode_n, attempt_id)
-                recorded = stopped_attempt["dispatch"]["status"]
-            except Exception:  # noqa: BLE001 —— manifest 讀不到就視為沒有紀錄(recorded=None)
-                recorded = None
             refused = isinstance(exc, _REFUSED_WITHOUT_DISPATCH) and (
                 recorded == "not_accepted"
                 or (recorded is None and not getattr(exc, "unconfirmed", False))
@@ -2799,14 +2875,9 @@ async def _run_episode(
                         f"episode_n={episode_n}, attempt_id={attempt_id!r})"
                     ),
                 )
-        raise
-    # `client` 已由上面的三元組換成**實際送出這次生成的**那一個。這裡曾經是
-    # `client = runtime.get_client()`,註解宣稱「用實際送出的那一個」,但那行結構上
-    # 給不出這個保證:它讀的是「此刻游標指到誰」。而 finalize(等生成 → 下載 → 回錄
-    # 上傳 → rename)是數十分鐘,並行的另一集在這段期間 rotate 掉游標是常態不是意外。
-    if store is not None:
-        _bind_accepted_artifact(store, episode_n, attempt_id, artifact_id)
-
+        raise exc
+    artifact_id = outcome.artifact_id
+    dispatch_account, client = outcome.account, outcome.client
     # 生成一旦送出,artifact 就在 NotebookLM 雲端建立並跑到完成,不靠本地連線活著。
     try:
         if store is not None:
@@ -4974,7 +5045,6 @@ async def podcast_series(
                     )
                     # baseline / 記帳 / 實際送出三者同源,理由同 `_run_episode`
                     # 那條路徑(並行 rotate 會讓 manifest 記 A、實際 B 送出)。
-                    dispatch_account, dispatch_client = account, client
                     # 來源筆數守門**不在這裡**:它在上面 re-arm/supersede 的共同上游,
                     # 也就是任何 manifest mutation 之前(`refuse_if_too_many_sources`)。
                     # 曾經擺在這一行,結果是「先把 not_accepted re-arm 成 prepared、
@@ -4990,26 +5060,6 @@ async def podcast_series(
                     # 一個字都還沒被動。`_run_episode` 的 `resolved_audio_*` 同理。
                     resend_audio_format = to_audio_format(audio_format)
                     resend_audio_length = to_audio_length(audio_length)
-                    baseline = await dispatch_client.artifacts.list(
-                        notebook_id, artifact_type=ArtifactType.AUDIO
-                    )
-                    claimed = _claim_prepared_dispatch(
-                        store,
-                        episode_n,
-                        active_attempt_id,
-                        [row.id for row in baseline],
-                        account=dispatch_account,
-                        wait_timeout=wait_timeout,
-                    )
-                    if not claimed:
-                        latest = store.read()
-                        _, latest_attempt = _attempt_record(latest, episode_n, active_attempt_id)
-                        return partial(
-                            episode_n,
-                            active_attempt_id,
-                            latest_attempt["dispatch"]["status"],
-                            ACTION_SERIES,
-                        )
 
                     async def _generate_resend(dispatch_client: object):
                         return await dispatch_client.artifacts.generate_audio(
@@ -5020,86 +5070,75 @@ async def podcast_series(
                             audio_length=resend_audio_length,  # noqa: B023 —— closure 在同一輪迴圈內就被 _dispatch_audio_with_failover await 掉,不會延遲綁定
                         )
 
-                    # 與 `_run_episode` 共用同一個 dispatch helper —— 它負責配額
-                    # failover 與 not_accepted / acceptance_unknown 的落盤。這裡只把
-                    # 例外翻成 series 的**結構化安全停點**(return partial,不外拋),
-                    # 那是 podcast_series 對呼叫端的契約。
-                    try:
-                        # 後兩個是實際送出的帳號與 client,finalize 必須用它們
-                        # (理由見 helper 的 docstring)。
-                        (
-                            artifact_id,
-                            dispatch_account,
-                            client,
-                        ) = await _dispatch_audio_with_failover(
-                            store,
-                            episode_n,
-                            active_attempt_id,
-                            _generate_resend,
-                            account=dispatch_account,
-                            client=dispatch_client,
-                            notebook_id=notebook_id,
-                        )
-                        account = dispatch_account
-                    except asyncio.CancelledError:
-                        raise
-                    except (RuntimeError, *_REFUSED_WITHOUT_DISPATCH) as exc:
-                        # 明確拒絕(配額/限流/權限)沒有建出 task,或 ensure_started
-                        # 判定的同一件事——但**不能無條件回 not_accepted**(跟
-                        # `_run_episode` 那圈同一種「補一半」):
-                        # `_dispatch_audio_with_failover` 的泛用 except 分支也可能把
-                        # 一個 acceptance_unknown 的普通失敗包成 RuntimeError 重新拋出。
-                        # 真正的判準是 manifest 裡記下的狀態,例外型別只是入場券,與
-                        # 下面 `_run_episode` 分支的判準完全同一個道理(F-4 的姊妹修正:
-                        # 這裡曾經是唯一沒有覆核 manifest 就回報的分支)。
-                        # 讀 manifest 不能自己變成新的失敗來源:`abandon_in_flight` 讓
-                        # 並行 retract 掉在飛的 attempt 成為受支援操作,`_attempt_record`
-                        # 因此會對 tombstone raise,而在 except handler 裡再拋會蓋掉
-                        # 原例外。**三態,不是 bool**:
-                        #   not_accepted → 結構化停點(可直接重跑整季)
-                        #   讀得到、但不是 not_accepted → 一樣回結構化停點,只是要先對帳
-                        #   讀不到       → 我們什麼都不知道,原例外原樣交出去
-                        # 中間那一態原本是 bare raise,於是同一個 acceptance_unknown 只因
-                        # 例外型別是不是 RuntimeError 就分岔:一邊裸拋(**前面幾集已經跑完
-                        # 的 run_results 整份丟掉**),一邊回 partial。而 series 對呼叫端的
-                        # 契約是「預期內的停止用回傳值表達」,下面那個 `except Exception`
-                        # 也正是這樣做的。
-                        try:
-                            current = store.read()
-                            _, stopped_attempt = _attempt_record(
-                                current, episode_n, active_attempt_id
-                            )
-                            recorded = stopped_attempt["dispatch"]["status"]
-                        except Exception:  # noqa: BLE001 —— manifest 讀不到就視為沒有紀錄(recorded=None)
-                            recorded = None
-                        if recorded is None:
-                            raise
-                        if recorded != "not_accepted":
-                            return partial(
-                                episode_n,
-                                active_attempt_id,
-                                "acceptance_unknown",
-                                ACTION_RECONCILE,
-                            )
-                        observed_state, action, extra = _classify_not_accepted_stop(exc)
+                    # 與 `_run_episode` 共用 `_dispatch_prepared_attempt` —— claim、配額 failover、
+                    # not_accepted / acceptance_unknown 的落盤與讀回分類都在那裡。這裡只把
+                    # 結果翻成 series 的**結構化安全停點**(return partial,不外拋),那是
+                    # podcast_series 對呼叫端的契約。
+                    outcome = await _dispatch_prepared_attempt(
+                        store,
+                        notebook_id,
+                        episode_n,
+                        active_attempt_id,
+                        _generate_resend,
+                        account=account,
+                        client=client,
+                        wait_timeout=wait_timeout,
+                    )
+                    if isinstance(outcome, DispatchNotClaimed):
+                        latest = store.read()
+                        _, latest_attempt = _attempt_record(latest, episode_n, active_attempt_id)
                         return partial(
                             episode_n,
                             active_attempt_id,
-                            observed_state,
-                            action,
-                            **extra,
+                            latest_attempt["dispatch"]["status"],
+                            ACTION_SERIES,
                         )
-                    except Exception:  # noqa: BLE001 —— 刻意 blind except:失敗降級成 acceptance_unknown,不讓上層白做
+                    if isinstance(outcome, DispatchStopped):
+                        exc = outcome.exc
+                        if isinstance(exc, asyncio.CancelledError):
+                            raise exc
+                        if isinstance(exc, (RuntimeError, *_REFUSED_WITHOUT_DISPATCH)):
+                            # 明確拒絕(配額/限流/權限)沒有建出 task,或 ensure_started
+                            # 判定的同一件事——但**不能無條件回 not_accepted**(跟
+                            # `_run_episode` 那圈同一種「補一半」):泛用 except 分支也可能
+                            # 把 acceptance_unknown 的普通失敗包成 RuntimeError 重新拋出。
+                            # 真正的判準是 manifest 記下的狀態(`outcome.recorded`),例外
+                            # 型別只是入場券(F-4 的姊妹修正)。**三態,不是 bool**:
+                            #   not_accepted → 結構化停點(可直接重跑整季)
+                            #   讀得到、但不是 not_accepted → 一樣回結構化停點,只是要先對帳
+                            #   讀不到       → 我們什麼都不知道,原例外原樣交出去
+                            # 中間那一態若 bare raise,同一個 acceptance_unknown 會只因例外
+                            # 型別是不是 RuntimeError 就分岔,並丟掉前面各集的 run_results;
+                            # series 的契約是「預期內的停止用回傳值表達」。
+                            recorded = outcome.recorded
+                            if recorded is None:
+                                raise exc
+                            if recorded != "not_accepted":
+                                return partial(
+                                    episode_n,
+                                    active_attempt_id,
+                                    "acceptance_unknown",
+                                    ACTION_RECONCILE,
+                                )
+                            observed_state, action, extra = _classify_not_accepted_stop(exc)
+                            return partial(
+                                episode_n,
+                                active_attempt_id,
+                                observed_state,
+                                action,
+                                **extra,
+                            )
+                        # 其餘 Exception:刻意 blind,失敗降級成 acceptance_unknown,不讓上層白做。
                         return partial(
                             episode_n,
                             active_attempt_id,
                             "acceptance_unknown",
                             ACTION_RECONCILE,
                         )
-                    # `client` 已由上面的三元組換成實際送出的那一個。這裡曾經是
-                    # `client = runtime.get_client()` —— 以「殺掉分開讀全域」為目的的
-                    # 那一輪修正,自己在這條路上又種了一顆同型的(補一半的又一例)。
-                    _bind_accepted_artifact(store, episode_n, active_attempt_id, artifact_id)
+                    # `outcome` 的 account / client 是實際送出的那一個,finalize 必須用它們
+                    # (bind 已在 `_dispatch_prepared_attempt` 內做完)。
+                    artifact_id = outcome.artifact_id
+                    account, client = outcome.account, outcome.client
 
                 if not artifact_id:
                     if dispatch_state not in (

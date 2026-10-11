@@ -8,6 +8,7 @@
 
 ## Unreleased
 
+- 結構清理(零行為變更):prepared attempt 的派送(baseline → claim → failover → 讀回 manifest 分類 → bind)收成 `tools_podcast._dispatch_prepared_attempt`,回 `DispatchAccepted` / `DispatchNotClaimed` / `DispatchStopped`;`_run_episode` 與 `podcast_series` inline 重送只翻譯結果(raise 補指引 / 回 partial)。迴圈仍只有 `_failover.dispatch_with_failover`。
 - 結構清理(零行為變更):刪無 production caller 的 `tools_podcast._rotate_for_quota`(兩條測試改直接打 `_failover.rotate_for_quota`);`_created_at_utc` / `_source_ready` 收斂到 `audio_finalize`(兩份實作等價);三份 sha256-of-file 收斂成 `_atomic.sha256_file`;修 `publish/rss_models.py` 過期 docstring。
 
 ## v0.9.31 — 一槽憑證死掉不再讓整台 MCP 起不來
