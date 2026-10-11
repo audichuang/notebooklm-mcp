@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import os
 import stat
 import tempfile
@@ -114,3 +115,12 @@ async def download_atomically(
         if os.path.getsize(temp_path) <= 0:
             raise ValueError(f"downloaded file is empty: {final_path}")
         validate(temp_path)
+
+
+def sha256_file(path: str) -> str:
+    """串流算檔案 sha256(1 MiB 一塊);發布 / finalize / 檔名 hash 共用這一份。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

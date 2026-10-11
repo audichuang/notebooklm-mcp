@@ -8,7 +8,6 @@ projection；caller 只在本函式完整成功後才 promotion。
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import stat
 import tempfile
@@ -19,7 +18,12 @@ from typing import Any
 
 from notebooklm.types import ArtifactType
 
-from ._atomic import _DIR_FSYNC_UNSUPPORTED, _NEW_FILE_MODE, fsync_parent as _fsync_parent
+from ._atomic import (
+    _DIR_FSYNC_UNSUPPORTED,
+    _NEW_FILE_MODE,
+    fsync_parent as _fsync_parent,
+    sha256_file,
+)
 from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
 from .manifest_store import ManifestStore
 from .naming import episode_label
@@ -183,19 +187,11 @@ def _source_ready(source: object) -> bool:
     return status_value in ("ready", "completed") if status_value else False
 
 
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _file_matches(path: str, expected_size: int, expected_sha256: str) -> bool:
     try:
         if os.path.getsize(path) != expected_size:
             return False
-        digest = _sha256_file(path)
+        digest = sha256_file(path)
     except OSError:
         return False
     return digest == expected_sha256
@@ -634,7 +630,7 @@ async def finalize_attempt(
             size = os.path.getsize(temp_path)
             if size <= 0:
                 raise ValueError("downloaded audio is empty")
-            digest = _sha256_file(temp_path)
+            digest = sha256_file(temp_path)
             # mkstemp 給 0600,os.replace 會把 temp 的 mode 一起帶到最終 mp3——沿用既有
             # 檔案的 mode,首次下載才用 _NEW_FILE_MODE(對齊 _atomic.download_atomically
             # 同一做法,fsync 前就要設好)。

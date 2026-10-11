@@ -6,6 +6,10 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## Unreleased
+
+- 結構清理(零行為變更):刪無 production caller 的 `tools_podcast._rotate_for_quota`(兩條測試改直接打 `_failover.rotate_for_quota`);`_created_at_utc` / `_source_ready` 收斂到 `audio_finalize`(兩份實作等價);三份 sha256-of-file 收斂成 `_atomic.sha256_file`;修 `publish/rss_models.py` 過期 docstring。
+
 ## v0.9.31 — 一槽憑證死掉不再讓整台 MCP 起不來
 
 **事故**:v0.9.30 發版後到兩台 Mac 安裝時,MCP 在每台機器(含本機)都啟動即崩:

@@ -3,17 +3,11 @@ uploader: the MCP renders in memory and PUTs, so it never writes durable files."
 
 from __future__ import annotations
 
-import hashlib
-
-_CHUNK = 1 << 20
+from .._atomic import sha256_file
 
 
 def content_hash8(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(_CHUNK), b""):
-            h.update(chunk)
-    return h.hexdigest()[:8]
+    return sha256_file(path)[:8]
 
 
 def media_filename(episode_n: int, hash8: str) -> str:

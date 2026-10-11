@@ -27,7 +27,6 @@ from ._failover import (
     REFUSED_WITHOUT_DISPATCH as _REFUSED_WITHOUT_DISPATCH,
     describe_refusal,
     dispatch_with_failover,
-    rotate_for_quota,
 )
 from ._sources import (
     TooManySourcesError,
@@ -40,6 +39,8 @@ from .app import mcp
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
     RemoteArtifactUnverifiableError,
+    _created_at_utc,
+    _source_ready,
     claimed_source_ids,
     finalize_attempt,
     has_durable_output_evidence,
@@ -856,13 +857,6 @@ def _attempt_next_step(caps: dict) -> str:
     return retract_hint
 
 
-def _artifact_created_at_utc(value: object) -> datetime | None:
-    """Normalize the SDK's local-naive artifact timestamp to aware UTC."""
-    if not isinstance(value, datetime):
-        return None
-    return value.astimezone(UTC)
-
-
 def _attempt_record(
     manifest: dict,
     episode_n: int,
@@ -1402,7 +1396,7 @@ def _attempt_failover_recorder(store: ManifestStore | None, episode_n: int, atte
     沒有地方寫紀錄還靜默換帳號,違反 ADR-0010 自己立的「對 client 透明可以,對稽核
     紀錄不行」(standalone 沒有 manifest 的路徑就是這一種)。
 
-    抽成一支是因為 `_rotate_for_quota` 與 `_dispatch_audio_with_failover` 都要綁同一份
+    抽成一支是因為共用輪替(`_failover.rotate_for_quota`)與 `_dispatch_audio_with_failover` 都要綁同一份
     ——各自 inline 一個 closure 等於這條「稽核往哪寫」的決定有兩個版本。
     """
     if store is None:
@@ -1412,29 +1406,6 @@ def _attempt_failover_recorder(store: ManifestStore | None, episode_n: int, atte
         _record_dispatch_failover(store, episode_n, attempt_id, reason, from_account, to_account)
 
     return record
-
-
-def _rotate_for_quota(
-    store: ManifestStore | None,
-    episode_n: int,
-    attempt_id: str,
-    reason: object,
-    from_account: str | None,
-    tried: set[str],
-) -> tuple[str | None, object] | None:
-    """音檔家族的 rotate = 共用輪替 + 這個 attempt 的稽核面。
-
-    **輪替本身的紀律(`tried` 要擋在稽核寫入之前、`skip=` 要進掃描、`refused=` 要用
-    呼叫端實際持有的 label)住在 `_failover.rotate_for_quota`,不在這裡** —— v0.9.16
-    附件家族也接上 failover 時抽出去的:那三條每一條都是一次真實事故,各寫一份等於
-    下一次修正只有一處被改到。這支只剩「稽核往哪寫」這一件家族專屬的事。
-    """
-    return rotate_for_quota(
-        _attempt_failover_recorder(store, episode_n, attempt_id),
-        reason,
-        from_account,
-        tried,
-    )
 
 
 async def _dispatch_audio_with_failover(
@@ -1456,7 +1427,7 @@ async def _dispatch_audio_with_failover(
     不要在這裡加分支**,各寫一份正是本 repo 反覆出事的「補一半」。
 
     這支只剩音檔家族專屬的三件事:①稽核與終態標記寫進**這個 attempt**
-    (`_rotate_for_quota` / `_mark_not_accepted` / `_mark_acceptance_unknown`);
+    (`_attempt_failover_recorder` / `_mark_not_accepted` / `_mark_acceptance_unknown`);
     ②`store is None`(standalone)時退化成不換帳號;③維持既有的 positional 呼叫形狀。
 
     **重送是同一個 attempt** —— 同一個 `attempt_id`、不 supersede、不新建 manifest 紀錄。
@@ -1481,7 +1452,7 @@ async def _dispatch_audio_with_failover(
         client=client,
         notebook_id=notebook_id,
         # `store is None` 時這裡是 `None`,共用迴圈就一律不換帳號(沒地方寫稽核紀錄,
-        # ADR-0010)。`_rotate_for_quota` 綁的是同一支,不再各寫一份。
+        # ADR-0010)。
         record_failover=_attempt_failover_recorder(store, episode_n, attempt_id),
         # `account` 用不到 —— attempt 的 `dispatch.account` 已經記著這次是誰送的,
         # 而那個欄位在 failover 換帳號時就被 `_record_dispatch_failover` 更新過了。
@@ -3188,7 +3159,7 @@ async def _podcast_episode_reconcile(
     for artifact in artifacts:
         artifact_id = getattr(artifact, "id", None)
         kind = getattr(getattr(artifact, "kind", None), "value", None)
-        created_at = _artifact_created_at_utc(getattr(artifact, "created_at", None))
+        created_at = _created_at_utc(getattr(artifact, "created_at", None))
         if (
             not isinstance(artifact_id, str)
             or not artifact_id
@@ -3459,16 +3430,6 @@ def _source_value(value: object) -> str | None:
     return raw if isinstance(raw, str) else None
 
 
-def _source_is_ready(source: object) -> bool:
-    ready = getattr(source, "is_ready", None)
-    if isinstance(ready, bool):
-        return ready
-    return _source_value(getattr(source, "status", None)) in (
-        "ready",
-        "completed",
-    )
-
-
 async def _continuity_source_verified(
     client: object,
     notebook_id: str,
@@ -3483,7 +3444,7 @@ async def _continuity_source_verified(
         if (source_id is None or getattr(source, "id", None) == source_id)
         and getattr(source, "title", None) == label
         and _source_value(getattr(source, "kind", None)) == "media"
-        and _source_is_ready(source)
+        and _source_ready(source)
     ]
     return len(matches) == 1
 
@@ -3712,7 +3673,7 @@ async def podcast_attempt_adopt(
 
         if dispatch_status == "acceptance_unknown":
             _, _, baseline, dispatched_at = _reconciliation_subject(snapshot, episode_n, attempt_id)
-            created_at = _artifact_created_at_utc(getattr(matches[0], "created_at", None))
+            created_at = _created_at_utc(getattr(matches[0], "created_at", None))
             if artifact_id in baseline or created_at is None:
                 raise ValueError("explicit artifact is not a post-dispatch candidate")
             if not (
@@ -3800,7 +3761,7 @@ async def podcast_attempt_adopt(
         if getattr(source, "id", None) == feedback_source_id
         and getattr(source, "title", None) in allowed_titles
         and _source_value(getattr(source, "kind", None)) == "media"
-        and _source_is_ready(source)
+        and _source_ready(source)
     ]
     if len(matches) != 1:
         raise ValueError(

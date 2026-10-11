@@ -26,7 +26,7 @@ import httpx
 from mcp.types import ToolAnnotations
 
 from . import runtime
-from ._atomic import download_atomically
+from ._atomic import download_atomically, sha256_file
 from .app import mcp
 from .manifest_store import ManifestStore
 from .publish import (
@@ -220,14 +220,6 @@ async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None, staging_
     return staging
 
 
-def _file_sha256(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _mp3_provenance_gap(ep: dict, local_path: str) -> str | None:
     """發布前驗「這顆 mp3 真的是 promoted attempt 產出的那顆」。
 
@@ -260,7 +252,7 @@ def _mp3_provenance_gap(ep: dict, local_path: str) -> str | None:
     expected = ((attempt.get("finalize") or {}).get("download") or {}).get("sha256")
     if not expected:
         return f"promoted attempt {promoted} 沒記 finalize.download.sha256(舊版 finalize 形狀)"
-    actual = _file_sha256(local_path)
+    actual = sha256_file(local_path)
     if actual != expected:
         raise ValueError(
             f"episode {n}: mp3 檔案的 sha256 與 promoted attempt 不符"
