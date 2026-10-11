@@ -46,3 +46,5 @@ publisher 不比 sha(`_mp3_provenance_gap` 放行並列進 `sha_unverified_episo
   「工具名與參數都沒變、純 manifest 欄位」的契約,正是那支 checker 最容易漏的一類。
 - 要「復活」一份退役 manifest 必須**移除欄位**(同樣走 `ManifestStore.update`),沒有
   `retired: false` 這條捷徑——復活是罕見且該被看見的動作。
+
+> 現名對照:`_mp3_provenance_gap` → `canonical_audio.canonical_audio` + `verify_file`(發布端唯讀查詢)。

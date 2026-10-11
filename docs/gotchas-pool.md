@@ -68,7 +68,7 @@ INFO 級「HTTP Request」日誌會把它印進 stderr。
 - `_lifespan_client_pool` 對 `from_storage` 失敗的槽位**記 warning、診斷列帶 `startup_error`、
   `continue`**;全部槽位都失敗才 raise(訊息列出每一槽)。結構不合法(`_write_credential_file`)
   仍當場 raise —— 那是 Doppler 設定錯,不是會自己壞掉的憑證。
-- **`auth_check(all_slots=True)` 的槽位編號從診斷列對回去**,不是 pool 的 index:跳過第 3 槽
+- **`auth_check(all_slots=True)` 的槽位編號看 `Slot.number`**,不是 pool 的 index:跳過第 3 槽
   之後 pool 第 3 個 client 是第 4 槽。改 `runtime.Slot` 的編號或 `install_slots` 的內容時(槽位編號住在 `Slot.number`,診斷與 client 同一筆),
   `test_a_dead_slot_is_skipped_instead_of_taking_the_server_down`(斷言 lifespan 裝出的 `Slot.number`)會紅;`install_slots` 也會擋 `Slot.number` 與診斷列 `slot` 不一致。
 - 測試鎖:`test_a_dead_slot_is_skipped_instead_of_taking_the_server_down`、

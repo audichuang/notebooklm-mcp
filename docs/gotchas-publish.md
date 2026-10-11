@@ -80,7 +80,7 @@
     revision 無條件 +1,無效寫盤會撞掉別人的 CAS);**不能先 `read()` 再決定要不要 `update()`**
     —— 兩次呼叫之間別的 writer 插進來,判斷就過期了。
   ① **只管發布層,不代表禁止重生。** `podcast_series`、attempt/artifact/cleanup 掃描
-    (`_claimed_artifact_ids`、`_unresolved_attempt_ids`、`_settle_cleanup_state`)**刻意不看
+    (`attempt_state.claimed_artifact_ids`、`attempt_state.unresolved_attempt_ids`、`cleanup_obligation.settle_cleanup_state`)**刻意不看
     這個欄位** —— deferred 的理由正是「待有受支持的生成入口後再修復」,拿它擋重生會把
     暫緩變成永久除名;而 attempt 級掃描要看全 manifest 才算得出正確的清理義務與 artifact 歸屬。
   ② **判準是「欄位在不在」,而且值只認明列的那幾個 —— 其餘一律 raise。** 拼錯(`defered`)、

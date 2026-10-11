@@ -123,9 +123,8 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 (鎖與 CAS 仍歸 `manifest_store`)。重點:
 
 - `apply_accepted(attempt, artifact_id, origin, reset_error=)` 是「attempt 擁有 artifact、dispatch 已受理」
-  的唯一欄位寫入;`bind_reconciled` / `bind_sdk_heuristic` / `bind_caller_verified` / `new_resume_binding`
-  各帶自己的守門,**守門差異是現況而非 bug 清單**:reconciled 不查來源狀態、sdk 允許四個來源且重複綁為 no-op、
-  adopt 只認 `acceptance_unknown`/`reconciliation_ambiguous` 並清 error 欄位、resume 新建分支不做 claim 唯一性掃描。
+  的唯一欄位寫入;`bind_reconciled` / `bind_sdk_heuristic` / `bind_caller_verified` 各帶自己的守門(`new_resume_binding` 只建底稿,不帶守門),**守門差異是現況而非 bug 清單**:reconciled 不查來源狀態、sdk 允許四個來源且重複綁為 no-op、
+  adopt 只認 `acceptance_unknown`/`reconciliation_ambiguous` 並清 error 欄位、`attempt_admission.decide()` 對每個 RESUME 請求都會掃 claims,只有 `new_resume_binding` 自己不再掃一次。
 - `find_attempt` 的 `retracted_hint` 只換訊息尾巴(finalize 場景傳自己的);拒絕行為共用。
 - 不收進來:`_attempt_capabilities()` / `_attempt_next_step()` 產生的指引(紅線)、promotion 的 legacy 衝突守門
   (要 caps)、reconcile 回傳點鎖外算 caps 的時機(F7,gotchas-attempt)。
@@ -164,7 +163,7 @@ series 路徑會先跑一次 gate、fresh 路徑再進 `_run_episode` 跑第二�
 
 ## canonical_audio.py:發布端的 canonical 音檔查詢
 
-`canonical_audio(ep)` 回 `CanonicalAudio`(mp3_path / artifact_id / notebook_id / 受理帳號 / sha256,
+`canonical_audio(ep)` 回 `CanonicalAudio`(mp3_path / artifact_id / notebook_id / sha256,
 或 `Unverifiable` 四種原因之一);`verify_file` 做 sha 比對。LEGACY / NO_SHA 放行並標進
 `sha_unverified_episodes`,NO_OUTPUT_POINTER / DANGLING_POINTER fail-closed(訊息原樣)。
 本模組不 raise 歧義,讓 `tools_publish` 維持「先 resolve 檔案、再驗出身」的原順序。

@@ -88,10 +88,10 @@
   回報與紀錄相反。姊妹分支早就有「讀 manifest 覆核、例外型別只是入場券」的寫法,
   照抄過去即可。完整推導見
   [升級筆記](notebooklm-py-0.8-upgrade.md)的 §1。
-- **「從未 dispatch 的 attempt」由建立它的那支工具原樣重呼續推**(`_is_resendable_same_request`)。
+- **「從未 dispatch 的 attempt」由建立它的那支工具原樣重呼續推**(`attempt_admission.is_resendable_same_request`)。
   帶 `source_ids` 的 attempt `podcast_series` 接不了,只有 `podcast_episode` 能續。
   **「逐字相同」是安全邊界** —— 設定變了還沿用等於靜默換掉生成輸入。連帶三條:
-  ①`_reset_attempt_for_resend` 要 dispatch 與 remote **一起**清(只清一半會讓 series 看到
+  ①`attempt_state.reset_for_resend` 要 dispatch 與 remote **一起**清(只清一半會讓 series 看到
   `remote.status="failed"` 而誤判該 supersede);②診斷靠 `errors[]`(只 append),不靠
   `remote`;③**驗證一律先於變更**。事故經過見 [CHANGELOG](../CHANGELOG.md) v0.7.2。
   **現況更新**:這支函式現在只做一件事——真的要重送時的逐欄位相等閘門(notebook /
@@ -156,12 +156,12 @@
   process 的整合測試才驗得出來。之後要動 reconcile 的回傳點時,順手改成跟
   adopt/retract 一樣在鎖裡面算,別再長出第三種寫法。
 - **(F8,v0.9.10 盲審,只記不改)`abandon_in_flight` retract 會永久停用該 notebook
-  的候選自動綁定**:`_unresolved_attempt_ids()` 掃同一本 notebook 底下所有
+  的候選自動綁定**:`attempt_state.unresolved_attempt_ids()` 掃同一本 notebook 底下所有
   `dispatch.status` 落在 `dispatching`/`acceptance_unknown`/`reconciliation_ambiguous`
   且還沒 claim 到 artifact 的 attempt,**不排除已經 retract 的**——`podcast_attempt_retract`
   不會改動 `dispatch.status`,只加 `retraction` 欄位,所以一顆用
   `abandon_in_flight=True` 作廢的 attempt(它的 dispatch 永遠停在作廢當下那個「還在飛」
-  的狀態)會被 `_unresolved_attempt_ids()` 永久算成「未解決」,擋住這本 notebook 之後
+  的狀態)會被 `attempt_state.unresolved_attempt_ids()` 永久算成「未解決」,擋住這本 notebook 之後
   **每一集**的唯一候選自動綁定(改停在 `reconciliation_ambiguous` 要求手動
   `podcast_attempt_adopt`)。這是刻意的設計取捨——否則遲到的 orphan artifact 可能被
   誤綁給不相干的新 attempt——不是 bug,但代價要記下來。否定答案(「確認這顆候選不屬於
