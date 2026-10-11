@@ -217,7 +217,7 @@ def test_historical_attempt_wins_over_unresolved_upload(status):
 def test_post_retract_unresolved_upload_does_not_promise_regeneration():
     """retract 之後義務還沒對帳完時,不准把重生講成現在就做得到。
 
-    `_assert_source_cleanup_done` 會把 `regeneration_entry` 擋成 ValueError,所以
+    `cleanup_obligation.assert_generation_allowed` 會把 `regeneration_entry` 擋成 ValueError,所以
     `safe_next_action` 必須是 `None`、指引必須講「等窗關上、gate 會自己對帳」。
     """
     episode, attempt = _case("accepted", "completed", "active", "series")
@@ -386,7 +386,7 @@ def test_resend_and_flag_free_retract_are_different_questions(dispatch, remote, 
     """**第五次現形的直接回歸。**
 
     `failed`/`removed` 兩個問題的答案相反:免旗標 retract 可以(結果已定),原樣重送不行
-    (`_is_resendable_same_request` 只收 `prepared`/`not_accepted`,重送走的是 supersede)。
+    (`attempt_admission.is_resendable_same_request` 只收 `prepared`/`not_accepted`,重送走的是 supersede)。
     共用一個布林就必然教錯一邊 —— 那正是 v0.9.5 訊息裡發生的事。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
@@ -394,7 +394,7 @@ def test_resend_and_flag_free_retract_are_different_questions(dispatch, remote, 
 
     if caps["can_resend"]:
         assert dispatch in ("prepared", "not_accepted"), (
-            "宣稱可原樣重送,但 `_is_resendable_same_request` 只收從沒 dispatch 的"
+            "宣稱可原樣重送,但 `attempt_admission.is_resendable_same_request` 只收從沒 dispatch 的"
         )
         assert not caps["is_output"], "已 promote 的 output 不該被教去重送"
     if remote in ("failed", "removed") and dispatch not in ("prepared", "not_accepted"):

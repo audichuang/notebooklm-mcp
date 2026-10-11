@@ -23,10 +23,9 @@ from notebooklm.exceptions import NetworkError, RateLimitError
 from notebooklm.types import ArtifactType
 
 from . import attempt_state, runtime
-from ._errors import NotebookAccessDenied, reconcile_hint_if_unconfirmed
+from ._errors import NotebookAccessDenied, describe_refusal, reconcile_hint_if_unconfirmed
 from ._failover import (
     REFUSED_WITHOUT_DISPATCH as _REFUSED_WITHOUT_DISPATCH,
-    describe_refusal,
     dispatch_with_failover,
 )
 from ._sources import (
@@ -50,7 +49,6 @@ from .attempt_admission import (
     check_series_identity,
     decide as decide_admission,
     has_output_pointer_or_hard,
-    is_resendable_same_request,
     new_prepared_attempt,
     new_resume_attempt,
 )
@@ -174,7 +172,7 @@ SAFE_NEXT_ACTIONS = frozenset(
         ACTION_RESUME,
         # 筆數守門撞上**既有 active attempt** 時的停點。不能指回 `ACTION_EPISODE`:
         # 那顆 attempt 的 settings 是「不指名來源」,呼叫端拿指名版進來會被
-        # `_is_resendable_same_request` 判成不同請求而拒絕(`already has durable
+        # `attempt_admission.is_resendable_same_request` 判成不同請求而拒絕(`already has durable
         # active attempt`),不指名又撞回守門 —— **死路**。retract 是純本機動作,
         # 那顆從未 dispatch 的 attempt 沒有 stale source 要清,tombstone 掉才走得出去。
         ACTION_RETRACT,
@@ -358,7 +356,7 @@ def _attempt_capabilities(
     共用一個布林就必然教錯一邊。
 
     修法每次都是「補那一格」,而判斷分散在三個各自為政的布林
-    (`_outcome_is_settled` / `_is_resendable_same_request` / `abandons_unauthorized_candidate`)
+    (`_outcome_is_settled` / `attempt_admission.is_resendable_same_request` / `abandons_unauthorized_candidate`)
     加十幾處手寫訊息裡 —— 只要保持那個結構,第六次幾乎必然。這裡把**維度**與**結論**
     都攤開,由 `tests/test_attempt_capabilities.py` 對狀態組合的**笛卡爾積**逐格鎖住:
     想不到的組合也不會漏,那正是前幾輪突變驗證照不到的盲區。
@@ -439,7 +437,7 @@ def _attempt_capabilities(
 
     # **只有從沒送出去的才重送得了。** 遠端已終態(`failed`/`removed`)雖然同樣
     # 「結果已定」,重送卻是走 supersede 建新 attempt,不是沿用這顆 ——
-    # `_is_resendable_same_request` 也只收 `_NEVER_DISPATCHED`。
+    # `attempt_admission.is_resendable_same_request` 也只收 `_NEVER_DISPATCHED`。
     can_resend = never_dispatched and not is_output
     can_resume = bool(remote.get("artifact_id")) and not is_output
     can_reconcile = (
@@ -922,10 +920,6 @@ def _admission_next_step(episode: dict, attempt: dict, attempt_id: str) -> str:
     return _attempt_next_step(_attempt_capabilities(episode, attempt, attempt_id))
 
 
-# 「原樣重送」的判準搬進 `attempt_admission`(與 capabilities 的 `can_resend` 刻意是兩個判準)。
-_is_resendable_same_request = is_resendable_same_request
-
-
 def _create_audio_attempt(
     store: ManifestStore,
     *,
@@ -1090,7 +1084,7 @@ def _record_dispatch_failover(
 
     def mutate(manifest: dict) -> None:
         _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        # 兩種拒絕形狀的判讀共用 `_failover.describe_refusal`(附件家族的 recorder 也用
+        # 兩種拒絕形狀的判讀共用 `_errors.describe_refusal`(附件家族的 recorder 也用
         # 同一支)——各寫一份等於上游改了 status 欄位名時只有一處被改到。
         reason_type, message = describe_refusal(reason)
         attempt["dispatch"]["account"] = to_account
@@ -1204,7 +1198,7 @@ def _mark_acceptance_unknown(
     `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"`,**真正的原因
     (`status.error`)整條蒸發**,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個
     記憶體地址。簽名原本宣告 `BaseException` 也是錯的(從來就有非例外的呼叫端)。
-    改用 `_failover.describe_refusal`,與 `_record_dispatch_failover` / 附件家族同源。
+    改用 `_errors.describe_refusal`,與 `_record_dispatch_failover` / 附件家族同源。
     """
 
     store.update(lambda manifest: mark_acceptance_unknown(manifest, episode_n, attempt_id, error))
@@ -1258,6 +1252,9 @@ class DispatchStopped:
 
     判準是 `recorded`,例外型別只是入場券:`RuntimeError` 既可能是乾淨的 not_accepted,
     也可能是泛用分支標成 acceptance_unknown 的普通失敗。
+
+    唯一已知的時序差異(相對於重構前):series 的 cancel／泛用例外分支在往外傳播前,
+    多做了一次唯讀、持鎖的 manifest 讀取(`_recorded_dispatch_status`);不改任何狀態。
     """
 
     exc: BaseException
@@ -1297,6 +1294,9 @@ async def _dispatch_prepared_attempt(
     順序即 ADR-0001 的紀律:baseline(唯讀)→ `_claim_prepared_dispatch`(durable,先於任何
     遠端副作用)→ failover 派送 → 成功才 `_bind_accepted_artifact`。`store is None`
     (standalone)略過 claim / bind / 讀回。`bind` 的失敗不在 try 內,原樣往外拋。
+
+    唯一已知的時序差異:series 的 cancel／泛用例外分支在傳播前多一次唯讀、持鎖的
+    manifest 讀取(`_recorded_dispatch_status`),不改任何狀態。
     """
     if store is not None:
         baseline = await client.artifacts.list(notebook_id, artifact_type=ArtifactType.AUDIO)
@@ -2181,32 +2181,6 @@ async def podcast_episode(
     return output
 
 
-# P1(Codex adversarial review 實跑驗證,主迴圈裁決採納):**時間窗本身判定不了
-# artifact 歸屬。** 兩顆並行、各自 response lost 的 unresolved attempt,候選窗會
-# 重疊——窗內出現的一顆 artifact 可能是「另一顆」的產物,不是「正在對帳的這一顆」的。
-# 實跑重現:EP1 用 wait_timeout=7200 dispatch 後 response lost;EP2 在窗內另外
-# dispatch,也 response lost、建出 artifact-B(同樣還沒 claim);對 EP1 reconcile 時,
-# artifact-B 落在 EP1 的候選窗內、不在 EP1 的 baseline、也沒被 EP2 claim,於是被判成
-# EP1 的「唯一候選」而誤綁——manifest 的稽核紀錄從此失真(這顆其實是 EP2 的)。
-#
-# 完整重新設計歸屬判定不在這輪範圍,這裡先加 Codex 驗過的保守 guard:唯一候選出現
-# 時,若同一本 notebook 底下還有其他「未解決」的 attempt,代表這顆 artifact 有可能
-# 是它的產物,不能自動綁定——停下來把候選交給呼叫端,要求明確指名
-# (`podcast_attempt_adopt`)。**只有一顆 attempt 在飛的正常情境不受影響**:那時
-# `_unresolved_attempt_ids` 排除自己之後找不到任何人,guard 不會觸發,自動綁定照舊。
-#
-# 「未解決」的判準:dispatch_status 落在對帳中的三個狀態(與 `can_reconcile` 判準
-# 一致——`_NEVER_DISPATCHED` 從沒離開本機、`_TERMINAL_REMOTE` 已終態,兩者往後都不會
-# 再冒出新 artifact,不算「未解決」)、且尚未 claim 到 artifact。這三個狀態下
-# `remote.artifact_id` 理論上恆為 None(見下面 `podcast_episode_reconcile` 開頭的
-# 一致性檢查:`remote_artifact_id is not None` 時 `dispatch_status` 必須是
-# `"accepted"`),這裡仍顯式檢查而不是只憑 dispatch_status 假設,防呆成本很低。
-# T10(測試債,wp-a2):這裡原本自己另開一份同樣的 frozenset(`_UNRESOLVED_
-# DISPATCH_STATUSES`)——與 `can_reconcile` 判準「一致」這句話原本只是註解上的
-# 承諾,程式碼層級是兩份獨立字面值。改成共用模組層的 `_RECONCILABLE_DISPATCH_
-# STATES`(定義在 `_NEVER_DISPATCHED` 旁邊),別再各自維護一份。
-
-
 @mcp.tool()
 async def podcast_episode_reconcile(
     manifest_path: str,
@@ -2337,7 +2311,7 @@ async def _podcast_episode_reconcile(
 
     candidate_ids = sorted(candidates)
     if len(candidate_ids) == 1:
-        # **時間窗判定不了歸屬,所有權才是**(P1,見上面 `_unresolved_attempt_ids`
+        # **時間窗判定不了歸屬,所有權才是**(P1,見上面 `attempt_state.unresolved_attempt_ids`
         # 的推導)。同一本 notebook 底下還有別的 attempt 也還沒 claim 到 artifact 時,
         # 窗內這顆唯一候選有可能其實是它的產物——不自動綁定,停下來讓呼叫端指名。
         blocking_attempt_ids = _unresolved_attempt_ids(
@@ -2400,7 +2374,7 @@ async def _podcast_episode_reconcile(
             "observed_state": "reconciliation_ambiguous",
             "candidate_artifact_ids": candidate_ids,
             # F6 修復:真的有 2 筆以上候選時直接判定 ambiguous，不會先跑
-            # `_unresolved_attempt_ids` 那條早退路徑，所以這裡本來就沒有「被別的
+            # `attempt_state.unresolved_attempt_ids` 那條早退路徑，所以這裡本來就沒有「被別的
             # attempt 卡住」這件事——固定回空陣列，讓兩個 `reconciliation_ambiguous`
             # 出口的 return shape 對稱，keying 在這個欄位上的 host 不會 KeyError。
             "blocking_attempt_ids": [],
@@ -3115,7 +3089,7 @@ async def podcast_attempt_retract(
         # retract 的(`test_retract_refuses_an_attempt_that_is_not_the_durable_output`
         # 鎖著)——沒有任何 legacy 證據時,「還沒完成」不等於「無路可走的分岔」。
         # 兩種都無路可走時:retract 被「只有 promoted output 才能 retract」卡、原樣
-        # 重呼被 `_is_resendable_same_request` 擋(dispatch 已 accepted)、傳
+        # 重呼被 `attempt_admission.is_resendable_same_request` 擋(dispatch 已 accepted)、傳
         # supersedes_attempt_id 撞「is not terminal」、adopt/reconcile 都要求已
         # finalize。允許作廢這個「從未 promote、無人授權」的 candidate 就是唯一出口,
         # 而且留下理由。
@@ -3620,7 +3594,7 @@ async def podcast_series(
         **`safe_next_action` 依有沒有既有 attempt 分岔,這不是風格問題**:
         - 沒有 attempt(全新一集)→ `podcast_episode`,呼叫端帶 `source_ids` 直接進來即可。
         - 已有 attempt → **`podcast_attempt_retract`**。那顆 attempt 的 settings 是
-          「不指名來源」,呼叫端拿指名版進來會被 `_is_resendable_same_request` 判成不同
+          「不指名來源」,呼叫端拿指名版進來會被 `attempt_admission.is_resendable_same_request` 判成不同
           請求而拒絕(`already has durable active attempt`),不指名又撞回這道守門 ——
           **那是死路**,正是 v0.9.1 修過的「指引在它自己產生的狀態下不可執行」。
 
@@ -3722,7 +3696,7 @@ async def podcast_series(
                 )
                 about_to_redispatch = _series_will_redispatch(attempt_for_leak_check)
                 # 已有 active attempt 時 `podcast_episode(source_ids=...)` 是死路
-                # ——`_create_audio_attempt` 的 `_is_resendable_same_request` 會判定
+                # ——`_create_audio_attempt` 的 `attempt_admission.is_resendable_same_request` 會判定
                 # settings 不同(series 建的 attempt 沒有 source_ids)而拒收
                 # 「already has durable active attempt」。純本機的 retract 才是唯一
                 # 打得通的出口:作廢它之後再用 podcast_episode 指名來源重生。

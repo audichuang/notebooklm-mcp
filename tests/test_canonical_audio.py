@@ -12,10 +12,9 @@ def _ep(**kw):
     return {"episode": 3, "mp3_path": "/x.mp3", "artifact_id": "a", "notebook_id": "nb", **kw}
 
 
-def _att(aid, sha=None, account=None):
+def _att(aid, sha=None):
     return {
         "attempt_id": aid,
-        "dispatch": {"account": account} if account else {},
         "finalize": {"download": {"sha256": sha}},
     }
 
@@ -34,10 +33,10 @@ def test_classification(ep, kind):
     assert canonical_audio(ep).unverifiable is kind
 
 
-def test_fields_and_recorded_account():
-    c = canonical_audio(_ep(attempts=[_att("a1", "s", "pool-account-2")], output_attempt_id="a1"))
+def test_fields():
+    c = canonical_audio(_ep(attempts=[_att("a1", "s")], output_attempt_id="a1"))
     assert (c.mp3_path, c.artifact_id, c.notebook_id) == ("/x.mp3", "a", "nb")
-    assert (c.attempt_id, c.sha256, c.account) == ("a1", "s", "pool-account-2")
+    assert (c.attempt_id, c.sha256) == ("a1", "s")
 
 
 def test_verify_file(tmp_path):

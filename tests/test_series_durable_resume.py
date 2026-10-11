@@ -39,7 +39,7 @@ async def test_safe_next_action_vocabulary_names_public_mcp_tools():
         "notebook_share_with_pool",
         "podcast_episode_resume",
         # 筆數守門撞上既有 active attempt 時的停點:那顆 attempt 的 settings 是
-        # 「不指名來源」,指回 `podcast_episode` 會被 `_is_resendable_same_request`
+        # 「不指名來源」,指回 `podcast_episode` 會被 `attempt_admission.is_resendable_same_request`
         # 拒絕、不指名又撞回守門 —— 得先 tombstone 才走得出去。
         "podcast_attempt_retract",
         "podcast_series",
@@ -649,7 +649,7 @@ async def test_series_retract_of_a_middle_episode_does_not_regenerate_reading_th
     自己建的 settings 回 `ACTION_SERIES`,series 就對 EP02 全新一集 dispatch——不指名
     來源 = 讀整本筆記本,把 EP03 的回錄音檔洩進 EP02。
 
-    修法落點:每集迴圈頂端、`_assert_source_cleanup_done` 之後,一旦發現「本集無
+    修法落點:每集迴圈頂端、`cleanup_obligation.assert_generation_allowed` 之後,一旦發現「本集無
     output,但存在 episode > n 已有 output 的列」就停下,回 `podcast_episode`
     (不指名來源會靜默讀整本筆記本,這裡改成明講要指名)。"""
     manifest_path = tmp_path / "series_manifest.json"

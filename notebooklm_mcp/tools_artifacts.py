@@ -10,7 +10,8 @@ from mcp.types import ToolAnnotations
 
 from . import runtime
 from ._atomic import download_atomically
-from ._failover import describe_refusal, dispatch_with_failover
+from ._errors import describe_refusal
+from ._failover import dispatch_with_failover
 from ._sources import assert_sources_exist, to_source_ids
 from ._status import ensure_completed, wait_for_artifact
 from ._text import strip_citations as _strip_citations, strip_inline_emphasis

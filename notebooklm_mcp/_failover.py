@@ -71,22 +71,6 @@ REFUSED_WITHOUT_DISPATCH = (RateLimitError, ArtifactFeatureUnavailableError)
 RecordFailover = Callable[[object, "str | None", str], None]
 
 
-def describe_refusal(reason: object) -> tuple[str, str]:
-    """把拒絕的原因翻成稽核紀錄要寫的 `(type, message)`。
-
-    **兩種形狀**:0.8.0 起的同步拒絕是例外;0.7.x 是「不 raise,回 `task_id=""` +
-    `is_failed`」的 status 物件。稽核紀錄兩種都要讀得懂,否則 0.7.x 那條路留下的
-    `type` 會是 `"NoneType"` 之類的無用字串。
-
-    抽到這裡是因為音檔的 `_record_dispatch_failover` 與附件的 recorder 都要同一份 ——
-    各寫一份就是「上游改了 status 的欄位名、只有一處被改到」。
-    """
-    if isinstance(reason, BaseException):
-        return type(reason).__name__, str(reason) or type(reason).__name__
-    message = getattr(reason, "error", None) or getattr(reason, "status", "failed")
-    return getattr(reason, "error_code", None) or "not_accepted", message
-
-
 def rotate_for_quota(
     record: RecordFailover | None,
     reason: object,

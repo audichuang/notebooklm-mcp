@@ -244,9 +244,10 @@ def _validate(manifest: Any, path: Path, *, on_write: bool = False) -> None:
             # 的是手改 JSON,而它是手改的**唯一**守門 —— 讀寫兩端都驗,寧可連讀都炸,
             # 也不要把被拒收的輸出讀出來當正常資料用。
             # ⚠️ 若之後真要收窄成 on_write-only:今天擋 retracted 集上 feed 的其實是
-            # `tools_publish.py` 的 pop 與 `canonical_audio.verify_file` 這兩處,**不是**這裡
+            # `tools_publish.py` 的 pop 與 `canonical_audio.canonical_audio()` 這兩處,**不是**這裡
             # (它們都不讀 `retraction` 欄位)——收窄的同一個 commit 必須先在
-            # `canonical_audio.verify_file` 補上 `retraction` 判斷,否則手改的
+            # `canonical_audio.canonical_audio()`(promoted attempt 在那裡被選出,
+            # `verify_file` 看不到 attempt)補上 `retraction` 判斷,否則手改的
             # manifest 會被它撈到 tombstone、sha 卻相符,照樣放行上 feed。
             if value in retracted_ids:
                 raise ValueError(

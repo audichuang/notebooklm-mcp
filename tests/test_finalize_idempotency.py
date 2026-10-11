@@ -753,7 +753,7 @@ async def test_adopt_replacement_feedback_source_without_uploading_again(fake_cl
     assert adopted["feedback_source_id"] == replacement_source_id
     # 被取代的 old_source_id 現在要進清理義務(對齊 retract 的回傳形狀)——即使本測試
     # 用 sources.clear() 模擬它早就不在筆記本裡了,回傳的 hint 仍是「有待刪項」;真正
-    # 的存在性驗證留給下一次 `_assert_source_cleanup_done`(它會查到已經不在、悄悄結案)。
+    # 的存在性驗證留給下一次 `cleanup_obligation.assert_generation_allowed`(它會查到已經不在、悄悄結案)。
     assert adopted["stale_source_ids"] == [old_source_id]
     assert adopted["safe_next_action"] == "source_delete"
     assert upload["source_id"] == replacement_source_id

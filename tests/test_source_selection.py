@@ -323,7 +323,7 @@ async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(fake_client
 
     `_assert_series_owns_attempt` 原本的 owner_hint 無條件說「re-calling
     podcast_episode with the identical arguments … resends that same attempt」,
-    但 `accepted`+`failed` 的 `can_resend` 是 False(`_is_resendable_same_request`
+    但 `accepted`+`failed` 的 `can_resend` 是 False(`attempt_admission.is_resendable_same_request`
     只收 `_NEVER_DISPATCHED`),照做會撞 `already has durable active attempt`。
     那正是 docs/gotchas-attempt.md 紅線列的「指引在它自己產生的狀態下不可執行」。
     """
@@ -685,7 +685,7 @@ async def test_the_count_guard_also_covers_the_series_resend_path(fake_client, t
 
     # **照著 `safe_next_action` 做必須真的能離開停點。** 只斷言字串會漏掉 v0.9.1 那種
     # 「指引在它自己產生的狀態下不可執行」:這顆 attempt 的 settings 是「不指名來源」,
-    # 直接改呼指名版會被 `_is_resendable_same_request` 判成不同請求而拒絕。
+    # 直接改呼指名版會被 `attempt_admission.is_resendable_same_request` 判成不同請求而拒絕。
     assert out["safe_next_action"] == "podcast_attempt_retract"
     # FINDING-2:retract 不打 RPC,看不到筆記本已超標,它的回傳會說 `podcast_series`
     # —— 照做會再撞一次這道守門(會終止,但白跑一趟)。**擋下它的是我們,我們知道**,

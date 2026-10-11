@@ -21,7 +21,7 @@ async def test_source_delete_replayed_after_success_stays_idempotent(fake_client
     """**清理迴圈要能重放。** `podcast_attempt_retract` 的契約是「把回傳的
     stale_source_ids 逐一 source_delete」,而 response 遺失後 host 重放整個迴圈是預期
     操作。對已經刪掉的那一筆拋錯會讓自動化 host 停在半路,剩下的 id 從此沒人刪
-    (`_assert_source_cleanup_done` 只列「還在」的 id,不會替它補回來)。"""
+    (`cleanup_obligation.assert_generation_allowed` 只列「還在」的 id,不會替它補回來)。"""
     fake_client.sources.seed("EP01")
     sid = fake_client.sources.sources[0]["id"]
     await t.source_delete("nb-1", sid)

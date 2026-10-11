@@ -669,7 +669,7 @@ async def test_idempotent_retract_after_a_stuck_replacement_does_not_point_at_a_
        source_delete,再用 regeneration_entry 重生」。
     3. `source_delete(stale)`。
     4. 重生 → response lost → B 成為 `active` + `acceptance_unknown`
-       (`_assert_source_cleanup_done` 這一步已經清掉
+       (`cleanup_obligation.assert_generation_allowed` 這一步已經清掉
        `episode["pending_source_cleanup"]`)。
     5. **再次 `podcast_attempt_retract(A)`**——MCP request 被取消後的正常重試,
        retract 明文冪等。
@@ -2163,7 +2163,7 @@ async def test_retract_abandons_an_in_flight_attempt_when_the_caller_declares_it
 
     沒有這條出路時五條路全被擋死:retract 撞「只有 promoted output 才能 retract」、
     傳乾淨 brief 撞「already has durable active attempt」、原樣重呼被
-    `_is_resendable_same_request` 擋(dispatch 已 accepted)、傳 supersedes_attempt_id
+    `attempt_admission.is_resendable_same_request` 擋(dispatch 已 accepted)、傳 supersedes_attempt_id
     撞「is not terminal」、adopt/reconcile 都要求已 finalize。唯一走得通的是讓錯的版本
     跑完 → promote → retract → source_delete → 重生。
     """
@@ -2636,7 +2636,7 @@ async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_vio
     """T5(P3,`scratchpad/verify-A1/r1_violations_cas.py` 的重現):CAS 衝突後
     `violations` 沒跟著 `discovered` 一起修剪。
 
-    `if violations:` raise 的清單是在 `_settle_cleanup_state` 修剪 `discovered`
+    `if violations:` raise 的清單是在 `cleanup_obligation.settle_cleanup_state` 修剪 `discovered`
     **之前**算的;gate 停在 `sources.list` 的 await 上時,另一個真正在跑的
     finalizer(EP02)合法認領了這筆孤兒之後,重算後的 manifest 是對的(沒把它
     記成待刪),但錯誤訊息卻還點名這筆已被合法認領的 source,叫呼叫端去
@@ -2720,7 +2720,7 @@ async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_vio
         assert orphan not in raised_message, (
             "已被 EP02 合法認領的 source 不該被點名要求 source_delete"
         )
-    # manifest 對(沒把已被認領的 source 記成待刪)—— 這是 `_settle_cleanup_state`
+    # manifest 對(沒把已被認領的 source 記成待刪)—— 這是 `cleanup_obligation.settle_cleanup_state`
     # 既有的正確行為,這支測試只補回傳訊息那一半沒被驗到的地方。
     assert orphan not in _pending_ids(manifest_path)
 

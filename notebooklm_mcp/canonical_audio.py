@@ -37,7 +37,6 @@ class CanonicalAudio:
     mp3_path: str | None
     artifact_id: str | None
     notebook_id: str | None
-    account: str | None  # 受理該 attempt 的帳號(dispatch.account);僅供對帳,重抓不用它
     sha256: str | None
     unverifiable: Unverifiable | None
     reason: str  # unverifiable 時的人讀說明;驗得動時為 ""
@@ -52,12 +51,11 @@ def canonical_audio(ep: dict) -> CanonicalAudio:
         "notebook_id": ep.get("notebook_id"),
     }
 
-    def gap(kind, reason, *, attempt_id=None, account=None, sha=None):
+    def gap(kind, reason, *, attempt_id=None):
         return CanonicalAudio(
             **base,
             attempt_id=attempt_id,
-            account=account,
-            sha256=sha,
+            sha256=None,
             unverifiable=kind,
             reason=reason,
         )
@@ -80,19 +78,16 @@ def canonical_audio(ep: dict) -> CanonicalAudio:
             f"episode {n}: output_attempt_id {promoted} 指向不存在的 attempt"
             " —— manifest 不自洽,不發布",
         )
-    account = (attempt.get("dispatch") or {}).get("account")
     expected = ((attempt.get("finalize") or {}).get("download") or {}).get("sha256")
     if not expected:
         return gap(
             Unverifiable.NO_SHA,
             f"promoted attempt {promoted} 沒記 finalize.download.sha256(舊版 finalize 形狀)",
             attempt_id=promoted,
-            account=account,
         )
     return CanonicalAudio(
         **base,
         attempt_id=promoted,
-        account=account,
         sha256=expected,
         unverifiable=None,
         reason="",

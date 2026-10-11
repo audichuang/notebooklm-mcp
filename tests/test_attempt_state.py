@@ -241,8 +241,27 @@ def test_bind_reconciled_refusals():
         lambda m: st.bind_sdk_heuristic(m, 1, "a1", "art-9"),
         lambda m: st.bind_reconciled(m, 1, "a1", "art-9"),
         lambda m: st.mark_reconciliation_ambiguous(m, 1, "a1", ["art-9"]),
+        lambda m: st.claim_prepared(m, 1, "a1", [], None, 60.0),
+        lambda m: st.bind_caller_verified(m, m["episodes"][0]["attempts"][0], "a1", "art-9"),
+        lambda m: st.apply_promotion(
+            m["episodes"][0], m["episodes"][0]["attempts"][0], "a1", {"artifact_id": "art-9"}
+        ),
+        lambda m: st.reset_for_resend(m["episodes"][0]["attempts"][0]),
+        lambda m: st.apply_accepted(m["episodes"][0]["attempts"][0], "art-9", "remote"),
     ],
-    ids=["unknown", "not_accepted", "rearm", "sdk_bind", "reconciled_bind", "ambiguous"],
+    ids=[
+        "unknown",
+        "not_accepted",
+        "rearm",
+        "sdk_bind",
+        "reconciled_bind",
+        "ambiguous",
+        "claim_prepared",
+        "caller_verified_bind",
+        "promotion",
+        "reset_for_resend",
+        "apply_accepted",
+    ],
 )
 def test_every_transition_refuses_a_retracted_attempt(call):
     manifest, _ = _manifest("dispatching", retracted=True)

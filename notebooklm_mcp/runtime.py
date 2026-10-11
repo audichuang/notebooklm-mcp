@@ -93,7 +93,10 @@ def set_clients(entries: list[tuple[str, Any]]) -> None:
 
 
 def slot_diagnostics() -> list[dict[str, Any]]:
-    """啟動診斷,依槽位順序;沒記錄過就是空 list(單帳號路徑、測試的 fake client)。"""
+    """啟動診斷,依槽位順序;沒記錄過就是空 list(單帳號路徑、測試的 fake client)。
+
+    僅測試使用:production 已改讀 `slots_in_order()`。
+    """
     return [dict(slot.diag) for slot in _SLOTS if slot.diag]
 
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 
-from ._failover import describe_refusal
+from ._errors import describe_refusal
 
 # `can_reconcile` 認的「還可能對帳得到東西」的 dispatch 狀態(T10:單一事實來源)。
 RECONCILABLE_DISPATCH_STATES = frozenset(
@@ -74,6 +74,17 @@ def find_attempt(
     return episode, attempt
 
 
+def _refuse_retracted(attempt: dict, attempt_id: str | None = None) -> None:
+    """吃 raw attempt dict 的轉換點用的 tombstone 守門(與 `find_attempt` 同一個拒絕語意)。
+
+    這些函式的呼叫端都已走過 `find_attempt`;這裡是縱深防禦,讓「每個狀態轉換都拒絕
+    被 retract 的 attempt」不依賴呼叫端記得先查(ADR-0009)。
+    """
+    if attempt.get("retraction"):
+        aid = attempt_id or attempt.get("attempt_id")
+        raise ValueError(f"attempt {aid!r} was retracted; {_DEFAULT_RETRACTED_HINT}")
+
+
 def claimed_artifact_ids(manifest: dict, excluding_attempt_id: str) -> set[str]:
     claimed: set[str] = set()
     for episode in manifest["episodes"]:
@@ -99,6 +110,12 @@ def unresolved_attempt_ids(
 
     回傳值只用來回答「能不能自動綁定」,不是稽核紀錄,所以不需要跨 notebook —— 別本
     notebook 的 attempt 不可能在這本 notebook 的 `artifacts.list` 裡冒出候選。
+
+    為什麼需要:兩顆並行、各自 response lost 的 attempt 候選窗會重疊,窗內出現的 artifact
+    可能是「另一顆」的產物,時間窗本身判定不了歸屬(Codex 實跑驗證)。唯一候選出現時,若
+    還有其他未解決者就不自動綁定,交給呼叫端明確指名(`podcast_attempt_adopt`)。
+    「未解決」= dispatch 狀態在 `RECONCILABLE_DISPATCH_STATES` 且尚未 claim artifact
+    (與 `can_reconcile` 共用同一份集合);只有一顆在飛的正常情境不受影響。
     """
     unresolved: list[str] = []
     for episode in manifest.get("episodes", []):
@@ -128,6 +145,7 @@ def apply_accepted(
     adopt 傳 True:它是從 `acceptance_unknown` 人工收養,要清掉殘留的 error 欄位;
     其他路徑從來沒清過,維持原樣(已知分歧,保留不修)。
     """
+    _refuse_retracted(attempt)
     now = datetime.now(UTC).isoformat()
     attempt["dispatch"]["status"] = "accepted"
     attempt["dispatch"]["accepted_at"] = now
@@ -229,10 +247,12 @@ def bind_sdk_heuristic(manifest: dict, episode_n: int, attempt_id: str, artifact
 def bind_caller_verified(manifest: dict, attempt: dict, attempt_id: str, artifact_id: str) -> None:
     """`podcast_attempt_adopt` 的綁定(origin=caller_verified);唯一會清 error 欄位的一條。
 
-    tombstone 拒絕由呼叫端先走 `find_attempt` 負責(本函式收 attempt 物件)。
+    本函式收 attempt 物件,tombstone 拒絕由 `_refuse_retracted` 在入口補上
+    (呼叫端也已先走 `find_attempt`)。
     身分驗證(`_validate_adoption_identity`)與 caps 計算留在呼叫端的 mutate 裡,
     維持「caps 在鎖內算」的 F7 時機。
     """
+    _refuse_retracted(attempt, attempt_id)
     current_dispatch = attempt["dispatch"]
     current_status = current_dispatch.get("status")
     if current_status not in ("acceptance_unknown", "reconciliation_ambiguous"):
@@ -344,8 +364,9 @@ def reset_for_resend(attempt: dict) -> None:
     換掉。被拒的原因不會遺失 —— 它在 `errors[]` 裡,那份只 append、從不清除。
 
     兩個呼叫端共用:`rearm_not_accepted`(series 續跑)與 `_create_audio_attempt`
-    的同請求沿用分支(podcast_episode 原樣重呼,見 `_is_resendable_same_request`)。
+    的同請求沿用分支(podcast_episode 原樣重呼,見 `attempt_admission.is_resendable_same_request`)。
     """
+    _refuse_retracted(attempt)
     dispatch = attempt["dispatch"]
     dispatch.update(
         {
@@ -451,6 +472,7 @@ def apply_promotion(episode: dict, attempt: dict, attempt_id: str, output: dict)
     守門(已 retract／owned-by-another／legacy 不同 artifact)留在
     `tools_podcast._promote_attempt_output`——legacy 那道要用 `_attempt_capabilities`。
     """
+    _refuse_retracted(attempt, attempt_id)
     attempt["remote"]["status"] = "completed"
     attempt["remote"]["observed_at"] = datetime.now(UTC).isoformat()
     episode["artifact_id"] = output["artifact_id"]

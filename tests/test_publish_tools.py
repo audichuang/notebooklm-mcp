@@ -736,7 +736,7 @@ async def test_retired_manifest_is_refused_before_any_network(
     存在的理由(podcast-lab graphify 2026-08-30 審查):兩份退役快照搬進 `archive/`
     之後仍通過 ManifestStore schema、`show_id` 仍能打到第一季的舊 feed;只靠位置與 README
     擋,`mp3_path` 哪天被「修好」就會把別節目的音檔以舊節目名義送上公網(legacy 集不比
-    sha,`_mp3_provenance_gap` 攔不到)。位置不是安全邊界,machine-readable 旗標才是。
+    sha,`canonical_audio.canonical_audio／verify_file` 攔不到)。位置不是安全邊界,machine-readable 旗標才是。
 
     `healthz_status=500`:若閘沒有排在最前面,會先撞 auth precheck 的錯誤訊息而非本閘的。"""
     captured = _install_mock(monkeypatch, healthz_status=500)
@@ -2739,7 +2739,7 @@ async def test_promoted_pointer_to_a_missing_attempt_is_rejected(
     env, tmp_path, artwork_png, monkeypatch
 ):
     """幽靈指標在 ManifestStore 載入驗證就 fail-closed(先於本閘、先於任何 PUT)——
-    鎖住這層既有防線;_mp3_provenance_gap 裡的同型 raise 是給非 store 路徑的備援。"""
+    鎖住這層既有防線;canonical_audio.canonical_audio／verify_file 裡的同型 raise 是給非 store 路徑的備援。"""
     captured = _install_mock(monkeypatch)
     manifest = _two_episode_manifest(tmp_path)
     _attach_attempt(manifest, 1, sha=_sha256_hex(b"audio-1"))
