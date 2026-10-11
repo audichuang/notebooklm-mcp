@@ -6,7 +6,25 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
-## Unreleased
+## v0.9.32 —— 結構重構:attempt 的派送 / 狀態轉換 / 准入 / 清理義務各收成一個模組
+
+**為什麼**:`tools_podcast.py`(5366 行)近 90 天至少 11 個 commit 是「只補了一條路徑」——同一條規則在
+episode / resume / series 各有一份,修一份漏一份。這版把重複的邏輯收到單一 interface 後面,
+`tools_podcast.py` 降到 4342 行,新增 `attempt_state` / `attempt_admission` / `cleanup_obligation` /
+`canonical_audio` 四個模組,各有直接打 interface 的表格式測試(全套 13178 → 13322 passed)。
+
+**對呼叫端零契約變更**:37 支工具的描述、input schema 與 server `instructions` 與 v0.9.31 逐位元組相同
+(兩版各自 import 後 dump 比對),skill repo 不需同步。流程:每項 Sonnet 實作 → Opus 獨立審查(未過最多三輪)
+→ commit;全部完成後兩個 Opus 只看成品複審(無 P1),採納的 P2/P3 另成一輪修正並再複審。
+
+**刻意保留、未修的既有分歧**(重構時發現,修了就是行為變更,留待逐條決定):series 新鮮路徑遇到非預期例外
+(如 `ValueError`)會裸拋丟掉前面各集結果,inline 重送路徑則回 partial;「已有 output」述詞各入口對空字串
+pointer 判定不同;notebook 身分在不同入口比 episode 級或 attempt 級;`_ensure_local_mp3` 重抓用當前帳號而非
+生成帳號;`_promote_attempt_output` 對 retracted 的 `PromotionRefusedError` 走不到(前面 lookup 已丟 `ValueError`)。
+細節見 design-notes 與 AGENTS.md 各模組列。
+
+依賴:lock 對齊消費端實裝(filelock 4.1.1、pydantic 2.14.1、pydantic-core 2.50.1)。
+
 
 - 結構清理(零行為變更,唯一已知時序差異):`podcast_series` 的 dispatch cancel／泛用例外分支在往外傳播前,多做一次唯讀、持鎖的 manifest 讀取(`_recorded_dispatch_status`,為了分類),不改任何狀態。另:`attempt_state` 的 `bind_caller_verified` / `apply_promotion` / `reset_for_resend` / `apply_accepted` 入口補上 tombstone 拒絕(現有呼叫端本來就都先走過 `find_attempt`,屬縱深防禦);`describe_refusal` 由 `_failover` 搬到 `_errors`,讓狀態層不再依賴派送層;`CanonicalAudio` 移除無人讀取的 `account` 欄位。
 - 結構清理(零行為變更):發布端只讀 canonical output。新 `canonical_audio.py` 一支唯讀查詢(路徑 / sha256 / artifact / notebook,或型別化的 `Unverifiable` 原因),取代 `tools_publish._mp3_provenance_gap` 對 attempt 內部欄位的直讀;`_atomic` 空下載改丟 `EmptyDownloadError(ValueError)`,發布端不再比對訊息字串。已知保留:`_ensure_local_mp3` 重抓仍用 `runtime.get_client()`(當前帳號),不是 attempt 記錄的帳號。
