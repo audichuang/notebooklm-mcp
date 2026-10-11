@@ -26,7 +26,7 @@ NBLM_STRICT_SKIPS=1 uv run --no-sync pytest -q -ra --cov --cov-report=term-missi
 # 每個 clone 做一次
 uv tool install pre-commit && pre-commit install && git config blame.ignoreRevsFile .git-blame-ignore-revs
 
-# 消費端安裝(3 VM / podcast-lab 各裝一次;@latest = 最新發版,不追 master)
+# 消費端安裝(@latest = 最新發版,不追 master)
 uv tool install --python 3.12 --force --reinstall "git+https://github.com/audichuang/notebooklm-mcp.git@latest"
 
 # 跑 MCP server(認證由 doppler 注入 NOTEBOOKLM_AUTH_JSON);repo 內開發用 uv run python -m notebooklm_mcp.server
@@ -34,7 +34,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 #   HTTP 模式:--transport streamable-http --host 127.0.0.1 --port 8484
 #   ⚠️ streamable-http / sse「無認證」——勿綁非 loopback host(同網段可驅動帳號);
 #      **且只能給單一 client**(每 session 一個 lifespan 會互相換掉 process 全域 pool,
-#      見 gotchas-pool)。生產四台全走 stdio。
+#      見 gotchas-pool)。生產全走 stdio。
 #   註冊進 Claude Code 見 docs/mcp-setup.md。
 ```
 
