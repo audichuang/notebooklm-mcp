@@ -6,6 +6,19 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.30 — retract / publish_series 描述小修、依賴對齊
+
+- **工具描述**:`podcast_attempt_retract` 不再指向 ADR-0009(只在本 repo,呼叫端讀不到),
+  `UPLOAD_DISPATCH_WINDOW` 括號與「錯誤訊息會給」合併;`publish_series` 刪掉 `return_episodes`
+  與結尾指標的重複子句。兩支合計 2717 → 2617 字元。**規則一句都沒刪**——v0.9.26 已把事故敘事
+  搬走,剩下的每句都是呼叫前要知道的事;這輪逐句檢查後能安全拿掉的只有約 100 字元。
+  受影響 7 題的 eval_harness(v0.9.29 vs 新版,各 2 次,盲評)兩臂皆 42/42。
+- **skill 同步**(audi-skill `e0f1e05`):SKILL.md 的修復範本(published_at 重排、改標題的
+  ManifestStore 一行式、封面旗標細節、講義識別碼實例)換成規則 + 指標,正本留在 references;
+  419 → 382 行。eval_harness 全 16 題 × 2 次,盲評舊 95/96、新 96/96。
+- **依賴**:`uv lock --upgrade` 對齊消費端實裝(pydantic 2.14.0 / pydantic-core 2.50.0 /
+  filelock 4.1.0 等 7 筆),全套綠。
+
 ## v0.9.29 — 跟上 notebooklm-py 0.8.4、依賴安全升級(Pillow 12)、建立 ruff 與更嚴的 CI
 
 起因:上游 0.8.4 發版後,消費端重裝 `@latest` 會落在沒測過的組合;Pillow 11.3 帶著 18 筆 advisory;
