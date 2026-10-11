@@ -25,6 +25,7 @@ from ._atomic import (
     sha256_file,
 )
 from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
+from .attempt_state import find_attempt
 from .manifest_store import ManifestStore
 from .naming import episode_label
 
@@ -96,27 +97,16 @@ def new_finalize_state() -> dict:
 
 
 def _record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[dict, dict]:
-    episode = next(
-        (row for row in manifest["episodes"] if row.get("episode") == episode_n),
-        None,
-    )
-    if episode is None:
-        raise ValueError(f"episode {episode_n} is missing from the manifest")
-    attempt = next(
-        (row for row in episode.get("attempts", []) if row.get("attempt_id") == attempt_id),
-        None,
-    )
-    if attempt is None:
-        raise ValueError(f"attempt {attempt_id!r} is missing from episode {episode_n}")
     # Tombstone。`podcast_attempt_retract` 作廢的 attempt 不得再被 finalize:所有 finalize
     # checkpoint 的讀寫都走這裡,所以一個 in-flight finalizer 在 retract 之後的第一次
     # manifest 觸碰就會停住,不會繼續 upload／rename／promote 把被拒收的那版復活。
-    if attempt.get("retraction"):
-        raise ValueError(
-            f"attempt {attempt_id!r} was retracted (episode {episode_n}); "
-            "generate a replacement instead of finalizing it"
-        )
-    return episode, attempt
+    # 查找與拒絕的本體在 `attempt_state.find_attempt`;這裡只換 finalize 場景的訊息尾巴。
+    return find_attempt(
+        manifest,
+        episode_n,
+        attempt_id,
+        retracted_hint="generate a replacement instead of finalizing it",
+    )
 
 
 def _ensure_finalize(store: ManifestStore, episode_n: int, attempt_id: str) -> None:

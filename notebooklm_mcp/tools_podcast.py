@@ -22,7 +22,7 @@ from mcp.types import ToolAnnotations
 from notebooklm.exceptions import NetworkError, RateLimitError
 from notebooklm.types import ArtifactType
 
-from . import runtime
+from . import attempt_state, runtime
 from ._errors import NotebookAccessDenied, reconcile_hint_if_unconfirmed
 from ._failover import (
     REFUSED_WITHOUT_DISPATCH as _REFUSED_WITHOUT_DISPATCH,
@@ -37,6 +37,23 @@ from ._sources import (
 )
 from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
 from .app import mcp
+from .attempt_state import (
+    RECONCILABLE_DISPATCH_STATES as _RECONCILABLE_DISPATCH_STATES,
+    apply_promotion,
+    bind_caller_verified,
+    bind_reconciled,
+    bind_sdk_heuristic,
+    claimed_artifact_ids as _claimed_artifact_ids,
+    find_attempt,
+    first_published_at as _first_published_at,  # noqa: F401 —— 舊名,tests 與 tools_publish 註解沿用
+    mark_acceptance_unknown,
+    mark_not_accepted,
+    mark_reconciliation_ambiguous,
+    new_resume_binding,
+    rearm_not_accepted,
+    reset_for_resend as _reset_attempt_for_resend,
+    unresolved_attempt_ids as _unresolved_attempt_ids,
+)
 from .audio_finalize import (
     UPLOAD_DISPATCH_WINDOW,
     RemoteArtifactUnverifiableError,
@@ -166,14 +183,8 @@ _SERIES_SETTINGS_KEYS = frozenset({"language", "audio_format", "audio_length"})
 _TERMINAL_REMOTE = frozenset({"failed", "removed"})
 # dispatch 從沒離開本機:契約保證伺服器沒建出 task(ADR-0010 紀律④的立論基礎)。
 _NEVER_DISPATCHED = frozenset({"prepared", "not_accepted"})
-# T10(測試債,wp-a2):`can_reconcile` 認的那三個「還可能對帳得到東西」的 dispatch
-# 狀態——原本以字面 tuple 散落在本模組三處(`can_reconcile` 本身、
-# `_attempt_next_step` 的窗關閉分支、`_unresolved_attempt_ids` 曾經另開的
-# `_UNRESOLVED_DISPATCH_STATUSES`)與 `test_attempt_capabilities.py` 的 skip
-# 白名單各抄一份;抽成具名常數讓它們共用同一份真相,別再各自維護一份等著漏改。
-_RECONCILABLE_DISPATCH_STATES = frozenset(
-    {"dispatching", "acceptance_unknown", "reconciliation_ambiguous"}
-)
+# `_RECONCILABLE_DISPATCH_STATES`(`can_reconcile` 認的三個狀態)已搬到
+# `attempt_state.RECONCILABLE_DISPATCH_STATES`,上面 import 時沿用舊名。
 
 
 def _regeneration_entry_point(attempt: dict) -> str:
@@ -865,28 +876,8 @@ def _attempt_record(
     *,
     allow_retracted: bool = False,
 ) -> tuple[dict, dict]:
-    episode = next(
-        (ep for ep in manifest["episodes"] if ep.get("episode") == episode_n),
-        None,
-    )
-    if episode is None:
-        raise ValueError(f"episode {episode_n} is missing from the manifest")
-    attempt = next(
-        (row for row in episode.get("attempts", []) if row.get("attempt_id") == attempt_id),
-        None,
-    )
-    if attempt is None:
-        raise ValueError(f"attempt {attempt_id!r} is missing from episode {episode_n}")
-    # Tombstone,default-deny:被 retract 的 attempt 是歷史紀錄,任何 attempt 級操作
-    # (reconcile／adopt／resume／promote／supersede)都不得再改它——否則 adopt 之類的
-    # 工具可以改寫它的 finalize checkpoint,讓已結案的清理義務指向錯的 source。
-    # 唯一的例外是 `podcast_attempt_retract` 自己(冪等重呼要讀得到它)。
-    if attempt.get("retraction") and not allow_retracted:
-        raise ValueError(
-            f"attempt {attempt_id!r} was retracted (episode {episode_n}); "
-            "it is history — work on the replacement attempt instead"
-        )
-    return episode, attempt
+    # Tombstone default-deny 的本體在 `attempt_state.find_attempt`(ADR-0009)。
+    return find_attempt(manifest, episode_n, attempt_id, allow_retracted=allow_retracted)
 
 
 def _audio_settings(
@@ -1274,6 +1265,7 @@ def _ensure_resume_attempt(
             finalize["feedback_source_rename"].update(
                 {"status": "completed", "adopted_at": adopted_at}
             )
+        resume_dispatch, resume_remote = new_resume_binding(artifact_id, now)
         attempt = {
             "attempt_id": attempt_id,
             "created_at": now,
@@ -1282,20 +1274,8 @@ def _ensure_resume_attempt(
             "title": title.strip(),
             "brief_sha256": None,
             "settings": {"origin": "explicit_resume"},
-            "dispatch": {
-                "status": "accepted",
-                "artifact_ids_before": [],
-                "dispatched_at": None,
-                "accepted_at": now,
-            },
-            "remote": {
-                "artifact_id": artifact_id,
-                "status": "pending",
-                "status_origin": "caller_verified",
-                "observed_at": now,
-                "error": None,
-                "error_code": None,
-            },
+            "dispatch": resume_dispatch,
+            "remote": resume_remote,
             "finalize": finalize,
             "errors": [],
         }
@@ -1335,21 +1315,9 @@ def _claim_prepared_dispatch(
     """
 
     def mutate(manifest: dict) -> bool:
-        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        dispatch = attempt["dispatch"]
-        if dispatch["status"] != "prepared":
-            return False
-        dispatch.update(
-            {
-                "status": "dispatching",
-                "artifact_ids_before": artifact_ids,
-                "dispatched_at": datetime.now(UTC).isoformat(),
-                "wait_timeout": float(wait_timeout),
-            }
+        return attempt_state.claim_prepared(
+            manifest, episode_n, attempt_id, artifact_ids, account, wait_timeout
         )
-        if account is not None:
-            dispatch["account"] = account
-        return True
 
     _, claimed = store.update(mutate)
     return claimed
@@ -1489,22 +1457,7 @@ def _mark_acceptance_unknown(
     改用 `_failover.describe_refusal`,與 `_record_dispatch_failover` / 附件家族同源。
     """
 
-    def mutate(manifest: dict) -> None:
-        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        if attempt["dispatch"]["status"] != "dispatching":
-            return
-        error_type, message = describe_refusal(error)
-        attempt["dispatch"]["status"] = "acceptance_unknown"
-        attempt["errors"].append(
-            {
-                "phase": "dispatch",
-                "type": error_type,
-                "message": message,
-                "recorded_at": datetime.now(UTC).isoformat(),
-            }
-        )
-
-    store.update(mutate)
+    store.update(lambda manifest: mark_acceptance_unknown(manifest, episode_n, attempt_id, error))
 
 
 def _mark_not_accepted(
@@ -1522,38 +1475,7 @@ def _mark_not_accepted(
     兩條路都必須寫進同一個 not_accepted 終態,否則同一件事會依 SDK 版本落到不同狀態。
     """
 
-    def mutate(manifest: dict) -> None:
-        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        if attempt["dispatch"]["status"] != "dispatching":
-            return
-        now = datetime.now(UTC).isoformat()
-        if isinstance(status, BaseException):
-            # 例外沒有 .error/.error_code;不轉換的話 manifest 會留下一條只寫著
-            # "failed" 的紀錄,把「為什麼被拒」這個唯一有用的資訊丟掉。
-            error = str(status) or type(status).__name__
-            error_code = type(status).__name__
-        else:
-            error = getattr(status, "error", None)
-            error_code = getattr(status, "error_code", None)
-        attempt["dispatch"]["status"] = "not_accepted"
-        attempt["remote"].update(
-            {
-                "status": "failed",
-                "observed_at": now,
-                "error": error,
-                "error_code": error_code,
-            }
-        )
-        attempt["errors"].append(
-            {
-                "phase": "dispatch",
-                "type": "not_accepted",
-                "message": error or error_code or getattr(status, "status", "failed"),
-                "recorded_at": now,
-            }
-        )
-
-    store.update(mutate)
+    store.update(lambda manifest: mark_not_accepted(manifest, episode_n, attempt_id, status))
 
 
 # ───────────────────────── 派送 prepared attempt(單一入口)─────────────────────────
@@ -1809,49 +1731,6 @@ def _assert_series_owns_attempt(
     )
 
 
-def _reset_attempt_for_resend(attempt: dict) -> None:
-    """把一個「從未成功 dispatch」的 attempt 就地清回乾淨的 prepared。
-
-    dispatch 與 remote **必須一起**重設:只清 dispatch 會留下 `remote.status="failed"`,
-    而 `podcast_series` 看到那個值會判定「該 supersede」,於是明明要沿用的 attempt 被
-    換掉。被拒的原因不會遺失 —— 它在 `errors[]` 裡,那份只 append、從不清除。
-
-    兩個呼叫端共用:`_rearm_not_accepted_attempt`(series 續跑)與 `_create_audio_attempt`
-    的同請求沿用分支(podcast_episode 原樣重呼,見 `_is_resendable_same_request`)。
-    """
-    dispatch = attempt["dispatch"]
-    dispatch.update(
-        {
-            "status": "prepared",
-            "artifact_ids_before": [],
-            "dispatched_at": None,
-            "accepted_at": None,
-        }
-    )
-    dispatch.pop("candidate_artifact_ids", None)
-    # 帳號也要 pop:留著會變成**過期值**——manifest 說 A 生的,實際是重送時的 B 送出的。
-    # 缺漏至少看得出來,錯的值看不出來(v0.8.0 驗收 F-4)。
-    dispatch.pop("account", None)
-    # P2(Codex 實跑驗證):`wait_timeout` 是**這次 dispatch** 的持久化承諾(見
-    # `_validate_wait_timeout` docstring),reset 回 `prepared` 就代表這次 dispatch
-    # 已經不存在了——留著上一輪的值會被下一次對帳誤當成「這次」的窗判準。實跑重現:
-    # `wait_timeout=7200` 被拒 → reset 成 prepared → 用 `wait_timeout=60` 重試 →
-    # manifest 卻是 `status=prepared`／`dispatched_at=None`／`wait_timeout=7200.0`
-    # ——沒有當前 dispatch,卻留著上一輪的窗。**這裡是所有 dispatch-specific 欄位
-    # 該清的地方,新增持久化欄位時記得跟上**——這正是「新增欄位卻沒跟著清理義務走」
-    # 的典型補一半。
-    dispatch.pop("wait_timeout", None)
-    attempt["remote"].update(
-        {
-            "status": "unknown",
-            "status_origin": None,
-            "observed_at": None,
-            "error": None,
-            "error_code": None,
-        }
-    )
-
-
 def _rearm_not_accepted_attempt(
     store: ManifestStore,
     episode_n: int,
@@ -1859,36 +1738,8 @@ def _rearm_not_accepted_attempt(
 ) -> bool:
     """只在下一次明確呼叫時，將未受理的同一 attempt 恢復為 prepared。"""
 
-    def mutate(manifest: dict) -> bool:
-        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        dispatch = attempt["dispatch"]
-        if dispatch["status"] != "not_accepted":
-            return False
-        if attempt["remote"].get("artifact_id") is not None:
-            raise ValueError("not_accepted attempt cannot have an artifact mapping")
-        _reset_attempt_for_resend(attempt)
-        return True
-
-    _, rearmed = store.update(mutate)
+    _, rearmed = store.update(lambda manifest: rearm_not_accepted(manifest, episode_n, attempt_id))
     return rearmed
-
-
-def _claimed_artifact_ids(manifest: dict, excluding_attempt_id: str) -> set[str]:
-    claimed: set[str] = set()
-    for episode in manifest["episodes"]:
-        for attempt in episode.get("attempts", []):
-            if attempt.get("attempt_id") == excluding_attempt_id:
-                continue
-            remote = attempt.get("remote", {})
-            if not isinstance(remote, dict):
-                raise ValueError("attempt remote state must be an object")
-            artifact_id = remote.get("artifact_id")
-            if artifact_id is None:
-                continue
-            if not isinstance(artifact_id, str) or not artifact_id:
-                raise ValueError("claimed remote artifact_id must be a non-empty string")
-            claimed.add(artifact_id)
-    return claimed
 
 
 def _reconciliation_subject(
@@ -1929,40 +1780,9 @@ def _bind_reconciled_artifact(
     attempt_id: str,
     artifact_id: str,
 ) -> list[str]:
-    def mutate(manifest: dict) -> list[str]:
-        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        remote = attempt.get("remote")
-        if not isinstance(remote, dict) or remote.get("artifact_id") is not None:
-            raise ValueError("attempt already has a remote artifact mapping")
-        if artifact_id in _claimed_artifact_ids(manifest, attempt_id):
-            raise ValueError(f"artifact {artifact_id!r} was claimed during reconciliation")
-        # F4(盲審 P3):`notebook_id` 的非空字串驗證已經在唯一呼叫端
-        # `podcast_episode_reconcile` 進來前由 `_reconciliation_subject` 做過一次
-        # ——逐位元組相同的 guard，而 `notebook_id` 是建立 attempt 時寫死、之後不會
-        # 被任何 writer 改動的欄位（唯一寫入點在 `_create_audio_attempt` 一類的建立
-        # 分支），這裡重驗建構上不可達。不重複驗證，直接沿用。
-        notebook_id = attempt.get("notebook_id")
-        blocking_attempt_ids = _unresolved_attempt_ids(
-            manifest, notebook_id, excluding_attempt_id=attempt_id
-        )
-        if blocking_attempt_ids:
-            # RPC 前的 snapshot 只是廉價早退；歸屬會在 await 期間變動，
-            # 所以真正的綁定許可必須與 claimed 重驗共用這次原子 update。
-            return blocking_attempt_ids
-        now = datetime.now(UTC).isoformat()
-        attempt["dispatch"]["status"] = "accepted"
-        attempt["dispatch"]["accepted_at"] = now
-        remote.update(
-            {
-                "artifact_id": artifact_id,
-                "status": "pending",
-                "status_origin": "remote",
-                "observed_at": now,
-            }
-        )
-        return []
-
-    _, blocking_attempt_ids = store.update(mutate)
+    _, blocking_attempt_ids = store.update(
+        lambda manifest: bind_reconciled(manifest, episode_n, attempt_id, artifact_id)
+    )
     return blocking_attempt_ids
 
 
@@ -1972,17 +1792,11 @@ def _mark_reconciliation_ambiguous(
     attempt_id: str,
     candidate_ids: list[str],
 ) -> None:
-    def mutate(manifest: dict) -> None:
-        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        remote = attempt.get("remote")
-        if not isinstance(remote, dict) or remote.get("artifact_id") is not None:
-            raise ValueError("attempt already has a remote artifact mapping")
-        if _claimed_artifact_ids(manifest, attempt_id).intersection(candidate_ids):
-            raise ValueError("candidate claim changed during reconciliation")
-        attempt["dispatch"]["status"] = "reconciliation_ambiguous"
-        attempt["dispatch"]["candidate_artifact_ids"] = candidate_ids
-
-    store.update(mutate)
+    store.update(
+        lambda manifest: mark_reconciliation_ambiguous(
+            manifest, episode_n, attempt_id, candidate_ids
+        )
+    )
 
 
 def _bind_accepted_artifact(
@@ -1991,66 +1805,7 @@ def _bind_accepted_artifact(
     attempt_id: str,
     artifact_id: str,
 ) -> None:
-    def mutate(manifest: dict) -> None:
-        _, attempt = _attempt_record(manifest, episode_n, attempt_id)
-        dispatch = attempt["dispatch"]
-        if dispatch["status"] not in (
-            "dispatching",
-            "acceptance_unknown",
-            "reconciliation_ambiguous",
-            "accepted",
-        ):
-            raise ValueError(
-                f"attempt {attempt_id!r} cannot accept an artifact from "
-                f"dispatch state {dispatch['status']!r}"
-            )
-        remote = attempt["remote"]
-        existing_artifact_id = remote.get("artifact_id")
-        if existing_artifact_id not in (None, artifact_id):
-            raise ValueError(
-                f"attempt {attempt_id!r} is already mapped to another artifact "
-                f"{existing_artifact_id!r}"
-            )
-        if existing_artifact_id == artifact_id:
-            return
-        if existing_artifact_id is None and artifact_id in _claimed_artifact_ids(
-            manifest, attempt_id
-        ):
-            raise ValueError(f"artifact {artifact_id!r} is already claimed")
-        now = datetime.now(UTC).isoformat()
-        attempt["dispatch"]["status"] = "accepted"
-        attempt["dispatch"]["accepted_at"] = now
-        attempt["remote"].update(
-            {
-                "artifact_id": artifact_id,
-                "status": "pending",
-                "status_origin": "sdk_heuristic",
-                "observed_at": now,
-            }
-        )
-
-    store.update(mutate)
-
-
-def _first_published_at(episode: dict) -> str | None:
-    """回頭重生一集時,pubDate 必須是首發時間、不能漂成重生當下(真實事故:
-    saa-drill EP05/EP09——GUID 不變＝同集更新,episodic feed 按 pubDate 倒序,漂移
-    會讓重生集跳到列表前面;RSS 排序假設 pubDate 隨集號遞增,見 tools_publish.py
-    的 fallback 註解)。沿 attempts 建立順序(即 list 的 append 順序)找回第一筆
-    非空的 retracted_output.published_at——那是 retract 當時從 episode 級投影搶救
-    下來的首發時間。取「第一筆非空」而非「第一筆有 retraction」:
-    abandons_unauthorized_candidate 分支(從未 promote 就被作廢的 candidate)留下的
-    retracted_output 是空 dict,必須跳過,不能誤判成「這集從沒發過」。"""
-    for attempt in episode.get("attempts", []):
-        retraction = attempt.get("retraction")
-        if not isinstance(retraction, dict):
-            continue
-        # `or {}` 而非 default {}:手改的 manifest 可能把 retracted_output 寫成 null,
-        # default 只在 key 不存在時生效,擋不住顯式 null(本模組的前提就是手改會發生)。
-        published_at = (retraction.get("retracted_output") or {}).get("published_at")
-        if isinstance(published_at, str) and published_at:
-            return published_at
-    return None
+    store.update(lambda manifest: bind_sdk_heuristic(manifest, episode_n, attempt_id, artifact_id))
 
 
 class PromotionRefusedError(ValueError):
@@ -2127,35 +1882,7 @@ def _promote_attempt_output(
                 episode_n=episode_n,
                 attempt_id=attempt_id,
             )
-        attempt["remote"]["status"] = "completed"
-        attempt["remote"]["observed_at"] = datetime.now(UTC).isoformat()
-        episode["artifact_id"] = output["artifact_id"]
-        episode["mp3_path"] = os.path.abspath(output["mp3_path"])
-        episode["output_attempt_id"] = attempt_id
-        for key in ("title", "label"):
-            episode.setdefault(key, output[key])
-        # published_at 不能跟 title／label 一樣用 output 自己的 setdefault:output 裡
-        # 那個值是「這次生成完成的時刻」,取代版每一次重生都會不一樣。已驗證的安全
-        # 互動(見上方 _attempt_record 的 tombstone 與 :1867 附近 retract 冪等分支的
-        # ownership guard):取代版 B 帶著 A 的首發時間上任後,對 A 重打冪等 retract
-        # 不會誤刪 B 的投影——那條 guard 只在 output_attempt_id in (None, attempt_id)
-        # 時才動手,B 是現任 output 時整段會跳過。
-        episode.setdefault("published_at", _first_published_at(episode) or output["published_at"])
-        # 回寫進 output:這支函式的四個呼叫點都是 `_promote…(…, output); return output`,
-        # 只改 manifest 會讓**回傳值**仍帶著「這次重生的時刻」——feed 對、呼叫端拿到的
-        # 卻是錯的 pubDate(v0.6.0 實測抓到:manifest 12:07:20、回傳值 12:16:39)。
-        # 修在這個匯流點,四條路徑一起正確。
-        output["published_at"] = episode["published_at"]
-        # 回寫進 output:這支函式的四個呼叫點都是 `_promote…(…, output); return output`,
-        # 只改 manifest 會讓**回傳值**still 帶著「這次重生的時刻」——feed 對、呼叫端拿到的
-        # 卻是錯的 pubDate(v0.6.0 實測抓到:manifest 12:07:20、回傳值 12:16:39)。
-        # 修在這個匯流點,四條路徑一起正確。
-        # episode 級 continuity 證據:attempt 裡的 source_id 是主要真相,但 legacy
-        # projection 只認得 episode 級欄位。不寫 feedback_source_adopted_at——那是
-        # podcast_attempt_adopt 的人工驗證標記,resume 靠它判斷可否沿用舊 source。
-        source_id = output.get("feedback_source_id")
-        if isinstance(source_id, str) and source_id:
-            episode["feedback_source_id"] = source_id
+        apply_promotion(episode, attempt, attempt_id, output)
 
     store.update(mutate)
 
@@ -3089,29 +2816,6 @@ async def podcast_episode(
 # STATES`(定義在 `_NEVER_DISPATCHED` 旁邊),別再各自維護一份。
 
 
-def _unresolved_attempt_ids(
-    manifest: dict, notebook_id: str, excluding_attempt_id: str
-) -> list[str]:
-    """同一本 notebook 底下，還有哪些「已送出但還沒被認領」的 attempt(排除自己)。
-
-    回傳值只用來回答「能不能自動綁定」,不是稽核紀錄,所以不需要跨 notebook —— 別本
-    notebook 的 attempt 不可能在這本 notebook 的 `artifacts.list` 裡冒出候選。
-    """
-    unresolved: list[str] = []
-    for episode in manifest.get("episodes", []):
-        for attempt in episode.get("attempts", []):
-            attempt_id = attempt.get("attempt_id")
-            if attempt_id == excluding_attempt_id or attempt.get("notebook_id") != notebook_id:
-                continue
-            remote = attempt.get("remote") or {}
-            if remote.get("artifact_id") is not None:
-                continue
-            dispatch = attempt.get("dispatch") or {}
-            if dispatch.get("status") in _RECONCILABLE_DISPATCH_STATES:
-                unresolved.append(attempt_id)
-    return sorted(unresolved)
-
-
 @mcp.tool()
 async def podcast_episode_reconcile(
     manifest_path: str,
@@ -3192,13 +2896,10 @@ async def _podcast_episode_reconcile(
     if not auth_probed:
         await probe_auth(client)
     if dispatch_status == "dispatching":
-
-        def mark_unknown(manifest: dict) -> None:
-            _, current = _attempt_record(manifest, episode_n, attempt_id)
-            if current["dispatch"].get("status") == "dispatching":
-                current["dispatch"]["status"] = "acceptance_unknown"
-
-        snapshot, _ = store.update(mark_unknown)
+        # 不傳 error:這條升級路徑從來不留 errors[] 紀錄(與 dispatch 失敗路徑不同)。
+        snapshot, _ = store.update(
+            lambda manifest: mark_acceptance_unknown(manifest, episode_n, attempt_id)
+        )
         attempt, notebook_id, baseline, dispatched_at = _reconciliation_subject(
             snapshot, episode_n, attempt_id
         )
@@ -3764,39 +3465,7 @@ async def podcast_attempt_adopt(
                 episode_n=episode_n,
                 title=title,
             )
-            current_dispatch = current["dispatch"]
-            current_status = current_dispatch.get("status")
-            if current_status not in (
-                "acceptance_unknown",
-                "reconciliation_ambiguous",
-            ):
-                raise ValueError("attempt reconciliation state changed")
-            if (
-                current_status == "reconciliation_ambiguous"
-                and artifact_id not in current_dispatch.get("candidate_artifact_ids", [])
-            ):
-                raise ValueError("artifact is no longer an ambiguity candidate")
-            if current_status == "acceptance_unknown" and artifact_id in current_dispatch.get(
-                "artifact_ids_before", []
-            ):
-                raise ValueError("artifact was already present before dispatch")
-            if artifact_id in _claimed_artifact_ids(manifest, attempt_id):
-                raise ValueError(f"artifact {artifact_id!r} is already claimed")
-            if current["remote"].get("artifact_id") is not None:
-                raise ValueError("attempt already has a remote artifact mapping")
-            now = datetime.now(UTC).isoformat()
-            current_dispatch["status"] = "accepted"
-            current_dispatch["accepted_at"] = now
-            current["remote"].update(
-                {
-                    "artifact_id": artifact_id,
-                    "status": "pending",
-                    "status_origin": "caller_verified",
-                    "observed_at": now,
-                    "error": None,
-                    "error_code": None,
-                }
-            )
+            bind_caller_verified(manifest, current, attempt_id, artifact_id)
             return _attempt_capabilities(current_episode, current, attempt_id)
 
         _, caps = store.update(adopt_artifact)

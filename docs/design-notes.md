@@ -115,3 +115,18 @@
 (Caddy 唯讀對外,由使用者既有的 Cloudflare Tunnel 指過來;寫端 uploader 僅內網,不進
 tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `show_id`(**永不改**),
 不綁 notebook_id。
+
+### `attempt_state.py` —— attempt 狀態轉換
+
+`dispatch.status` 轉換(含 `claim_prepared` / `reset_for_resend` 這一對)、artifact 綁定的 `remote` 寫入與 output 指標收在這裡。**仍在模組外**:audio_finalize 的 remote 終態、retract 的 tombstone 與 episode 投影 pop、`_record_dispatch_failover` 的 `dispatch.account`、`active_attempt_id` 指標、`_create_audio_attempt` 的初始 prepared 骨架。函式簽名是
+`(manifest, episode_n, attempt_id, …)`,設計成在 `ManifestStore.update` 的 mutate 內呼叫
+(鎖與 CAS 仍歸 `manifest_store`)。重點:
+
+- `apply_accepted(attempt, artifact_id, origin, reset_error=)` 是「attempt 擁有 artifact、dispatch 已受理」
+  的唯一欄位寫入;`bind_reconciled` / `bind_sdk_heuristic` / `bind_caller_verified` / `new_resume_binding`
+  各帶自己的守門,**守門差異是現況而非 bug 清單**:reconciled 不查來源狀態、sdk 允許四個來源且重複綁為 no-op、
+  adopt 只認 `acceptance_unknown`/`reconciliation_ambiguous` 並清 error 欄位、resume 新建分支不做 claim 唯一性掃描。
+- `find_attempt` 的 `retracted_hint` 只換訊息尾巴(finalize 場景傳自己的);拒絕行為共用。
+- 不收進來:`_attempt_capabilities()` / `_attempt_next_step()` 產生的指引(紅線)、promotion 的 legacy 衝突守門
+  (要 caps)、reconcile 回傳點鎖外算 caps 的時機(F7,gotchas-attempt)。
+- 測試:`tests/test_attempt_state.py` 以 from-state × event 表鎖轉換。
