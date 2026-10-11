@@ -6,6 +6,26 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.31 — 一槽憑證死掉不再讓整台 MCP 起不來
+
+**事故**:v0.9.30 發版後到兩台 Mac 安裝時,MCP 在每台機器(含本機)都啟動即崩:
+`NOTEBOOKLM_AUTH_JSON_3 的憑證建不出 client:CSRF token not found in HTML`。另外幾個帳號
+好好的,但 `_lifespan_client_pool` 對 `from_storage` 失敗一律 raise —— 一個槽位壞掉,
+整個 pool 陪葬。v0.9.14 FINDING-B 修的是「說不出哪一槽」,raise 本身沒人重新檢討過,
+而它與 `_account_label`、routability 降級已立下的政策正好相反。
+
+- **跳過死槽位,全滅才 raise**(訊息列出每一槽)。結構不合法的憑證仍當場 raise(Doppler 打錯字)。
+- **`auth_check(all_slots=True)` 看得到被跳過的槽位**:`usable=false`、`account=null`、
+  `error="not_in_pool: …"`,槽位編號是真實編號。不列的話 pool 少一格而掃描回 `all_usable: true`。
+- 原因字串只留第一行、URL 去掉 query/fragment(它現在會進到 MCP client 的 context)。
+- ADR-0010 補 amendment;gotchas-pool 新增 §二之一。
+- **跳過的槽位要重啟才回來**;跳過期間新建的 notebook 不會分享給它,回 pool 後跑
+  `notebook_share_with_pool`。
+
+**真實 pool 驗證(prd,唯讀 RPC)**:啟動成功;pool-account-1、pool-account-2 可用,
+**pool-account-3、4、5 全部 `not_in_pool`(CSRF token not found)** —— 生產 failover
+容量目前只有 2/5,要逐一重登後 `doppler secrets set --raw` 寫回。
+
 ## v0.9.30 — retract / publish_series 描述小修、依賴對齊
 
 - **工具描述**:`podcast_attempt_retract` 不再指向 ADR-0009(只在本 repo,呼叫端讀不到),
