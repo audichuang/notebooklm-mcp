@@ -4012,9 +4012,8 @@ async def podcast_attempt_retract(
     ``source_cleanup_unresolved=True``(upload 已送出、``source_id`` 還沒落盤)時
     **照回傳的 ``safe_next_action`` 做,不要照這個狀態名猜**:gate 已經對帳到具體 id 就是
     ``source_delete``(義務在 ``source_cleanup_obligations`` 裡,照樣要逐筆刪);還撈不到
-    id 才是 ``null`` —— 那種是**要等、不是死路**(候選窗自 dispatch 起算,窗關且零候選才放行;
-    實際秒數由 ``UPLOAD_DISPATCH_WINDOW`` 決定,錯誤訊息會給)。要保住那筆 source 的身分就別 retract,改走
-    ``podcast_episode_resume``。
+    id 才是 ``null`` —— 那種是**要等、不是死路**(dispatch 起算的候選窗關閉且零候選才放行,
+    秒數見錯誤訊息)。要保住那筆 source 的身分就別 retract,改走 ``podcast_episode_resume``。
 
     **``safe_next_action`` 不一定是重生**:該集已有別顆 attempt 成為正式輸出時是 ``null``;
     已有替代 attempt 在飛時指向**那一顆**現在能做的事。⚠️ **執行它一律用
@@ -4022,7 +4021,7 @@ async def podcast_attempt_retract(
     被 retract 的稽核主體)—— 拿錯會撞 tombstone 或冪等重跑成無限迴圈。重生指回
     ``podcast_episode`` 時,把 ``regeneration_source_ids`` 原樣帶進 ``source_ids``。
 
-    完整狀態表、稽核欄位與回傳形狀見 ``references/tool-reference.md`` 與 ADR-0009。
+    狀態表與回傳形狀見 skill ``references/tool-reference.md``。
     """
     if not isinstance(manifest_path, str) or not manifest_path:
         raise ValueError("manifest_path must be a non-empty string")

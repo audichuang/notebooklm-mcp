@@ -466,8 +466,7 @@ async def publish_series(
     加集只傳 `manifest_path`** 即沿用。顯式參數永遠優先並回寫;`category` / `explicit` /
     `itunes_type` / `require_*` 同樣沿用。
 
-    `return_episodes` **只過濾回傳的 `episodes`,不縮小發布範圍** —— 每次呼叫一律重發
-    整季;傳 `[N]` 只是免得回傳隨集數膨脹。
+    `return_episodes` **只過濾回傳的 `episodes`,不縮小發布範圍** —— 每次呼叫一律重發整季。
 
     `itunes_type` 預設 `episodic`(照 pubDate 由新到舊排)。**連載節目不顯式傳 `serial`
     不會報錯,只會在播放器裡靜默倒序。**
@@ -482,7 +481,7 @@ async def publish_series(
     某集帶 `publication_state: "deferred"` 就**不進 feed**:集號回在 `deferred_episodes`,
     `episode_count` 只算真的發出去的(manifest 50 集、扣下 1 集 → 回 49,不是漏集)。
 
-    完整回傳欄位與 preflight 涵蓋範圍見 skill `references/tool-reference.md`(**參數的正本是這支的 inputSchema**,不必為了湊參數去讀那份)。"""  # noqa: E501 —— tool description 正本,折行會改 inputSchema 描述
+    回傳欄位與 preflight 範圍見 skill `references/tool-reference.md`(湊參數看 inputSchema 即可)。"""
     base_url = _require_url_env("PODCAST_PUBLIC_BASE_URL")
     # return_episodes 只是回傳過濾器,但舊版拖到所有 PUT + manifest 回寫都完成後才
     # `set(return_episodes)`——傳個 [[1]] 之類的壞型別會在「發布其實已成功」之後才
