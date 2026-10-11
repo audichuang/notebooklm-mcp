@@ -130,3 +130,24 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - 不收進來:`_attempt_capabilities()` / `_attempt_next_step()` 產生的指引(紅線)、promotion 的 legacy 衝突守門
   (要 caps)、reconcile 回傳點鎖外算 caps 的時機(F7,gotchas-attempt)。
 - 測試:`tests/test_attempt_state.py` 以 from-state × event 表鎖轉換。
+
+### `attempt_admission.py` —— attempt 建立/沿用的單一決策
+
+四個入口(`_create_audio_attempt`、`_ensure_resume_attempt` 的 claimed 與新建分支、`_reuse_frozen_input_attempt`)
+過去各抄一份守門。現在 `decide()` 依請求來源選分支,按 `_GUARDS` 表的**固定順序**跑守門,回
+`Admit(kind)` 或 `Refusal(exc_type, message)`;呼叫端只負責寫(`attach_new_attempt` / reset / rearm)
+或 `raise_()`。順序即「同時違反兩條時讀到哪一句」,不可調換。紀錄 literal 各一份
+(`new_prepared_attempt` / `new_resume_attempt`)。依賴方向:本模組 → `attempt_state` / `audio_finalize` /
+`naming`,不 import `tools_podcast`(指引以 callable 注入,避免循環 import)。
+
+刻意保留的差異(各入口原本就不同,統一是行為變更):
+
+- 標題不可變:generate 只在 `retracted_attempt_ids` 存在時擋;resume(兩支)永遠比 episode 級標題;
+  claimed 另比 attempt 級標題。
+- notebook 身分:generate / resume 新建比 episode 級;claimed 與 frozen 只比 attempt 級。
+- 既有輸出:generate 擋 pointer(真值)|硬證據|legacy preparatory;resume 新建擋 pointer(is-not-None)並
+  對 legacy 硬證據只放行同一顆 artifact;claimed 只擋「output 屬於別顆」;frozen 只看 pointer;series 洩漏判斷
+  用 `has_output_pointer_or_hard`。
+- series 自檢三種 subject(active / output / legacy)訊息不同,legacy 只比標題。
+
+測試:`tests/test_attempt_admission.py`,episode 狀態 × 來源 → 決策表,純 dict。
