@@ -20,6 +20,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -214,6 +215,18 @@ def _write_credential_file(cred: str, path: Path, slot: int) -> Path:
     return path
 
 
+def _redact_startup_error(exc: Exception) -> str:
+    """跳過槽位時要存進診斷、經 `auth_check` 回給呼叫端的原因字串 —— 只留第一行、URL 去掉
+    query / fragment。
+
+    這段字以前只進 stderr;現在會進到 MCP client 的 context。登入轉址 URL 的 query 可能帶
+    `osidt=` 這類短期憑證參數(所以 `_lifespan` 才把 httpx 調到 WARNING)。上游的 CSRF /
+    登入轉址訊息已經走 `_safe_url`,但其他例外(httpx 的 HTTP 錯誤)會原樣帶完整 URL。
+    """
+    first_line = f"{type(exc).__name__}: {exc}".splitlines()[0]
+    return re.sub(r"(https?://[^\s?#]*)[?#]\S*", r"\1", first_line)
+
+
 def _reject_duplicate_accounts(pool: list[tuple[str, object]]) -> None:
     """兩個槽位輪到同一個帳號 —— 配額沒有變多,而 failover 會寫一筆謊報的紀錄。
 
@@ -338,6 +351,7 @@ async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
         async with contextlib.AsyncExitStack() as stack:
             pool: list[tuple[str, object]] = []
             diagnostics: list[dict[str, object]] = []
+            dead: list[str] = []
             if len(creds) > 1:
                 # 多帳號:每個槽位各自一份 storage_state 檔,client 自己帶著身分走。
                 # **env 完全不動** —— 它不再是身分,只是 Doppler 注入的原始輸入。
@@ -400,12 +414,15 @@ async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
                     # 0.8.1 將 L3 護欄升為建構參數;與上面刪除
                     # `NOTEBOOKLM_HEADLESS_REAUTH` 的 env 護欄互補,兩層都保留。
                     #
-                    # 失敗一定要講出是**哪一個槽位**(v0.9.14 真實驗收 FINDING-B):
-                    # `_write_credential_file` 那條(結構不合法)本來就會指名,但這條
-                    # ——「結構合法、cookie 已死」——原本讓 SDK 的 `_LoginRedirectError`
-                    # 原樣穿透,訊息只有「Authentication expired or invalid. Run
-                    # 'notebooklm login'」。9 槽 pool 裡任何一槽過期就整台起不來,
-                    # 而人看不出要去重登哪一個帳號。實測就是這個形狀。
+                    # 「結構合法、cookie 已死」的槽位**跳過,不讓整台 server 起不來**
+                    # (v0.9.30 事故:prd 第 3 槽 CSRF token not found,所有機器的 MCP
+                    # 啟動即崩,另外 4 個付費帳號全陪葬)。與 `_account_label` 同一條
+                    # 政策。結構不合法(上面 `_write_credential_file`)仍然當場 raise:
+                    # 那是 Doppler 打錯字,確定性的設定錯誤,不是會自己壞掉的憑證。
+                    # 跳過時一定要講出是**哪一個槽位**(v0.9.14 FINDING-B):warning
+                    # 指名,診斷列帶 `startup_error` 讓 `auth_check(all_slots=True)`
+                    # 看得到它 —— 否則 pool 少一格而掃描回全綠。
+                    # ponytail:跳過的槽位要等重啟才回來;要熱回補再加重建 client 的路徑。
                     try:
                         client = await stack.enter_async_context(
                             # backend="web" 顯式傳,不靠 _INLINE_AUTH_ENV_OVERRIDES 刪
@@ -416,12 +433,25 @@ async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
                                 path=str(path), allow_headless=False, backend="web"
                             )
                         )
-                    except Exception as exc:
-                        raise RuntimeError(
-                            f"{_slot_env_name(slot)} 的憑證建不出 client:{exc}"
-                        ) from exc
+                    except Exception as exc:  # noqa: BLE001 —— 一槽壞掉只跳過該槽,全滅才 raise
+                        reason = _redact_startup_error(exc)
+                        logger.warning(
+                            "%s 的憑證建不出 client,本次啟動跳過這個槽位(其餘槽位照常服役;"
+                            "重登該帳號、寫回 Doppler 後重啟 MCP 才會回到 pool):%s",
+                            _slot_env_name(slot),
+                            reason,
+                        )
+                        dead.append(f"{_slot_env_name(slot)}:{reason}")
+                        row = _slot_diagnostic(slot, cred)
+                        row["startup_error"] = reason
+                        diagnostics.append(row)
+                        continue
                     pool.append((await _account_label(client, slot), client))
                     diagnostics.append(_slot_diagnostic(slot, cred))
+                if not pool:
+                    raise RuntimeError(
+                        "pool 裡每個槽位的憑證都建不出 client,沒有可用帳號:\n  " + "\n  ".join(dead)
+                    )
             else:
                 # 單帳號 inline 不需要這把 flock:`_resolve_recovery_path` 先看 path,
                 # 再看 `resolve_auth_json_env()`。這條分支不傳 path,而 inline_auth 為真

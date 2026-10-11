@@ -63,6 +63,17 @@ INFO 級「HTTP Request」日誌會把它印進 stderr。
   另外兩台下次啟動就掛,而本機正常啟動只有 debug 訊息。
   推導與取捨見 [ADR-0010](adr/0010-quota-failover-rides-the-zero-side-effect-refusal.md) 的 v0.9.0 amendment。
 
+## 二之一、一槽建不出 client 只跳過該槽(v0.9.31)
+
+- `_lifespan_client_pool` 對 `from_storage` 失敗的槽位**記 warning、診斷列帶 `startup_error`、
+  `continue`**;全部槽位都失敗才 raise(訊息列出每一槽)。結構不合法(`_write_credential_file`)
+  仍當場 raise —— 那是 Doppler 設定錯,不是會自己壞掉的憑證。
+- **`auth_check(all_slots=True)` 的槽位編號從診斷列對回去**,不是 pool 的 index:跳過第 3 槽
+  之後 pool 第 3 個 client 是第 4 槽。改 `set_slot_diagnostics` 的順序或內容時,
+  `test_auth_check_all_slots_lists_slots_skipped_at_startup` 會紅。
+- 測試鎖:`test_a_dead_slot_is_skipped_instead_of_taking_the_server_down`、
+  `test_pool_raises_only_when_every_slot_is_dead_and_still_tears_down`。
+
 ## 二之二、憑證殘留不需要有人 `kill` —— 正常關 session 就有約 10~15%
 
 **已知取捨的發生率被低估了。** 原本的說法是「`kill -9` / `SIGTERM` 不展開

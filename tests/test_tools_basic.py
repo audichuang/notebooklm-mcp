@@ -953,6 +953,42 @@ async def test_auth_check_all_slots_ok_is_null_when_the_active_slot_was_not_meas
     assert result["all_usable"] is False
 
 
+async def test_auth_check_all_slots_lists_slots_skipped_at_startup(fake_client):
+    """啟動時被跳過的槽位不在 pool 裡,但 `all_slots` 的表**一定要看得到它**。
+
+    否則一個死掉的槽位會讓 pool 少一格,而掃描回 `all_usable: true` —— 正是這支工具
+    存在要消滅的「1/N 綠燈」。也要保住槽位編號:跳過第 2 槽之後,pool 的第 2 個 client
+    是**第 3 槽**,表上不能把它標成 2(人會去重登錯的帳號)。
+    """
+    third = FakeClient()
+    _pool(fake_client, third)
+    runtime.set_slot_diagnostics(
+        [
+            {"slot": 1, "env": "NOTEBOOKLM_AUTH_JSON", "refreshable": True},
+            {
+                "slot": 2,
+                "env": "NOTEBOOKLM_AUTH_JSON_2",
+                "refreshable": None,
+                "startup_error": "RuntimeError: CSRF token not found",
+            },
+            {"slot": 3, "env": "NOTEBOOKLM_AUTH_JSON_3", "refreshable": True},
+        ]
+    )
+
+    result = await t.auth_check(all_slots=True)
+
+    assert [row["slot"] for row in result["slots"]] == [1, 2, 3]
+    skipped = result["slots"][1]
+    assert skipped["usable"] is False and skipped["active"] is False
+    assert skipped["account"] is None
+    assert skipped["env"] == "NOTEBOOKLM_AUTH_JSON_2"
+    assert "CSRF token not found" in skipped["error"]
+    assert result["slots"][2]["env"] == "NOTEBOOKLM_AUTH_JSON_3"
+    assert result["slots"][2]["usable"] is True
+    assert result["ok"] is True
+    assert result["all_usable"] is False
+
+
 class TestSourceSearch:
     """`source_search`:排序過的段落檢索,取代「整份全文拉回來自己比對」。
 

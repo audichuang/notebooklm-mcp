@@ -150,6 +150,10 @@ async def auth_check(all_slots: bool = False) -> dict:
     錯誤、**沒量到**,別讀成壞掉),判斷寫 ``usable is True``;**全部槽位都不可用時**它才
     比照預設模式 raise。
 
+    啟動時憑證建不出 client 的槽位會被跳過(不讓整台 server 起不來),它在表上是
+    ``usable=false`` + ``error="not_in_pool: …"``、``account=null``:要重登那個帳號、
+    寫回 Doppler 再重啟 MCP 才回到 pool。
+
     ``refreshable`` 問的是「PSIDTS 能不能 refresh」,**不是「現在能不能用」**(那是
     ``usable``)。``usable=true`` + ``refreshable=false`` 是已知可服役,不要據此去重登。
     """
@@ -161,15 +165,22 @@ async def auth_check(all_slots: bool = False) -> dict:
     # —— 兩件事的修法完全不同,不能長得一樣。
     runtime.get_client()
 
-    diagnostics = {row["slot"]: row for row in runtime.slot_diagnostics()}
+    rows = runtime.slot_diagnostics()
+    clients = runtime.all_clients()
+    # 啟動時建不出 client 的槽位(`startup_error`)不在 pool 裡:pool 的第 N 個 client
+    # 不再是第 N 槽,槽位編號要從活著的那幾列依序對回去,否則人會去重登錯的帳號。
+    live = [row for row in rows if "startup_error" not in row]
+    slot_rows = (
+        live if len(live) == len(clients) else [{"slot": i} for i in range(1, len(clients) + 1)]
+    )
     # 掃描期間如果有並行的 failover rotate,這個游標快照會過時 —— **可以接受**,因為
     # `active` 在這裡純粹是顯示用的標記,不是記帳。`snapshot()` 那條「記帳與送出必須同源」
     # 的紀律管的是會寫進 manifest 的身分(ADR-0010),這支不寫任何東西。
     active = runtime.active_account()
     slots: list[dict] = []
-    for index, (label, client) in enumerate(runtime.all_clients(), start=1):
-        row: dict = {"slot": index, "account": label, "active": label == active}
-        row.update({k: v for k, v in diagnostics.get(index, {}).items() if k != "slot"})
+    for diag, (label, client) in zip(slot_rows, clients, strict=True):
+        row: dict = {"slot": diag["slot"], "account": label, "active": label == active}
+        row.update({k: v for k, v in diag.items() if k != "slot"})
         try:
             row.update(usable=True, notebooks=(await probe_auth(client))["notebooks"])
         except _AuthProbeError:
@@ -178,6 +189,14 @@ async def auth_check(all_slots: bool = False) -> dict:
         except Exception as exc:  # noqa: BLE001 —— 網路/限流:沒量到,不等於壞掉
             row.update(usable=None, error=f"{type(exc).__name__}: {exc}")
         slots.append(row)
+    # 被跳過的槽位也要列出來:不列的話 pool 少一格,而這張表回 `all_usable: true`。
+    for diag in rows:
+        if "startup_error" in diag:
+            skipped = {"slot": diag["slot"], "account": None, "active": False}
+            skipped.update({k: v for k, v in diag.items() if k not in ("slot", "startup_error")})
+            skipped.update(usable=False, error=f"not_in_pool: {diag['startup_error']}")
+            slots.append(skipped)
+    slots.sort(key=lambda row: row["slot"])
 
     if slots and all(row["usable"] is False for row in slots):
         raise RuntimeError(f"pool 裡 {len(slots)} 個槽位全部認證失效。\n{RELOGIN_HINT}")

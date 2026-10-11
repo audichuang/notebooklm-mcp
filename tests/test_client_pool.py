@@ -553,6 +553,9 @@ async def test_duplicate_accounts_fail_loud(monkeypatch):
         async with app._lifespan(app.mcp):
             pass
     assert all(c.closed for c in built), "擋下來也要把已經建好的 client 關掉"
+    # 這是 client 建好之後才 raise 的唯一路徑(死槽位改成跳過之後),失敗路徑的憑證
+    # 目錄清理由這裡守。
+    assert not built[0].path.parent.exists()
 
 
 async def test_distinct_accounts_are_accepted(monkeypatch):
@@ -823,36 +826,94 @@ async def test_every_client_is_closed_on_normal_shutdown(monkeypatch):
     assert not built[0].path.parent.exists(), "憑證目錄也要跟著收掉"
 
 
-async def test_pool_is_torn_down_even_if_a_later_client_fails(monkeypatch):
-    """第 2 個 client 建到一半炸掉,第 1 個已經 enter 的必須被關掉。
+def _from_storage_failing_for(dead: set[str], built):
+    """`from_storage` 替身:憑證字串在 `dead` 裡的槽位建不出 client(模擬 cookie 已死)。"""
 
-    否則 stdio server 啟動失敗會留下一條沒關的 HTTP 連線,而失敗路徑正是
-    最不會被人盯著看的地方。憑證檔同理:失敗路徑也要刪乾淨。
+    def fake(*args, path=None, **kwargs):
+        cred = Path(path).read_text(encoding="utf-8")
+        if cred in dead:
+            raise ValueError(f"CSRF token not found ({cred[-40:]!r})")
+        client = _FakeClientCM(cred=cred, path=Path(path))
+        built.append(client)
+        return client
+
+    return fake
+
+
+async def test_a_dead_slot_is_skipped_instead_of_taking_the_server_down(monkeypatch, caplog):
+    """一個槽位的 cookie 死了,其他槽位照常服役 —— 不是整台 server 起不來。
+
+    v0.9.30 實際事故:prd 第 3 槽 `CSRF token not found`,於是**所有機器**上的 MCP
+    啟動即崩,即使另外 4 個付費帳號都好好的。這違反本檔其他地方(`_account_label`、
+    `_reject_duplicate_accounts`、routability 降級)都已立下的「一個死憑證不該讓整台
+    server 起不來」。v0.9.14 FINDING-B 修的是「說不出哪一槽」—— 那個要求保留:跳過時的
+    warning 必須指名槽位與原因,而且 `auth_check(all_slots=True)` 要看得到它(另一條測試)。
+    """
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", _cred("1"))
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", _cred("2"))
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_3", _cred("3"))
+    built = []
+    monkeypatch.setattr(
+        app.NotebookLMClient, "from_storage", _from_storage_failing_for({_cred("2")}, built)
+    )
+
+    with caplog.at_level(logging.WARNING, logger=app.logger.name):
+        async with app._lifespan(app.mcp):
+            assert runtime.account_count() == 2
+            assert [c.cred for c in built] == [_cred("1"), _cred("3")]
+            rows = runtime.slot_diagnostics()
+            assert [r["slot"] for r in rows] == [1, 2, 3]
+            assert "CSRF token not found" in rows[1]["startup_error"]
+            assert "startup_error" not in rows[0] and "startup_error" not in rows[2]
+    warning = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "NOTEBOOKLM_AUTH_JSON_2" in warning and "CSRF token not found" in warning
+    # 跳過的槽位不會留下半開的 client;活著的兩個正常關閉、憑證目錄收掉。
+    assert [c.closed for c in built] == [True, True]
+    assert not built[0].path.parent.exists()
+
+
+def test_startup_error_keeps_credential_query_params_out_of_the_diagnostic():
+    """跳過原因會經 `auth_check` 進到 MCP client 的 context,不能帶登入轉址 URL 的 query。"""
+    exc = ValueError(
+        "Redirected to https://accounts.google.com/ServiceLogin?osidt=secret&continue=x#frag\n"
+        "second line with more detail"
+    )
+    reason = app._redact_startup_error(exc)
+    assert "osidt=secret" not in reason and "#frag" not in reason
+    assert "https://accounts.google.com/ServiceLogin" in reason
+    assert "second line" not in reason
+
+
+async def test_pool_raises_only_when_every_slot_is_dead_and_still_tears_down(monkeypatch):
+    """全部槽位都建不出 client 才 raise —— 沒有任何帳號可用時,啟動成功只是假象。
+
+    訊息要列出**每一個**死掉的槽位(FINDING-B 的要求延伸到整批),原因留在訊息裡。
+    失敗路徑照舊要收乾淨:憑證目錄刪掉、env 還原。
     """
     monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", _cred("1"))
     monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_2", _cred("2"))
     built = []
+    monkeypatch.setattr(
+        app.NotebookLMClient,
+        "from_storage",
+        _from_storage_failing_for({_cred("1"), _cred("2")}, built),
+    )
+    seen_dirs = []
+    real_mkdtemp = app.tempfile.mkdtemp
+    monkeypatch.setattr(
+        app.tempfile,
+        "mkdtemp",
+        lambda **kw: seen_dirs.append(real_mkdtemp(**kw)) or seen_dirs[-1],
+    )
 
-    def fake(*args, path=None, **kwargs):
-        if Path(path).read_text(encoding="utf-8") == _cred("2"):
-            raise ValueError("boom")
-        client = _FakeClientCM(cred=_cred("1"), path=Path(path))
-        built.append(client)
-        return client
-
-    monkeypatch.setattr(app.NotebookLMClient, "from_storage", fake)
-
-    # v0.9.14 FINDING-B:建 client 失敗一定要講出是**哪一個槽位**(原本 SDK 的
-    # `_LoginRedirectError` 原樣穿透,9 槽 pool 裡看不出要去重登哪一個帳號),
-    # 所以這裡改成 RuntimeError + 槽位名;原因用 `from exc` 保留在 __cause__。
-    with pytest.raises(RuntimeError, match="NOTEBOOKLM_AUTH_JSON_2") as excinfo:
+    with pytest.raises(RuntimeError) as excinfo:
         async with app._lifespan(app.mcp):
             pass
-    assert "boom" in str(excinfo.value)
-    assert isinstance(excinfo.value.__cause__, ValueError)
-    assert [c.closed for c in built] == [True]
-    assert not built[0].path.parent.exists()
-    # 失敗也要還原 env,別把中間狀態留給下一段程式。
+    message = str(excinfo.value)
+    assert "NOTEBOOKLM_AUTH_JSON " in message or "NOTEBOOKLM_AUTH_JSON:" in message
+    assert "NOTEBOOKLM_AUTH_JSON_2" in message and "CSRF token not found" in message
+    assert built == []
+    assert seen_dirs and not Path(seen_dirs[0]).exists()
     assert app.os.environ["NOTEBOOKLM_AUTH_JSON"] == _cred("1")
 
 
