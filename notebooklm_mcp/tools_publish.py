@@ -26,8 +26,9 @@ import httpx
 from mcp.types import ToolAnnotations
 
 from . import runtime
-from ._atomic import download_atomically, sha256_file
+from ._atomic import EmptyDownloadError, download_atomically
 from .app import mcp
+from .canonical_audio import canonical_audio, verify_file
 from .manifest_store import ManifestStore
 from .publish import (
     artwork as artwork_mod,
@@ -173,15 +174,16 @@ async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None, staging_
     重抓的筆記本**優先用該集自己的 `ep["notebook_id"]`**(podcast_episode 的
     manifest stub 會寫入)——滾動 feed 每集獨立筆記本,單一 show 層 notebook_id
     會抓錯本;沒有per-episode 欄位才退到呼叫端傳的 fallback。"""
-    path = ep.get("mp3_path")
+    canon = canonical_audio(ep)
+    path = canon.mp3_path
     if path and os.path.exists(path) and os.path.getsize(path) > 0:
         return path
-    artifact_id = ep.get("artifact_id")
+    artifact_id = canon.artifact_id
     if not artifact_id:
         raise ValueError(
             f"episode {ep.get('episode')}: mp3_path missing and no artifact_id to re-download"
         )
-    notebook_id = ep.get("notebook_id") or fallback_notebook_id
+    notebook_id = canon.notebook_id or fallback_notebook_id
     if not notebook_id:
         raise ValueError(
             f"episode {ep.get('episode')}: mp3_path missing and no notebook_id to re-download from "
@@ -208,59 +210,13 @@ async def _ensure_local_mp3(ep: dict, fallback_notebook_id: str | None, staging_
             lambda dest: client.artifacts.download_audio(notebook_id, dest, artifact_id),
             lambda _dest: None,  # 內容格式交給後面 _embed_cover 的 ffprobe 驗
         )
-    except ValueError as exc:
-        # 只攔 _atomic 的「空檔案」語意(download_atomically 唯一會丟的 ValueError 形狀)。
-        # 原本 `except ValueError` 連 download_audio 自己的 ValueError(artifact 不存在等)
-        # 都改寫成「produced no file」,誤導診斷——那些要原樣往上拋。
-        if "downloaded file is empty" not in str(exc):
-            raise
+    except EmptyDownloadError as exc:
+        # 只攔 _atomic 的「空檔案」(型別化,不再比對訊息字串)。download_audio 自己的
+        # ValueError(artifact 不存在等)要原樣往上拋,不改寫成「produced no file」。
         raise ValueError(
             f"episode {ep.get('episode')}: re-download via artifact {artifact_id} produced no file"
         ) from exc
     return staging
-
-
-def _mp3_provenance_gap(ep: dict, local_path: str) -> str | None:
-    """發布前驗「這顆 mp3 真的是 promoted attempt 產出的那顆」。
-
-    回傳 None = 驗過相符;回傳字串 = 驗不動的原因(呼叫端收進
-    `sha_unverified_episodes` 標註——「沒驗」必須明講,不能讀成「驗過了」)。
-    不符或 canonical 歧義 → raise,擋在任何 PUT 之前。
-
-    存在的理由(podcast-lab retracted-slot-rename 2026-08-19):QA 拒收的音檔坐在
-    預設檔名槽,而 `_ensure_local_mp3` 只 resolve「檔案存在」——存在即過,拒收版
-    就冒充 canonical 上了公網。「認 canonical 一律比 sha」原本是 host 手動紀律,
-    這裡下沉成 fail-closed 閘。legacy manifest(無 attempts)刻意放行:整季
-    republish 不能因為驗不動就死(deferred 事故的形狀)。"""
-    n = ep.get("episode")
-    attempts = ep.get("attempts") or []
-    promoted = ep.get("output_attempt_id")
-    if not attempts and not promoted:
-        return "legacy manifest(無 attempts 記錄,無從比對)"
-    if not promoted:
-        raise ValueError(
-            f"episode {n}: 有 attempts 但沒有 output_attempt_id,分不出哪一顆是 canonical"
-            " —— 不靜默挑一顆(那正是本閘要消滅的路徑);用工具把輸出 promote 回"
-            " episode 層再發布"
-        )
-    attempt = next((a for a in attempts if a.get("attempt_id") == promoted), None)
-    if attempt is None:
-        raise ValueError(
-            f"episode {n}: output_attempt_id {promoted} 指向不存在的 attempt"
-            " —— manifest 不自洽,不發布"
-        )
-    expected = ((attempt.get("finalize") or {}).get("download") or {}).get("sha256")
-    if not expected:
-        return f"promoted attempt {promoted} 沒記 finalize.download.sha256(舊版 finalize 形狀)"
-    actual = sha256_file(local_path)
-    if actual != expected:
-        raise ValueError(
-            f"episode {n}: mp3 檔案的 sha256 與 promoted attempt 不符"
-            f"(檔案 {actual[:12]}…,attempt {promoted} 記錄 {expected[:12]}…)"
-            " —— 檔案被換過或 mp3_path 指錯位置;重新對帳 manifest,別讓"
-            "「檔案存在」冒充 canonical"
-        )
-    return None
 
 
 async def _auth_precheck(client, base: str, upload_token: str) -> None:
@@ -756,7 +712,7 @@ async def publish_series(
         sha_unverified: list[int] = []
         for ep in manifest_eps:
             n = int(ep["episode"])
-            gap = await asyncio.to_thread(_mp3_provenance_gap, ep, resolved_mp3[n])
+            gap = await asyncio.to_thread(verify_file, canonical_audio(ep), resolved_mp3[n])
             if gap:
                 sha_unverified.append(n)
 

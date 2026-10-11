@@ -101,6 +101,10 @@ def prepared_replacement(
         ) from exc
 
 
+class EmptyDownloadError(ValueError):
+    """下載產物為空檔。繼承 ValueError,既有 `except ValueError` 與訊息文字不變。"""
+
+
 async def download_atomically(
     final_path: str,
     download: Callable[[str], Awaitable[object]],
@@ -113,7 +117,7 @@ async def download_atomically(
     with prepared_replacement(final_path) as temp_path:
         await download(temp_path)
         if os.path.getsize(temp_path) <= 0:
-            raise ValueError(f"downloaded file is empty: {final_path}")
+            raise EmptyDownloadError(f"downloaded file is empty: {final_path}")
         validate(temp_path)
 
 

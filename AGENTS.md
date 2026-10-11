@@ -67,6 +67,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 | `_failover.py` | 配額 failover 的**唯一**迴圈(音檔 `_dispatch_audio_with_failover` 與附件三支共用) | 五條紅線在它的模組 docstring,各是一次事故 —— 改分類/終止性要在那裡改,別在呼叫端加分支。家族差異用三個 callback 表達(`record_failover=None` = 沒稽核面 = 不換帳號),**別為了防半接線併成一個** —— v0.9.17 做過又退掉,理由在 ADR-0011 末段 |
 | `tools_research.py` | Web / Deep Research 的薄包,**三支分開**(start / wait / import) | [gotchas-research](docs/gotchas-research.md);分開是為了對齊 ADR-0001 的 attempt/resume 紀律,不是為了彈性 |
 | `tools_publish.py` + `publish/` | 整季發布成 Apple 合規 RSS;`publish/` 是純邏輯(離線可測)。`publish/state.py` = 發布層 manifest 欄位閘的正本(`publication_state` 白名單、`retired`;讀它的 publish 與寫它的 artifacts 共用) | [gotchas-publish](docs/gotchas-publish.md);**白名單別搬回 `tools_publish`** —— 會炸循環 import,實測踩過 |
+| `canonical_audio.py` | 發布端讀「某集 canonical 音檔」的唯一唯讀查詢(sha / 路徑 / artifact / notebook / 記錄帳號,或型別化 `Unverifiable`);不 raise,擋或標註由 `tools_publish` 決定 | 讀 attempt 形狀的解讀只在這裡;發布仍不寫 attempt(ADR-0002),retired 閘留 `publish/state.py`(ADR-0013) |
 | `generation_input.py` | frozen generation-input bundle + `attempt-binding.json` sidecar | 驗證與綁定都在**第一個遠端副作用之前**(ADR-0001);圍籬由 host 的 `workspace_root` 宣告(ADR-0012) |
 | `_sources.py` | caller 指名的 `source_ids` 驗證與對帳 | **重生某一集不指名,後面各集的回錄會洩進那一集**;選哪幾筆的政策留 host(ADR-0007) |
 | `_errors.py` | `NotebookAccessDenied` / `is_permission_denied`(`tools_basic` 與 `tools_podcast` 共用) | 各寫一份 = 上游改 `rpc_code` 時只有一處被改到 |

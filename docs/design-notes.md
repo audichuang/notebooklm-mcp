@@ -161,3 +161,11 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 所以可用假清單在介面層測試。四階段順序、CAS 的不對稱處置(保留加義務、丟掉結案旗標)原樣搬入,
 理由見 `assert_generation_allowed` / `settle_cleanup_state` docstring。
 series 路徑會先跑一次 gate、fresh 路徑再進 `_run_episode` 跑第二次(第二次只在仍有義務時才打 list)——刻意保留。
+
+## canonical_audio.py:發布端的 canonical 音檔查詢
+
+`canonical_audio(ep)` 回 `CanonicalAudio`(mp3_path / artifact_id / notebook_id / 受理帳號 / sha256,
+或 `Unverifiable` 四種原因之一);`verify_file` 做 sha 比對。LEGACY / NO_SHA 放行並標進
+`sha_unverified_episodes`,NO_OUTPUT_POINTER / DANGLING_POINTER fail-closed(訊息原樣)。
+本模組不 raise 歧義,讓 `tools_publish` 維持「先 resolve 檔案、再驗出身」的原順序。
+`_ensure_local_mp3` 重抓用 `runtime.get_client()`(當前帳號)而非記錄帳號,為既有行為,刻意未改。
