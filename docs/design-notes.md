@@ -151,3 +151,13 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - series 自檢三種 subject(active / output / legacy)訊息不同,legacy 只比標題。
 
 測試:`tests/test_attempt_admission.py`,episode 狀態 × 來源 → 決策表,純 dict。
+
+## cleanup_obligation.py:清理義務單一模組
+
+義務(`episode["pending_source_cleanup"]`,每筆 `{source_id, notebook_id}`;legacy 純字串讀出時補 fallback)
+與 tombstone 上的 `source_cleanup_unresolved` 兩種,舊版散在 retract / adopt / capabilities / gate 各自摸欄位。
+現在形狀只在本模組;`tools_podcast` 只呼叫 `list_obligations` / `record_cleanup_obligation` /
+`queue_pending_source_cleanup` 與 gate。Gate 只吃 `list_sources`(`client.sources.list`)當遠端 port,
+所以可用假清單在介面層測試。四階段順序、CAS 的不對稱處置(保留加義務、丟掉結案旗標)原樣搬入,
+理由見 `assert_generation_allowed` / `settle_cleanup_state` docstring。
+series 路徑會先跑一次 gate、fresh 路徑再進 `_run_episode` 跑第二次(第二次只在仍有義務時才打 list)——刻意保留。

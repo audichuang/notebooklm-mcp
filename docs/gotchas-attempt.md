@@ -119,7 +119,7 @@
   連 `podcast_attempt_retract`(修復正門)與回填腳本都打不開,唯一出路變成 ADR-0009 禁止的
   手改 JSON。**壞資料要讀得進來,才修得掉**;retracted tombstone 一律豁免(否則 retract 後
   換 notebook 重生就寫不進去)。
-- **`_assert_source_cleanup_done` 的執行順序本身就是安全性質,動它之前先讀那支的 docstring。**
+- **`assert_generation_allowed` 的執行順序本身就是安全性質,動它之前先讀那支的 docstring。**
   四個階段:①驗身分 → ②一次 `sources.list`、純計算不中途拋 → ③單次 revision-CAS mutation
   → ④寫完才 raise。每一段都對應一個實際重現過的缺口:身分檢查排在篩選之後 → 會把**別本
   筆記本裡碰巧同名同時間窗**的來源寫進清理義務、再叫呼叫端刪掉它;迴圈裡直接 raise →
@@ -135,7 +135,7 @@
 - **作廢一顆「回錄 upload 還沒落盤」的 attempt 之後,最多 12 分鐘不能重生。** upload 停在
   `dispatching`/`acceptance_unknown`/`reconciliation_ambiguous` 且 `source_id` 還沒落盤時,
   retract(要帶 `abandon_in_flight`)會在 tombstone 記一筆 `source_cleanup_unresolved`,
-  而 `_assert_source_cleanup_done` 在候選窗(`UPLOAD_DISPATCH_WINDOW`,dispatch 起算
+  而 `assert_generation_allowed` 在候選窗(`UPLOAD_DISPATCH_WINDOW`,dispatch 起算
   11+1 分鐘)關上之前一律 fail-closed —— **即使已經把撈到的孤兒刪掉也一樣**,因為窗還開著
   時晚到的 upload 仍可能再冒一筆出來。`safe_next_action` 在這個狀態是 `None`,不是重生入口。
   **想避開這個等待就別急著 retract**:照 capabilities 指的 `podcast_episode_resume` 續完,

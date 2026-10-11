@@ -569,7 +569,7 @@ async def test_series_auth_expiry_stops_before_pending_cleanup_rpc(
 
     def add_cleanup(manifest):
         row = next(item for item in manifest["episodes"] if item["episode"] == 2)
-        p._record_cleanup_obligation(row, "stale", "nb-1")
+        p.record_cleanup_obligation(row, "stale", "nb-1")
 
     async def finalize_then_expire(*args, **kwargs):
         nonlocal expired

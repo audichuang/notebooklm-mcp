@@ -8,6 +8,7 @@
 
 ## Unreleased
 
+- 結構清理(零行為變更):清理義務收成 `cleanup_obligation.py`(義務的讀/記/刪/排隊、`settle_cleanup_state` CAS、四階段 gate `assert_generation_allowed`),唯一遠端依賴是 `list_sources` 可呼叫物件;原 `tools_podcast._assert_source_cleanup_done` 等私有名移除,相關測試改打新介面。series 路徑 gate 先跑一次、新鮮路徑進 `_run_episode` 再跑一次的行為原樣保留。
 - 結構清理(零行為變更):attempt 建立/沿用的守門收成 `attempt_admission.decide()`(請求來源當資料、守門順序列表、`Admit`/`Refusal`),`_create_audio_attempt` / `_ensure_resume_attempt` / `_reuse_frozen_input_attempt` 與 series 的 title/brief 自檢改為委派;新 attempt 紀錄 literal 各收成一份。各入口守門差異原樣保留,見 design-notes。
 - 結構清理(零行為變更):attempt 狀態轉換收成 `attempt_state.py`(dispatch 狀態標記、三種 origin 的 artifact 綁定、rearm/reset、promotion 欄位寫入、共用 `find_attempt` tombstone 查找);`tools_podcast` 的對應 closure 變成一行委派,舊私有名保留為別名。各轉換的守門差異原樣保留(見 AGENTS.md 該列)。
 - 結構清理(零行為變更):prepared attempt 的派送(baseline → claim → failover → 讀回 manifest 分類 → bind)收成 `tools_podcast._dispatch_prepared_attempt`,回 `DispatchAccepted` / `DispatchNotClaimed` / `DispatchStopped`;`_run_episode` 與 `podcast_series` inline 重送只翻譯結果(raise 補指引 / 回 partial)。迴圈仍只有 `_failover.dispatch_with_failover`。

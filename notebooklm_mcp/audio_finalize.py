@@ -158,7 +158,7 @@ def claimed_source_ids(manifest: dict) -> set[str]:
     """所有已被某顆 attempt 認領成回錄 source 的 id。
 
     「這筆 source 有人認領」= 它不是孤兒,清理義務不該把它排進待刪清單 —— 對帳結果撞上
-    並行寫入而要重算時,這是唯一要重驗的那件事(見 `tools_podcast._settle_cleanup_state`)。
+    並行寫入而要重算時,這是唯一要重驗的那件事(見 `cleanup_obligation.settle_cleanup_state`)。
     """
     return _claimed_source_ids(manifest, "")
 
@@ -297,7 +297,7 @@ def unresolved_upload_candidates(
     """從 notebook 現況篩出「可能是這次 upload 建出來的」source id。
 
     **這是唯一一份候選判準**:finalize 對帳(`_reconcile_source_upload`)與 retract
-    之後的清理義務對帳(`tools_podcast._assert_source_cleanup_done`)都走這裡。
+    之後的清理義務對帳(`cleanup_obligation.assert_generation_allowed`)都走這裡。
     baseline／title／kind／時間窗／已被別顆認領這五個條件,漏任何一個都會把別集的
     回錄誤判成這次的孤兒(或反過來漏掉真的孤兒),而兩邊各寫一份就等於保證有一天
     只有一邊被修到——本 repo 對「各寫一份」記過的帳已經夠多了。

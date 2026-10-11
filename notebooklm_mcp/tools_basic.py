@@ -582,7 +582,7 @@ async def source_delete(notebook_id: str, source_id: str) -> dict:
         # 不 raise —— `podcast_attempt_retract` 的清理契約要求呼叫端把回傳的
         # `stale_source_ids`「逐一 source_delete」,而 response 遺失後重放整個迴圈是
         # **預期操作**;對已經刪掉的那一筆拋錯會讓自動化 host 停在半路,剩下的 id
-        # 從此沒人刪,而 `_assert_source_cleanup_done` 只列「還在」的 id,不會替它
+        # 從此沒人刪,而 `assert_generation_allowed` 只列「還在」的 id,不會替它
         # 補回來。fail-loud 保護的是打錯參數,代價卻是打斷冪等的清理迴圈 —— 這裡
         # 兩者都要:安全性質留在「不打 RPC」,冪等留在「不 raise」。
         return {"deleted": source_id, "was_present": False}

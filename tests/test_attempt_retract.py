@@ -961,8 +961,8 @@ async def test_cleanup_cannot_be_discharged_from_another_notebook(fake_client, t
     await p.podcast_attempt_retract(manifest_path, 1, before["output_attempt_id"], reason="QA")
 
     with pytest.raises(ValueError, match="清理義務屬於 notebook"):
-        await p._assert_source_cleanup_done(
-            fake_client, ManifestStore(manifest_path), "nb-wrong", 1
+        await p.assert_generation_allowed(
+            fake_client.sources.list, ManifestStore(manifest_path), "nb-wrong", 1
         )
     assert _pending_ids(manifest_path) == [before["feedback_source_id"]]
 
@@ -987,7 +987,7 @@ async def test_cleanup_does_not_swallow_an_obligation_added_during_the_check(fak
 
     fake_client.sources.list = racing_list
     try:
-        await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
+        await p.assert_generation_allowed(fake_client.sources.list, store, "nb-1", 1)
     finally:
         fake_client.sources.list = real_list
     assert _pending_ids(manifest_path) == ["src-added-during-await"]
@@ -2092,12 +2092,12 @@ async def test_adopt_source_replacement_queues_stale_ids_for_cleanup(fake_client
     # 下一次生成前不刪就 fail-closed
     store = ManifestStore(manifest_path)
     with pytest.raises(ValueError, match="retracted feedback sources still in the notebook"):
-        await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
+        await p.assert_generation_allowed(fake_client.sources.list, store, "nb-1", 1)
 
     # 全部刪掉後通過
     await b.source_delete("nb-1", candidate_a)
     await b.source_delete("nb-1", candidate_b)
-    await p._assert_source_cleanup_done(fake_client, store, "nb-1", 1)
+    await p.assert_generation_allowed(fake_client.sources.list, store, "nb-1", 1)
     assert (
         "pending_source_cleanup"
         not in json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]
@@ -2499,7 +2499,9 @@ async def test_cleanup_obligation_identity_survives_switching_the_episode_notebo
 
     # 拿新本來查:nb-new 裡沒有 src,但**不准**因此把義務判成已結案。
     with pytest.raises(ValueError, match="清理義務屬於 notebook"):
-        await p._assert_source_cleanup_done(fake_client, ManifestStore(manifest_path), "nb-new", 1)
+        await p.assert_generation_allowed(
+            fake_client.sources.list, ManifestStore(manifest_path), "nb-new", 1
+        )
     assert _pending_ids(manifest_path) == [stale], "義務被別本的查詢結果清掉了"
 
 
@@ -2518,7 +2520,9 @@ async def test_legacy_string_obligation_without_any_identity_fails_closed(fake_c
     ManifestStore(manifest_path).update(strip_all_identity)
 
     with pytest.raises(ValueError, match="沒有可核對的 notebook 身分"):
-        await p._assert_source_cleanup_done(fake_client, ManifestStore(manifest_path), "nb-1", 1)
+        await p.assert_generation_allowed(
+            fake_client.sources.list, ManifestStore(manifest_path), "nb-1", 1
+        )
     assert _pending_ids(manifest_path) == ["src-legacy"]
 
 
@@ -2568,7 +2572,9 @@ def _gate_client(sources, *, entered=None, release=None):
 async def _run_gate(manifest_path, client):
     """跑一次 gate,把預期內的 fail-closed 吞掉(這裡只關心它寫了什麼)。"""
     try:
-        await p._assert_source_cleanup_done(client, ManifestStore(manifest_path), "nb-1", 1)
+        await p.assert_generation_allowed(
+            client.sources.list, ManifestStore(manifest_path), "nb-1", 1
+        )
     except ValueError:
         pass
 
@@ -2686,8 +2692,8 @@ async def test_cas_conflict_does_not_name_a_legitimately_claimed_source_as_a_vio
 
     entered, release = asyncio.Event(), asyncio.Event()
     gate_task = asyncio.create_task(
-        p._assert_source_cleanup_done(
-            _gate_client(seen, entered=entered, release=release),
+        p.assert_generation_allowed(
+            _gate_client(seen, entered=entered, release=release).sources.list,
             ManifestStore(manifest_path),
             "nb-1",
             1,
@@ -2732,7 +2738,9 @@ async def test_blocked_gate_does_not_bump_the_revision(fake_client, tmp_path, mo
 
     # 候選窗還沒關 + 零候選 → 一定 fail-closed,而且什麼都沒得改
     with pytest.raises(ValueError, match="候選窗還沒關"):
-        await p._assert_source_cleanup_done(fake_client, ManifestStore(manifest_path), "nb-1", 1)
+        await p.assert_generation_allowed(
+            fake_client.sources.list, ManifestStore(manifest_path), "nb-1", 1
+        )
 
     assert ManifestStore(manifest_path).read()["revision"] == before
 
