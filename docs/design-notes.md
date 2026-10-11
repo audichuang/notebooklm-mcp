@@ -83,7 +83,7 @@
     `layout.py`(內容 hash + 媒體檔名)、
     `artwork.py`(Apple Show Cover 規格驗證)、`rss_models.py` / `feed.py`(RSS+iTunes XML + index.html)
   - `_status.py` — generation-status 防護:SDK 把失敗/限流回報成 `task_id=""` 而非丟例外,用前要先擋掉
-  - `languages.py`(白名單 + `zh_Hant` 預設)、`enums.py`(字串→int-enum)、`runtime.py`(client holder)
+  - `languages.py`(白名單 + `zh_Hant` 預設)、`enums.py`(字串→int-enum)、`runtime.py`(client holder;單一槽位表 `Slot`:活/死槽位同表、冷卻在 `cooled_at`、`find_client(label, casefold=)` 與 `_find_slot` 是唯一的 label 反查,逐字或大小寫不分由呼叫端選)
   - `auth_probe.py` — `probe_auth` 輕量真 RPC 認證預檢(長跑前 fail-fast;`auth_check` 工具的底層)
   - `auth_cli.py` — 貼 storage_state JSON 建檔(headless 備援)
   - `cover_cli.py` — `notebooklm-cover` console script(封面 CLI)。填 `assets/*.html` template

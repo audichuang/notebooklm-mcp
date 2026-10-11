@@ -18,54 +18,111 @@ incoming message `tg.start_soon`),而 `_ACTIVE` 是全域的 —— 但 pool 的
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
-# (label, client);label 是帳號 email(拿不到就退回 "#N"),用於稽核紀錄。
-#
-# **憑證不再存在這裡**(v0.9.0 移除的第三元素):身分改由 client 自己帶著
-# (`from_storage(path=…)` 建構時注入的 storage_path),不再靠覆寫 process 全域的
-# `NOTEBOOKLM_AUTH_JSON`。理由見 `app.py` 的 `_write_credential_file`。
-_POOL: list[tuple[str, Any]] = []
-_ACTIVE: int = 0
 
-# 槽位 index → 它上次被伺服器拒絕的 `time.monotonic()` 時刻。**這不是「今天已耗盡」**:
-# v0.9.6 真實驗收量到同一個帳號被拒後 26 分鐘又被受理,所以 `RateLimitError` 常常只是
-# 瞬時限流。冷卻期取得比那個觀測保守 —— 試錯成本是一次 RPC,丟錯成本是整個 process
-# 少一個帳號可用。
-_COOLING: dict[int, float] = {}
+@dataclass
+class Slot:
+    """pool 裡**一個設定槽位**的全部事實 —— 活著的和啟動時就死掉的都在同一張表上。
+
+    以前這些事實分散在幾個平行結構(`(label, client)` 的 pool、診斷 list、冷卻 dict),
+    讀的人得靠「位置對得上」或「先 A 後 B 的呼叫順序」把它們接回來
+    (`auth_check` 曾用 `len(live) == len(clients)` 去賭兩邊同長)。現在一個槽位一筆。
+
+    - ``number``:槽位編號(1 起算,對應 Doppler 的 `NOTEBOOKLM_AUTH_JSON[_N]`)。跳過第 3
+      槽之後 pool 的第 3 個 client 是第 4 槽 —— 編號住在這裡,不是 pool 的 index。
+    - ``label`` / ``client``:活槽位的 `(label, client)`;啟動時建不出 client 的槽位兩者
+      皆 None(``dead``)。label 是帳號 email(拿不到退回 "#N"),用於稽核紀錄。
+    - ``diag``:啟動時算好的**非機密**診斷(env 名稱、refreshable、PSIDTS domain,死槽位
+      另帶 ``startup_error``)。**不含 cookie 值**;憑證不存在這裡(v0.9.0 移除的第三元素)。
+    - ``cooled_at``:上次被伺服器拒絕的 `time.monotonic()`;**不是「今天已耗盡」**
+      (v0.9.6 實測同帳號被拒 26 分鐘後又被受理,常只是瞬時限流)。
+    """
+
+    number: int
+    label: str | None = None
+    client: Any = None
+    diag: dict[str, Any] = field(default_factory=dict)
+    cooled_at: float | None = None
+
+    @property
+    def dead(self) -> bool:
+        return self.client is None
+
+    @property
+    def env(self) -> str | None:
+        return self.diag.get("env")
+
+    @property
+    def startup_error(self) -> str | None:
+        return self.diag.get("startup_error")
+
+
+# **唯一**的槽位表,依槽位順序,含啟動時就死掉的槽位。
+_SLOTS: list[Slot] = []
+# 作用中游標:index 進**活槽位**(`_live()`)的清單,不是進 `_SLOTS`。
+_ACTIVE: int = 0
+# 冷卻期取得比 v0.9.6 的觀測保守 —— 試錯成本是一次 RPC,丟錯成本是整個 process 少一個帳號。
 _COOLDOWN_SECONDS: float = 600.0
 
-# 槽位 index → 啟動時算出來的**非機密**診斷(env 名稱、refreshable 與否、PSIDTS domain)。
-#
-# **這不是 v0.9.0 移除的那個第三元素。** 那個移除的是**憑證**——身分改由 client 自己
-# 帶著(`from_storage(path=…)`),不再有第二份副本。這裡放的是啟動時就已經算完、而且
-# 印在 log 裡的描述性資料,**不含 cookie 值**,單純因為 `auth_check` 事後問不到:
-# routability 是從 storage_state 算的,而 pool 只留 `(label, client)`。
-# pool 的 `(label, client)` 形狀刻意不動 —— 46 個呼叫點對此無感,是那個決定的重點。
-_SLOT_DIAGNOSTICS: list[dict[str, Any]] = []
+
+def _live() -> list[Slot]:
+    """活著的槽位(= 舊的 pool),依槽位順序。"""
+    return [slot for slot in _SLOTS if not slot.dead]
+
+
+def install_slots(slots: list[Slot]) -> None:
+    """一次裝入整張槽位表(含死槽位)並把游標與冷卻重設 —— lifespan 走這條。
+
+    新的一輪(server 重啟)= 新的 `Slot` 物件,冷卻紀錄自然不留。診斷與 client 同在
+    一筆裡,所以不再有「診斷一定要在 `set_clients` 之後塞」的順序規則。
+    """
+    global _SLOTS, _ACTIVE
+    for slot in slots:
+        # Slot.number 與診斷列的 "slot" 是同一個事實的兩份副本;不一致 = 重登錯帳號。
+        if "slot" in slot.diag and slot.diag["slot"] != slot.number:
+            raise ValueError(f"slot number {slot.number} != diag slot {slot.diag['slot']}")
+    _SLOTS = list(slots)
+    _ACTIVE = 0
 
 
 def set_clients(entries: list[tuple[str, Any]]) -> None:
     """裝入整個 pool 並把作用中的位置重設回第一個。entry 是 `(label, client)`。"""
-    global _POOL, _ACTIVE, _COOLING, _SLOT_DIAGNOSTICS
-    _POOL = [(label, client) for label, client in entries]
-    _ACTIVE = 0
-    # 重新裝 pool = 新的一輪(server 重啟走的就是這條),冷卻紀錄一起清掉。
-    _COOLING = {}
-    # 診斷跟著 pool 走:清掉才不會讓上一輪的 refreshable 留在新 pool 上冒充現況。
-    # lifespan 會在 `set_clients` **之後**再塞進來。
-    _SLOT_DIAGNOSTICS = []
-
-
-def set_slot_diagnostics(rows: list[dict[str, Any]]) -> None:
-    """記下每個槽位的非機密啟動診斷;**一定要在 `set_clients` 之後呼叫**(它會清空)。"""
-    global _SLOT_DIAGNOSTICS
-    _SLOT_DIAGNOSTICS = [dict(row) for row in rows]
+    install_slots([Slot(i, label, client) for i, (label, client) in enumerate(entries, start=1)])
 
 
 def slot_diagnostics() -> list[dict[str, Any]]:
     """啟動診斷,依槽位順序;沒記錄過就是空 list(單帳號路徑、測試的 fake client)。"""
-    return [dict(row) for row in _SLOT_DIAGNOSTICS]
+    return [dict(slot.diag) for slot in _SLOTS if slot.diag]
+
+
+def slots_in_order() -> list[Slot]:
+    """整張槽位表(活的與啟動時死掉的),依槽位編號排序 —— `auth_check(all_slots=True)` 用。
+
+    編號相同時活槽位在前(穩定排序)。回的是表上的 `Slot` 本身(測試會直接設 `cooled_at`)。
+    """
+    return sorted(_SLOTS, key=lambda slot: (slot.number, slot.dead))
+
+
+def _find_slot(label: str, casefold: bool = False) -> Slot | None:
+    """用 label 找活槽位的 `Slot`;找不到回 None。label 反查的**唯一**實作。"""
+    key = label.casefold() if casefold else label
+    for slot in _live():
+        if (slot.label.casefold() if casefold else slot.label) == key:
+            return slot
+    return None
+
+
+def find_client(label: str, *, casefold: bool = False) -> tuple[str, Any] | None:
+    """用 label 找活槽位的 `(label, client)`;找不到回 None。**不動作用中游標。**
+
+    比對語意由呼叫端選:`casefold=False` 是逐字相等(research handle 的 `account`),
+    `casefold=True` 是大小寫不分(`notebook_share_with_pool` 拿 owner email 去對 pool)。
+    `rotate_client` 的 `refused` 也走同一個 `_find_slot`(逐字)。
+    """
+    slot = _find_slot(label, casefold)
+    return (slot.label, slot.client) if slot else None
 
 
 def set_client(client: Any) -> None:
@@ -74,9 +131,10 @@ def set_client(client: Any) -> None:
 
 
 def get_client() -> Any:
-    if not _POOL:
+    live = _live()
+    if not live:
         raise RuntimeError("NotebookLM client not initialized (server lifespan not started)")
-    return _POOL[_ACTIVE][1]
+    return live[_ACTIVE].client
 
 
 def snapshot() -> tuple[str | None, Any]:
@@ -94,23 +152,25 @@ def snapshot() -> tuple[str | None, Any]:
     這個函式內部沒有 await,所以取出的兩個值必然屬於同一個槽位;呼叫端拿著
     `client` 往下走,之後任何 rotate 都影響不到這一次的送出。
     """
-    if not _POOL:
+    live = _live()
+    if not live:
         raise RuntimeError("NotebookLM client not initialized (server lifespan not started)")
-    label, client = _POOL[_ACTIVE]
-    return label, client
+    slot = live[_ACTIVE]
+    return slot.label, slot.client
 
 
 def account_count() -> int:
-    return len(_POOL)
+    return len(_live())
 
 
 def active_account() -> str | None:
-    return _POOL[_ACTIVE][0] if _POOL else None
+    live = _live()
+    return live[_ACTIVE].label if live else None
 
 
 def all_accounts() -> list[str]:
     """pool 裡每個帳號的 label,依槽位順序。"""
-    return [label for label, _ in _POOL]
+    return [slot.label for slot in _live()]
 
 
 def all_clients() -> list[tuple[str, Any]]:
@@ -125,7 +185,7 @@ def all_clients() -> list[tuple[str, Any]]:
     讓別的功能去挪它會讓 failover 的帳號記帳失去意義。要用特定帳號就直接拿它的
     client 呼叫,游標不動。
     """
-    return list(_POOL)
+    return [(slot.label, slot.client) for slot in _live()]
 
 
 def rotate_client(refused: str | None = None, skip: frozenset[str] = frozenset()) -> str | None:
@@ -160,7 +220,7 @@ def rotate_client(refused: str | None = None, skip: frozenset[str] = frozenset()
     會分別落在 a1、a2 上,沒有槽位被錯殺。**現在只有真的被拒的槽位會進冷卻,跳過去的
     那個下次照樣是候選**——這句話在並行下才終於成立。
 
-    **終止性只在單次呼叫內有保證**:迴圈最多繞 `len(_POOL)` 步,全部冷卻中就回 None,
+    **終止性只在單次呼叫內有保證**:迴圈最多繞 `len(live)` 步,全部冷卻中就回 None,
     不會無限迴圈。但**跨呼叫的收斂靠牆上時鐘**,不是這個函式能保證的:如果繞完一圈的
     耗時超過 `_COOLDOWN_SECONDS`,第一格的冷卻已經過期,下一輪又會被選中重試——這在
     正常配額 failover 的時間尺度下不是問題,但誠實地說,**這個函式本身不保證「同一批
@@ -176,25 +236,20 @@ def rotate_client(refused: str | None = None, skip: frozenset[str] = frozenset()
     讀,那個縫由 `snapshot()` 關掉,不是這裡。
     """
     global _ACTIVE
-    if not _POOL:
+    live = _live()
+    if not live:
         return None
     now = time.monotonic()
     # 反查 refused 對應的槽位;找不到(None、或 label 不在目前的 pool 裡,例如
     # pool 重裝過)就保守退回冷卻現在的 _ACTIVE —— 舊呼叫端相容。
-    refused_index = _ACTIVE
-    if refused is not None:
-        for i, (label, _client) in enumerate(_POOL):
-            if label == refused:
-                refused_index = i
-                break
-    _COOLING[refused_index] = now
-    for step in range(1, len(_POOL) + 1):
-        candidate = (_ACTIVE + step) % len(_POOL)
-        label = _POOL[candidate][0]
-        if label in skip:
+    target = _find_slot(refused) if refused is not None else None
+    (target or live[_ACTIVE]).cooled_at = now
+    for step in range(1, len(live) + 1):
+        candidate = (_ACTIVE + step) % len(live)
+        slot = live[candidate]
+        if slot.label in skip:
             continue
-        cooled_at = _COOLING.get(candidate)
-        if cooled_at is None or now - cooled_at >= _COOLDOWN_SECONDS:
+        if slot.cooled_at is None or now - slot.cooled_at >= _COOLDOWN_SECONDS:
             _ACTIVE = candidate
-            return label
+            return slot.label
     return None

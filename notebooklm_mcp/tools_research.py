@@ -55,9 +55,9 @@ def _handle_client(account: str | None) -> object:
     """
     if account is None:
         return runtime.get_client()
-    for label, client in runtime.all_clients():
-        if label == account:
-            return client
+    found = runtime.find_client(account)
+    if found is not None:
+        return found[1]
     raise ValueError(
         f"account {account!r} 不在這個 server 的 pool 裡"
         f"(可用:{runtime.all_accounts()});research handle 只有發起它的那個帳號"

@@ -865,6 +865,12 @@ async def test_a_dead_slot_is_skipped_instead_of_taking_the_server_down(monkeypa
             assert [r["slot"] for r in rows] == [1, 2, 3]
             assert "CSRF token not found" in rows[1]["startup_error"]
             assert "startup_error" not in rows[0] and "startup_error" not in rows[2]
+            # production 的 Slot.number 本身(auth_check 的 slot 欄來源)也要是 1/2/3。
+            assert [(s.number, s.dead) for s in runtime.slots_in_order()] == [
+                (1, False),
+                (2, True),
+                (3, False),
+            ]
     warning = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
     assert "NOTEBOOKLM_AUTH_JSON_2" in warning and "CSRF token not found" in warning
     # 跳過的槽位不會留下半開的 client;活著的兩個正常關閉、憑證目錄收掉。

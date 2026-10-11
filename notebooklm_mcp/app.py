@@ -349,8 +349,8 @@ async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
                 os.environ[name] = value
     try:
         async with contextlib.AsyncExitStack() as stack:
-            pool: list[tuple[str, object]] = []
-            diagnostics: list[dict[str, object]] = []
+            # 一個設定槽位一筆(活的與啟動時就死掉的同在一張表上),見 `runtime.Slot`。
+            slots: list[runtime.Slot] = []
             dead: list[str] = []
             if len(creds) > 1:
                 # 多帳號:每個槽位各自一份 storage_state 檔,client 自己帶著身分走。
@@ -444,11 +444,17 @@ async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
                         dead.append(f"{_slot_env_name(slot)}:{reason}")
                         row = _slot_diagnostic(slot, cred)
                         row["startup_error"] = reason
-                        diagnostics.append(row)
+                        slots.append(runtime.Slot(slot, diag=row))
                         continue
-                    pool.append((await _account_label(client, slot), client))
-                    diagnostics.append(_slot_diagnostic(slot, cred))
-                if not pool:
+                    slots.append(
+                        runtime.Slot(
+                            slot,
+                            await _account_label(client, slot),
+                            client,
+                            _slot_diagnostic(slot, cred),
+                        )
+                    )
+                if all(s.dead for s in slots):
                     raise RuntimeError(
                         "pool 裡每個槽位的憑證都建不出 client,沒有可用帳號:\n  " + "\n  ".join(dead)
                     )
@@ -465,12 +471,17 @@ async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
                     # NOTEBOOKLM_BACKEND=android 讀走,同上面多帳號分支同一個理由。
                     NotebookLMClient.from_storage(allow_headless=False, backend="web")
                 )
-                pool.append((await _account_label(client, 1), client))
-                diagnostics.append(_slot_diagnostic(1, creds[0] if creds else None))
-            _reject_duplicate_accounts(pool)
-            runtime.set_clients(pool)
-            # 一定要在 set_clients 之後:它會清空診斷(換 pool = 換一輪)。
-            runtime.set_slot_diagnostics(diagnostics)
+                slots.append(
+                    runtime.Slot(
+                        1,
+                        await _account_label(client, 1),
+                        client,
+                        _slot_diagnostic(1, creds[0] if creds else None),
+                    )
+                )
+            _reject_duplicate_accounts([(s.label, s.client) for s in slots if not s.dead])
+            # 診斷與 client 同在一筆 Slot 裡,一次裝入(換 pool = 換一輪,冷卻一併重設)。
+            runtime.install_slots(slots)
             try:
                 yield
             finally:

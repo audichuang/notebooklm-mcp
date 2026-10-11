@@ -863,23 +863,32 @@ async def test_auth_check_all_slots_reports_every_slot_with_refreshability(fake_
     """
     dead = FakeClient()
     dead.notebooks.fail_list = True
-    _pool(fake_client, dead)
-    runtime.set_slot_diagnostics(
+    runtime.install_slots(
         [
-            {
-                "slot": 1,
-                "env": "NOTEBOOKLM_AUTH_JSON",
-                "refreshable": False,
-                "heal_reason": "wrong_scope",
-                "psidts_domains": [".youtube.com"],
-            },
-            {
-                "slot": 2,
-                "env": "NOTEBOOKLM_AUTH_JSON_2",
-                "refreshable": True,
-                "heal_reason": None,
-                "psidts_domains": [".google.com"],
-            },
+            runtime.Slot(
+                1,
+                "acct1@x",
+                fake_client,
+                {
+                    "slot": 1,
+                    "env": "NOTEBOOKLM_AUTH_JSON",
+                    "refreshable": False,
+                    "heal_reason": "wrong_scope",
+                    "psidts_domains": [".youtube.com"],
+                },
+            ),
+            runtime.Slot(
+                2,
+                "acct2@x",
+                dead,
+                {
+                    "slot": 2,
+                    "env": "NOTEBOOKLM_AUTH_JSON_2",
+                    "refreshable": True,
+                    "heal_reason": None,
+                    "psidts_domains": [".google.com"],
+                },
+            ),
         ]
     )
 
@@ -961,17 +970,29 @@ async def test_auth_check_all_slots_lists_slots_skipped_at_startup(fake_client):
     是**第 3 槽**,表上不能把它標成 2(人會去重登錯的帳號)。
     """
     third = FakeClient()
-    _pool(fake_client, third)
-    runtime.set_slot_diagnostics(
+    runtime.install_slots(
         [
-            {"slot": 1, "env": "NOTEBOOKLM_AUTH_JSON", "refreshable": True},
-            {
-                "slot": 2,
-                "env": "NOTEBOOKLM_AUTH_JSON_2",
-                "refreshable": None,
-                "startup_error": "RuntimeError: CSRF token not found",
-            },
-            {"slot": 3, "env": "NOTEBOOKLM_AUTH_JSON_3", "refreshable": True},
+            runtime.Slot(
+                1,
+                "acct1@x",
+                fake_client,
+                {"slot": 1, "env": "NOTEBOOKLM_AUTH_JSON", "refreshable": True},
+            ),
+            runtime.Slot(
+                2,
+                diag={
+                    "slot": 2,
+                    "env": "NOTEBOOKLM_AUTH_JSON_2",
+                    "refreshable": None,
+                    "startup_error": "RuntimeError: CSRF token not found",
+                },
+            ),
+            runtime.Slot(
+                3,
+                "acct3@x",
+                third,
+                {"slot": 3, "env": "NOTEBOOKLM_AUTH_JSON_3", "refreshable": True},
+            ),
         ]
     )
 

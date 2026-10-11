@@ -507,7 +507,7 @@ async def test_attempt_rotate_for_quota_does_not_give_up_when_the_first_scanned_
     回傳值上(而不是掃描裡)被漏試,`rotate_for_quota` 因此白白回 None。
 
     ``fake_client`` 只為了借它的 fixture 收尾(`runtime.set_client(None)`)——這裡
-    直接改寫 pool/`_ACTIVE`/`_COOLING`,沒有這個收尾會漏到同一個 session 後面的測試。
+    直接改寫 pool/`_ACTIVE`/槽位的 `cooled_at`,沒有這個收尾會漏到同一個 session 後面的測試。
     """
     manifest_path = tmp_path / "series_manifest.json"
     store = p.ManifestStore(str(manifest_path))
@@ -528,7 +528,7 @@ async def test_attempt_rotate_for_quota_does_not_give_up_when_the_first_scanned_
     runtime.set_clients([(label, fake_client) for label in ("a@x", "b@x", "c@x", "d@x")])
     now = {"t": 1000.0}
     monkeypatch.setattr(time_mod, "monotonic", lambda: now["t"])
-    runtime._COOLING[0] = now["t"]  # a 先前被拒,先進冷卻
+    runtime.slots_in_order()[0].cooled_at = now["t"]  # a 先前被拒,先進冷卻
     runtime._ACTIVE = 3  # 模擬「並行 request 已經把游標推到 d」
     now["t"] += runtime._COOLDOWN_SECONDS + 1  # a 的冷卻剛好到期
 

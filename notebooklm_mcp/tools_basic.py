@@ -165,38 +165,31 @@ async def auth_check(all_slots: bool = False) -> dict:
     # —— 兩件事的修法完全不同,不能長得一樣。
     runtime.get_client()
 
-    rows = runtime.slot_diagnostics()
-    clients = runtime.all_clients()
-    # 啟動時建不出 client 的槽位(`startup_error`)不在 pool 裡:pool 的第 N 個 client
-    # 不再是第 N 槽,槽位編號要從活著的那幾列依序對回去,否則人會去重登錯的帳號。
-    live = [row for row in rows if "startup_error" not in row]
-    slot_rows = (
-        live if len(live) == len(clients) else [{"slot": i} for i in range(1, len(clients) + 1)]
-    )
     # 掃描期間如果有並行的 failover rotate,這個游標快照會過時 —— **可以接受**,因為
     # `active` 在這裡純粹是顯示用的標記,不是記帳。`snapshot()` 那條「記帳與送出必須同源」
     # 的紀律管的是會寫進 manifest 的身分(ADR-0010),這支不寫任何東西。
     active = runtime.active_account()
+    # 槽位表由 runtime 依編號給出(含啟動時建不出 client 的槽位):pool 的第 N 個 client
+    # 不再是第 N 槽,編號住在 `Slot.number`,不用再靠位置把診斷對回去。
     slots: list[dict] = []
-    for diag, (label, client) in zip(slot_rows, clients, strict=True):
-        row: dict = {"slot": diag["slot"], "account": label, "active": label == active}
-        row.update({k: v for k, v in diag.items() if k != "slot"})
-        try:
-            row.update(usable=True, notebooks=(await probe_auth(client))["notebooks"])
-        except _AuthProbeError:
-            # 確認是認證失效(probe_auth 已分類過)。重登指引在下面整批一次給,不逐列重複。
-            row.update(usable=False, error="auth_expired")
-        except Exception as exc:  # noqa: BLE001 —— 網路/限流:沒量到,不等於壞掉
-            row.update(usable=None, error=f"{type(exc).__name__}: {exc}")
+    for slot in runtime.slots_in_order():
+        diag = slot.diag
+        if slot.dead:
+            # 被跳過的槽位也要列出來:不列的話 pool 少一格,而這張表回 `all_usable: true`。
+            row = {"slot": slot.number, "account": None, "active": False}
+            row.update({k: v for k, v in diag.items() if k not in ("slot", "startup_error")})
+            row.update(usable=False, error=f"not_in_pool: {diag['startup_error']}")
+        else:
+            row = {"slot": slot.number, "account": slot.label, "active": slot.label == active}
+            row.update({k: v for k, v in diag.items() if k != "slot"})
+            try:
+                row.update(usable=True, notebooks=(await probe_auth(slot.client))["notebooks"])
+            except _AuthProbeError:
+                # 確認是認證失效(probe_auth 已分類過)。重登指引在下面整批一次給,不逐列重複。
+                row.update(usable=False, error="auth_expired")
+            except Exception as exc:  # noqa: BLE001 —— 網路/限流:沒量到,不等於壞掉
+                row.update(usable=None, error=f"{type(exc).__name__}: {exc}")
         slots.append(row)
-    # 被跳過的槽位也要列出來:不列的話 pool 少一格,而這張表回 `all_usable: true`。
-    for diag in rows:
-        if "startup_error" in diag:
-            skipped = {"slot": diag["slot"], "account": None, "active": False}
-            skipped.update({k: v for k, v in diag.items() if k not in ("slot", "startup_error")})
-            skipped.update(usable=False, error=f"not_in_pool: {diag['startup_error']}")
-            slots.append(skipped)
-    slots.sort(key=lambda row: row["slot"])
 
     if slots and all(row["usable"] is False for row in slots):
         raise RuntimeError(f"pool 裡 {len(slots)} 個槽位全部認證失效。\n{RELOGIN_HINT}")
@@ -226,7 +219,7 @@ def _pool_peers(context: str, active_label: str) -> list[str]:
 
     `dict.fromkeys` 去重是 defense-in-depth,**不是生產可達路徑**:`app.py` 的
     `_reject_duplicate_accounts` 在 `runtime.set_clients()` 之前就擋掉重複帳號
-    的 pool,production 的 `_POOL` 不可能出現重複 label。這裡留著只防**繞過
+    的 pool,production 的 pool 不可能出現重複 label。這裡留著只防**繞過
     lifespan 直接呼叫 `runtime.set_clients()`** 的呼叫端——測試就是這樣做的
     (`test_duplicate_pool_slots_are_deduped`),那條路徑上 server 本來就不會啟動。
 
@@ -304,10 +297,7 @@ def _owner_slot(status) -> tuple[str, object] | None:
     ).casefold()
     if not owner:
         return None
-    return next(
-        ((label, client) for label, client in runtime.all_clients() if label.casefold() == owner),
-        None,
-    )
+    return runtime.find_client(owner, casefold=True)
 
 
 async def _resolve_share_executor(notebook_id: str) -> tuple[str, object, object]:

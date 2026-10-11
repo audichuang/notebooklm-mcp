@@ -69,8 +69,8 @@ INFO 級「HTTP Request」日誌會把它印進 stderr。
   `continue`**;全部槽位都失敗才 raise(訊息列出每一槽)。結構不合法(`_write_credential_file`)
   仍當場 raise —— 那是 Doppler 設定錯,不是會自己壞掉的憑證。
 - **`auth_check(all_slots=True)` 的槽位編號從診斷列對回去**,不是 pool 的 index:跳過第 3 槽
-  之後 pool 第 3 個 client 是第 4 槽。改 `set_slot_diagnostics` 的順序或內容時,
-  `test_auth_check_all_slots_lists_slots_skipped_at_startup` 會紅。
+  之後 pool 第 3 個 client 是第 4 槽。改 `runtime.Slot` 的編號或 `install_slots` 的內容時(槽位編號住在 `Slot.number`,診斷與 client 同一筆),
+  `test_a_dead_slot_is_skipped_instead_of_taking_the_server_down`(斷言 lifespan 裝出的 `Slot.number`)會紅;`install_slots` 也會擋 `Slot.number` 與診斷列 `slot` 不一致。
 - 測試鎖:`test_a_dead_slot_is_skipped_instead_of_taking_the_server_down`、
   `test_pool_raises_only_when_every_slot_is_dead_and_still_tears_down`。
 
@@ -147,7 +147,7 @@ server 在跑。要根治得換方向(例如把展開搬到 SIGTERM handler 裡)
 
 ## ⚠️ `--transport streamable-http` 只能給**單一** client 用(v0.9.26 確認)
 
-pool 住在 `runtime` 的 **process 全域**(`_POOL` / `_ACTIVE` / `_COOLING`),而 stateful 的
+pool 住在 `runtime` 的 **process 全域**(`_SLOTS` / `_ACTIVE`),而 stateful 的
 streamable-http **每個 session 各跑一次 `_lifespan`**。第二個 session 現在會在進入
 pool 建構前直接拒絕,不會覆寫第一個 session 的 pool 或在斷線時清掉它。
 

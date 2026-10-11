@@ -30,7 +30,7 @@ def test_all_slots_cooled_within_one_lap_returns_none(monkeypatch):
     """這條只證得動「一輪之內全部被拒就回 None」——**不是**「繞圈保證終止」。
 
     `time.monotonic` 被凍成常數,所以冷卻永遠不會過期;這條測試證的是單次呼叫內
-    迴圈有界(最多繞 `len(_POOL)` 步),不是跨呼叫的收斂性。真正的「同一批 failover
+    迴圈有界(最多繞 `len(live)` 步),不是跨呼叫的收斂性。真正的「同一批 failover
     不會原地打轉」靠呼叫端(`tools_podcast._dispatch_audio_with_failover`)的
     tried set,不是這裡的冷卻表——見 `rotate_client` docstring 的誠實聲明。
     """
@@ -72,7 +72,7 @@ def test_a_slot_skipped_by_a_stale_snapshot_rotate_is_not_burned(monkeypatch):
     ⚠️ **回傳值本身沒有鑑別力,不要只斷言它**:缺陷版燒掉 a1 之後,搜尋起點也跟著
     推到 slot1,下一格照樣是 a2 —— 兩版的 `second` 都是 `"a2@x"`。上一輪就是栽在
     這裡(斷言對缺陷版與修復版同時成立,突變後全套 2588 全綠)。真正的差異只在
-    **a1 有沒有被寫進 `_COOLING`**,所以下面兩條斷言一條查狀態、一條查行為。
+    **a1 有沒有被寫進 `cooled_at`**,所以下面兩條斷言一條查狀態、一條查行為。
     """
     _pool(3)
     monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
@@ -88,8 +88,9 @@ def test_a_slot_skipped_by_a_stale_snapshot_rotate_is_not_burned(monkeypatch):
     assert second == "a2@x", "a1 從沒被拒絕過,不該被 B 的 stale snapshot 燒掉"
 
     # 狀態面:被冷卻的必須**只有** slot0(兩次被拒的都是它)。
-    assert 1 not in runtime._COOLING, (
-        f"a1 從沒被拒絕過卻被燒進冷卻表 —— refused 反查失效了 cooling={runtime._COOLING}"
+    cooled = [slot.number for slot in runtime.slots_in_order() if slot.cooled_at is not None]
+    assert cooled == [1], (
+        f"a1 從沒被拒絕過卻被燒進冷卻表 —— refused 反查失效了 cooled slots={cooled}"
     )
 
     # 行為面:a1 仍該是候選。缺陷版此刻 slot0/1/2 全在冷卻中,這一轉會回 None。
