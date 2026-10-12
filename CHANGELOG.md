@@ -6,7 +6,7 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
-## 未發版 —— 發布音檔改 96 kbps mono,檔案約小 62%
+## v0.9.34 —— 發布音檔改 96 kbps mono,檔案約小 62%
 
 **為什麼**:NAS 上 290 集 mp3 共 12.8 GB。NotebookLM 給的是 256k AAC「立體聲」,但左右聲道逐位元相同
 (L−R -91 dB,抽 6 集皆然),而 `_embed_cover` 照原樣轉成 256k stereo MP3 —— 同一份聲音存兩次。

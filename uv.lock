@@ -356,7 +356,7 @@ wheels = [
 
 [[package]]
 name = "notebooklm-mcp"
-version = "0.9.33"
+version = "0.9.34"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
