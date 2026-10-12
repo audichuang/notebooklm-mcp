@@ -6,6 +6,36 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.33 —— 收尾(finalize + promote)收成單一入口,adopt 與作廢的欄位清單各歸其主
+
+**為什麼**:v0.9.32 收掉了派送端,收尾端還留著四份——`podcast_episode`、`podcast_episode_resume`、
+`podcast_series` 的 output 複驗與 active 收尾各自排一串 `except`,`RemoteArtifactUnverifiableError` /
+`TerminalGenerationError` 都是 `RuntimeError` 子類這件事只靠各處 except 的排列維持;finalize checkpoint
+的形狀在 `tools_podcast` 被直接 `.get()` 九次,adopt 的 checkpoint 轉換也寫在那裡;episode output 投影
+由 `attempt_state` 寫入、卻由 retract 函式本體裡的鍵清單 pop 掉,兩邊沒有東西逼它們對齊。
+
+**改了什麼**(零行為變更):
+- `_complete_attempt` 回 `CompletionDone / CompletionRefused / CompletionStopped(kind)`,比照派送端的
+  `DispatchOutcome`;各呼叫點只依 `kind` 決定 raise 或回 partial。`CompletionStopped.record()` 延遲讀
+  manifest,維持 tombstone default-deny 與原本的讀取時機。
+- `audio_finalize.feedback_upload` / `adopt_feedback_source`:checkpoint 的唯讀存取與 adopt 轉換搬回擁有形狀的
+  模組,守門原樣;ADR-0009 那句「`_record` 是唯一入口」改成與現況相符。
+- `attempt_state.OUTPUT_PROJECTION_KEYS` / `EPISODE_IDENTITY_KEYS`,加 tripwire 測試:promotion 寫的每個鍵必須
+  恰好屬於其中一類(紅了要判斷新欄位是證據還是身分,不是照抄加一筆)。
+- `CONTEXT.md` 改名 `GLOSSARY.md`,新增「收尾」「Output 投影 / 集的身分」兩個詞。
+
+**對呼叫端零契約變更**:37 支工具的描述、input schema、annotations 與 server `instructions` 與 v0.9.32
+逐位元組相同(兩版各自 import 後 dump 比對),skill repo 不需同步。全套 13322 → 13338 passed。
+
+**真實驗收**(stg pool,發 tag 前從 repo master 跑,結果見 `docs/acceptance-v0.9.33-rc-findings.md`):
+每一條收尾路徑走通,造出 `continuity_unverified` / `output_unverifiable` / 作廢後重生逾時三種狀態並照停點
+指引走出去,測試 feed 發布三次冪等。重構前沒有測試守的一格(active 收尾撞 unverifiable 時與 runtime 同一處置)
+突變存活,已補測試。
+
+**驗收找到、未修的既有問題**:slides 被配額拒絕後遠端留下一顆 `pending` deck,manifest 與回傳都沒記——
+ADR-0010/0011「配額拒絕即零副作用」在 slides 家族的反例(音檔家族實測成立),待下一輪追那顆的終態;
+headless `claude -p` 收尾時憑證目錄殘留率 4/4(互動 session 量到的是 10–15%)。
+
 ## v0.9.32 —— 結構重構:attempt 的派送 / 狀態轉換 / 准入 / 清理義務各收成一個模組
 
 **為什麼**:`tools_podcast.py`(5366 行)近 90 天至少 11 個 commit 是「只補了一條路徑」——同一條規則在
