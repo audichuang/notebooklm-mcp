@@ -90,6 +90,12 @@ server 於是改讀本機 `~/.notebooklm` 的舊 storage_state:單帳號分支�
 憑證過期**(v0.9.28 發版為此誤判「生產憑證失效」、叫人重登)。判準:prd 冒煙的 `auth_check(all_slots=True)`
 槽位數要等於 Doppler 裡的 `NOTEBOOKLM_AUTH_JSON*` 數;只有 1 槽就是 env 沒進去,不是帳號壞了。
 
+**發 tag 前驗 master(rc 輪)時,別動本機實裝** —— PATH 上的 `nblm-mcp` 同時是這台機器的正式用途。
+工作區 `.mcp.json` 改成 `doppler run -p notebooklm -c stg -- uv run --project ../notebooklm-mcp --no-sync python -P -m notebooklm_mcp.server --transport stdio`,
+`local-checks.sh` §0 改驗 repo HEAD / working tree 乾淨 / `notebooklm_mcp.__file__` 落在 repo(範本的 §0 驗的是實裝 shim,
+照抄會在 rc 輪驗錯東西);`claude -p` 加 `--strict-mcp-config --mcp-config .mcp.json` 直接吃工作區那份。
+發 tag 之後仍要照 release-checklist 從中立目錄驗一次實裝。v0.9.33-rc 照這樣跑,見 `acceptance-v0.9.33-rc-findings.md`。
+
 ## 工作區長什麼樣
 
 ```

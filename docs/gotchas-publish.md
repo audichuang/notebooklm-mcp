@@ -35,8 +35,11 @@
     並**停止**輪替);**但 source 層級的論證不完整** —— B 看得到 notebook、而某個 `source_id`
     在 A 驗過之後被刪掉的話,B 的生成會拿到聚焦錯誤的成品而不報錯。要在 dispatch 的幾秒內
     被刪才會撞到,所以留著沒修,但別把它當成已證明安全。
-  ⚠️ **`generate_slide_deck` 撞配額的實際形狀還沒量過**(ADR-0010 的 1.35s 同步拒絕是對
-    **audio** 量的)。推導在 ADR-0011,真實驗收未跑。
+  ⚠️ **`generate_slide_deck` 撞配額:failover 走得通,但「拒絕即零副作用」在 slides 不成立**
+    (v0.9.33-rc 真實驗收量到):拋 `RateLimitError`、換帳號重送成功、`attachment_errors` 照記,
+    **但遠端多出一顆 `pending` 的 slide_deck**(created_at 早於 failover 約 1 秒),manifest 與
+    回傳都沒記它,只有 `artifact_list` 看得到。ADR-0010 的 1.35s 零副作用拒絕是對 **audio** 量的。
+    未結案:那顆會不會自己完成/計費 —— 下一輪刻意讓 slides 撞配額,事後輪詢它的終態。
 - **發布用的 HTML guard 是標籤/屬性允許清單,不是關鍵字黑名單**(`publish/notes_html.py`):
   黑名單會把「設定 online=1」「JavaScript:動態語言的起點」這種普通中文散文誤殺(誤判成本 =
   整季 publish raise),又漏掉 `<svg><image href>`、`<input type=image>` 等。允許清單走
