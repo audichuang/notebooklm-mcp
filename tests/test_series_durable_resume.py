@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import tools_basic as b, tools_podcast as p
 
 EPS3 = [
     {"title": "心法篇", "brief": "1"},
@@ -1194,3 +1194,36 @@ async def test_series_active_attempt_promotion_refusal_becomes_a_structured_stop
     # 一步是 resume 續完(不重新生成)。
     assert out["safe_next_action"] == p.ACTION_RESUME
     assert out.get("next_step")
+
+
+async def test_following_retract_guidance_to_series_stops_before_leaking_later_feedback(
+    fake_client, tmp_path
+):
+    """v0.9.33-rc 真實驗收的形狀:整季兩集完成 → retract EP01 → retract 的 `next_step` 說
+    「用 podcast_series 重生」(這顆是 series 建的、沒指名來源,所以 `regeneration_source_ids`
+    是 None)。照著做時 EP02 的回錄已在筆記本裡,series 不得重新 dispatch EP01(那會讀整本、
+    把 EP02 回錄洩進來),必須停在 `later_episode_has_output` 並把呼叫端交給
+    `podcast_episode(source_ids=…)`。驗收時 agent 跳過了這一步,這裡把「照著做」補成離線斷言。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.seed("整季講義")
+    done = await p.podcast_series("nb-1", episodes=EPS3[:2], output_dir=str(tmp_path))
+    assert done["complete"] is True
+    ep1 = next(row for row in done["episodes"] if row["episode"] == 1)
+
+    retracted = await p.podcast_attempt_retract(
+        str(manifest_path), 1, ep1["attempt_id"], reason="QA 拒收"
+    )
+    assert "podcast_series" in retracted["next_step"]
+    assert retracted["regeneration_source_ids"] is None
+    for source_id in retracted["stale_source_ids"]:
+        await b.source_delete("nb-1", source_id)
+
+    boundary = len(_generate_briefs(fake_client))
+    out = await p.podcast_series("nb-1", episodes=EPS3[:2], output_dir=str(tmp_path))
+
+    assert out["complete"] is False
+    assert out["stopped_at_episode"] == 1
+    assert out["observed_state"] == "later_episode_has_output"
+    assert out["safe_next_action"] == "podcast_episode"
+    assert "source_ids" in out["next_step"]
+    assert len(_generate_briefs(fake_client)) == boundary, "不准不指名就重生 EP01"
