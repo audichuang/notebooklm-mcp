@@ -466,6 +466,23 @@ def first_published_at(episode: dict) -> str | None:
     return None
 
 
+# Episode 級 output 投影:promotion(本模組 `apply_promotion`)與 adopt 寫入,
+# `podcast_attempt_retract` 整批 pop 進 `retraction.retracted_output`(ADR-0009:pop,
+# 不設 None——殘留的 None 會擋住取代版用 setdefault 寫回真值)。`task_id` 是 legacy
+# 路徑寫的同義欄位,新路徑不寫,但作廢時一樣要清。
+OUTPUT_PROJECTION_KEYS = (
+    "output_attempt_id",
+    "artifact_id",
+    "task_id",
+    "mp3_path",
+    "published_at",
+    "feedback_source_id",
+    "feedback_source_adopted_at",
+)
+# 集的身分:promotion 只 setdefault、retract 不碰——取代版不得改標題(ADR-0009)。
+EPISODE_IDENTITY_KEYS = ("title", "label")
+
+
 def apply_promotion(episode: dict, attempt: dict, attempt_id: str, output: dict) -> None:
     """守門通過後,把 attempt 的產出掛成 episode 級 output 並寫回 `output["published_at"]`。
 
@@ -478,7 +495,7 @@ def apply_promotion(episode: dict, attempt: dict, attempt_id: str, output: dict)
     episode["artifact_id"] = output["artifact_id"]
     episode["mp3_path"] = os.path.abspath(output["mp3_path"])
     episode["output_attempt_id"] = attempt_id
-    for key in ("title", "label"):
+    for key in EPISODE_IDENTITY_KEYS:
         episode.setdefault(key, output[key])
     # published_at 不能跟 title／label 一樣用 output 自己的 setdefault:output 裡
     # 那個值是「這次生成完成的時刻」,取代版每一次重生都會不一樣。已驗證的安全

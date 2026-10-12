@@ -328,3 +328,33 @@ def test_apply_promotion_writes_pointers_and_echoes_published_at(tmp_path):
     assert episode["output_attempt_id"] == "a1"
     assert episode["published_at"] == "first" == output["published_at"]
     assert episode["feedback_source_id"] == "src-1"
+
+
+def test_every_key_promotion_writes_is_either_output_projection_or_identity(tmp_path):
+    """ADR-0009:retract 把 output 投影整批 pop 掉,取代版才能合法重生。
+
+    這條紅了代表 `apply_promotion` 開始寫一個新的 episode 欄位。**正確的反應是決定它是哪一種**,
+    不是隨手加進其中一個清單:
+      - output 證據(取代版必須重寫它)→ `OUTPUT_PROJECTION_KEYS`,retract 會 pop 它;
+      - 集的身分(取代版不得改,如標題)→ `EPISODE_IDENTITY_KEYS`,retract 不碰它。
+    漏判成身分 = 作廢後殘留舊值擋住重生或被 setdefault 沿用(published_at 事故的形狀)。
+    """
+    manifest, attempt = _manifest("accepted", artifact_id="art-1")
+    episode = manifest["episodes"][0]
+    output = {
+        "artifact_id": "art-1",
+        "mp3_path": str(tmp_path / "e.mp3"),
+        "title": "T",
+        "label": "EP01 T",
+        "published_at": "now",
+        "feedback_source_id": "src-1",
+    }
+    for key in (*st.OUTPUT_PROJECTION_KEYS, *st.EPISODE_IDENTITY_KEYS):
+        episode.pop(key, None)
+    before = set(episode)
+
+    st.apply_promotion(episode, attempt, "a1", output)
+
+    written = set(episode) - before
+    assert written <= {*st.OUTPUT_PROJECTION_KEYS, *st.EPISODE_IDENTITY_KEYS}
+    assert not set(st.OUTPUT_PROJECTION_KEYS) & set(st.EPISODE_IDENTITY_KEYS)

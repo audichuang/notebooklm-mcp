@@ -53,6 +53,7 @@ from .attempt_admission import (
     new_resume_attempt,
 )
 from .attempt_state import (
+    OUTPUT_PROJECTION_KEYS,
     RECONCILABLE_DISPATCH_STATES as _RECONCILABLE_DISPATCH_STATES,
     apply_promotion,
     bind_caller_verified,
@@ -3091,16 +3092,6 @@ async def podcast_attempt_retract(
         raise ValueError("abandon_in_flight must be a bool")
     _require_existing_manifest(manifest_path)
 
-    _RETRACTED_EPISODE_KEYS = (
-        "output_attempt_id",
-        "artifact_id",
-        "task_id",
-        "mp3_path",
-        "published_at",
-        "feedback_source_id",
-        "feedback_source_adopted_at",
-    )
-
     def mutate(manifest: dict) -> tuple[dict, dict]:
         episode, attempt = _attempt_record(manifest, episode_n, attempt_id, allow_retracted=True)
         existing = attempt.get("retraction")
@@ -3230,7 +3221,7 @@ async def podcast_attempt_retract(
             # 留一個 None 值會讓取代版補不回真正的產製時間(publish 有 fallback、不會爆,
             # 只會靜默發出假日期,而 podcast-lab 的完成門會先擋下來)。
             retracted_output = {
-                key: episode.pop(key) for key in _RETRACTED_EPISODE_KEYS if key in episode
+                key: episode.pop(key) for key in OUTPUT_PROJECTION_KEYS if key in episode
             }
             if episode.get("active_attempt_id") == attempt_id:
                 del episode["active_attempt_id"]
