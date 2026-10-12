@@ -6,6 +6,19 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## 未發版 —— 發布音檔改 96 kbps mono,檔案約小 62%
+
+**為什麼**:NAS 上 290 集 mp3 共 12.8 GB。NotebookLM 給的是 256k AAC「立體聲」,但左右聲道逐位元相同
+(L−R -91 dB,抽 6 集皆然),而 `_embed_cover` 照原樣轉成 256k stereo MP3 —— 同一份聲音存兩次。
+
+**改了什麼**:`_embed_cover` 的 ffmpeg 改 `-b:a 96k -ac 1`;true MP3 輸入只在已是 ≤96k mono 時沿用
+(不多一輪有損、重發冪等),否則也重壓。真檔驗收:ep08(14.7 分)28.3 → 11.9 MB(含內嵌封面),
+對輸出再發一次 bytes 相同。
+
+**對已發布節目的影響**:下次 `publish_series` 重發某季時,該季每集都會重新轉檔 → content-hash
+檔名換一次(GUID 不變,訂閱者 App 可能重抓一次);舊 256k 檔留在 feed host 成為可回收空間,
+用 feed host dashboard 的 `/storage` 清。
+
 ## v0.9.33 —— 收尾(finalize + promote)收成單一入口,adopt 與作廢的欄位清單各歸其主
 
 **為什麼**:v0.9.32 收掉了派送端,收尾端還留著四份——`podcast_episode`、`podcast_episode_resume`、

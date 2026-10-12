@@ -1335,9 +1335,9 @@ def test_embed_cover_normalizes_notebooklm_mp4_to_real_mp3(tmp_path):
     stream = probe["streams"][0]
     assert probe["format"]["format_name"] == "mp3"
     assert stream["codec_name"] == "mp3"
-    assert stream["bit_rate"] == "256000"
+    assert stream["bit_rate"] == "96000"
     assert stream["sample_rate"] == "44100"
-    assert stream["channels"] == 2
+    assert stream["channels"] == 1
     from mutagen.id3 import ID3
 
     assert ID3(str(fixed)).getall("APIC")
@@ -1432,18 +1432,63 @@ def test_embed_cover_preserves_real_mp3_and_adds_id3_artwork(tmp_path):
             "-select_streams",
             "a:0",
             "-show_entries",
-            "stream=codec_name",
+            "stream=bit_rate,channels",
             "-of",
-            "default=nw=1:nk=1",
+            "csv=p=0",
             str(fixed),
         ],
         text=True,
     ).strip()
-    assert codec == "mp3"
+    assert codec == "1,96000"  # channels,bit_rate;128k 的 true MP3 也要重壓成 96k mono
     from mutagen.id3 import ID3
 
     assert ID3(str(fixed)).getall("APIC")
     assert _real_embed(str(src), cover) == out
+
+
+def test_embed_cover_keeps_already_compressed_mp3_without_reencoding(tmp_path, monkeypatch):
+    """已經是 ≤96k mono 的 true MP3 不再過 ffmpeg:重發整季時不能每次多一輪有損壓縮。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not (ffmpeg and shutil.which("ffprobe")):
+        pytest.skip("需要 ffmpeg/ffprobe")
+    src = tmp_path / "small.mp3"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
+            "-t",
+            "1",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "96k",
+            "-ac",
+            "1",
+            str(src),
+        ],
+        check=True,
+    )
+
+    real_run = subprocess.run
+
+    def no_ffmpeg(cmd, *a, **k):
+        # check_output 底層也走 run;只擋 ffmpeg,放行 ffprobe
+        assert cmd[0] != "ffmpeg", "already-compressed MP3 must not be re-encoded"
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(tools_publish.subprocess, "run", no_ffmpeg)
+    out = _real_embed(str(src), _valid_cover(tmp_path, "small-cover.jpg"))
+    from mutagen.id3 import ID3
+
+    fixed = tmp_path / "small-fixed.mp3"
+    fixed.write_bytes(out)
+    assert ID3(str(fixed)).getall("APIC")
 
 
 def test_embed_cover_rejects_unsupported_adts_aac(tmp_path):

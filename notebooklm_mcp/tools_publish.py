@@ -248,8 +248,11 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
     """把支援的來源正規化成真正 MP3，內嵌 ID3 APIC，回傳決定性 bytes。
 
     NotebookLM 原始下載常是偽裝成 ``.mp3`` 的 fragmented MP4/AAC；這裡直接轉成
-    256 kbps MP3，使實際 container/codec 與 enclosure 的 ``.mp3``/``audio/mpeg``
-    契約一致。既有 true MP3 不重編音訊，只重寫封面。其他格式一律 fail-closed。
+    96 kbps mono MP3，使實際 container/codec 與 enclosure 的 ``.mp3``/``audio/mpeg``
+    契約一致。NotebookLM 的 256k「立體聲」左右聲道逐位元相同(實測相減 -91 dB),
+    mono 96k 對語音聽不出差、檔案約 -62%。碼率更高的 true MP3 也重壓;已是
+    ≤96k mono 的 true MP3 不重編音訊(重發整季不多一輪有損),只重寫封面。
+    其他格式一律 fail-closed。
     這是可被測試 monkeypatch 的 seam(多數 publish 測試用假 audio bytes)。"""
     from mutagen.id3 import APIC, ID3, ID3NoHeaderError
 
@@ -267,7 +270,7 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
                     "-select_streams",
                     "a:0",
                     "-show_entries",
-                    "format=format_name:stream=codec_name",
+                    "format=format_name:stream=codec_name,bit_rate,channels",
                     "-of",
                     "json",
                     mp3_path,
@@ -277,7 +280,8 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
             )
         )
         formats = set(probe["format"]["format_name"].split(","))
-        codec = probe["streams"][0]["codec_name"]
+        stream = probe["streams"][0]
+        codec = stream["codec_name"]
     except FileNotFoundError as exc:
         raise ValueError("ffprobe is required to inspect podcast audio") from exc
     except (
@@ -290,7 +294,9 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
         raise ValueError(f"unsupported or unreadable audio: {mp3_path}") from exc
 
     if formats == {"mp3"} and codec == "mp3":
-        source_kind = "mp3"
+        # VBR 等讀不到 bit_rate 的一律當作需要重壓
+        compact = stream.get("channels") == 1 and int(stream.get("bit_rate") or 10**9) <= 96000
+        source_kind = "mp3" if compact else "mp3_large"
     elif "mp4" in formats and codec == "aac":
         source_kind = "mp4_aac"
     else:
@@ -322,11 +328,11 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
                         "-c:a",
                         "libmp3lame",
                         "-b:a",
-                        "256k",
+                        "96k",
                         "-ar",
                         "44100",
                         "-ac",
-                        "2",
+                        "1",
                         tmp,
                     ],
                     check=True,

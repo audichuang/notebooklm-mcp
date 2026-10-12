@@ -161,7 +161,7 @@
   改版只改 template。**需系統有 headless Chrome**(`google-chrome`/`chromium`;`--chrome` 或
   `NOTEBOOKLM_COVER_CHROME` 指定)——只有「產封面的那台」需要,3 個認證 VM 不用。NotebookLM 下載的
   音檔是 **fragmented-MP4 / DASH**(AAC),雖常用 `.mp3` 副檔名卻不是 MP3；`_embed_cover`
-  發布前會正向辨識並轉成 256 kbps true MP3，再寫 ID3/APIC(見下方 gotcha)。
+  發布前會正向辨識並轉成 96 kbps mono true MP3，再寫 ID3/APIC(見下方 gotcha)。
 - **單集封面**:`notebooklm-cover --manifest <json> --show-name Audicast --byline audichuang [--output-dir <dir>]`
   批次讀 episodes 逐集填 episode template(集號決定色相 `(n*77)%360`、集標當大標、EP 徽章)、
   把絕對 `cover_path` 寫回 manifest,供 `publish_series` 吃(該集 `<item>` 掛 `itunes:image`,
@@ -175,8 +175,10 @@
   itunes:image 我方掛得對、URL 也公網可達(實測 200),但 Apple/Spotify 常優先吃音檔內嵌圖。
   NotebookLM raw 檔是 fragmented MP4/AAC、常偽裝成 `.mp3`;若仍以 `audio/mpeg` 發布，副檔名/MIME/
   container/codec 四者矛盾。故 `publish_series` 的 `_embed_cover` seam 先用 ffprobe **正向辨識**:
-  MP4/AAC → ffmpeg 轉 256 kbps、44.1 kHz stereo true MP3；既有 true MP3 不重編音訊；其他格式
-  fail-closed。最後用 mutagen 寫單一 authoritative front-cover ID3/APIC。這讓公開 enclosure 的
+  MP4/AAC → ffmpeg 轉 96 kbps、44.1 kHz mono true MP3；true MP3 只在「已是 ≤96k mono」時不重編音訊
+  (重發整季不多一輪有損),更高碼率的也重壓；其他格式 fail-closed。**為什麼 mono 96k**:NotebookLM 的
+  256k「立體聲」左右聲道逐位元相同(L−R 實測 -91 dB,抽 6 集皆然),語音 96k 聽不出差,檔案約 -62%
+  (一集 14.7 分鐘 28.2 → 10.6 MB 音訊)。最後用 mutagen 寫單一 authoritative front-cover ID3/APIC。這讓公開 enclosure 的
   `.mp3` + `audio/mpeg` 與實際 MP3 完全一致且可 HTTP range seek。**代價**:首次啟用正規化會讓
   MP4 來源各集換一次 content-hash URL(舊 URL 因 uploader 不刪仍可用,訂閱者可能重抓)。
   exact output bytes/hash 只在相同 ffmpeg/libmp3lame 工具鏈穩定；升級會再次 churn enclosure URL，
