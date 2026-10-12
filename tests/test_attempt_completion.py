@@ -112,3 +112,35 @@ async def test_record_is_read_lazily_and_keeps_tombstone_default_deny(fake_clien
         outcome.record()
     _, attempt = outcome.record(allow_retracted=True)
     assert attempt["retraction"]
+
+
+async def test_non_refusal_promote_failure_is_its_own_kind(fake_client, tmp_path, monkeypatch):
+    store, first = await _completed_episode(fake_client, tmp_path)
+    boom = RuntimeError("manifest write failed")
+
+    def fail(*_args, **_kwargs):
+        raise boom
+
+    monkeypatch.setattr(p, "_promote_attempt_output", fail)
+
+    outcome = await _complete(fake_client, store, first["attempt_id"], tmp_path)
+
+    # 不是 `runtime`:series 不得把 promote 階段的 RuntimeError 當成回錄 source 問題處置。
+    assert isinstance(outcome, p.CompletionStopped)
+    assert outcome.kind == "promote"
+    assert outcome.exc is boom
+
+
+async def test_promotion_refusal_is_refused(fake_client, tmp_path, monkeypatch):
+    store, first = await _completed_episode(fake_client, tmp_path)
+    refusal = p.PromotionRefusedError("owned elsewhere", episode_n=1, attempt_id="x")
+
+    def refuse(*_args, **_kwargs):
+        raise refusal
+
+    monkeypatch.setattr(p, "_promote_attempt_output", refuse)
+
+    outcome = await _complete(fake_client, store, first["attempt_id"], tmp_path)
+
+    assert isinstance(outcome, p.CompletionRefused)
+    assert outcome.exc is refusal
