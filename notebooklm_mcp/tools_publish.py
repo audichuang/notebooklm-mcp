@@ -1,9 +1,9 @@
 """Podcast publishing MCP tool. publish_series renders the whole season in memory
-and PUTs each file to the feed host's LAN-only uploader (token-gated). The MCP
-host writes nothing durable and needs no NAS mount — it reaches the NAS over the
-internal network (PODCAST_UPLOAD_URL = http://<nas-lan-ip>:<port>).
+and PUTs each file to the feed host's token-gated write endpoint
+(PODCAST_UPLOAD_URL: podcast-feed-host's Worker in front of R2, or its LAN uploader).
+The MCP host writes nothing durable and needs no storage mount.
 
-Commit order (the uploader is a dumb landing zone, so the CLIENT enforces order):
+Commit order (the write endpoint is a dumb landing zone, so the CLIENT enforces order):
 media (mp3 + artwork) -> show.json -> feed.xml/index.html. Combined with "the
 uploader never deletes", a reader on the public read port never sees a feed.xml
 that points at a missing enclosure."""
