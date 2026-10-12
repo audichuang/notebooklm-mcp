@@ -72,6 +72,7 @@ from .audio_finalize import (
     RemoteArtifactUnverifiableError,
     _created_at_utc,
     _source_ready,
+    adopt_feedback_source,
     feedback_upload,
     finalize_attempt,
     has_durable_output_evidence,
@@ -2968,45 +2969,15 @@ async def podcast_attempt_adopt(
         if not _attempt_can_adopt_source(current_attempt):
             raise ValueError("feedback source adoption requires completed audio download")
         current = current_attempt
-        upload = current["finalize"]["feedback_source_upload"]
-        if needs_rename and not (
-            upload.get("status") == "reconciliation_ambiguous"
-            and feedback_source_id in upload.get("candidate_source_ids", [])
-            and upload.get("expected_title") == expected_upload_title
-        ):
-            raise ValueError("feedback source is no longer an ambiguity candidate")
-        previous = upload.get("source_id")
         # 未被選中的 candidate(reconciliation_ambiguous 遺留)與被取代的 previous 一樣是
-        # 同名重複 source——`upload.update` 下面即將把 candidate_source_ids 清空,先在
-        # 清空前抓下來,連同 previous 一起排入清理義務。
-        stale_candidates = [
-            source_id
-            for source_id in upload.get("candidate_source_ids", [])
-            if source_id != feedback_source_id
-        ]
-        if previous not in (None, feedback_source_id):
-            history = upload.setdefault("previous_source_ids", [])
-            if previous not in history:
-                history.append(previous)
-        upload.update(
-            {
-                "status": "accepted" if needs_rename else "completed",
-                "source_id": feedback_source_id,
-                "adopted_at": now,
-                "candidate_source_ids": [],
-            }
+        # 同名重複 source——連同 previous 一起排入清理義務。
+        previous, stale_candidates = adopt_feedback_source(
+            current,
+            feedback_source_id,
+            needs_rename=needs_rename,
+            expected_title=expected_upload_title,
+            now=now,
         )
-        rename = current["finalize"]["feedback_source_rename"]
-        if needs_rename:
-            rename.update(
-                {
-                    "status": "not_started",
-                    "source_name": None,
-                    "verified_at": None,
-                }
-            )
-        else:
-            rename.update({"status": "completed", "adopted_at": now})
         stale = queue_pending_source_cleanup(
             current_episode,
             [*stale_candidates, previous] if isinstance(previous, str) else stale_candidates,

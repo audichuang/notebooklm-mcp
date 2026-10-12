@@ -104,6 +104,60 @@ def feedback_upload(attempt: dict) -> dict:
     return (attempt.get("finalize") or {}).get("feedback_source_upload") or {}
 
 
+def adopt_feedback_source(
+    attempt: dict,
+    source_id: str,
+    *,
+    needs_rename: bool,
+    expected_title: str | None,
+    now: str,
+) -> tuple[str | None, list[str]]:
+    """`podcast_attempt_adopt` 對 finalize checkpoint 的轉換:認領 `source_id` 為回錄 source。
+
+    在 `ManifestStore.update` 的 mutate 內呼叫;tombstone 與可認領性(download 完成)由
+    呼叫端先擋。`needs_rename` 時只接受仍在 `reconciliation_ambiguous` 候選裡、且
+    expected_title 相符的 id——守門在任何寫入之前。
+
+    回傳 `(previous, stale_candidates)`:被取代的舊 `source_id`,以及沒被選中的候選
+    (清空 `candidate_source_ids` 之前抓下來),兩者都要由呼叫端排進清理義務。
+    """
+    upload = attempt["finalize"]["feedback_source_upload"]
+    if needs_rename and not (
+        upload.get("status") == "reconciliation_ambiguous"
+        and source_id in upload.get("candidate_source_ids", [])
+        and upload.get("expected_title") == expected_title
+    ):
+        raise ValueError("feedback source is no longer an ambiguity candidate")
+    previous = upload.get("source_id")
+    stale_candidates = [
+        candidate for candidate in upload.get("candidate_source_ids", []) if candidate != source_id
+    ]
+    if previous not in (None, source_id):
+        history = upload.setdefault("previous_source_ids", [])
+        if previous not in history:
+            history.append(previous)
+    upload.update(
+        {
+            "status": "accepted" if needs_rename else "completed",
+            "source_id": source_id,
+            "adopted_at": now,
+            "candidate_source_ids": [],
+        }
+    )
+    rename = attempt["finalize"]["feedback_source_rename"]
+    if needs_rename:
+        rename.update(
+            {
+                "status": "not_started",
+                "source_name": None,
+                "verified_at": None,
+            }
+        )
+    else:
+        rename.update({"status": "completed", "adopted_at": now})
+    return previous, stale_candidates
+
+
 def _record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[dict, dict]:
     # Tombstone。`podcast_attempt_retract` 作廢的 attempt 不得再被 finalize:所有 finalize
     # checkpoint 的讀寫都走這裡,所以一個 in-flight finalizer 在 retract 之後的第一次
