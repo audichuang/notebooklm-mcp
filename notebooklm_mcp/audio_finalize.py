@@ -96,6 +96,14 @@ def new_finalize_state() -> dict:
     }
 
 
+def feedback_upload(attempt: dict) -> dict:
+    """唯讀取 attempt 的 `finalize.feedback_source_upload` checkpoint;沒有就回空 dict。
+
+    形狀由本模組擁有(`new_finalize_state`),呼叫端別自己拼 `.get(...)` 鏈。
+    """
+    return (attempt.get("finalize") or {}).get("feedback_source_upload") or {}
+
+
 def _record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[dict, dict]:
     # Tombstone。`podcast_attempt_retract` 作廢的 attempt 不得再被 finalize:所有 finalize
     # checkpoint 的讀寫都走這裡,所以一個 in-flight finalizer 在 retract 之後的第一次

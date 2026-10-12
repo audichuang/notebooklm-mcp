@@ -72,6 +72,7 @@ from .audio_finalize import (
     RemoteArtifactUnverifiableError,
     _created_at_utc,
     _source_ready,
+    feedback_upload,
     finalize_attempt,
     has_durable_output_evidence,
     has_hard_output_evidence,
@@ -406,9 +407,7 @@ def _attempt_capabilities(
     # (`unresolved_upload_descriptor`),不在這裡重讀 checkpoint 發明第二套。
     unresolved_upload = unresolved_upload_descriptor(attempt)
     feedback_upload_unresolved = unresolved_upload is not None
-    feedback_upload_status = (attempt.get("finalize", {}).get("feedback_source_upload", {})).get(
-        "status"
-    )
+    feedback_upload_status = feedback_upload(attempt).get("status")
     # T1:候選一律來自 `unresolved_upload`(`_reconcile_source_upload` 寫入的同一份
     # checkpoint),非空即代表狀態是 `reconciliation_ambiguous`(該函式把「有候選」與
     # 「狀態設成 ambiguous」綁在同一次 mutate 裡,兩者不會分岔)。
@@ -1371,9 +1370,7 @@ def _later_episode_has_output(snapshot: dict, episode_n: int, notebook_id: str) 
                 and attempt.get("notebook_id") == notebook_id
                 and not attempt.get("retraction")
                 and (
-                    ((attempt.get("finalize") or {}).get("feedback_source_upload") or {}).get(
-                        "source_id"
-                    )
+                    feedback_upload(attempt).get("source_id")
                     or unresolved_upload_descriptor(attempt) is not None
                 )
                 for attempt in row.get("attempts", [])
@@ -1634,6 +1631,103 @@ def _promote_attempt_output(
         apply_promotion(episode, attempt, attempt_id, output)
 
     store.update(mutate)
+
+
+# ── 收尾(finalize + promote)的結構化結果 ─────────────────────────────────────
+# 與上面的 `DispatchOutcome` 對稱:派送回 Accepted/NotClaimed/Stopped,收尾回
+# Done/Refused/Stopped。四個呼叫點(podcast_episode / resume / series 的 output 複驗與
+# active 收尾)各自決定 raise 還是回 partial,但「這次失敗屬於哪一類」只在這裡判一次。
+
+
+@dataclass(frozen=True)
+class CompletionDone:
+    """finalize 與 promote 都完成;`output` 已帶 promote 寫回的生效值(如首發 `published_at`)。"""
+
+    output: dict
+
+
+@dataclass(frozen=True)
+class CompletionRefused:
+    """finalize 完成,但 promote 被三道守門之一拒絕(retract／他人持有 output／legacy 不同 artifact)。"""
+
+    exc: PromotionRefusedError
+
+
+@dataclass(frozen=True)
+class CompletionStopped:
+    """收尾沒有完成。`exc` 是原例外(含 CancelledError),**未改寫**——要不要附指引由呼叫端決定。
+
+    `kind` 互斥:
+      - `unverifiable`:遠端列表驗不到這顆 artifact(`RemoteArtifactUnverifiableError`)
+      - `terminal`:伺服器端終態 failed／removed(`TerminalGenerationError`)
+      - `transient`:`_TRANSIENT_TRANSPORT_ERRORS`
+      - `runtime`:其餘 `RuntimeError`(postcondition 失敗、回錄 source 不見等)
+      - `promote`:finalize 完成後 promote 失敗,但不是 `PromotionRefusedError`
+      - `other`:其餘一切(ValueError 前置條件、CancelledError…)
+
+    `record()` **延遲**讀 manifest(呼叫時才讀,不在失敗當下多一次讀取),預設維持
+    tombstone default-deny——併發 retract 之後讀到的是 ValueError,跟重構前的呼叫點一致。
+    """
+
+    exc: BaseException
+    kind: str
+    store: ManifestStore
+    episode_n: int
+    attempt_id: str
+
+    def record(self, *, allow_retracted: bool = False) -> tuple[dict, dict]:
+        return _attempt_record(
+            self.store.read(), self.episode_n, self.attempt_id, allow_retracted=allow_retracted
+        )
+
+
+CompletionOutcome = CompletionDone | CompletionRefused | CompletionStopped
+
+
+def _finalize_failure_kind(exc: BaseException) -> str:
+    # 子類先判:RemoteArtifactUnverifiableError / TerminalGenerationError 都是 RuntimeError。
+    if isinstance(exc, RemoteArtifactUnverifiableError):
+        return "unverifiable"
+    if isinstance(exc, TerminalGenerationError):
+        return "terminal"
+    if isinstance(exc, _TRANSIENT_TRANSPORT_ERRORS):
+        return "transient"
+    if isinstance(exc, RuntimeError):
+        return "runtime"
+    return "other"
+
+
+async def _complete_attempt(
+    client: object,
+    store: ManifestStore,
+    *,
+    episode_n: int,
+    attempt_id: str,
+    output_dir: str,
+    wait_timeout: float,
+) -> CompletionOutcome:
+    """把一顆已 accepted 的 attempt 收尾:`finalize_attempt` → `_promote_attempt_output`。
+
+    任何失敗都轉成結構化結果,不 raise;呼叫端要裸拋就 `raise outcome.exc`。
+    """
+    try:
+        output = await finalize_attempt(
+            client,
+            store,
+            episode_n=episode_n,
+            attempt_id=attempt_id,
+            output_dir=output_dir,
+            wait_timeout=wait_timeout,
+        )
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 —— 刻意 blind:任何失敗都轉成結構化 Stopped,由呼叫端依 kind 處置
+        return CompletionStopped(exc, _finalize_failure_kind(exc), store, episode_n, attempt_id)
+    try:
+        _promote_attempt_output(store, episode_n, attempt_id, output)
+    except PromotionRefusedError as exc:
+        return CompletionRefused(exc)
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 —— 同上;promote 階段的其他失敗另成一類
+        return CompletionStopped(exc, "promote", store, episode_n, attempt_id)
+    return CompletionDone(output)
 
 
 def _validate_episode_args(episode_n: int, title: str, prior_mp3_path: str | None) -> None:
@@ -1998,21 +2092,23 @@ async def _run_episode(
     dispatch_account, client = outcome.account, outcome.client
     # 生成一旦送出,artifact 就在 NotebookLM 雲端建立並跑到完成,不靠本地連線活著。
     try:
-        if store is not None:
-            output = await finalize_attempt(
-                client,
-                store,
-                episode_n=episode_n,
-                attempt_id=attempt_id,
-                output_dir=output_dir,
-                wait_timeout=wait_timeout,
-            )
-            _promote_attempt_output(store, episode_n, attempt_id, output)
-        else:
+        if store is None:
             output = await _finalize_episode(
                 client, notebook_id, episode_n, title, artifact_id, output_dir, wait_timeout
             )
-        return output, dispatch_account, client
+            return output, dispatch_account, client
+        completion = await _complete_attempt(
+            client,
+            store,
+            episode_n=episode_n,
+            attempt_id=attempt_id,
+            output_dir=output_dir,
+            wait_timeout=wait_timeout,
+        )
+        if isinstance(completion, CompletionDone):
+            return completion.output, dispatch_account, client
+        # 原例外丟回同一組 except:分類與附指引的方式維持原樣(promote 被拒也一樣附續跑指引)。
+        raise completion.exc
     except TerminalGenerationError:
         # 伺服器端終態(failed / removed,如每日配額耗盡):artifact 已被下架,resume
         # 也救不回——原樣往上拋,不誤導成「可續跑」。用專屬型別而非 except RuntimeError,
@@ -2512,16 +2608,18 @@ async def podcast_episode_resume(
             title=title,
             artifact_id=artifact_id.strip(),
         )
-        try:
-            output = await finalize_attempt(
-                client,
-                store,
-                episode_n=episode_n,
-                attempt_id=attempt_id,
-                output_dir=output_dir,
-                wait_timeout=wait_timeout,
-            )
-        except RemoteArtifactUnverifiableError as exc:
+        completion = await _complete_attempt(
+            client,
+            store,
+            episode_n=episode_n,
+            attempt_id=attempt_id,
+            output_dir=output_dir,
+            wait_timeout=wait_timeout,
+        )
+        if isinstance(completion, CompletionDone):
+            return completion.output
+        exc = completion.exc
+        if isinstance(completion, CompletionStopped) and completion.kind == "unverifiable":
             # T6:resume 路徑接住同一個具名例外,給結構化錯誤訊息而不是裸拋一句沒有
             # 下一步的話。**不能用 `_attempt_next_step(caps)` 整句**——這顆 attempt
             # 若還沒 promote(`is_output=False`),caps 的 `can_resume` 分支會教
@@ -2530,10 +2628,7 @@ async def podcast_episode_resume(
             # `_retract_hint(caps) + caps["regeneration_hint"]`——這兩塊只講
             # retract 與重生時要注意什麼,不論 is_output 真假都不會指回 resume 自己。
             try:
-                current = store.read()
-                stopped_episode, stopped_attempt = _attempt_record(
-                    current, episode_n, attempt_id, allow_retracted=True
-                )
+                stopped_episode, stopped_attempt = completion.record(allow_retracted=True)
                 caps = _attempt_capabilities(
                     stopped_episode,
                     stopped_attempt,
@@ -2548,9 +2643,7 @@ async def podcast_episode_resume(
                     f"{attempt_id!r} 目前的狀態。"
                 )
             exc.args = (f"{exc}\n{guidance}",)
-            raise
-        _promote_attempt_output(store, episode_n, attempt_id, output)
-        return output
+        raise exc
 
     output = await _finalize_episode(
         client, notebook_id, episode_n, title, artifact_id.strip(), output_dir, wait_timeout
@@ -2774,9 +2867,7 @@ async def podcast_attempt_adopt(
         }
 
     assert feedback_source_id is not None
-    upload = (
-        attempt.get("finalize", {}).get("feedback_source_upload", {}) if attempt is not None else {}
-    )
+    upload = feedback_upload(attempt) if attempt is not None else {}
     candidate_pending_rename = upload.get(
         "status"
     ) == "reconciliation_ambiguous" and feedback_source_id in upload.get("candidate_source_ids", [])
@@ -2814,9 +2905,7 @@ async def podcast_attempt_adopt(
             for current in row.get("attempts", []):
                 if current.get("attempt_id") == attempt_id and row.get("episode") == episode_n:
                     continue
-                source_id = (
-                    current.get("finalize", {}).get("feedback_source_upload", {}).get("source_id")
-                )
+                source_id = feedback_upload(current).get("source_id")
                 if source_id == feedback_source_id:
                     return True
         return False
@@ -3177,7 +3266,7 @@ async def podcast_attempt_retract(
         # 清理義務要以 attempt 的 finalize checkpoint 為準,不能只信 episode 級投影:
         # 投影是 legacy 相容欄位,可能缺、可能被 adopt 改寫,而真正上傳了哪一筆 source
         # 只有 checkpoint 知道。
-        upload = attempt.get("finalize", {}).get("feedback_source_upload", {})
+        upload = feedback_upload(attempt)
         # **身分不確定的義務也要記下來,不能因為記不住就擋住 retract。** upload 已經
         # dispatch 但 `source_id` 沒落盤時,遠端可能多出一筆沒人記得的 media —— 舊版的
         # 處置是硬擋 retract(連 `abandon_in_flight` 都擋),而那個狀態靠 cancellation
@@ -3468,9 +3557,7 @@ async def podcast_series(
             needs_artifact_reconcile = observed == "acceptance_unknown"
             action = ACTION_RECONCILE if needs_artifact_reconcile else ACTION_SERIES
             return partial(episode_n, attempt_id, observed, action)
-        upload_state = (
-            stopped_attempt.get("finalize", {}).get("feedback_source_upload", {}).get("status")
-        )
+        upload_state = feedback_upload(stopped_attempt).get("status")
         # T1:回錄 source 上傳卡在這三種 unresolved 狀態時走 caps,理由與上面
         # active-attempt 分支那兩個 handler 相同(單一事實來源、候選一併帶出)。
         if upload_state in ("acceptance_unknown", "reconciliation_ambiguous"):
@@ -3741,75 +3828,70 @@ async def podcast_series(
                 )
                 if mismatch is not None:
                     mismatch.raise_()
-                try:
-                    repaired = await finalize_attempt(
-                        client,
-                        store,
-                        episode_n=episode_n,
-                        attempt_id=output_attempt_id,
-                        output_dir=output_dir,
-                        wait_timeout=wait_timeout,
-                    )
-                except RemoteArtifactUnverifiableError:
-                    # T6(P2,`scratchpad/verify-A2/07_artifact_gone.py`):已完成集的
-                    # 正式輸出在遠端被刪掉(或改名到面目全非)之後,drift 複驗撞到
-                    # 這個具名例外——過去是裸 `RuntimeError`,連 `safe_next_action`
-                    # 都沒有,already-succeeded 的 `run_results` 整批跟著呼叫端的
-                    # 自動化一起炸掉,整季永久卡死。翻成結構化 partial:這顆是
-                    # is_output,caps 給的是 `podcast_attempt_retract`(免旗標,純
-                    # 本機);`next_step` 額外提 `start=` 逃生口——這一集卡住不代表
-                    # 後面的集數也走不下去。新契約詞:
-                    # `observed_state="output_unverifiable"`。
-                    current = store.read()
-                    current_episode, stopped_attempt = _attempt_record(
-                        current, episode_n, output_attempt_id
-                    )
-                    caps = _attempt_capabilities(
-                        current_episode, stopped_attempt, output_attempt_id
-                    )
-                    return partial(
-                        episode_n,
-                        output_attempt_id,
-                        "output_unverifiable",
-                        caps["safe_next_action"],
-                        next_step=(
-                            _attempt_next_step(caps)
-                            + f" 這一集卡住不影響其他集:用 start={episode_n + 1} "
-                            "可以先跳過它、讓後面的集數繼續推進。"
-                        ),
-                    )
-                except RuntimeError:
-                    current = store.read()
-                    _, stopped_attempt = _attempt_record(current, episode_n, output_attempt_id)
-                    source_id = (
-                        stopped_attempt.get("finalize", {})
-                        .get("feedback_source_upload", {})
-                        .get("source_id")
-                    )
-                    if isinstance(source_id, str):
-                        sources = await client.sources.list(notebook_id)
-                        if not any(getattr(source, "id", None) == source_id for source in sources):
-                            return partial(
-                                episode_n,
-                                output_attempt_id,
-                                "continuity_unverified",
-                                ACTION_ADOPT,
-                            )
-                    raise
-                except _TRANSIENT_TRANSPORT_ERRORS:
-                    # 已完成集的 drift 複驗途中傳輸失敗:manifest checkpoint 仍是真相,
-                    # 回結構化 partial 讓呼叫端重跑同一組 series,別裸拋掉整季進度回報
-                    # (與下方 active attempt 分支同一處置)。
-                    return partial(
-                        episode_n,
-                        output_attempt_id,
-                        "verification_incomplete",
-                        ACTION_SERIES,
-                    )
-                try:
-                    _promote_attempt_output(store, episode_n, output_attempt_id, repaired)
-                except PromotionRefusedError as exc:
-                    return promotion_refused_stop(exc)
+                completion = await _complete_attempt(
+                    client,
+                    store,
+                    episode_n=episode_n,
+                    attempt_id=output_attempt_id,
+                    output_dir=output_dir,
+                    wait_timeout=wait_timeout,
+                )
+                if isinstance(completion, CompletionRefused):
+                    return promotion_refused_stop(completion.exc)
+                if isinstance(completion, CompletionStopped):
+                    if completion.kind == "unverifiable":
+                        # T6(P2,`scratchpad/verify-A2/07_artifact_gone.py`):已完成集的
+                        # 正式輸出在遠端被刪掉(或改名到面目全非)之後,drift 複驗撞到
+                        # 這個具名例外——過去是裸 `RuntimeError`,連 `safe_next_action`
+                        # 都沒有,already-succeeded 的 `run_results` 整批跟著呼叫端的
+                        # 自動化一起炸掉,整季永久卡死。翻成結構化 partial:這顆是
+                        # is_output,caps 給的是 `podcast_attempt_retract`(免旗標,純
+                        # 本機);`next_step` 額外提 `start=` 逃生口——這一集卡住不代表
+                        # 後面的集數也走不下去。新契約詞:
+                        # `observed_state="output_unverifiable"`。
+                        current_episode, stopped_attempt = completion.record()
+                        caps = _attempt_capabilities(
+                            current_episode, stopped_attempt, output_attempt_id
+                        )
+                        return partial(
+                            episode_n,
+                            output_attempt_id,
+                            "output_unverifiable",
+                            caps["safe_next_action"],
+                            next_step=(
+                                _attempt_next_step(caps)
+                                + f" 這一集卡住不影響其他集:用 start={episode_n + 1} "
+                                "可以先跳過它、讓後面的集數繼續推進。"
+                            ),
+                        )
+                    if completion.kind in ("terminal", "runtime"):
+                        # 已完成集的回錄 source 在遠端不見了 → continuity_unverified。
+                        # 刻意不帶候選:身分要呼叫端自己 source_list 指名(gotchas-attempt
+                        # 第十二次現形那條的判準)。
+                        _, stopped_attempt = completion.record()
+                        source_id = feedback_upload(stopped_attempt).get("source_id")
+                        if isinstance(source_id, str):
+                            sources = await client.sources.list(notebook_id)
+                            if not any(
+                                getattr(source, "id", None) == source_id for source in sources
+                            ):
+                                return partial(
+                                    episode_n,
+                                    output_attempt_id,
+                                    "continuity_unverified",
+                                    ACTION_ADOPT,
+                                )
+                    elif completion.kind == "transient":
+                        # 已完成集的 drift 複驗途中傳輸失敗:manifest checkpoint 仍是真相,
+                        # 回結構化 partial 讓呼叫端重跑同一組 series,別裸拋掉整季進度回報
+                        # (與下方 active attempt 分支同一處置)。
+                        return partial(
+                            episode_n,
+                            output_attempt_id,
+                            "verification_incomplete",
+                            ACTION_SERIES,
+                        )
+                    raise completion.exc
                 continue
 
             is_legacy_output = not episode.get("attempts") and has_durable_output_evidence(episode)
@@ -4162,95 +4244,53 @@ async def podcast_series(
                             **extra,
                         )
 
-                try:
-                    result = await finalize_attempt(
-                        client,
-                        store,
-                        episode_n=episode_n,
-                        attempt_id=active_attempt_id,
-                        output_dir=output_dir,
-                        wait_timeout=wait_timeout,
-                    )
-                except TerminalGenerationError:
-                    current = store.read()
-                    _, failed_attempt = _attempt_record(current, episode_n, active_attempt_id)
-                    return partial(
-                        episode_n,
-                        active_attempt_id,
-                        failed_attempt["remote"]["status"],
-                        ACTION_SERIES,
-                    )
-                except _TRANSIENT_TRANSPORT_ERRORS:
-                    current = store.read()
-                    current_episode, stopped_attempt = _attempt_record(
-                        current, episode_n, active_attempt_id
-                    )
-                    upload_state = (
-                        stopped_attempt.get("finalize", {})
-                        .get("feedback_source_upload", {})
-                        .get("status")
-                    )
-                    # T1:三種 unresolved upload 狀態一律走 caps(單一事實來源),不再
-                    # 各自手寫 ACTION_SERIES——`acceptance_unknown` 之前寫死 series,
-                    # 但 caps 算出的 resume 才是這個狀態真正走得通的路(can_resume 為
-                    # 真,續完 finalize 不必整季重跑);`reconciliation_ambiguous`
-                    # 之前不帶候選,現在由 caps 一併帶出。remote_status 的 fallback
-                    # (這三種以外的狀態)維持原樣,不擴大改動範圍。
-                    if upload_state in (
-                        "acceptance_unknown",
-                        "reconciliation_ambiguous",
-                    ):
-                        caps = _attempt_capabilities(
-                            current_episode, stopped_attempt, active_attempt_id
-                        )
+                completion = await _complete_attempt(
+                    client,
+                    store,
+                    episode_n=episode_n,
+                    attempt_id=active_attempt_id,
+                    output_dir=output_dir,
+                    wait_timeout=wait_timeout,
+                )
+                if isinstance(completion, CompletionRefused):
+                    return promotion_refused_stop(completion.exc)
+                if isinstance(completion, CompletionStopped):
+                    if completion.kind == "terminal":
+                        _, failed_attempt = completion.record()
                         return partial(
                             episode_n,
                             active_attempt_id,
-                            upload_state,
-                            caps["safe_next_action"],
-                            candidate_source_ids=caps["candidate_source_ids"],
-                            next_step=_attempt_next_step(caps),
+                            failed_attempt["remote"]["status"],
+                            ACTION_SERIES,
                         )
-                    observed = stopped_attempt["remote"]["status"]
-                    return partial(
-                        episode_n,
-                        active_attempt_id,
-                        observed,
-                        ACTION_SERIES,
-                    )
-                except RuntimeError:
-                    current = store.read()
-                    current_episode, stopped_attempt = _attempt_record(
-                        current, episode_n, active_attempt_id
-                    )
-                    upload_state = (
-                        stopped_attempt.get("finalize", {})
-                        .get("feedback_source_upload", {})
-                        .get("status")
-                    )
-                    # T1:刪掉手寫的 `ACTION_ADOPT if ambiguous else ACTION_SERIES`
-                    # ——中央 caps 現在就會給正確答案(ambiguous+候選非空 → adopt,
-                    # 且候選 / next_step 都由 caps 一併帶出),不必在呼叫點另組一份。
-                    if upload_state in (
-                        "acceptance_unknown",
-                        "reconciliation_ambiguous",
-                    ):
-                        caps = _attempt_capabilities(
-                            current_episode, stopped_attempt, active_attempt_id
-                        )
-                        return partial(
-                            episode_n,
-                            active_attempt_id,
-                            upload_state,
-                            caps["safe_next_action"],
-                            candidate_source_ids=caps["candidate_source_ids"],
-                            next_step=_attempt_next_step(caps),
-                        )
-                    raise
-                try:
-                    _promote_attempt_output(store, episode_n, active_attempt_id, result)
-                except PromotionRefusedError as exc:
-                    return promotion_refused_stop(exc)
+                    if completion.kind in ("transient", "runtime", "unverifiable"):
+                        current_episode, stopped_attempt = completion.record()
+                        upload_state = feedback_upload(stopped_attempt).get("status")
+                        # T1:unresolved upload 狀態一律走 caps(單一事實來源),不在呼叫點
+                        # 手寫——caps 算出的 resume 才是 `acceptance_unknown` 真正走得通的
+                        # 路;`reconciliation_ambiguous` 的候選 / next_step 也由 caps 一併帶出。
+                        if upload_state in ("acceptance_unknown", "reconciliation_ambiguous"):
+                            caps = _attempt_capabilities(
+                                current_episode, stopped_attempt, active_attempt_id
+                            )
+                            return partial(
+                                episode_n,
+                                active_attempt_id,
+                                upload_state,
+                                caps["safe_next_action"],
+                                candidate_source_ids=caps["candidate_source_ids"],
+                                next_step=_attempt_next_step(caps),
+                            )
+                        if completion.kind == "transient":
+                            # 這三種以外的狀態維持原本的 remote_status fallback。
+                            return partial(
+                                episode_n,
+                                active_attempt_id,
+                                stopped_attempt["remote"]["status"],
+                                ACTION_SERIES,
+                            )
+                    raise completion.exc
+                result = completion.output
                 run_results.append(result)
                 continue
 

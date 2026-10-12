@@ -551,6 +551,49 @@ async def test_series_transient_error_during_ambiguous_reconciliation_directs_vi
     assert "next_step" in out
 
 
+async def test_series_unverifiable_artifact_during_ambiguous_upload_directs_via_caps(
+    fake_client, tmp_path
+):
+    """active attempt 收尾撞 `RemoteArtifactUnverifiableError`(RuntimeError 子類)時,
+    跟其他 RuntimeError 一樣先看回錄 upload checkpoint:卡在 `reconciliation_ambiguous`
+    就由 caps 交出 adopt + 候選,不裸拋。鎖住 `_complete_attempt` 的 `unverifiable`
+    在 active 分支與 `runtime` 同一處置(output 複驗分支才有自己的 `output_unverifiable`)。"""
+    manifest_path = tmp_path / "series_manifest.json"
+    fake_client.sources.add_file_exc_after_create = TimeoutError("upload response lost")
+    with pytest.raises(TimeoutError, match="upload response lost"):
+        await p.podcast_episode(
+            "nb-1",
+            episode_n=1,
+            title="心法篇",
+            brief="第一集",
+            output_dir=str(tmp_path),
+            manifest_path=str(manifest_path),
+        )
+    fake_client.sources.add_file_exc_after_create = None
+    fake_client.sources._add("ep01.mp3", kind="media")
+
+    stopped = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+    assert stopped["observed_state"] == "reconciliation_ambiguous"
+    candidates = stopped["candidate_source_ids"]
+
+    fake_client.artifacts.artifacts.clear()
+
+    out = await p.podcast_series(
+        "nb-1",
+        episodes=[{"title": "心法篇", "brief": "第一集"}],
+        output_dir=str(tmp_path),
+    )
+
+    assert out["complete"] is False
+    assert out["observed_state"] == "reconciliation_ambiguous"
+    assert out["safe_next_action"] == "podcast_attempt_adopt"
+    assert out["candidate_source_ids"] == candidates
+
+
 async def test_attempt_backed_adopt_with_matching_title_directs_via_caps(fake_client, tmp_path):
     """T2:`needs_rename=False`(候選標題已經對)時,`safe_next_action` 必須跟 caps
     一致——舊版寫死 `podcast_series`,但 finalize 還沒 promote 成 output,照做 host
