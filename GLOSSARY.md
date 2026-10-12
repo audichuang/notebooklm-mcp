@@ -28,6 +28,14 @@ _Avoid_: 失敗、離線、未受理
 比對已記錄的操作意圖與 NotebookLM 遠端狀態，唯一吻合時補綁，無法唯一判定時回報候選而不猜測。
 _Avoid_: 選最新、直接重生
 
+**收尾（Completion）**:
+把一個已受理的生成嘗試完成為正式輸出的單一步驟：補完 finalize checkpoint（等待、命名、下載、Feedback Source），再 promote 成該集的 output；結果是「完成／promote 被拒／停在某一類失敗」之一，由呼叫端決定 raise 或回停點。與派送（Dispatch）對稱。
+_Avoid_: finalize（只指 checkpoint 那半）、重試
+
+**Output 投影與集的身分（Output Projection / Episode Identity）**:
+Output 投影是 episode 層級、指向目前正式輸出的欄位（output attempt、artifact、mp3、首發時間、Feedback Source）；作廢時整批移除，取代版必須重新寫入。集的身分（標題、label）只在第一次寫入，作廢不移除，取代版也不得更改。
+_Avoid_: episode 狀態、輸出欄位
+
 **Feedback Source**:
 為後續集數提供 continuity 而上傳到 NotebookLM Sources 的單集音檔；工具保存並驗證其 source identity，讓重跑不會重複上傳。
 _Avoid_: 暫存檔、最新同名 source
