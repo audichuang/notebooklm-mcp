@@ -670,6 +670,31 @@ def _retract_hint(caps: dict) -> str:
     return f"要作廢就直接 {ACTION_RETRACT}(**不需要** abandon_in_flight)。"
 
 
+def _cleanup_sentence(rows: list[dict]) -> str:
+    """清理義務 → 「先 source_delete」那句指引的**唯一** renderer(retract 與 adopt 共用)。
+
+    每筆讀它自己記錄的 notebook 身分,不准拿呼叫當下的 notebook 對全部蓋一遍。
+    **身分不明時不准印出假的可執行呼叫**:legacy 純字串義務 + episode 沒有 notebook_id
+    時是 `None`,印成 `source_delete(notebook_id=None, ...)` 照抄會失敗 —— 只講清楚缺什麼
+    (生成前的 gate 會用同一個理由 fail-closed,兩邊說法一致)。
+    """
+    return (
+        "先把這幾筆 source_delete 掉:"
+        + "、".join(
+            (
+                f"source_delete(notebook_id={row['notebook_id']!r}, source_id={row['source_id']!r})"
+                if row["notebook_id"] is not None
+                else (
+                    f"source_id={row['source_id']!r}(這一筆沒有記到 notebook 身分,"
+                    "補上 episode／manifest 的 notebook_id 後重呼本工具才算得出來)"
+                )
+            )
+            for row in rows
+        )
+        + "。"
+    )
+
+
 def _attempt_next_step(caps: dict) -> str:
     """把 `_attempt_capabilities` 的結論翻成一句**可執行**的話。
 
@@ -714,26 +739,9 @@ def _attempt_next_step(caps: dict) -> str:
         # **要列得出 id,不能只報欄位名。** 「把 `stale_source_ids` 全部 source_delete」
         # 在 gate 對帳撈到候選之後是**假的**:那個欄位是空的(tombstone 不回寫),id 只在
         # episode 的 `pending_source_cleanup` 裡 —— 照字面做的呼叫端會拿到空清單而以為
-        # 沒事要做,但生成 gate 正拿著同一批 id 擋著。
-        # **身分不明時不准印出假的可執行呼叫。** legacy 純字串義務 + episode 沒有
-        # notebook_id 時算出來的是 `None`,印成 `source_delete(notebook_id=None, ...)`
-        # 照抄會失敗 —— 那又是一句「在它自己產生的狀態下不可執行」的指引。這種只講清楚
-        # 缺什麼(生成前的 gate 會用同一個理由 fail-closed,兩邊說法一致)。
+        # 沒事要做,但生成 gate 正拿著同一批 id 擋著。身分不明的處理見 `_cleanup_sentence`。
         cleanup = (
-            "先把這幾筆 source_delete 掉:"
-            + "、".join(
-                (
-                    f"source_delete(notebook_id={row['notebook_id']!r}, "
-                    f"source_id={row['source_id']!r})"
-                    if row["notebook_id"] is not None
-                    else (
-                        f"source_id={row['source_id']!r}(這一筆沒有記到 notebook 身分,"
-                        "補上 episode／manifest 的 notebook_id 後重呼本工具才算得出來)"
-                    )
-                )
-                for row in caps["source_cleanup_obligations"]
-            )
-            + "。"
+            _cleanup_sentence(caps["source_cleanup_obligations"])
             if caps["pending_source_cleanup"]
             else ""
         )
@@ -3029,15 +3037,10 @@ async def podcast_attempt_adopt(
         # 「兩個欄位對同一個狀態指不同工具」。清理句子必須排在最前面:
         # `assert_generation_allowed` 同一道閘擋生成也擋 resume,所以「先刪」與
         # 「刪完之後 caps 教的那句」是同一個順序關係,不是互斥的兩個答案。
-        cleanup_sentence = (
-            "先把這幾筆 source_delete 掉:"
-            + "、".join(
-                f"source_delete(notebook_id={notebook_id!r}, source_id={sid!r})"
-                for sid in stale_source_ids
-            )
-            + "。"
-        )
-        result["next_step"] = cleanup_sentence + result.get("next_step", "")
+        # 文字與上面的 `source_cleanup_obligations` 走同一個 renderer:舊版在這裡拿
+        # 這次 adopt 的 `notebook_id` 自己拼句子,資料說 S-old 在 nb-old、文字卻叫人去
+        # nb-1 刪(T4 修了資料、漏了文字——補一半的又一例)。
+        result["next_step"] = _cleanup_sentence(obligations) + result.get("next_step", "")
     return result
 
 

@@ -2809,6 +2809,42 @@ async def test_adopt_does_not_relabel_a_preexisting_obligations_notebook(fake_cl
     ]
 
 
+async def test_adopt_next_step_text_names_each_obligations_own_notebook(fake_client, tmp_path):
+    """結構化義務修好了(上一條),`next_step` 那句卻仍拿這次 adopt 的 notebook 對每筆
+    蓋一遍 —— 資料說 S-old 在 nb-old,文字叫人去 nb-1 刪。呼叫端照文字做就打錯本。
+    文字必須跟 `source_cleanup_obligations` 走同一個 renderer。"""
+    manifest_path, before = await _complete_ep1(fake_client, tmp_path)
+
+    def _inject_stale_obligation_from_another_notebook(manifest):
+        manifest["episodes"][0].setdefault("pending_source_cleanup", []).append(
+            {"source_id": "S-old", "notebook_id": "nb-old"}
+        )
+
+    ManifestStore(manifest_path).update(_inject_stale_obligation_from_another_notebook)
+    replacement = fake_client.sources._add(before["label"], kind="media")
+
+    adopted = await p.podcast_attempt_adopt(
+        manifest_path, 1, before["output_attempt_id"], feedback_source_id=replacement
+    )
+
+    step = adopted["next_step"]
+    assert "source_delete(notebook_id='nb-old', source_id='S-old')" in step
+    assert "source_delete(notebook_id='nb-1', source_id='S-old')" not in step
+    for row in adopted["source_cleanup_obligations"]:
+        assert (
+            f"source_delete(notebook_id={row['notebook_id']!r}, source_id={row['source_id']!r})"
+            in step
+        )
+
+
+def test_cleanup_call_text_is_rendered_in_exactly_one_place():
+    """紅了的正確反應:把新入口改成呼叫 `_cleanup_sentence`,不是放寬這條。
+    adopt 曾自己拼這句、拿錯 notebook(上一條測試)——各入口自拼正是那個根因。"""
+    import inspect
+
+    assert inspect.getsource(p).count('f"source_delete(notebook_id=') == 1
+
+
 async def test_identity_unknown_obligation_never_prints_an_unexecutable_call(fake_client, tmp_path):
     """身分不明時指引不准印出 `source_delete(notebook_id=None, ...)`。
 
