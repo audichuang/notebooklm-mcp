@@ -6,6 +6,28 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.35 —— 跟上 notebooklm-py 0.8.5:已登出的槽位不再被誤報成「頁面結構改變」
+
+**為什麼**:v0.9.30 事故時 prd 第 3 槽的 `startup_error` 是「CSRF token not found … page structure has
+changed」,讓人往「上游頁面改版」查,實際是 session 被登出。根因在 NotebookLM 端:自 2026-10 起已登出的
+`GET /` 回 200 的無 token 落地頁,不再 302 到 Google 登入頁,0.8.4 的 URL 分類就把它判成結構改變。
+上游 0.8.5(#2479/#2481)改成多問一次 `/login`,回報 `Authentication expired`。
+
+**改了什麼**:
+- `notebooklm-py` 下界 0.8.4→0.8.5(主依賴與 `login` extra 兩處),lock 同步。抬下界而不是只動 lock:
+  `uv tool install git+…` 不讀 uv.lock,只有下界能讓「測的 = 裝的」。
+- 上游的語意變更:冷啟動過期改 raise `AuthError`(`RPCError` 子類,**不是** `ValueError`)。pool 啟動
+  與 `auth_probe` 都是 `except Exception`、`_failover` 刻意不收 `RPCError`,行為不變 —— 死槽跳過的測試
+  參數化補上 `AuthError` 形狀,變異驗證(except 收窄成 `ValueError`)只有新案例轉紅。
+
+**對帳**(照 release-checklist):`compare_sdk_surface.py` 零差異;`_web` 只改 `transport/session_auth.py`,
+其餘改動在 `_auth/`,我們直接 import 的私有符號(`_sanitized_auth_entries`、`psidts_recovery`、`keepalive`、
+`extract_cookies_from_storage`)本體未變;PyPI wheel 的 commit 與驗過的 git tag 同為 `50493ddf`。
+上游 0.8.5 的 PyPI 發佈第一次被它自己的 auth 覆蓋率閘擋下,約兩小時後才上架 —— 期間只有 GitHub release。
+上游的 FastMCP 4.1 / MCP 2.x 只在它的 `[mcp]` extra,我們不裝,`mcp<2` 上界不受影響。
+
+**對呼叫端零契約變更**:37 支工具的描述、input schema 與 server `instructions` 不變,skill repo 不需同步。
+
 ## v0.9.34 —— 發布音檔改 96 kbps mono,檔案約小 62%
 
 **為什麼**:NAS 上 290 集 mp3 共 12.8 GB。NotebookLM 給的是 256k AAC「立體聲」,但左右聲道逐位元相同
