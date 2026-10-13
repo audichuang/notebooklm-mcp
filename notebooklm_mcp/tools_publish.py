@@ -244,22 +244,12 @@ async def _put(client, base: str, token: str, upload_token: str, name: str, data
         raise ValueError(f"upload failed: PUT {name} -> {r.status_code} {r.text[:300]}")
 
 
-def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
-    """把支援的來源正規化成真正 MP3，內嵌 ID3 APIC，回傳決定性 bytes。
+def _probe_audio(mp3_path: str) -> str:
+    """ffprobe 辨識來源 container/codec,回 `_embed_cover` 的處理分類;不支援的一律 ValueError。
 
-    NotebookLM 原始下載常是偽裝成 ``.mp3`` 的 fragmented MP4/AAC；這裡直接轉成
-    96 kbps mono MP3，使實際 container/codec 與 enclosure 的 ``.mp3``/``audio/mpeg``
-    契約一致。NotebookLM 的 256k「立體聲」左右聲道逐位元相同(實測相減 -91 dB),
-    mono 96k 對語音聽不出差、檔案約 -62%。碼率更高的 true MP3 也重壓;已是
-    ≤96k mono 的 true MP3 不重編音訊(重發整季不多一輪有損),只重寫封面。
-    其他格式一律 fail-closed。
-    這是可被測試 monkeypatch 的 seam(多數 publish 測試用假 audio bytes)。"""
-    from mutagen.id3 import APIC, ID3, ID3NoHeaderError
-
-    with open(cover_path, "rb") as f:
-        cover = f.read()
-    cover_mime = "image/png" if cover[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
-
+    抽出來是為了讓 `publish_series` 的 preflight 在任何 PUT 之前先掃過整季:格式辨識是本機
+    可預判的決定性失敗,留在上傳迴圈裡就會在晚集爆掉前把前幾集的 blob 送上去。只跑
+    ffprobe、不轉檔,preflight 不多佔暫存磁碟。"""
     try:
         probe = json.loads(
             subprocess.check_output(
@@ -296,14 +286,32 @@ def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
     if formats == {"mp3"} and codec == "mp3":
         # VBR 等讀不到 bit_rate 的一律當作需要重壓
         compact = stream.get("channels") == 1 and int(stream.get("bit_rate") or 10**9) <= 96000
-        source_kind = "mp3" if compact else "mp3_large"
-    elif "mp4" in formats and codec == "aac":
-        source_kind = "mp4_aac"
-    else:
-        raise ValueError(
-            f"unsupported audio container/codec for publication: "
-            f"format={','.join(sorted(formats)) or 'unknown'} codec={codec or 'unknown'}"
-        )
+        return "mp3" if compact else "mp3_large"
+    if "mp4" in formats and codec == "aac":
+        return "mp4_aac"
+    raise ValueError(
+        f"unsupported audio container/codec for publication: "
+        f"format={','.join(sorted(formats)) or 'unknown'} codec={codec or 'unknown'}"
+    )
+
+
+def _embed_cover(mp3_path: str, cover_path: str) -> bytes:
+    """把支援的來源正規化成真正 MP3，內嵌 ID3 APIC，回傳決定性 bytes。
+
+    NotebookLM 原始下載常是偽裝成 ``.mp3`` 的 fragmented MP4/AAC；這裡直接轉成
+    96 kbps mono MP3，使實際 container/codec 與 enclosure 的 ``.mp3``/``audio/mpeg``
+    契約一致。NotebookLM 的 256k「立體聲」左右聲道逐位元相同(實測相減 -91 dB),
+    mono 96k 對語音聽不出差、檔案約 -62%。碼率更高的 true MP3 也重壓;已是
+    ≤96k mono 的 true MP3 不重編音訊(重發整季不多一輪有損),只重寫封面。
+    其他格式一律 fail-closed。
+    這是可被測試 monkeypatch 的 seam(多數 publish 測試用假 audio bytes)。"""
+    from mutagen.id3 import APIC, ID3, ID3NoHeaderError
+
+    with open(cover_path, "rb") as f:
+        cover = f.read()
+    cover_mime = "image/png" if cover[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+
+    source_kind = _probe_audio(mp3_path)
 
     fd, tmp = tempfile.mkstemp(suffix=".mp3")
     os.close(fd)
@@ -721,6 +729,16 @@ async def publish_series(
             gap = await asyncio.to_thread(verify_file, canonical_audio(ep), resolved_mp3[n])
             if gap:
                 sha_unverified.append(n)
+
+        # 格式辨識也提前(只 ffprobe、不轉檔):ADTS 之類不支援的來源是決定性失敗,留到
+        # 上傳迴圈的 _embed_cover 才爆,前幾集的 mp3/封面已經 PUT 上去了。轉檔本身仍在
+        # 迴圈內——整季先轉好要多佔一季份的暫存磁碟,那是 gotchas-publish 接受的取捨。
+        for ep in manifest_eps:
+            n = int(ep["episode"])
+            try:
+                await asyncio.to_thread(_probe_audio, resolved_mp3[n])
+            except ValueError as exc:  # 同講義預渲染:訊息要指名是哪一集
+                raise ValueError(f"episode {n}: {exc}") from exc
 
         # 講義 HTML 也預先渲染:render_report_html 命中 script/外部資源會 fail-closed,
         # 那是本機可預判的 deterministic 失敗,不該等到前幾集 PUT 完才爆。Markdown 渲染

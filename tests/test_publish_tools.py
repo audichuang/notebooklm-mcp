@@ -22,7 +22,7 @@ from notebooklm_mcp.publish import identity
 
 # Bind the REAL _embed_cover at import time — the autouse no-op fixture below only
 # rebinds the module attribute, so this local name stays the un-patched function.
-from notebooklm_mcp.tools_publish import _embed_cover as _real_embed
+from notebooklm_mcp.tools_publish import _embed_cover as _real_embed, _probe_audio as _real_probe
 
 _NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
@@ -49,11 +49,20 @@ def _atoms(path):
 @pytest.fixture(autouse=True)
 def _noop_embed(monkeypatch):
     """多數 publish 測試用假 audio bytes，不適合真丟給 ffprobe/ffmpeg/mutagen。
-    把 _embed_cover seam 換成「回原始 bytes」；真媒體契約由檔案下方 regression tests 鎖住。"""
+    把 _embed_cover seam 換成「回原始 bytes」、preflight 的 _probe_audio 一律放行；
+    真媒體契約由檔案下方 regression tests(`real_media` fixture)鎖住。"""
     monkeypatch.setattr(
         tools_publish, "_embed_cover", lambda mp3_path, cover_path: Path(mp3_path).read_bytes()
     )
+    monkeypatch.setattr(tools_publish, "_probe_audio", lambda path: "mp3")
     monkeypatch.setattr(tools_publish, "_require_media_binaries", lambda: None)
+
+
+@pytest.fixture
+def real_media(monkeypatch):
+    """改回真 ffprobe/ffmpeg seam(autouse 之後才套用)。"""
+    monkeypatch.setattr(tools_publish, "_embed_cover", _real_embed)
+    monkeypatch.setattr(tools_publish, "_probe_audio", _real_probe)
 
 
 @pytest.fixture
@@ -1279,7 +1288,7 @@ async def test_cover_embedded_into_published_mp3(env, tmp_path, artwork_png, mon
     assert show["episodes"]["1"]["length"] == len(mp3_put)  # enclosure length = 內嵌後大小
 
 
-def test_embed_cover_normalizes_notebooklm_mp4_to_real_mp3(tmp_path):
+def test_embed_cover_normalizes_notebooklm_mp4_to_real_mp3(real_media, tmp_path):
     """NotebookLM 的 fragmented MP4/AAC 即使副檔名叫 .mp3，發布器也必須輸出真正
     MP3 + ID3 APIC，讓副檔名與 RSS audio/mpeg 不再說謊；同輸入輸出必須決定性。"""
     ffmpeg = shutil.which("ffmpeg")
@@ -1344,7 +1353,7 @@ def test_embed_cover_normalizes_notebooklm_mp4_to_real_mp3(tmp_path):
     assert _real_embed(str(src), cover) == out  # 決定性:同輸入同 bytes
 
 
-def test_embed_cover_accepts_mp4_with_leading_free_box(tmp_path):
+def test_embed_cover_accepts_mp4_with_leading_free_box(real_media, tmp_path):
     """MP4 不保證 ftyp 固定在 byte 4；leading free box 仍應由 ffprobe 正確辨識。"""
     ffmpeg = shutil.which("ffmpeg")
     if not (ffmpeg and shutil.which("ffprobe")):
@@ -1392,7 +1401,7 @@ def test_embed_cover_accepts_mp4_with_leading_free_box(tmp_path):
     assert "format_name=mp3" in probe and "codec_name=mp3" in probe
 
 
-def test_embed_cover_preserves_real_mp3_and_adds_id3_artwork(tmp_path):
+def test_embed_cover_preserves_real_mp3_and_adds_id3_artwork(real_media, tmp_path):
     """若呼叫端已把 NotebookLM AAC 轉成真正 MP3，發布器不能再把它 remux 回 MP4
     卻仍用 `.mp3`/`audio/mpeg` 宣告。輸出必須維持 MP3、內嵌 ID3 APIC，且 bytes 決定性。"""
     ffmpeg = shutil.which("ffmpeg")
@@ -1446,7 +1455,9 @@ def test_embed_cover_preserves_real_mp3_and_adds_id3_artwork(tmp_path):
     assert _real_embed(str(src), cover) == out
 
 
-def test_embed_cover_keeps_already_compressed_mp3_without_reencoding(tmp_path, monkeypatch):
+def test_embed_cover_keeps_already_compressed_mp3_without_reencoding(
+    real_media, tmp_path, monkeypatch
+):
     """已經是 ≤96k mono 的 true MP3 不再過 ffmpeg:重發整季時不能每次多一輪有損壓縮。"""
     ffmpeg = shutil.which("ffmpeg")
     if not (ffmpeg and shutil.which("ffprobe")):
@@ -1491,7 +1502,7 @@ def test_embed_cover_keeps_already_compressed_mp3_without_reencoding(tmp_path, m
     assert ID3(str(fixed)).getall("APIC")
 
 
-def test_embed_cover_rejects_unsupported_adts_aac(tmp_path):
+def test_embed_cover_rejects_unsupported_adts_aac(real_media, tmp_path):
     """不是 MP3、也不是 NotebookLM MP4/AAC 的輸入必須 fail-closed，不能只因
     bytes[4:8] != ftyp 就被當成 MP3 後以 audio/mpeg 發布。"""
     ffmpeg = shutil.which("ffmpeg")
@@ -1522,7 +1533,60 @@ def test_embed_cover_rejects_unsupported_adts_aac(tmp_path):
         _real_embed(str(src), _valid_cover(tmp_path, "unsupported-cover.jpg"))
 
 
-def test_embed_cover_reports_missing_ffprobe(tmp_path, monkeypatch):
+async def test_later_episode_unsupported_audio_uploads_nothing(
+    real_media, env, tmp_path, artwork_png, monkeypatch
+):
+    """格式辨識是本機可預判的決定性失敗(同講義渲染):EP02 是 ADTS,舊版要等 EP01
+    的 mp3/封面都 PUT 完、轉到 EP02 的 `_embed_cover` 才爆。preflight 先 ffprobe 每集,
+    一個 blob 都不落地。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not (ffmpeg and shutil.which("ffprobe")):
+        pytest.skip("需要 ffmpeg/ffprobe")
+    captured = _install_mock(monkeypatch)
+
+    def _synth(name, *fmt):
+        out = tmp_path / name
+        subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=mono",
+                "-t",
+                "0.2",
+                *fmt,
+                str(out),
+            ],
+            check=True,
+        )
+        return str(out)
+
+    audio = {
+        1: _synth("probe1.mp3", "-c:a", "libmp3lame", "-b:a", "64k"),
+        2: _synth("probe2.mp3", "-c:a", "aac", "-f", "adts"),
+    }
+    eps = [
+        {
+            "episode": n,
+            "title": f"第{n}集",
+            "description": f"第{n}集重點整理。",
+            "mp3_path": audio[n],
+            "cover_path": _valid_cover(tmp_path, f"probe{n}-cover.jpg"),
+        }
+        for n in (1, 2)
+    ]
+    manifest = _manifest(tmp_path, eps, "probe.json")
+
+    with pytest.raises(ValueError, match=r"episode 2: .*unsupported audio container/codec"):
+        await _publish(manifest, artwork_png)
+    assert captured == []  # EP01 一個 blob 都沒落地
+
+
+def test_embed_cover_reports_missing_ffprobe(real_media, tmp_path, monkeypatch):
     src = tmp_path / "source.mp3"
     src.write_bytes(b"audio")
     cover = _valid_cover(tmp_path, "missing-ffprobe-cover.jpg")
@@ -1536,7 +1600,7 @@ def test_embed_cover_reports_missing_ffprobe(tmp_path, monkeypatch):
         _real_embed(str(src), cover)
 
 
-def test_embed_cover_reports_missing_ffmpeg(tmp_path, monkeypatch):
+def test_embed_cover_reports_missing_ffmpeg(real_media, tmp_path, monkeypatch):
     src = tmp_path / "source.mp3"
     src.write_bytes(b"audio")
     cover = _valid_cover(tmp_path, "missing-ffmpeg-cover.jpg")
@@ -1560,7 +1624,7 @@ def test_embed_cover_reports_missing_ffmpeg(tmp_path, monkeypatch):
         _real_embed(str(src), cover)
 
 
-def test_embed_cover_ffmpeg_call_includes_timeout(tmp_path, monkeypatch):
+def test_embed_cover_ffmpeg_call_includes_timeout(real_media, tmp_path, monkeypatch):
     """M4:ffprobe(30s)/Chrome(180s)都有 timeout,ffmpeg 是唯一沒有的外部命令——
     補上避免卡住的轉檔行程讓整季發布永遠掛著。"""
     src = tmp_path / "source.mp3"
@@ -1589,7 +1653,7 @@ def test_embed_cover_ffmpeg_call_includes_timeout(tmp_path, monkeypatch):
     assert captured_kwargs.get("timeout") == 600
 
 
-def test_embed_cover_ffmpeg_timeout_raises_value_error(tmp_path, monkeypatch):
+def test_embed_cover_ffmpeg_timeout_raises_value_error(real_media, tmp_path, monkeypatch):
     """ffmpeg 卡住超過 timeout 必須 fail-closed 成 ValueError,與 ffprobe 那支的
     錯誤契約一致,不是讓原生 subprocess.TimeoutExpired 往外傳。"""
     src = tmp_path / "source.mp3"
@@ -1615,7 +1679,7 @@ def test_embed_cover_ffmpeg_timeout_raises_value_error(tmp_path, monkeypatch):
         _real_embed(str(src), cover)
 
 
-def test_embed_cover_ffmpeg_nonzero_exit_raises_value_error(tmp_path, monkeypatch):
+def test_embed_cover_ffmpeg_nonzero_exit_raises_value_error(real_media, tmp_path, monkeypatch):
     """ffmpeg 非 0 退出碼(check=True 觸發的 CalledProcessError)必須 fail-closed 成
     ValueError 且帶 returncode,與 ffprobe 那支的錯誤契約一致,不是讓原生
     subprocess.CalledProcessError 往外傳。"""
@@ -1682,7 +1746,7 @@ async def test_audio_duration_hms_runs_off_event_loop_thread(
 
 
 async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(
-    env, tmp_path, artwork_png, monkeypatch
+    real_media, env, tmp_path, artwork_png, monkeypatch
 ):
     """端到端鎖住發布契約：真 NotebookLM-like MP4/AAC 經 publish_series 後，
     上傳 bytes 必須是 MP3，且 enclosure 同時使用 .mp3 與 audio/mpeg。"""
@@ -1690,7 +1754,6 @@ async def test_publish_real_notebooklm_mp4_uploads_genuine_mp3(
     if not (ffmpeg and shutil.which("ffprobe")):
         pytest.skip("需要 ffmpeg/ffprobe")
     captured = _install_mock(monkeypatch)
-    monkeypatch.setattr(tools_publish, "_embed_cover", _real_embed)
     src = tmp_path / "notebooklm.mp3"
     subprocess.run(  # noqa: ASYNC221 —— 測試內刻意用同步 subprocess 取得真實 ffmpeg/ffprobe 產物
         [
