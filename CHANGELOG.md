@@ -6,6 +6,31 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.36 —— adopt 的清理指引不再指錯 notebook;晚集音檔格式不支援時零 PUT
+
+**為什麼**:2026-10-13 的架構審查用離線 probe 重現兩件事。
+1. 一集同時留有**別本** notebook 的舊清理義務時,`podcast_attempt_adopt` 的
+   `source_cleanup_obligations` 正確寫 `S-old → nb-old`,`next_step` 卻寫
+   `source_delete(notebook_id='nb-1', source_id='S-old')`。T4 修了資料、漏了文字;retract 那邊早有正確的
+   逐筆 renderer,adopt 自己再拼一份 —— 「各入口自己拼指引」這個根因的又一次現形。
+2. 整季 EP01 合法、EP02 是 ADTS AAC 時,`publish_series` 先 PUT 了 EP01 的 mp3 與封面才在 EP02 爆掉。
+   格式辨識是本機決定性失敗,卻只在上傳迴圈內的 `_embed_cover` 裡做。
+
+**改了什麼**:
+- `tools_podcast._cleanup_sentence(rows)` 成為清理句的唯一 renderer,retract 與 adopt 共用(adopt 改傳逐筆
+  義務)。tripwire:該 f-string 在 `tools_podcast` 只准出現一次 —— 紅了的正確反應是改呼叫 helper。
+- `tools_publish._probe_audio` 從 `_embed_cover` 抽出(行為、錯誤訊息不變),preflight 逐集先跑一次,
+  錯誤訊息前綴 `episode N:`。只辨識不轉檔。
+- **刻意沒做**:審查另提的「四個入口共用完整指引 deep module」與「整季先轉檔到暫存磁碟再上傳」。前者目前只有
+  清理句一處反例,為它重設介面代價大於問題;後者要多佔一季份暫存磁碟,換到的只是網路/ffmpeg 失敗時少留
+  orphan blob,那是 gotchas-publish 已接受的 media-first 代價。
+
+**驗收**:第一層(離線)。兩條回歸測試都用審查 probe 的同一形狀;publish 那條用真 ffmpeg 合成音訊,
+突變(拿掉 preflight 呼叫)確認會紅。改到的是工具**回傳**文字,不是描述 / `instructions`,eval harness
+的 dry-run stub 看不到回傳,故不跑第二層。
+
+**對呼叫端零契約變更**:37 支工具的描述、input schema 與 server `instructions` 不變,skill repo 不需同步。
+
 ## v0.9.35 —— 跟上 notebooklm-py 0.8.5:已登出的槽位不再被誤報成「頁面結構改變」
 
 **為什麼**:v0.9.30 事故時 prd 第 3 槽的 `startup_error` 是「CSRF token not found … page structure has
