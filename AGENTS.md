@@ -81,7 +81,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 [docs/design-notes.md](docs/design-notes.md) = 模組設計細節;`docs/gotchas-*.md` = 按需載入的雷區(路由表見 §Gotchas 末尾);
 `docs/superpowers/` = 設計/計畫/findings。**SKILL.md 路由層 + references 不在本 repo**,在 `audi-skill/notebooklm`。
 
-## Gotchas(notebooklm-py 0.8.4,pin `>=0.8.4,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
+## Gotchas(notebooklm-py 0.8.5,pin `>=0.8.5,<0.9`;以**實裝版本**為準,不是 GitHub HEAD)
 
 - **`mcp[cli]` 必須有上界(`>=1.28.1,<2`)**:`uv tool install git+…` **不讀 `uv.lock`**,消費端每次安裝都自由解析成當下
   最新 —— 上界擋 2.0 被靜默吃進去。lock 與實裝之間的漂移會自己長回來(已量到三次,且曾帶行為差異),

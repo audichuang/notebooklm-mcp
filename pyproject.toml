@@ -16,7 +16,10 @@ dependencies = [
     # 因此釘在 `_web.*`(在 0.8.1 不存在)。**production code 兩版都跑得起來**,
     # 抬下界是為了讓「測的」與「裝的」是同一版,不是功能需求。
     # 下界 0.8.3→0.8.4:消費端全新安裝已解析到 0.8.4,同上理由讓測的=裝的;0.8.4 的 set_users 多了 readback 驗證(見 CHANGELOG v0.9.29)。
-    "notebooklm-py>=0.8.4,<0.9",
+    # 下界 0.8.4→0.8.5:上游 #2479 讓已登出的槽位回報 `Authentication expired`,不再誤報成
+    # 「CSRF token not found … page structure has changed」(v0.9.30 事故的誤導訊息);
+    # 冷啟動過期改 raise `AuthError`(非 ValueError),pool 啟動是 except Exception 不受影響。
+    "notebooklm-py>=0.8.5,<0.9",
     # 上界是硬需求:`uv tool install git+…` **不讀 uv.lock**,消費端每次安裝都自由解析成
     # 當下最新,所以無上界的話 mcp 2.0 一出來,四台機器下一次重裝就靜默吃到 breaking 版本。
     # 下界 1.28.1 = 第一個沒有已知 advisory 的版本(GHSA-jpw9-pfvf-9f58、GHSA-hvrp-rf83-w775 於 1.27.2 修;
@@ -43,7 +46,7 @@ dependencies = [
 # Only the LOCAL login machine needs a browser; the 3 VMs auth via Doppler
 # (NOTEBOOKLM_AUTH_JSON) and never install this. After installing, run:
 #   uv run playwright install chromium
-login = ["notebooklm-py[browser]>=0.8.4,<0.9"]
+login = ["notebooklm-py[browser]>=0.8.5,<0.9"]
 
 [project.scripts]
 # ⚠️ 命令叫 `nblm-mcp` 而不是 `notebooklm-mcp`,是因為 **notebooklm-py 0.8.0 自己也宣告了一支

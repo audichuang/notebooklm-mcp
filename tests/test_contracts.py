@@ -721,7 +721,11 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
         # 0.8.3 runs (lowest-direct was green) but is excluded so the tested version equals the installed one;
         # 0.8.4 also changed sharing.set_users semantics.
         assert Version("0.8.3") not in requirement.specifier
-        assert Version("0.8.4") in requirement.specifier
+        # 0.8.4 runs too, but reports a signed-out slot as "CSRF token not found ... page
+        # structure has changed" (upstream #2479) — the misleading startup_error from the
+        # v0.9.30 incident. Excluded so the tested version equals the installed one.
+        assert Version("0.8.4") not in requirement.specifier
+        assert Version("0.8.5") in requirement.specifier
 
 
 def test_rotation_lock_and_file_lock_semantics_that_app_lifespan_depends_on(tmp_path):
