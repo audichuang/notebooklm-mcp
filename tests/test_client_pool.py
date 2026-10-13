@@ -19,6 +19,7 @@ from notebooklm.auth import (
     NOTEBOOKLM_REFRESH_CMD_ENV,
     NOTEBOOKLM_REFRESH_CMD_MIDSESSION_ENV,
 )
+from notebooklm.exceptions import AuthError
 
 from notebooklm_mcp import app, runtime
 
@@ -826,13 +827,16 @@ async def test_every_client_is_closed_on_normal_shutdown(monkeypatch):
     assert not built[0].path.parent.exists(), "憑證目錄也要跟著收掉"
 
 
-def _from_storage_failing_for(dead: set[str], built):
-    """`from_storage` 替身:憑證字串在 `dead` 裡的槽位建不出 client(模擬 cookie 已死)。"""
+def _from_storage_failing_for(dead: set[str], built, error=None):
+    """`from_storage` 替身:憑證字串在 `dead` 裡的槽位建不出 client(模擬 cookie 已死)。
+
+    預設丟 0.8.4 的形狀(ValueError);0.8.5 起已登出改丟 `AuthError`
+    (RPCError 子類,**不是** ValueError),由 `error` 注入。"""
 
     def fake(*args, path=None, **kwargs):
         cred = Path(path).read_text(encoding="utf-8")
         if cred in dead:
-            raise ValueError(f"CSRF token not found ({cred[-40:]!r})")
+            raise error or ValueError(f"CSRF token not found ({cred[-40:]!r})")
         client = _FakeClientCM(cred=cred, path=Path(path))
         built.append(client)
         return client
@@ -840,7 +844,19 @@ def _from_storage_failing_for(dead: set[str], built):
     return fake
 
 
-async def test_a_dead_slot_is_skipped_instead_of_taking_the_server_down(monkeypatch, caplog):
+# The pinned SDK (>=0.8.5) raises AuthError for a signed-out slot; keep the old ValueError
+# shape too, since the skip policy must not depend on which exception family upstream picks.
+@pytest.mark.parametrize(
+    ("error", "marker"),
+    [
+        (None, "CSRF token not found"),
+        (AuthError("Authentication expired or invalid."), "Authentication expired"),
+    ],
+    ids=["value-error-0.8.4", "auth-error-0.8.5"],
+)
+async def test_a_dead_slot_is_skipped_instead_of_taking_the_server_down(
+    monkeypatch, caplog, error, marker
+):
     """一個槽位的 cookie 死了,其他槽位照常服役 —— 不是整台 server 起不來。
 
     v0.9.30 實際事故:prd 第 3 槽 `CSRF token not found`,於是**所有機器**上的 MCP
@@ -854,7 +870,9 @@ async def test_a_dead_slot_is_skipped_instead_of_taking_the_server_down(monkeypa
     monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON_3", _cred("3"))
     built = []
     monkeypatch.setattr(
-        app.NotebookLMClient, "from_storage", _from_storage_failing_for({_cred("2")}, built)
+        app.NotebookLMClient,
+        "from_storage",
+        _from_storage_failing_for({_cred("2")}, built, error),
     )
 
     with caplog.at_level(logging.WARNING, logger=app.logger.name):
@@ -863,7 +881,7 @@ async def test_a_dead_slot_is_skipped_instead_of_taking_the_server_down(monkeypa
             assert [c.cred for c in built] == [_cred("1"), _cred("3")]
             rows = runtime.slot_diagnostics()
             assert [r["slot"] for r in rows] == [1, 2, 3]
-            assert "CSRF token not found" in rows[1]["startup_error"]
+            assert marker in rows[1]["startup_error"]
             assert "startup_error" not in rows[0] and "startup_error" not in rows[2]
             # production 的 Slot.number 本身(auth_check 的 slot 欄來源)也要是 1/2/3。
             assert [(s.number, s.dead) for s in runtime.slots_in_order()] == [
@@ -872,7 +890,7 @@ async def test_a_dead_slot_is_skipped_instead_of_taking_the_server_down(monkeypa
                 (3, False),
             ]
     warning = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
-    assert "NOTEBOOKLM_AUTH_JSON_2" in warning and "CSRF token not found" in warning
+    assert "NOTEBOOKLM_AUTH_JSON_2" in warning and marker in warning
     # 跳過的槽位不會留下半開的 client;活著的兩個正常關閉、憑證目錄收掉。
     assert [c.closed for c in built] == [True, True]
     assert not built[0].path.parent.exists()
