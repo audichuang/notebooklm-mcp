@@ -7,28 +7,28 @@
 
 ---
 
-- **紅線:任何 `safe_next_action` 與狀態相關的指引訊息,一律由 `_attempt_capabilities()` /
-  `_attempt_next_step()` 產生,不准手寫 if/else。** 這個根因已經現形七次,每次的形狀都是
+- **紅線:任何 `safe_next_action` 與狀態相關的指引訊息,一律由 `attempt_capabilities()` /
+  `attempt_next_step()`(`attempt_guidance.py`)產生,不准手寫 if/else。** 這個根因已經現形七次,每次的形狀都是
   「指引在它自己產生的狀態下不可執行」——v0.9.1 FAIL-1(叫人跑一支在該狀態下自己也
   permission denied 的工具)→ v0.9.3(停點指向會拒收它的工具)→ v0.9.4 FINDING-2
   (拒絕訊息那句在該狀態下是假的)→ v0.9.5 一次六條(其中三條是修上一條時自己種的)
   → v0.9.6(把「可免旗標 retract」誤當「可原樣重送」,`failed`/`removed` 兩者答案相反,
   共用一個布林就必然教錯一邊)→ v0.9.7 FINDING-4 → **這一輪的 `_reuse_frozen_input_attempt`**
   (rearm 卡住時手寫 `f"frozen attempt is {status!r}; reconcile or resume it instead of
-  redispatching"`,沒有查 `_attempt_capabilities` 就叫呼叫端去做在那個狀態下不一定做得到
+  redispatching"`,沒有查 `attempt_capabilities` 就叫呼叫端去做在那個狀態下不一定做得到
   的事)。**每次的修法都是「補那一格」**——判斷分散在各自為政的布林 + 十幾處手寫訊息裡,
   永遠會有沒補到的下一格,這條紀律沒寫進常駐文件正是第七次現形的直接原因。
-  `_attempt_capabilities()`(單一事實來源,對狀態組合的笛卡爾積由
-  `tests/test_attempt_capabilities.py` 逐格鎖住)與 `_attempt_next_step()`(把結論翻成
+  `attempt_capabilities()`(單一事實來源,對狀態組合的笛卡爾積由
+  `tests/test_attempt_capabilities.py` 逐格鎖住)與 `attempt_next_step()`(把結論翻成
   一句可執行的話)已經把這個結構收斂掉了:新程式碼要教呼叫端「下一步該做什麼」,
   **先查這兩個函式有沒有覆蓋這個狀態**,沒覆蓋就擴充它們的笛卡爾積或加新 key,
   不要在呼叫點旁邊再長一條 if/else——那條 if/else 就是第八次現形的種子。
-  **清理句(`source_delete(notebook_id=…, source_id=…)`)只准由 `_cleanup_sentence(rows)` 產生**,
+  **清理句(`source_delete(notebook_id=…, source_id=…)`)只准由 `cleanup_sentence(rows)` 產生**,
   逐筆讀義務自己記錄的 notebook:v0.9.36 前 adopt 自己拼一份、對每筆套這次 adopt 的
   notebook,結構化資料對、文字指錯本(tripwire 在 `test_attempt_retract.py` 鎖 f-string 只出現一次)。
   **這條紅線只管「訊息從哪裡來」,不管「回傳完不完整」——那是下一條的守備範圍**
   （第十一次現形正是在這條紅線徹底遵守之後才發生的:`safe_next_action` 確實是
-  `_attempt_capabilities()` 算的,但公開回傳漏了那個動作要用的目標身分)。
+  `attempt_capabilities()` 算的,但公開回傳漏了那個動作要用的目標身分)。
   **「外部前置條件不算 attempt 狀態,所以可以寫死」是假的 —— 那正是第八次現形。**
   這句話曾經逐字寫在這裡,用來合理化 `podcast_series` 的認證停點硬寫
   `safe_next_action="podcast_series"`(理由是「重登後重入冪等的 series,再由它交給
@@ -47,8 +47,8 @@
   依然是被 retract 的那一顆(A,稽核主體)。呼叫端只讀公開回傳、照著 `safe_next_action`
   執行,實際上是拿 A 的 id 去做 B 的事:`podcast_episode_reconcile(A)` 撞 tombstone、
   `podcast_attempt_retract(A)` 冪等重跑撞回一模一樣的回傳形成無限迴圈。
-  修法是 `_attempt_capabilities()` 額外算 `safe_next_attempt_id` / `safe_next_artifact_id`
-  （`_safe_next_target()`,單一映射:認 `safe_next_action` 的字面值對應哪種身分,
+  修法是 `attempt_capabilities()` 額外算 `safe_next_attempt_id` / `safe_next_artifact_id`
+  （`attempt_guidance._safe_next_target()`,單一映射:認 `safe_next_action` 的字面值對應哪種身分,
   不重覆那條「哪個動作」的優先序 if/else——重覆等於下一次改優先序時兩邊漏改一邊,
   就是第十二次現形的種子）。**任何委派/交棒場景(把 `safe_next_action` 換成別顆
   attempt 算出來的值)都要連目標身分一起換**,回傳的稽核欄位(如 `attempt_id`)與
@@ -99,7 +99,7 @@
   `remote`;③**驗證一律先於變更**。事故經過見 [CHANGELOG](../CHANGELOG.md) v0.7.2。
   **現況更新**:這支函式現在只做一件事——真的要重送時的逐欄位相等閘門(notebook /
   標題 / brief 雜湊 / settings / frozen bundle 綁定,少一個都不放行)。它**不再是**
-  「能不能重送」這句指引訊息的來源——那個角色已經被上一條紅線講的 `_attempt_capabilities()`
+  「能不能重送」這句指引訊息的來源——那個角色已經被上一條紅線講的 `attempt_capabilities()`
   接手,它的 `can_resend` 欄位用的是更粗的判準(`never_dispatched and not is_output`),
   因為產生指引訊息的當下往往連呼叫端下一次會帶什麼請求都還不知道,沒東西可比對逐字
   相同。兩者故意不是同一個判準,別把它們合併成一個。
@@ -150,7 +150,7 @@
   遠端副作用。候選判準只有一份(`unresolved_upload_candidates`),finalize 對帳與清理義務
   共用;**再長出第二份就等於保證有一天只有一邊被修到**。
 - **（F7,v0.9.10 盲審,只記不改)算 caps 的位置,adopt/retract 跟 reconcile 不一致**:
-  `podcast_attempt_adopt`(`_attempt_capabilities` 在 `store.update` 的 mutate closure
+  `podcast_attempt_adopt`(`attempt_capabilities` 在 `store.update` 的 mutate closure
   **裡面**算,拿 `store.update` 已經回傳的一致 manifest)與 `podcast_attempt_retract`
   同樣如此;但 `podcast_episode_reconcile` 的四個回傳點丟掉 `store.update` 回傳的一致
   manifest,改在鎖**外面**重新 `store.read()` + `find_attempt()`。單 process 不可達

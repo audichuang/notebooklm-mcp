@@ -296,7 +296,7 @@ async def test_series_refuses_to_supersede_an_attempt_it_does_not_own(fake_clien
     失敗後直接重呼 `podcast_series`,兩次 dispatch 送出 `[["src-1"], None]` —— 第二次
     靜默改讀整本筆記本(含後面各集的回錄音檔),而工具回報 `complete=True`。
 
-    `_attempt_next_step()` 的 `settled` 分支註解早就點名這個形狀、也刻意不教人重呼
+    `attempt_next_step()` 的 `settled` 分支註解早就點名這個形狀、也刻意不教人重呼
     series;但**只防了訊息、沒防程式路徑**——真的有人呼進來時 supersede 分支照做。
     接手守門必須擺在「會產生新 dispatch」的**共同上游**,而不是只有 prepared/
     not_accepted 那兩格。
@@ -319,7 +319,7 @@ async def test_series_refuses_to_supersede_an_attempt_it_does_not_own(fake_clien
 
 
 async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(fake_client, tmp_path):
-    """訊息必須由 `_attempt_capabilities()` 產生 —— 手寫的那句在這一格是**假的**。
+    """訊息必須由 `attempt_capabilities()` 產生 —— 手寫的那句在這一格是**假的**。
 
     `_assert_series_owns_attempt` 原本的 owner_hint 無條件說「re-calling
     podcast_episode with the identical arguments … resends that same attempt」,
@@ -373,7 +373,7 @@ async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(fake_client
 async def test_series_does_not_supersede_a_frozen_bundle_attempt(fake_client, tmp_path):
     """歸屬不能只比 settings —— frozen bundle 的三個音訊設定可以剛好與整季相同。
 
-    `_regeneration_entry_point()` 看的是 `input_bundle`(有 bundle 就一定是
+    `regeneration_entry_point()` 看的是 `input_bundle`(有 bundle 就一定是
     `podcast_episode` 的),但 settings 逐字等值那條捷徑排在它前面,於是一顆
     「不指名 source_ids、language/format/length 全用預設」的 frozen attempt 會被判成
     series 自己的,supersede 掉、改讀整本筆記本 —— 與 source_ids 那條同型的內容錯置,
@@ -425,7 +425,7 @@ async def test_a_drifted_argument_is_not_told_to_re_call_series(fake_client, tmp
     """參數漂移**不是**交棒 —— 指引不准把人送回剛剛拒絕它的那支工具。
 
     這一格的 attempt 形狀是 series 自己的(只有 language 對不上),所以
-    `_attempt_capabilities()` 會算出 `can_resend` → `regeneration_entry` =
+    `attempt_capabilities()` 會算出 `can_resend` → `regeneration_entry` =
     `podcast_series`。若接手判準只問「settings 一不一樣」就把 caps 的話貼上來,
     訊息會變成「原樣重呼 podcast_series」——而呼叫端正是被 podcast_series 拒絕的。
     自我迴圈,又一次「指引在它自己產生的狀態下不可執行」。
@@ -1057,7 +1057,7 @@ async def test_the_zero_candidate_reconcile_stop_carries_a_way_out(fake_client, 
     step = out["next_step"]
     assert "artifact_list" in step, step
     # 這顆 attempt 是全新單集、沒有 output 接手,`needs_abandon_flag` 必為 True——
-    # 訊息要跟著同一顆 caps 走(`_retract_hint`),不能寫死另一個分支的措辭。
+    # 訊息要跟著同一顆 caps 走(`retract_hint`),不能寫死另一個分支的措辭。
     assert "abandon_in_flight=true" in step, step
     assert "不需要" not in step, step
     # 候選窗還沒關:不准說「繼續對帳沒有用」,那句只在窗關了之後才是真的

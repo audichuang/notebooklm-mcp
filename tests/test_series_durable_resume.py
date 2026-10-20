@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import tools_basic as b, tools_podcast as p
+from notebooklm_mcp import attempt_guidance as g, tools_basic as b, tools_podcast as p
 
 EPS3 = [
     {"title": "心法篇", "brief": "1"},
@@ -44,13 +44,13 @@ async def test_safe_next_action_vocabulary_names_public_mcp_tools():
         "podcast_attempt_retract",
         "podcast_series",
         "source_delete",
-    } == p.SAFE_NEXT_ACTIONS
+    } == g.SAFE_NEXT_ACTIONS
     # 白名單的意義是「一定是真的 MCP 工具名」,不是「一定在本模組」——source_delete 住在
     # tools_basic,所以對真正的工具註冊表驗,而不是對模組屬性。
     from notebooklm_mcp import app
 
     registered = {tool.name for tool in await app.mcp.list_tools()}
-    assert registered >= p.SAFE_NEXT_ACTIONS
+    assert registered >= g.SAFE_NEXT_ACTIONS
 
 
 async def _complete_episode(fake_client, tmp_path, episode_n: int) -> None:
@@ -688,7 +688,7 @@ async def test_series_retract_of_a_middle_episode_does_not_regenerate_reading_th
 ):
     """T3(P1,`scratchpad/verify-A1/r2_series_retract.py` 的序列):整季跑完 →
     retract 中段集(EP02)→ 刪完 stale source → 照 safe_next_action 重呼
-    podcast_series。舊行為:EP02 沒有 output,`_regeneration_entry_point` 對 series
+    podcast_series。舊行為:EP02 沒有 output,`regeneration_entry_point` 對 series
     自己建的 settings 回 `ACTION_SERIES`,series 就對 EP02 全新一集 dispatch——不指名
     來源 = 讀整本筆記本,把 EP03 的回錄音檔洩進 EP02。
 

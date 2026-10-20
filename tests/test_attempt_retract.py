@@ -20,7 +20,12 @@ from pathlib import Path
 import pytest
 from notebooklm.types import ArtifactType
 
-from notebooklm_mcp import audio_finalize, tools_basic as b, tools_podcast as p
+from notebooklm_mcp import (
+    attempt_guidance as g,
+    audio_finalize,
+    tools_basic as b,
+    tools_podcast as p,
+)
 from notebooklm_mcp._status import TerminalGenerationError
 from notebooklm_mcp.manifest_store import ManifestStore
 
@@ -83,7 +88,7 @@ def _assert_public_guidance_matches_capabilities(
 ) -> None:
     snapshot = ManifestStore(manifest_path).read()
     episode, attempt = p.find_attempt(snapshot, 1, attempt_id, allow_retracted=post_retract)
-    caps = p._attempt_capabilities(
+    caps = g.attempt_capabilities(
         episode,
         attempt,
         attempt_id,
@@ -95,7 +100,7 @@ def _assert_public_guidance_matches_capabilities(
         assert PUBLIC_GUIDANCE_EXCEPTIONS[exception_key].strip()
         return
     assert result["safe_next_action"] == caps["safe_next_action"]
-    assert result["next_step"] == p._attempt_next_step(caps)
+    assert result["next_step"] == g.attempt_next_step(caps)
 
 
 async def test_retract_clears_output_evidence_and_keeps_the_audit_trail(fake_client, tmp_path):
@@ -1075,8 +1080,8 @@ def _upload(manifest_path, attempt_id):
 def _attempt_next_step_for(manifest_path, attempt_id):
     snapshot = ManifestStore(manifest_path).read()
     episode, attempt = p.find_attempt(snapshot, 1, attempt_id, allow_retracted=True)
-    caps = p._attempt_capabilities(episode, attempt, attempt_id, post_retract=True)
-    return p._attempt_next_step(caps)
+    caps = g.attempt_capabilities(episode, attempt, attempt_id, post_retract=True)
+    return g.attempt_next_step(caps)
 
 
 def _age_the_dispatch_window(manifest_path, attempt_id):
@@ -2327,7 +2332,7 @@ async def test_the_audit_record_says_whether_the_flag_was_used(fake_client, tmp_
 async def test_the_audit_record_names_the_authorization_basis(fake_client, tmp_path):
     """**F4:v0.9.6 補的 `authorization_basis` / `remote_status_at_retraction` 零測試。**
 
-    `grep -rn authorization_basis tests/` 舊只命中 `_attempt_capabilities` 的**回傳值**
+    `grep -rn authorization_basis tests/` 舊只命中 `attempt_capabilities` 的**回傳值**
     斷言(`test_attempt_capabilities.py`),沒有一處讀 retraction **落盤紀錄**;
     `remote_status_at_retraction` 在 tests/ 舊全零命中。這兩個欄位是 v0.9.6 用來取代
     「只記呼叫端傳了什麼」(`abandon_in_flight`)的**實際生效授權依據**——欄位名稱、
@@ -2838,11 +2843,21 @@ async def test_adopt_next_step_text_names_each_obligations_own_notebook(fake_cli
 
 
 def test_cleanup_call_text_is_rendered_in_exactly_one_place():
-    """紅了的正確反應:把新入口改成呼叫 `_cleanup_sentence`,不是放寬這條。
-    adopt 曾自己拼這句、拿錯 notebook(上一條測試)——各入口自拼正是那個根因。"""
-    import inspect
+    """紅了的正確反應:把新入口改成呼叫 `cleanup_sentence`,不是放寬這條。
+    adopt 曾自己拼這句、拿錯 notebook(上一條測試)——各入口自拼正是那個根因。
+    掃整個套件,不是只掃兩個模組:第三個模組自拼同樣是這個根因。"""
+    from pathlib import Path
 
-    assert inspect.getsource(p).count('f"source_delete(notebook_id=') == 1
+    pkg = Path(g.__file__).parent
+    hits = [
+        f
+        for f in pkg.rglob("*.py")
+        if 'f"source_delete(notebook_id=' in f.read_text(encoding="utf-8")
+    ]
+    # cleanup_obligation 的生成前 gate 是另一種句型(`source_id=...` 佔位、notebook 就是它剛 list 的那本),
+    # 不是逐筆義務的清理句;新增第三個檔案才是根因重現。
+    assert sorted(f.name for f in hits) == ["attempt_guidance.py", "cleanup_obligation.py"]
+    assert Path(g.__file__).read_text(encoding="utf-8").count('f"source_delete(notebook_id=') == 1
 
 
 async def test_identity_unknown_obligation_never_prints_an_unexecutable_call(fake_client, tmp_path):

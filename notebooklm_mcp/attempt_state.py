@@ -19,7 +19,7 @@ failover 稽核)。仍在模組外的寫入:audio_finalize 的 remote 終態(`re
 投影(鍵集合、promotion、retract 的 pop、述詞)在 `output_projection`。
 
 不放在這裡的東西:
-- 指引訊息(`_attempt_capabilities()` / `_attempt_next_step()` 在 `tools_podcast`,
+- 指引訊息(`attempt_capabilities()` / `attempt_next_step()` 在 `attempt_guidance`,
   docs/gotchas-attempt.md 的紅線)——需要它們的守門(promotion 的 legacy 衝突)留在
   呼叫端,本模組只收守門之後的純欄位寫入。
 - 鎖內/鎖外算 caps 的時機(F7)——呼叫端各自維持原樣(`AttemptRef.mutate` 的 callback
@@ -488,7 +488,7 @@ def record_retraction(episode: dict, attempt: dict, attempt_id: str, retraction:
 
     tombstone 的內容(`retracted_output`、清理義務、授權依據…)由
     `podcast_attempt_retract` 組好傳進來——要讀 finalize checkpoint,那個形狀只在
-    `audio_finalize`。前後兩次 `_attempt_capabilities` 也留在呼叫端的 mutate 裡(F7)。
+    `audio_finalize`。前後兩次 `attempt_capabilities` 也留在呼叫端的 mutate 裡(F7)。
     """
     attempt["retraction"] = retraction
     episode.setdefault("retracted_attempt_ids", []).append(attempt_id)

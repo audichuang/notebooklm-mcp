@@ -585,7 +585,7 @@ async def test_reuse_frozen_input_attempt_points_at_a_way_out_that_actually_work
     手寫死「reconcile or resume it」,但兩條建議都走不通:reconcile 被
     `dispatch_status not in (...)` 的狀態檢查擋(它只收 acceptance_unknown /
     reconciliation_ambiguous),resume 因為終態已定直接拋 `TerminalGenerationError`。
-    而同一顆 attempt 餵進 `_attempt_capabilities` 的答案是 `authorization_basis=
+    而同一顆 attempt 餵進 `attempt_capabilities` 的答案是 `authorization_basis=
     "settled"`——免旗標 retract 才是唯一走得通的出口。
     """
     workspace = tmp_path / "workspace"

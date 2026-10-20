@@ -355,7 +355,7 @@ async def test_permission_denied_is_not_acceptance_unknown(fake_client, tmp_path
     assert "permission denied" in attempt["remote"]["error"]
     assert "notebook_share_with_pool" in attempt["remote"]["error"], (
         "manifest 的 remote.error 要帶出補分享的下一步,不是只留原始的 "
-        '"permission denied"——原本 _mark_not_accepted 收到的是建 '
+        '"permission denied"——原本 AttemptRef.mark_not_accepted 收到的是建 '
         "NotebookAccessDenied **之前**的原始 ClientError,指引整條蒸發"
     )
 
@@ -453,7 +453,7 @@ async def test_attempt_rotate_for_quota_tells_runtime_which_account_was_actually
     tmp_path, monkeypatch
 ):
     """**P1**:`rotate_for_quota` 手上的 `from_account` 是這次 dispatch 實際用過的
-    那一個——它自己的 docstring 逐字這樣寫,卻只拿去記帳(`_record_dispatch_failover`),
+    那一個——它自己的 docstring 逐字這樣寫,卻只拿去記帳(`AttemptRef.record_dispatch_failover`),
     沒轉給 `runtime.rotate_client`。冷卻要進的是**真正被拒**的那個槽位,不是「此刻游標
     指到誰」——兩者在並行 dispatch 下可能不是同一個。
 
@@ -666,10 +666,10 @@ async def test_tried_guard_does_not_leave_a_phantom_failover_record(
     fake_client, tmp_path, monkeypatch
 ):
     """**P1**:`tried` 命中前,`rotate_for_quota` 已經做完兩個副作用——
-    `runtime.rotate_client(refused=...)`(冷卻)與 `_record_dispatch_failover`
+    `runtime.rotate_client(refused=...)`(冷卻)與 `AttemptRef.record_dispatch_failover`
     (把 `dispatch.account` 改寫成 to_account、往 append-only 的 `errors[]` 多寫
     一筆)。若 `tried` 這道門放在呼叫端、事後才丟棄回傳值,冷卻確實該進沒錯,但
-    `_record_dispatch_failover` 那筆『換成 to_account』的紀錄從未真正生效
+    `AttemptRef.record_dispatch_failover` 那筆『換成 to_account』的紀錄從未真正生效
     (呼叫端沒有真的拿它去送),manifest 就會留下一次從未發生的換帳號,還覆寫掉
     上一輪才寫下的、真正生效的 `dispatch.account`。
 

@@ -128,7 +128,7 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
   的唯一欄位寫入;`bind_reconciled` / `bind_sdk_heuristic` / `bind_caller_verified` 各帶自己的守門(`new_resume_binding` 只建底稿,不帶守門),**守門差異是現況而非 bug 清單**:reconciled 不查來源狀態、sdk 允許四個來源且重複綁為 no-op、
   adopt 只認 `acceptance_unknown`/`reconciliation_ambiguous` 並清 error 欄位、`attempt_admission.decide()` 對每個 RESUME 請求都會掃 claims,只有 `new_resume_binding` 自己不再掃一次。
 - `find_attempt` 的 `retracted_hint` 只換訊息尾巴(finalize 場景傳自己的);拒絕行為共用。
-- 不收進來:`_attempt_capabilities()` / `_attempt_next_step()` 產生的指引(紅線)、promotion 的 legacy 衝突守門
+- 不收進來:`attempt_capabilities()` / `attempt_next_step()` 產生的指引(紅線)、promotion 的 legacy 衝突守門
   (要 caps)、reconcile 回傳點鎖外算 caps 的時機(F7,gotchas-attempt)。
 - 測試:`tests/test_attempt_state.py` 以 from-state × event 表鎖轉換。
 
@@ -152,6 +152,19 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - series 自檢三種 subject(active / output / legacy)訊息不同,legacy 只比標題。
 
 測試:`tests/test_attempt_admission.py`,episode 狀態 × 來源 → 決策表,純 dict。
+
+### `attempt_guidance.py` —— attempt 指引的單一來源
+
+`attempt_capabilities()`(狀態 → `safe_next_action` 與各維度結論)、`attempt_next_step()`(結論 → 一句可執行的話)、
+`retract_hint()` / `cleanup_sentence()`(retract 建議與清理句的唯一 renderer)、`regeneration_entry_point()`
+(重生用哪支工具),以及 `ACTION_*` / `SAFE_NEXT_ACTIONS` 字面值。原本是 `tools_podcast` 的私有符號,搬出來只是
+給紅線(gotchas-attempt)一個模組邊界,訊息文字逐字未變。純函式,依賴方向:本模組 → `attempt_state` /
+`audio_finalize` / `cleanup_obligation` / `output_projection`,不 import `tools_podcast`。
+
+- `attempt_admission` 仍不 import 本模組:指引由 `tools_podcast._admission_next_step` 注入(真 seam,別拆)。
+- 留在 `tools_podcast` 的:`_series_handoff_caps` / `_series_owns_attempt` / `_SERIES_ARGUMENT_DRIFT_HINT`
+  (series 層的「要不要交棒」政策,依賴 `_series_will_redispatch`,本身不產生狀態指引)。
+- 測試:`tests/test_attempt_capabilities.py` 對狀態組合的笛卡爾積逐格鎖住。
 
 ## cleanup_obligation.py:清理義務單一模組
 

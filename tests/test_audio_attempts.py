@@ -177,7 +177,7 @@ async def test_reconcile_with_no_candidate_past_the_window_offers_retract(fake_c
 
     候選窗(`dispatched_at` 到 `wait_timeout` 那段時間,含 1 分鐘時鐘容錯)已經關了
     ——未來任何 artifact 都會落在窗外,繼續對帳真的沒有用,這時才給
-    `podcast_attempt_retract`。用 `_attempt_record` 直接把 `dispatched_at` 往回撥
+    `podcast_attempt_retract`。用 `find_attempt` 直接把 `dispatched_at` 往回撥
     2 小時,模擬「窗早就關了」而不必真的等 `wait_timeout` 秒。
     """
     from datetime import datetime, timedelta
@@ -457,7 +457,7 @@ async def test_tombstone_blocker_offers_and_executes_the_negative_candidate_path
 
 
 async def test_dispatch_persists_the_original_wait_timeout_promise(fake_client, tmp_path):
-    """**P1 前置**:兩個 `_claim_prepared_dispatch` 呼叫端(`_run_episode` 與
+    """**P1 前置**:兩個 `AttemptRef.claim_prepared` 呼叫端(`_run_episode` 與
     `podcast_series` 的 inline 重送分支)都要把**原始承諾**的秒數存進
     `dispatch["wait_timeout"]`——只補一條正是 AGENTS.md 點名的病灶(v0.8.0 的
     failover 就是這樣只補一條)。這裡先鎖 `_run_episode` 那條(`podcast_episode`
@@ -474,7 +474,7 @@ async def test_dispatch_persists_the_original_wait_timeout_promise(fake_client, 
 
 async def test_series_resend_dispatch_also_persists_the_wait_timeout_promise(fake_client, tmp_path):
     """同一條紀律的第二個呼叫端:`podcast_series` re-arm 一顆 `not_accepted` attempt
-    後、真正 dispatch 前也要走 `_claim_prepared_dispatch`(:3549 附近的 inline 分支)
+    後、真正 dispatch 前也要走 `AttemptRef.claim_prepared`(:3549 附近的 inline 分支)
     ——這條路徑跟 `_run_episode` 是**分開**補的,漏一條全季重送都測不出來(第一次
     dispatch 就失敗才會走到這裡)。
     """
@@ -484,7 +484,7 @@ async def test_series_resend_dispatch_also_persists_the_wait_timeout_promise(fak
     await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321)
     fake_client.artifacts.fail_generate = False
 
-    # 第二次呼叫走 re-arm → prepared → `_claim_prepared_dispatch` 那條 inline 分支。
+    # 第二次呼叫走 re-arm → prepared → `AttemptRef.claim_prepared` 那條 inline 分支。
     await p.podcast_series("nb-1", episodes=episodes, output_dir=str(tmp_path), wait_timeout=4321)
 
     stored = json.loads((tmp_path / "series_manifest.json").read_text(encoding="utf-8"))
@@ -552,7 +552,7 @@ def test_reset_attempt_for_resend_clears_the_stale_wait_timeout_promise():
 async def test_podcast_episode_rejects_a_bad_wait_timeout_before_any_dispatch(
     fake_client, tmp_path, bad_wait_timeout
 ):
-    """**item 3(第四輪修復)**:`wait_timeout` 被 `_claim_prepared_dispatch` 持久化
+    """**item 3(第四輪修復)**:`wait_timeout` 被 `AttemptRef.claim_prepared` 持久化
     之後,升級成之後每一次對帳的安全窗判準——一個沒有信任邊界檢查的呼叫端輸入,不該
     直接變成長期有效的安全參數。`podcast_episode` 之前完全不驗證這個參數,`nan` 存進
     `dispatch["wait_timeout"]` 後,`timedelta(seconds=nan)` 會在往後每一次 reconcile
@@ -578,7 +578,7 @@ async def test_podcast_series_rejects_a_bad_wait_timeout_before_any_dispatch(
 ):
     """同一條紀律的第二個入口(AGENTS.md 紀律①:兩個 dispatch 入口都要補,只補一個
     正是反覆出現的病灶)。`podcast_series` 是全季的另一條路,不驗證的話同樣的 `nan`
-    會透過它的 `_claim_prepared_dispatch` 呼叫點(re-arm inline 分支)存進 manifest。
+    會透過它的 `AttemptRef.claim_prepared` 呼叫點(re-arm inline 分支)存進 manifest。
     """
     episodes = [{"title": "心法篇", "brief": "1"}]
     with pytest.raises(ValueError, match="wait_timeout must be a finite number greater than zero"):

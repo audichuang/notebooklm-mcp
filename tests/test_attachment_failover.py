@@ -745,7 +745,7 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
     """本地轉換失敗時,manifest **一個字都不該被動** —— 走真正的 series resend 分支。
 
     這條鎖的是 AST 測試看不到的那一半:把轉換搬出 closure 只解決一半。搬到
-    `_claim_prepared_dispatch` **之後**的話,`ValueError` 仍會留下
+    `AttemptRef.claim_prepared` **之後**的話,`ValueError` 仍會留下
     `dispatch.status="dispatching"` —— 一個「正在送」的 durable 狀態,而遠端一次都沒被碰到,
     比原本的 `acceptance_unknown` 沒有好到哪裡去。獨立複審用 probe 抓到 v0.9.16 的第一版
     修正就落在那個位置。

@@ -226,7 +226,7 @@ def test_permission_denied_message_is_stable_and_names_both():
 
 
 async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(fake_client, tmp_path):
-    """「有 task_id 卻 is_failed」傳給 `_mark_acceptance_unknown` 的是 **status 物件**。
+    """「有 task_id 卻 is_failed」傳給 `AttemptRef.mark_acceptance_unknown` 的是 **status 物件**。
 
     舊版本用 `type(error).__name__` / `str(error)` 直接處理,落盤成
     `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"` —— 真正的原因整條

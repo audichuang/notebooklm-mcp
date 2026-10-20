@@ -7,7 +7,7 @@ retract 工具裡、述詞分散在 `audio_finalize` 與 `attempt_admission`,改
 
 不放在這裡的東西:
 - promotion 的守門(已 retract／owned-by-another／legacy 衝突)——legacy 那道要用
-  `_attempt_capabilities`,留在 `tools_podcast._promote_attempt_output`。
+  `attempt_capabilities`,留在 `tools_podcast._promote_attempt_output`。
 - retract 的 tombstone 組裝(要讀 finalize checkpoint,形狀只在 `audio_finalize`)與
   `active_attempt_id` 指標的處置——留在 `podcast_attempt_retract`。
 - adopt legacy 分支對 `feedback_source_id` 的寫入(與 `previous_feedback_source_ids`
@@ -67,7 +67,7 @@ def apply_promotion(episode: dict, attempt: dict, attempt_id: str, output: dict)
     """守門通過後,把 attempt 的產出掛成 episode 級 output 並寫回 `output["published_at"]`。
 
     守門(已 retract／owned-by-another／legacy 不同 artifact)留在
-    `tools_podcast._promote_attempt_output`——legacy 那道要用 `_attempt_capabilities`。
+    `tools_podcast._promote_attempt_output`——legacy 那道要用 `attempt_capabilities`。
     """
     _refuse_retracted(attempt, attempt_id)
     attempt["remote"]["status"] = "completed"

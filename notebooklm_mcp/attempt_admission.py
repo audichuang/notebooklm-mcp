@@ -17,7 +17,7 @@
 
 指引文字不在這裡產生(docs/gotchas-attempt.md 紅線):呼叫端傳入
 `next_step(episode, attempt, attempt_id)`,實際是
-`_attempt_next_step(_attempt_capabilities(...))`;本模組只決定「在哪個守門點、對哪顆
+`attempt_next_step(attempt_capabilities(...))`;本模組只決定「在哪個守門點、對哪顆
 attempt 問它」。
 
 「原樣重送」(`is_resendable_same_request`)與 capabilities 的 `can_resend` 是刻意不同的兩個

@@ -18,7 +18,7 @@ import itertools
 
 import pytest
 
-from notebooklm_mcp import tools_podcast as p
+from notebooklm_mcp import attempt_guidance as g
 
 DISPATCH_STATES = (
     "prepared",
@@ -35,7 +35,7 @@ REMOTE_STATES = (None, "pending", "completed", "failed", "removed")
 # 但實際 retract A 會被 active guard 拒(要求先處理 active B);查 B(active)→
 # can_resume/can_reconcile 可能算出 True 而指向 resume/reconcile,但實際會被
 # `_ensure_resume_attempt` 的既有 output guard 拒收。正確且唯一的出口是先 retract
-# B 自己——這一格補進來之前,`_attempt_capabilities`/`_attempt_next_step` 對 B 完全
+# B 自己——這一格補進來之前,`attempt_capabilities`/`attempt_next_step` 對 B 完全
 # 沒有測試守著。
 ROLES = ("active", "output", "historical", "active_not_output")
 SETTINGS_SHAPES = {
@@ -105,14 +105,14 @@ ALL_CASES = list(itertools.product(DISPATCH_STATES, REMOTE_STATES, ROLES, SETTIN
 # 所以只在這裡加(笛卡爾積照 AGENTS.md 要求翻倍,不是每個測試都要背這個維度)。
 # **三態,不是布林**(第四輪修復):`None` = 呼叫端沒算過(五個呼叫點裡有四個是這樣),
 # `False`/`True` = 明確算過。三者的 `can_reconcile` 值相同(`None`/`False` 都不擋
-# reconcile),但 `_attempt_next_step()` 對 `None` 不准講任何窗宣稱——那正是這一輪
+# reconcile),但 `attempt_next_step()` 對 `None` 不准講任何窗宣稱——那正是這一輪
 # 修的回歸(見 test_unevaluated_window_never_makes_a_window_claim)。
 # F2 修復加的第二個維度:`candidate_selection_required`。它跟 window_closed 一樣只在
-# 這兩條核心不變式測試裡加——`_attempt_capabilities()` 的五個呼叫點裡只有兩個
+# 這兩條核心不變式測試裡加——`attempt_capabilities()` 的五個呼叫點裡只有兩個
 # (`podcast_episode_reconcile` 的候選分岔)會傳 `True`,但在這輪盲審之前，整個
 # `test_attempt_capabilities.py` 沒有任何一格餵過它(永遠吃預設值 `False`),於是
 # `candidate_selection_required=True` 這個新維度整個在笛卡爾網之外——`_attempt_
-# capabilities()` 與 `_attempt_next_step()` 對它的分支順序不一致（F2 regression：
+# capabilities()` 與 `attempt_next_step()` 對它的分支順序不一致（F2 regression：
 # 前者排在 `can_resume` 之前，後者原本排在之後）完全沒有測試碰過。
 # **三種 unresolved 狀態都要進網,不只 `dispatching`**(F2 盲審):三者的共同後果都是
 # 「遠端可能多出一筆 media,而 manifest 記不住它是誰」,只餵一種等於另外兩種完全沒有
@@ -171,20 +171,20 @@ def test_unresolved_feedback_upload_prefers_resume_but_never_blocks_retract(stat
         upload["candidate_source_ids"] = ["src-a", "src-b"]
     attempt["finalize"] = {"feedback_source_upload": upload}
 
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
 
     assert caps["feedback_upload_unresolved"] is True
     assert caps["feedback_upload_status"] == status
-    step = p._attempt_next_step(caps)
+    step = g.attempt_next_step(caps)
     if status == "reconciliation_ambiguous":
-        assert caps["safe_next_action"] == p.ACTION_ADOPT
+        assert caps["safe_next_action"] == g.ACTION_ADOPT
         assert caps["candidate_source_ids"] == ["src-a", "src-b"]
-        assert p.ACTION_ADOPT in step
+        assert g.ACTION_ADOPT in step
         assert "src-a" in step and "src-b" in step
     else:
-        assert caps["safe_next_action"] == p.ACTION_RESUME
+        assert caps["safe_next_action"] == g.ACTION_RESUME
         assert caps["candidate_source_ids"] == []
-        assert p.ACTION_RESUME in step
+        assert g.ACTION_RESUME in step
     assert "source_id 還沒落盤" in step
     # 旗標出口必須還在 —— 這一條就是 F2 的回歸鎖,對三種狀態都成立。
     assert caps["needs_abandon_flag"] is True
@@ -192,7 +192,7 @@ def test_unresolved_feedback_upload_prefers_resume_but_never_blocks_retract(stat
 
     # source_id 一落盤就不再 unresolved,回到既有的 stale_source_ids 路徑。
     attempt["finalize"]["feedback_source_upload"]["source_id"] = "src-1"
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
     assert caps["feedback_upload_unresolved"] is False
     assert caps["needs_abandon_flag"] is True
 
@@ -207,11 +207,11 @@ def test_historical_attempt_wins_over_unresolved_upload(status):
     episode, attempt = _case("accepted", "completed", "historical", "series")
     attempt["finalize"] = {"feedback_source_upload": {"status": status, "source_id": None}}
 
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
 
     assert caps["feedback_upload_unresolved"] is True
     assert caps["safe_next_action"] is None
-    assert "歷史紀錄" in p._attempt_next_step(caps)
+    assert "歷史紀錄" in g.attempt_next_step(caps)
 
 
 def test_post_retract_unresolved_upload_does_not_promise_regeneration():
@@ -225,12 +225,12 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
     attempt["retraction"] = {"source_cleanup_unresolved": True, "stale_source_ids": []}
     episode.pop("active_attempt_id", None)
 
-    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", post_retract=True)
 
     assert caps["source_cleanup_unresolved"] is True
     assert caps["cleanup_state"] == "reconcile_after"
     assert caps["safe_next_action"] is None
-    step = p._attempt_next_step(caps)
+    step = g.attempt_next_step(caps)
     assert "沒人記得" in step and "候選窗" in step
 
     # **gate 撈到候選之後,retract 的冪等回傳要跟著改口。** 那些 id 只會進 episode 的
@@ -239,16 +239,16 @@ def test_post_retract_unresolved_upload_does_not_promise_regeneration():
     # 生成 gate 同時拿著具體 id 要人刪,兩個欄位對同一狀態指向不同動作。
     episode["pending_source_cleanup"] = ["src-orphan"]
     assert attempt["retraction"]["stale_source_ids"] == []  # tombstone 沒有被改寫
-    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", post_retract=True)
     assert caps["cleanup_state"] == "pending_delete"
     assert caps["source_cleanup_unresolved"] is True  # 窗還沒關,義務仍未全部結案
-    assert caps["safe_next_action"] == p.ACTION_SOURCE_DELETE
-    assert "source_delete" in p._attempt_next_step(caps)
+    assert caps["safe_next_action"] == g.ACTION_SOURCE_DELETE
+    assert "source_delete" in g.attempt_next_step(caps)
 
     # 義務結案(gate 對帳過)之後,重生才回到指引裡。
     attempt["retraction"].pop("source_cleanup_unresolved")
     episode.pop("pending_source_cleanup")
-    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", post_retract=True)
     assert caps["cleanup_state"] is None
     assert caps["safe_next_action"] == caps["regeneration_entry"]
 
@@ -289,14 +289,14 @@ def test_every_state_combination_yields_executable_guidance(
         attempt["finalize"] = {
             "feedback_source_upload": {"status": upload_status, "source_id": None}
         }
-    caps = p._attempt_capabilities(
+    caps = g.attempt_capabilities(
         episode,
         attempt,
         "att-me",
         reconciliation_window_closed=window_closed,
         candidate_selection_required=candidate_selection_required,
     )
-    step = p._attempt_next_step(caps)
+    step = g.attempt_next_step(caps)
     assert caps["feedback_upload_unresolved"] is (upload_status is not None)
     if upload_status is not None and role == "active":
         # **F2 回歸鎖:未結案的 upload 不准把 retract 講成做不到。** 舊版在這一格回
@@ -338,14 +338,14 @@ def test_series_is_only_ever_offered_for_settings_series_can_reproduce(
     自己建的形狀才回它**,其餘一律走能明示來源的單集入口。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
 
-    if caps["regeneration_entry"] == p.ACTION_SERIES:
+    if caps["regeneration_entry"] == g.ACTION_SERIES:
         assert shape == "series", (
             f"{shape!r} 的 settings series 重現不出來,卻被指回 series —— 會靜默擴大來源"
         )
     else:
-        assert caps["regeneration_entry"] == p.ACTION_EPISODE
+        assert caps["regeneration_entry"] == g.ACTION_EPISODE
 
 
 @pytest.mark.parametrize("dispatch,remote,role,shape", ALL_CASES)
@@ -372,10 +372,10 @@ def test_settled_hint_never_mentions_series_when_the_entry_is_episode(
     這個字」當代理判準——那個代理現在會把合法的警告句也一起打成違規。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
-    step = p._attempt_next_step(caps)
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
+    step = g.attempt_next_step(caps)
 
-    if caps["regeneration_entry"] == p.ACTION_EPISODE:
+    if caps["regeneration_entry"] == g.ACTION_EPISODE:
         assert "也可以直接重呼 podcast_series" not in step, (
             f"regeneration_entry 是 podcast_episode,句子卻推薦重呼 podcast_series:{step}"
         )
@@ -390,7 +390,7 @@ def test_resend_and_flag_free_retract_are_different_questions(dispatch, remote, 
     共用一個布林就必然教錯一邊 —— 那正是 v0.9.5 訊息裡發生的事。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
 
     if caps["can_resend"]:
         assert dispatch in ("prepared", "not_accepted"), (
@@ -409,11 +409,11 @@ def test_a_historical_attempt_is_never_offered_the_flag(dispatch, remote, shape)
     """歷史 attempt 誰都動不了它:`abandon_in_flight` 只放行 active 那一顆,
     傳 True 與 False 得到同一句話。教它傳旗標就是給一個永遠做不到的動作。"""
     episode, attempt = _case(dispatch, remote, "historical", shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
 
     assert caps["needs_abandon_flag"] is False
     assert caps["authorization_basis"] is None
-    step = p._attempt_next_step(caps)
+    step = g.attempt_next_step(caps)
     assert "abandon_in_flight" not in step, step
 
 
@@ -424,7 +424,7 @@ def test_every_state_that_trips_the_source_guard_retracts_without_a_flag(dispatc
     """**單向包含:來源守門停在 retract 的每一個狀態,retract 都必須免旗標收下它。**
 
     這是「停點照著做走得通」的形式化。守門的觸發條件寫在 `podcast_series` 裡、免旗標
-    條件寫在 `_attempt_capabilities` 裡,**兩份程式碼分開** —— 動一邊沒動另一邊,指引
+    條件寫在 `attempt_capabilities` 裡,**兩份程式碼分開** —— 動一邊沒動另一邊,指引
     就變死路。v0.9.4 正是如此:守門涵蓋了 `failed`/`removed`,免旗標條件沒有,照著
     `safe_next_action` 做必然被拒。
 
@@ -436,11 +436,11 @@ def test_every_state_that_trips_the_source_guard_retracts_without_a_flag(dispatc
     # T10(測試債):改引用具名常數而不是手抄一份 tuple——守門的觸發條件（`_NEVER_
     # DISPATCHED`/`_TERMINAL_REMOTE`）哪天前移，這裡若還是手抄字面值就會靜默 skip
     # 掉，不會紅。
-    guard_trips = dispatch in p._NEVER_DISPATCHED or remote in p._TERMINAL_REMOTE
+    guard_trips = dispatch in g.NEVER_DISPATCHED or remote in g.TERMINAL_REMOTE
     if not guard_trips:
         pytest.skip("這個狀態不會觸發來源守門")
     episode, attempt = _case(dispatch, remote, "active", "series")
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
 
     assert caps["authorization_basis"] == "settled", (
         f"守門會停在這裡並指向 retract,但 retract 不肯免旗標收下它({dispatch}/{remote})"
@@ -464,7 +464,7 @@ def test_the_regeneration_hint_never_claims_sources_that_are_not_there(
     都不可能再靠猜。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
     hint = caps["regeneration_hint"]
 
     if "必須帶回原本那組" in hint:
@@ -484,15 +484,15 @@ def test_can_resend_hint_never_forbids_the_source_change_it_just_offered(
 ):
     """**P2 修復:can_resend 分支的自相矛盾回歸。**
 
-    v0.9.9 讓 `_attempt_next_step` 的 can_resend 分支同時說「要換來源就先 retract
+    v0.9.9 讓 `attempt_next_step` 的 can_resend 分支同時說「要換來源就先 retract
     重生」+「重生時**必須帶回原本那組** `source_ids`」——前半刻意允許換來源,後半又
     要求來源不能換,是同一句話裡的矛盾指引。can_resend 為真時,`source_ids` 那句的
     正確措辭是區分兩種意圖(只換 brief 保留原樣;刻意換來源就走 retract+新
     source_ids),不能無條件講死「必須帶回原本」。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
-    step = p._attempt_next_step(caps)
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
+    step = g.attempt_next_step(caps)
 
     if caps["can_resend"] and "要換 brief 或來源就先" in step:
         assert "必須帶回原本那組" not in step, (
@@ -509,7 +509,7 @@ def test_settled_and_output_still_require_the_original_sources_back(dispatch, re
     以」的模糊講法(那對這兩個分支是假的——它們根本沒有「原樣重送」這個選項)。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
     hint = caps["regeneration_hint"]
     settings = attempt.get("settings") or {}
 
@@ -532,15 +532,15 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
     candidate_selection_required,
     upload_status,
 ):
-    """**P2 修復:`_attempt_capabilities()` 直接產生 `safe_next_action`。**
+    """**P2 修復:`attempt_capabilities()` 直接產生 `safe_next_action`。**
 
-    這條把它跟 `_attempt_next_step()` 挑的分支對照鎖住——兩個函式各自算「哪支工具」
+    這條把它跟 `attempt_next_step()` 挑的分支對照鎖住——兩個函式各自算「哪支工具」
     跟「怎麼講」,答案不准分岔(那正是 `podcast_episode_reconcile` 零候選出口原本要
     自己手寫 if/else 的原因:沒有單一事實來源可用)。
 
     **F2 修復**:`candidate_selection_required` 這個維度加進來之前,這條測試從沒
-    驗過 `caps["safe_next_action"] == p.ACTION_ADOPT` 那一格——`_attempt_next_step()`
-    原本把這個分支排在 `can_resume` 之後,跟這裡（=`_attempt_capabilities()`）的
+    驗過 `caps["safe_next_action"] == g.ACTION_ADOPT` 那一格——`attempt_next_step()`
+    原本把這個分支排在 `can_resume` 之後,跟這裡（=`attempt_capabilities()`）的
     優先序相反,兩個函式對同一顆 caps 指向不同工具卻沒有任何測試看得到。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
@@ -548,7 +548,7 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
         attempt["finalize"] = {
             "feedback_source_upload": {"status": upload_status, "source_id": None}
         }
-    caps = p._attempt_capabilities(
+    caps = g.attempt_capabilities(
         episode,
         attempt,
         "att-me",
@@ -561,56 +561,56 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
     if not caps["is_active"] and not caps["is_output"]:
         assert action is None, "歷史紀錄沒有可執行的下一步"
         return
-    assert action is None or action in p.SAFE_NEXT_ACTIONS or action == p.ACTION_EPISODE
+    assert action is None or action in g.SAFE_NEXT_ACTIONS or action == g.ACTION_EPISODE
     if caps["feedback_upload_unresolved"]:
         # 優先序:歷史紀錄(上面已 return)→ upload 未結案 → is_output → ……。續完是
         # 唯一能把那筆 source 的身分認回來的路,所以排在其他建議之前。
         assert action == (
-            p.ACTION_RESUME
+            g.ACTION_RESUME
             if caps["can_resume"]
-            else p.ACTION_RECONCILE
+            else g.ACTION_RECONCILE
             if caps["can_reconcile"]
             else None
         )
-        if action == p.ACTION_RESUME:
-            assert "podcast_episode_resume" in p._attempt_next_step(caps)
+        if action == g.ACTION_RESUME:
+            assert "podcast_episode_resume" in g.attempt_next_step(caps)
         return
     if caps["is_output"]:
-        assert action == p.ACTION_RETRACT
+        assert action == g.ACTION_RETRACT
     elif caps["authorization_basis"] == "output_owner":
         # P1:active≠output 分岔(自己是 active,但另有一顆不同的 output)——can_resend
         # /can_resume/can_reconcile 對這格可能仍算出 True,但那三條路都會被既有 output
         # guard 擋下來,safe_next_action 必須無條件指向先 retract 自己,優先序排在
-        # 它們前面(見 `_attempt_capabilities` 裡 `elif basis == "output_owner":` 那格)。
-        assert action == p.ACTION_RETRACT
+        # 它們前面(見 `attempt_capabilities` 裡 `elif basis == "output_owner":` 那格)。
+        assert action == g.ACTION_RETRACT
     elif caps["can_resend"]:
         assert action == caps["regeneration_entry"], (
             "can_resend 為真時,safe_next_action 該是原樣重呼的那支工具"
         )
     elif caps["authorization_basis"] == "settled":
-        assert action == p.ACTION_RETRACT
+        assert action == g.ACTION_RETRACT
     elif caps["candidate_selection_required"] and caps["can_reconcile"]:
-        # F2:必須排在 `can_resume` 之前,跟 `_attempt_capabilities()` 的優先序對齊
-        # ——這個 elif 的順序本身就是斷言的一部分（`_attempt_next_step()` 若排錯，
-        # 下面 `_attempt_next_step` 對照測試會抓到，這裡先鎖住 `safe_next_action` 值）。
-        assert action == p.ACTION_ADOPT
+        # F2:必須排在 `can_resume` 之前,跟 `attempt_capabilities()` 的優先序對齊
+        # ——這個 elif 的順序本身就是斷言的一部分（`attempt_next_step()` 若排錯，
+        # 下面 `attempt_next_step` 對照測試會抓到，這裡先鎖住 `safe_next_action` 值）。
+        assert action == g.ACTION_ADOPT
     elif caps["can_resume"]:
-        assert action == p.ACTION_RESUME
+        assert action == g.ACTION_RESUME
     elif caps["can_reconcile"]:
-        assert action == p.ACTION_RECONCILE
+        assert action == g.ACTION_RECONCILE
     else:
-        assert action == p.ACTION_RETRACT
+        assert action == g.ACTION_RETRACT
 
     # **這條測試的名字要求驗證「文字教的工具」,不是只驗 `safe_next_action` 這個值。**
-    # F2 的實際 regression 在 `_attempt_next_step()` 那邊——兩個函式各自算，這裡直接
+    # F2 的實際 regression 在 `attempt_next_step()` 那邊——兩個函式各自算，這裡直接
     # 對照文字裡點名的工具跟 `action` 一致，才是名字承諾的那件事。
-    step = p._attempt_next_step(caps)
-    if action == p.ACTION_ADOPT:
+    step = g.attempt_next_step(caps)
+    if action == g.ACTION_ADOPT:
         assert "podcast_attempt_adopt" in step, (
             f"safe_next_action 是 adopt,文字卻沒教這支工具:{step}"
         )
         assert "podcast_episode_resume" not in step, f"adopt 優先序更高，文字不該再教 resume:{step}"
-    elif action == p.ACTION_RESUME:
+    elif action == g.ACTION_RESUME:
         assert "podcast_episode_resume" in step, step
 
 
@@ -618,7 +618,7 @@ def test_safe_next_action_agrees_with_the_tool_the_message_actually_teaches(
 def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
     dispatch, remote, role, shape
 ):
-    """**P2 修復:候選窗關閉的說明文字由 `_attempt_next_step()` 產生,不是呼叫點手寫。**
+    """**P2 修復:候選窗關閉的說明文字由 `attempt_next_step()` 產生,不是呼叫點手寫。**
 
     只在 dispatch 落在可對帳的狀態集合、但呼叫端已經算出候選窗關了時才會走到這句;
     這句話**不准提到 `podcast_episode_reconcile`**(那個工具名不准在窗關了之後
@@ -626,10 +626,10 @@ def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
     """
     # T10(測試債):改引用 SUT 的具名常數，不再手抄一份 tuple —— 手抄的那份哪天
     # 跟 `can_reconcile` 的判準前移／改了範圍，這裡會靜默變成 skip 而不是紅。
-    if dispatch not in p._RECONCILABLE_DISPATCH_STATES:
+    if dispatch not in g._RECONCILABLE_DISPATCH_STATES:
         pytest.skip("這個 dispatch 狀態走不到窗關閉分支")
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
     if (
         caps["can_resend"]
         or caps["is_output"]
@@ -644,7 +644,7 @@ def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
         pytest.skip("更高優先序的分支先接手,不會走到窗狀態說明")
     if not caps["is_active"] and not caps["is_output"]:
         pytest.skip("歷史紀錄分支不會走到窗狀態說明")
-    step = p._attempt_next_step(caps)
+    step = g.attempt_next_step(caps)
 
     assert "已經關了" in step, step
     assert "podcast_episode_reconcile" not in step, step
@@ -667,12 +667,10 @@ def test_window_closed_narrative_reaches_the_assertion_on_exactly_fifteen_cases(
     """
     reached = 0
     for dispatch, remote, role, shape in ALL_CASES:
-        if dispatch not in p._RECONCILABLE_DISPATCH_STATES:
+        if dispatch not in g._RECONCILABLE_DISPATCH_STATES:
             continue
         episode, attempt = _case(dispatch, remote, role, shape)
-        caps = p._attempt_capabilities(
-            episode, attempt, "att-me", reconciliation_window_closed=True
-        )
+        caps = g.attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
         if (
             caps["can_resend"]
             or caps["is_output"]
@@ -694,7 +692,7 @@ def test_the_default_reconciliation_window_state_is_unevaluated_not_open(
 ):
     """**第四輪修復的鑑別測試:預設值必須是 `None`(沒算過),不是 `False`(已確認未關)。**
 
-    `_attempt_capabilities()` 有五個呼叫點,只有 `podcast_episode_reconcile` 真的
+    `attempt_capabilities()` 有五個呼叫點,只有 `podcast_episode_reconcile` 真的
     讀時鐘算過候選窗;另外四個(attempt 建立衝突、resume 的兩個停點、
     `_reuse_frozen_input_attempt` 卡在 frozen 重呼)手上根本沒有 `dispatched_at`,
     全部吃預設值。實跑復現的矛盾:attempt 停在 acceptance_unknown、`dispatched_at`
@@ -705,11 +703,11 @@ def test_the_default_reconciliation_window_state_is_unevaluated_not_open(
     `test_every_state_combination_yields_executable_guidance` 的 `window_closed=None`
     分支測過(逐格覆蓋,含優先序更高的分支會先接手的狀態),不在這裡重複斷言逐字文案。
 
-    突變驗證:把 `_attempt_capabilities` 的 `reconciliation_window_closed` 參數預設值
+    突變驗證:把 `attempt_capabilities` 的 `reconciliation_window_closed` 參數預設值
     改回 `False`,這條就會紅。
     """
     episode, attempt = _case(dispatch, remote, role, shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")  # 不傳 → 預設值
+    caps = g.attempt_capabilities(episode, attempt, "att-me")  # 不傳 → 預設值
     assert caps["reconciliation_window_closed"] is None, (
         "預設值必須是 None(沒算過),不是 False(已確認未關)"
     )
@@ -722,7 +720,7 @@ def test_the_default_reconciliation_window_state_is_unevaluated_not_open(
 def test_active_not_output_narrative_teaches_retracting_itself_not_resume_or_resend(
     dispatch, remote, shape
 ):
-    """**P1(Codex adversarial review 實跑驗證):`_attempt_next_step` 的文字要跟著
+    """**P1(Codex adversarial review 實跑驗證):`attempt_next_step` 的文字要跟著
     `safe_next_action` 的新分支走,不能只改一邊。**
 
     Codex 實跑用 helper 查這格(active=B、output=A)的答案:查 A(output)→
@@ -731,19 +729,19 @@ def test_active_not_output_narrative_teaches_retracting_itself_not_resume_or_res
     resume/reconcile,但實際會被 `_ensure_resume_attempt` 的既有 output guard 拒收。
     正確且唯一的出口是先 retract B 自己。
 
-    這條直接鎖 `_attempt_next_step` 產生的文字(不只是 `safe_next_action` 那個
+    這條直接鎖 `attempt_next_step` 產生的文字(不只是 `safe_next_action` 那個
     工具名欄位)——把這裡的分支拿掉,文字會落回 can_resend/can_resume/can_reconcile
     分支,教出 resume/reconcile/原樣重呼這些會被既有 output 擋下來的死路,而純不變式
     測試(`test_every_state_combination_yields_executable_guidance`)照不到這個盲區
     (can_resume/can_resend 這些 caps 本身在這格可能就是 True,自洽,但系統性是錯的
     ——跟 AGENTS.md 記錄的「獨立複審用兩個突變證明的盲區」同一個形狀)。
 
-    突變驗證:把 `_attempt_next_step` 裡 `caps["authorization_basis"] ==
+    突變驗證:把 `attempt_next_step` 裡 `caps["authorization_basis"] ==
     "output_owner"` 那個分支拿掉,這條就會紅(而純不變式測試全綠,抓不到)。
     """
     episode, attempt = _case(dispatch, remote, "active_not_output", shape)
-    caps = p._attempt_capabilities(episode, attempt, "att-me")
-    step = p._attempt_next_step(caps)
+    caps = g.attempt_capabilities(episode, attempt, "att-me")
+    step = g.attempt_next_step(caps)
 
     assert "podcast_attempt_retract" in step, step
     assert "podcast_episode_resume" not in step, step
@@ -763,11 +761,11 @@ def test_window_open_narrative_names_the_closure_window_not_the_candidate_window
     一個講。這裡直接餵「明確算過、窗還沒關」的三態值(`False`),鎖住訊息不准再講
     「候選窗」,必須改講它實際依據的關閉判斷窗。
 
-    突變驗證:把 `_attempt_next_step` 這句話的措辭改回「候選窗還沒關」就會紅。
+    突變驗證:把 `attempt_next_step` 這句話的措辭改回「候選窗還沒關」就會紅。
     """
     episode, attempt = _case("dispatching", None, "active", "series")
-    caps = p._attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=False)
-    step = p._attempt_next_step(caps)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=False)
+    step = g.attempt_next_step(caps)
 
     assert "候選窗" not in step, step
     assert "關閉判斷窗" in step, step
@@ -788,8 +786,8 @@ def test_window_closed_narrative_offers_the_widen_wait_timeout_rescue_not_an_abs
     「放大 wait_timeout」的揭露,這條就會紅。
     """
     episode, attempt = _case("dispatching", None, "active", "series")
-    caps = p._attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
-    step = p._attempt_next_step(caps)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
+    step = g.attempt_next_step(caps)
 
     assert "候選窗" not in step, step
     assert "已經關了" in step, step
@@ -798,7 +796,7 @@ def test_window_closed_narrative_offers_the_widen_wait_timeout_rescue_not_an_abs
 
 
 def test_reconciliation_ambiguous_with_a_stray_remote_artifact_still_teaches_adopt():
-    """**F2(獨立盲審實跑探針):`safe_next_action` 與 `_attempt_next_step()` 對同一顆
+    """**F2(獨立盲審實跑探針):`safe_next_action` 與 `attempt_next_step()` 對同一顆
     caps 指向不同工具。**
 
     探針:`dispatch=reconciliation_ambiguous`、`remote.artifact_id="art-1"`、
@@ -807,18 +805,18 @@ def test_reconciliation_ambiguous_with_a_stray_remote_artifact_still_teaches_ado
     finalize」——同一份回傳的兩個欄位教不同的工具,只讀其中一個欄位的 host 會被
     另一個欄位誤導。
 
-    `_mark_reconciliation_ambiguous`(候選分岔唯一產生點)禁止 `remote.artifact_id`
+    `mark_reconciliation_ambiguous`(候選分岔唯一產生點)禁止 `remote.artifact_id`
     已存在時再標記 ambiguous,所以這個精確組合單 process 不可達——但順序不一致
     本身是明確的契約違反,這裡直接餵這個組合驗證兩個函式的優先序一致。
 
-    突變驗證:把 F2 修復(`_attempt_next_step()` 裡 `candidate_selection_required`
+    突變驗證:把 F2 修復(`attempt_next_step()` 裡 `candidate_selection_required`
     分支挪回 `can_resume` 之後)還原,這條就會紅。
     """
     episode, attempt = _case("reconciliation_ambiguous", "pending", "active", "series")
-    caps = p._attempt_capabilities(episode, attempt, "att-me", candidate_selection_required=True)
-    step = p._attempt_next_step(caps)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", candidate_selection_required=True)
+    step = g.attempt_next_step(caps)
 
-    assert caps["safe_next_action"] == p.ACTION_ADOPT, caps
+    assert caps["safe_next_action"] == g.ACTION_ADOPT, caps
     assert "podcast_attempt_adopt" in step, step
     assert "podcast_episode_resume" not in step, (
         f"safe_next_action 教 adopt,next_step 卻教 resume,兩個欄位互相矛盾:{step}"
@@ -836,12 +834,12 @@ def test_a_retracted_prepared_attempt_with_pinned_sources_is_not_taught_to_retra
     (不需要 abandon_in_flight)後帶新的 source_ids」——教一顆已經是 tombstone 的
     attempt 去 retract 自己,正是 v0.9.6 FINDING-4 的形狀。
 
-    突變驗證:把 `_attempt_capabilities()` 裡
+    突變驗證:把 `attempt_capabilities()` 裡
     `resend_possible=can_resend and not post_retract` 改成
     `resend_possible=can_resend`,這條就會紅。
     """
     episode, attempt = _case("prepared", None, "active", "pinned")
-    caps = p._attempt_capabilities(episode, attempt, "att-me", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt, "att-me", post_retract=True)
 
     assert caps["can_resend"] is True, "前提:can_resend 真的不看 retraction 狀態"
     hint = caps["regeneration_hint"]
@@ -864,7 +862,7 @@ def test_post_retract_defers_to_the_replacement_attempt_already_in_flight():
     拒收。`source_delete` 是冪等的,所以舊版教的「先清 stale source 再重呼」在這裡
     走不通不是因為清理沒做,是 regeneration_entry 本身在這個狀態下就是死路。
 
-    突變驗證:把 `_attempt_capabilities()` 裡 `elif replacement_caps is not None:`
+    突變驗證:把 `attempt_capabilities()` 裡 `elif replacement_caps is not None:`
     這個分支拿掉,這條就會紅。
     """
     attempt_a = {
@@ -886,11 +884,11 @@ def test_post_retract_defers_to_the_replacement_attempt_already_in_flight():
         "attempts": [attempt_a, attempt_b],
     }
 
-    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
 
-    assert caps["safe_next_action"] != p.ACTION_SERIES, caps
-    assert caps["safe_next_action"] == p.ACTION_RECONCILE, caps
-    step = p._attempt_next_step(caps)
+    assert caps["safe_next_action"] != g.ACTION_SERIES, caps
+    assert caps["safe_next_action"] == g.ACTION_RECONCILE, caps
+    step = g.attempt_next_step(caps)
     assert "用 podcast_series 重生" not in step, step
     assert "podcast_episode_reconcile" in step, step
     # P1(這一輪,同一根因第十一次現形):`safe_next_action` 換成了 B 的,但目標身分
@@ -930,9 +928,9 @@ def test_post_retract_replacement_identity_wins_even_when_the_replacement_is_set
         "attempts": [attempt_a, attempt_b],
     }
 
-    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
 
-    assert caps["safe_next_action"] == p.ACTION_RETRACT, caps
+    assert caps["safe_next_action"] == g.ACTION_RETRACT, caps
     assert caps["safe_next_attempt_id"] == "att-b", caps
     assert caps["safe_next_attempt_id"] != "att-a", (
         f"目標身分仍是 A 的話,照著回傳冪等 retract A 會拿到一模一樣的回傳:{caps}"
@@ -948,7 +946,7 @@ def test_post_retract_replacement_identity_carries_the_artifact_id_for_resume():
 
     突變驗證:同上,拿掉 `_safe_next_target()` 的 sibling 交棒分支就會紅
     ——`safe_next_artifact_id` 會變成 `None`(A 沒有走 resume 分支,`remote` 是
-    `_attempt_capabilities` 這一層自己的 `remote` 變數,不會是 B 的 `art-b`)。
+    `attempt_capabilities` 這一層自己的 `remote` 變數,不會是 B 的 `art-b`)。
     """
     attempt_a = {
         "attempt_id": "att-a",
@@ -969,9 +967,9 @@ def test_post_retract_replacement_identity_carries_the_artifact_id_for_resume():
         "attempts": [attempt_a, attempt_b],
     }
 
-    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
 
-    assert caps["safe_next_action"] == p.ACTION_RESUME, caps
+    assert caps["safe_next_action"] == g.ACTION_RESUME, caps
     assert caps["safe_next_attempt_id"] == "att-b", caps
     assert caps["safe_next_artifact_id"] == "art-b", caps
 
@@ -1020,7 +1018,7 @@ def test_post_retract_delegation_also_swaps_regeneration_source_ids():
         "attempts": [attempt_a, attempt_b],
     }
 
-    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
 
     # 前提:這確實是交棒的那一格(身分已經換成 B)。
     assert caps["safe_next_attempt_id"] == "att-b", caps
@@ -1075,14 +1073,14 @@ def test_regeneration_source_ids_follows_the_replacement_even_when_next_action_i
         "pending_source_cleanup": [{"notebook_id": "nb", "source_id": "src-old"}],
     }
 
-    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
 
     # 前提:這一格的下一步是清理,**不是**替代那顆的動作 —— 所以身分不換。
-    assert caps["safe_next_action"] == p.ACTION_SOURCE_DELETE, caps["safe_next_action"]
+    assert caps["safe_next_action"] == g.ACTION_SOURCE_DELETE, caps["safe_next_action"]
     assert caps["safe_next_attempt_id"] is None, caps
     # 但重生的意圖仍然是替代版的,才不會與 next_step 打架。
     assert caps["regeneration_source_ids"] == ["s1", "s3"], caps
-    assert "不能再走「重生」" in p._attempt_next_step(caps)
+    assert "不能再走「重生」" in g.attempt_next_step(caps)
 
 
 def test_regeneration_source_ids_stays_own_when_there_is_no_replacement():
@@ -1101,7 +1099,38 @@ def test_regeneration_source_ids_stays_own_when_there_is_no_replacement():
     }
     episode = {"episode": 1, "active_attempt_id": "att-a", "attempts": [attempt_a]}
 
-    caps = p._attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
+    caps = g.attempt_capabilities(episode, attempt_a, "att-a", post_retract=True)
 
     assert caps["post_retract_replacement_caps"] is None, caps
     assert caps["regeneration_source_ids"] == ["s1", "s2"], caps
+
+
+@pytest.mark.parametrize(
+    ("module", "forbidden"),
+    [
+        # 指引是純函式的單一來源;回頭 import 工具層就是循環,也代表指引開始讀工具狀態。
+        ("attempt_guidance", "tools_podcast"),
+        # admission 的指引由呼叫端注入(真 seam,test_attempt_admission 用 stub);
+        # 直接 import 會讓 stub 失效而測試照綠。
+        ("attempt_admission", "attempt_guidance"),
+    ],
+)
+def test_guidance_import_direction(module, forbidden):
+    """紅了的正確反應:把依賴改回注入/參數,不是刪掉這條。"""
+    import ast
+    import importlib
+    from pathlib import Path
+
+    tree = ast.parse(
+        Path(importlib.import_module(f"notebooklm_mcp.{module}").__file__).read_text(
+            encoding="utf-8"
+        )
+    )
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+    assert not any(name.rsplit(".", 1)[-1] == forbidden for name in imported)

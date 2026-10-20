@@ -170,7 +170,7 @@ async def test_inline_resend_does_not_lie_about_acceptance_unknown(fake_client, 
     判準是**三態**而不是「是/不是 not_accepted」:記著 `not_accepted` → 可直接重跑整季的
     停點;記著別的狀態 → 一樣回結構化停點,只是 `safe_next_action` 換成先對帳;
     **manifest 根本讀不到** → 我們什麼都不知道,原例外原樣交出去(`abandon_in_flight`
-    讓「並行 retract 掉在飛的 attempt」變成受支援操作,`_attempt_record` 會對 tombstone
+    讓「並行 retract 掉在飛的 attempt」變成受支援操作,`find_attempt` 會對 tombstone
     raise,而在 except handler 裡再拋會蓋掉真正該讀的錯誤)。
     """
     from notebooklm.exceptions import RateLimitError
@@ -302,7 +302,7 @@ async def test_auth_expiry_hands_a_pinned_attempt_to_its_real_owner(
     音檔),然後回報 `complete=True`。
 
     docs/gotchas-attempt.md 的紅線正是為這種形狀存在:狀態相關的指引一律由
-    `_attempt_capabilities()` 產生,不准手寫。
+    `attempt_capabilities()` 產生,不准手寫。
     """
     from notebooklm.exceptions import RateLimitError
 

@@ -431,7 +431,7 @@ async def test_dispatch_and_finalize_both_ride_the_snapshotted_client(fake_clien
 
     這是整個「身分跟著 client 走」重構的核心斷言,而它需要**這個**時序才驗得到:
     `runtime.snapshot()` 之後到 `generate` 之間隔著 baseline `artifacts.list` 與
-    `_claim_prepared_dispatch`,並行的另一個工具呼叫正是在這裡把全域游標換掉。
+    `AttemptRef.claim_prepared`,並行的另一個工具呼叫正是在這裡把全域游標換掉。
     (在 `generate_audio` **內部**才 rotate 的測試驗不到這件事——那時 client 已經
     傳進去了,`generate(runtime.get_client())` 這個突變照樣會綠。)
 
