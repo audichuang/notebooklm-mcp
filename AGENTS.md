@@ -149,5 +149,5 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
   就是讓它變綠的正解 —— 但 enum 是 backend-neutral、能力是 backend-specific,那個白名單開出一個
   伺服器生不出來的死選項,真實驗收才擋下。**一條問錯問題的 tripwire 比沒有更糟:它會把人推向錯答案。**
   寫 contract test 時先問「這條紅了,正確的反應是什麼」——如果答案是「照它說的加一筆」就重寫它。
-- **大型修復輪派 agent:實作 → 獨立審查 → 主迴圈裁決**,四條操作紀律(各是一次事故)見
+- **大型修復輪派 agent:實作 → 獨立審查 → 主迴圈裁決**,操作紀律(各是一次事故)見
   [docs/agent-review-playbook.md](docs/agent-review-playbook.md);修正輪之後再派一輪**只看成品、不看原 findings**的複審。

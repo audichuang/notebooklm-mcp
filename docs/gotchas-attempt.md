@@ -26,9 +26,12 @@
   **`podcast_series` 自己要做哪個轉換(re-arm / supersede / 直接送)同理,唯一來源是
   `tools_podcast._series_redispatch_kind`**(`_series_will_redispatch` 只是它的 `is not None`;
   mutation 後重讀用 `after=` 只往後走),由 `tests/test_series_redispatch_kind.py` 與 caps 互查。
+  **「remote 是終態」不等於「已送出後失敗」**:`mark_not_accepted` 一律寫 `remote=failed`,拿 remote 終態
+  當 supersede 判準會把從沒送出的 `not_accepted` 也算進去(v0.9.37 前外來 attempt 因此先被 re-arm 才被拒)。
   **清理句(`source_delete(notebook_id=…, source_id=…)`)只准由 `cleanup_sentence(rows)` 產生**,
   逐筆讀義務自己記錄的 notebook:v0.9.36 前 adopt 自己拼一份、對每筆套這次 adopt 的
-  notebook,結構化資料對、文字指錯本(tripwire 在 `test_attempt_retract.py` 鎖 f-string 只出現一次)。
+  notebook,結構化資料對、文字指錯本(tripwire 在 `test_attempt_retract.py` 掃整個套件:只准 `attempt_guidance`,
+  外加 `cleanup_obligation` 生成前 gate 的另一種句型)。
   **這條紅線只管「訊息從哪裡來」,不管「回傳完不完整」——那是下一條的守備範圍**
   （第十一次現形正是在這條紅線徹底遵守之後才發生的:`safe_next_action` 確實是
   `attempt_capabilities()` 算的,但公開回傳漏了那個動作要用的目標身分)。
