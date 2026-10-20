@@ -164,6 +164,9 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 - `attempt_admission` 仍不 import 本模組:指引由 `tools_podcast._admission_next_step` 注入(真 seam,別拆)。
 - 留在 `tools_podcast` 的:`_series_handoff_caps` / `_series_owns_attempt` / `_SERIES_ARGUMENT_DRIFT_HINT`
   (series 層的「要不要交棒」政策,依賴 `_series_will_redispatch`,本身不產生狀態指引)。
+- series active 分支的自動轉換表(`_series_redispatch_kind`:`rearm` → `supersede` → `send`,`None` = 收尾路徑)
+  也留在 `tools_podcast`,**刻意不從它推導** caps 的 `never_dispatched` / `remote_terminal`(`prepared`+`failed`
+  兩者不同),`defers_to_output_guard` 也刻意用原始 `TERMINAL_REMOTE` 判準(`not_accepted`+`failed` 不同)。
 - 測試:`tests/test_attempt_capabilities.py` 對狀態組合的笛卡爾積逐格鎖住。
 
 ## cleanup_obligation.py:清理義務單一模組

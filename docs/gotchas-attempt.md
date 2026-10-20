@@ -23,6 +23,9 @@
   一句可執行的話)已經把這個結構收斂掉了:新程式碼要教呼叫端「下一步該做什麼」,
   **先查這兩個函式有沒有覆蓋這個狀態**,沒覆蓋就擴充它們的笛卡爾積或加新 key,
   不要在呼叫點旁邊再長一條 if/else——那條 if/else 就是第八次現形的種子。
+  **`podcast_series` 自己要做哪個轉換(re-arm / supersede / 直接送)同理,唯一來源是
+  `tools_podcast._series_redispatch_kind`**(`_series_will_redispatch` 只是它的 `is not None`;
+  mutation 後重讀用 `after=` 只往後走),由 `tests/test_series_redispatch_kind.py` 與 caps 互查。
   **清理句(`source_delete(notebook_id=…, source_id=…)`)只准由 `cleanup_sentence(rows)` 產生**,
   逐筆讀義務自己記錄的 notebook:v0.9.36 前 adopt 自己拼一份、對每筆套這次 adopt 的
   notebook,結構化資料對、文字指錯本(tripwire 在 `test_attempt_retract.py` 鎖 f-string 只出現一次)。

@@ -318,6 +318,38 @@ async def test_series_refuses_to_supersede_an_attempt_it_does_not_own(fake_clien
     assert len(stored["episodes"][0]["attempts"]) == 1
 
 
+async def test_series_refuses_a_foreign_not_accepted_attempt_before_rearming_it(
+    fake_client, tmp_path
+):
+    """歸屬守門在**任何 mutation 之前**,即使這一集已有硬輸出證據(F-7 同一條紀律)。
+
+    `mark_not_accepted` 一律寫 `dispatch=not_accepted` + `remote=failed`,所以「讓位給輸出
+    守門」若用原始的 remote 終態判準,`not_accepted` 也會被放過去 —— 但它 re-arm 後直接
+    送出、不經過 `_create_audio_attempt`,輸出守門根本不會看到它。舊行為是先 re-arm 成
+    `prepared`、到 send 前的第二道歸屬檢查才拒絕,半成品留在 manifest。
+    只有 supersede 那條路該讓位。
+    """
+    _, manifest_path, attempt_id = await _quota_blocked_episode(fake_client, tmp_path)
+    fake_client.artifacts.generate_audio_exc = None
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["episodes"][0]["attempts"][0]["remote"]["status"] == "failed"
+    stored["episodes"][0]["mp3_path"] = str(tmp_path / "ep01-legacy.mp3")
+    manifest_path.write_text(json.dumps(stored, ensure_ascii=False), encoding="utf-8")
+    before = sum(1 for c in fake_client.artifacts.calls if c[0] == "generate_audio")
+
+    with pytest.raises(ValueError, match=attempt_id):
+        await p.podcast_series(
+            "nb-1",
+            episodes=[{"title": "心法篇", "brief": "第一集"}],
+            output_dir=str(tmp_path),
+        )
+
+    assert sum(1 for c in fake_client.artifacts.calls if c[0] == "generate_audio") == before
+    after = json.loads(manifest_path.read_text(encoding="utf-8"))["episodes"][0]["attempts"]
+    assert len(after) == 1
+    assert after[0]["dispatch"]["status"] == "not_accepted", "拒絕前已被 re-arm(半成品)"
+
+
 async def test_the_refusal_for_a_pinned_attempt_is_actually_walkable(fake_client, tmp_path):
     """訊息必須由 `attempt_capabilities()` 產生 —— 手寫的那句在這一格是**假的**。
 

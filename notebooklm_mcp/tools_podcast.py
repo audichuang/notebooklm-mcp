@@ -60,7 +60,6 @@ from .attempt_guidance import (
     ACTION_SERIES,
     ACTION_SHARE_WITH_POOL,
     ACTION_SOURCE_DELETE,
-    NEVER_DISPATCHED as _NEVER_DISPATCHED,
     SAFE_NEXT_ACTIONS,
     TERMINAL_REMOTE as _TERMINAL_REMOTE,
     attempt_capabilities,
@@ -70,6 +69,7 @@ from .attempt_guidance import (
     retract_hint,
 )
 from .attempt_state import (
+    RECONCILABLE_DISPATCH_STATES,
     AttemptRef,
     bind_caller_verified,
     claimed_artifact_ids as _claimed_artifact_ids,
@@ -501,6 +501,29 @@ async def _dispatch_prepared_attempt(
     return DispatchAccepted(artifact_id, account, client)
 
 
+_REDISPATCH_ORDER = ("rearm", "supersede", "send")
+
+
+def _series_redispatch_kind(attempt: dict, *, after: str | None = None) -> str | None:
+    """Which new dispatch podcast_series auto-performs on this attempt; None = finalize path.
+
+    Arm order == the active-branch chain order; `after` skips arms at or before it
+    (re-read after a mutation only moves forward, exactly like the old sequential ifs).
+    """
+    d = (attempt.get("dispatch") or {}).get("status")
+    r = (attempt.get("remote") or {}).get("status")
+    start = 0 if after is None else _REDISPATCH_ORDER.index(after) + 1
+    arms = (
+        ("rearm", d == "not_accepted"),
+        ("supersede", r in _TERMINAL_REMOTE),
+        ("send", d == "prepared"),
+    )
+    for kind, hit in arms[start:]:
+        if hit:
+            return kind
+    return None
+
+
 def _series_will_redispatch(attempt: dict) -> bool:
     """series 走到這顆 attempt 時,會不會產生**新的一次 dispatch**。
 
@@ -509,9 +532,7 @@ def _series_will_redispatch(attempt: dict) -> bool:
     與認證停點的交棒判準都要用這一個,不要各自列狀態字面值 —— 舊版接手守門只列了前
     兩種,`accepted`+`failed` 那格因此整條漏掉(見 `_series_handoff_caps`)。
     """
-    dispatch_status = (attempt.get("dispatch") or {}).get("status")
-    remote_status = (attempt.get("remote") or {}).get("status")
-    return dispatch_status in _NEVER_DISPATCHED or remote_status in _TERMINAL_REMOTE
+    return _series_redispatch_kind(attempt) is not None
 
 
 def _later_episode_has_output(snapshot: dict, episode_n: int, notebook_id: str) -> bool:
@@ -634,7 +655,7 @@ def _assert_series_owns_attempt(
 
     **指引由 `attempt_capabilities()` 產生,不再手寫**(docs/gotchas-attempt.md 紅線)。
     舊版無條件說「原樣重呼 podcast_episode 就會沿用同一顆重送」,那句話只對
-    `_NEVER_DISPATCHED` 成立;`accepted`+`failed` 的 `can_resend` 是 False,照做會撞
+    `attempt_guidance.NEVER_DISPATCHED` 成立;`accepted`+`failed` 的 `can_resend` 是 False,照做會撞
     `already has durable active attempt` —— 又一次「指引在它自己產生的狀態下不可執行」。
     那一格 caps 給的是「先 retract,再用 podcast_episode 帶回原本的 source_ids 重生」。
     """
@@ -2836,7 +2857,7 @@ async def podcast_series(
         # T3(P1,`scratchpad/verify-A1/r2_series_retract.py`):retract 中段集之後,
         # 這一集(還)沒有 output,但整季稍後的集數已經有——series 對它接下來要做的
         # 一定是重新 dispatch(全新一集 / not_accepted re-arm / failed-removed
-        # supersede,`_series_will_redispatch()` 涵蓋的正是這三種),而 series 生不出
+        # supersede,`_series_redispatch_kind()` 涵蓋的正是這三種),而 series 生不出
         # 帶 `source_ids` 的 settings,不指名就是讀整本筆記本,把後面集數的回錄音檔
         # 洩進這一集。**這一格 caps 修不了**——`attempt_capabilities` 只拿單一
         # attempt/episode,看不到 sibling episode 的 output 證據,跨集判斷只能留在
@@ -3080,12 +3101,12 @@ async def podcast_series(
 
                 dispatch_state = attempt.get("dispatch", {}).get("status")
                 remote = attempt.get("remote", {})
-                remote_state = remote.get("status")
                 artifact_id = remote.get("artifact_id")
+                step = _series_redispatch_kind(attempt)
                 # 這三種狀態接下來都會產生新的 dispatch(`prepared` 直接送、
                 # `not_accepted` 先 re-arm 再送、`failed`/`removed` 建 superseding
                 # attempt 再送),所以兩道守門都擺在它們的**共同上游**(判準集中在
-                # `_series_will_redispatch()`)、在任何 manifest mutation 之前。擺在
+                # `_series_redispatch_kind()`)、在任何 manifest mutation 之前。擺在
                 # 各自的 dispatch 點會先 re-arm/先建 attempt 才拒絕,留下半成品狀態、
                 # 還讓 `attempt_count` 白長一格(v0.7.1 驗收 F-7:抹完的 manifest 看
                 # 起來就像分類從未生效過)。已經 dispatch 出去、只等 finalize 的
@@ -3097,7 +3118,7 @@ async def podcast_series(
                 # 筆記本 —— 兩次 dispatch 送出 `[["src-1"], None]`,而工具回報
                 # `complete=True`。`attempt_next_step()` 的 settled 分支註解早就點名
                 # 過這個形狀,但只防了訊息、沒防程式路徑。
-                if _series_will_redispatch(attempt):
+                if step is not None:
                     # **筆數守門排在歸屬之前。** 反過來(純本機檢查先跑、省一趟 RPC)看起來
                     # 更划算,但它把一條原本回結構化 `too_many_sources` 停點的路改成裸拋
                     # ——`accepted`+`failed` 的外來 attempt 撞上超標筆記本時,舊行為是
@@ -3116,8 +3137,11 @@ async def podcast_series(
                     # 只讓終態那條路讓位:`prepared`/`not_accepted` 不經過
                     # `_create_audio_attempt`(re-arm 後直接送出),歸屬仍要在這裡驗,
                     # 否則等於為它們開一條沒有守門的路。
-                    defers_to_output_guard = remote_state in _TERMINAL_REMOTE and (
-                        has_hard_output_evidence(episode)
+                    # 判準必須是 `step`、不是 remote 終態:`mark_not_accepted` 一律寫
+                    # `remote=failed`,用終態判準會把 `not_accepted` 也放過去,先 re-arm
+                    # 才在 send 前被第二道歸屬檢查擋下(半成品,v0.9.37 修)。
+                    defers_to_output_guard = step == "supersede" and has_hard_output_evidence(
+                        episode
                     )
                     if not defers_to_output_guard:
                         _assert_series_owns_attempt(
@@ -3127,7 +3151,7 @@ async def podcast_series(
                             episode_n,
                             active_attempt_id,
                         )
-                if dispatch_state == "not_accepted":
+                if step == "rearm":
                     rearmed = AttemptRef(store, episode_n, active_attempt_id).rearm_not_accepted()
                     if not rearmed:
                         latest = store.read()
@@ -3142,9 +3166,9 @@ async def podcast_series(
                     episode, attempt = find_attempt(snapshot, episode_n, active_attempt_id)
                     dispatch_state = attempt["dispatch"]["status"]
                     remote = attempt["remote"]
-                    remote_state = remote["status"]
                     artifact_id = remote["artifact_id"]
-                if remote_state in ("failed", "removed"):
+                    step = _series_redispatch_kind(attempt, after="rearm")
+                if step == "supersede":
                     superseded_attempt_id = active_attempt_id
                     active_attempt_id = _create_audio_attempt(
                         store,
@@ -3161,10 +3185,10 @@ async def podcast_series(
                     episode, attempt = find_attempt(snapshot, episode_n, active_attempt_id)
                     dispatch_state = attempt["dispatch"]["status"]
                     remote = attempt["remote"]
-                    remote_state = remote["status"]
                     artifact_id = remote["artifact_id"]
+                    step = _series_redispatch_kind(attempt, after="supersede")
 
-                if dispatch_state == "prepared":
+                if step == "send":
                     # settings 可重現性已在上面(任何變更之前)驗過。這裡再驗一次是因為
                     # 上面那圈只涵蓋「進入本輪時就是 prepared/not_accepted」的 attempt,
                     # 而 remote failed/removed 的 supersede 分支會**新建**一個 prepared
@@ -3227,6 +3251,9 @@ async def podcast_series(
                             ACTION_SERIES,
                         )
                     if isinstance(outcome, DispatchStopped):
+                        # Kept separate from `_run_episode`'s classification on purpose:
+                        # `recorded is None` re-raises here, while `_run_episode` treats it as a
+                        # clean refusal unless the exception is `unconfirmed`.
                         exc = outcome.exc
                         if isinstance(exc, asyncio.CancelledError):
                             raise exc
@@ -3274,11 +3301,7 @@ async def podcast_series(
                     account, client = outcome.account, outcome.client
 
                 if not artifact_id:
-                    if dispatch_state not in (
-                        "dispatching",
-                        "acceptance_unknown",
-                        "reconciliation_ambiguous",
-                    ):
+                    if dispatch_state not in RECONCILABLE_DISPATCH_STATES:
                         raise ValueError(
                             f"episode {episode_n} attempt has no remote artifact "
                             f"in state {dispatch_state!r}"

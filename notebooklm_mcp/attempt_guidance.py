@@ -285,6 +285,8 @@ def attempt_capabilities(
         else []
     )
 
+    # Not derived from `tools_podcast._series_redispatch_kind` on purpose: for
+    # `prepared`+`failed` kind is "supersede" yet both of these are True.
     never_dispatched = dispatch_status in NEVER_DISPATCHED
     remote_terminal = remote_status in TERMINAL_REMOTE
 
