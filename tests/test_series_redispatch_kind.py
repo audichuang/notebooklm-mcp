@@ -10,6 +10,7 @@ series 進到一集已有 active attempt 時,要自己決定「re-arm / supersed
 import itertools
 
 import pytest
+from test_attempt_capabilities import _case
 
 from notebooklm_mcp import attempt_guidance as g, tools_podcast as tp
 from notebooklm_mcp.attempt_state import RECONCILABLE_DISPATCH_STATES
@@ -35,20 +36,8 @@ def _attempt(dispatch, remote, artifact_id=None):
     }
 
 
-# Local copy of test_attempt_capabilities._case for the "series" settings shape
-# (kept local so that file stays untouched).
 def _series_case(dispatch, remote):
-    attempt = {
-        "attempt_id": "att-me",
-        "dispatch": {"status": dispatch},
-        "remote": {
-            "status": remote,
-            "artifact_id": "art-1" if remote in ("pending", "completed") else None,
-        },
-        "settings": {"language": "zh", "audio_format": None, "audio_length": None},
-    }
-    episode = {"episode": 1, "attempts": [attempt], "active_attempt_id": "att-me"}
-    return episode, attempt
+    return _case(dispatch, remote, "active", "series")
 
 
 @pytest.mark.parametrize(

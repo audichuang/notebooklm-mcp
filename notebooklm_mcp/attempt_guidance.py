@@ -283,8 +283,8 @@ def attempt_capabilities(
         else []
     )
 
-    # Not derived from `tools_podcast._series_redispatch_kind` on purpose: for
-    # `prepared`+`failed` kind is "supersede" yet both of these are True.
+    # 刻意不從 `tools_podcast._series_redispatch_kind` 推導:`prepared`+`failed` 的
+    # kind 是 "supersede",但下面兩個都為 True。
     never_dispatched = dispatch_status in NEVER_DISPATCHED
     remote_terminal = remote_status in TERMINAL_REMOTE
 
@@ -587,7 +587,7 @@ def attempt_next_step(caps: dict) -> str:
     **P1 修復:兩處窗宣稱都不准再講「候選窗」。**`can_reconcile` 依據的是
     `reconciliation_window_closed`(**關閉判斷窗**,含 `_RECONCILIATION_MIN_WINDOW`
     1 小時保守下限),跟 `podcast_episode_reconcile` 篩選候選用的候選窗(`promised`
-    原始值,不套下限)是刻意拆開的兩個不同的窗(見檔案開頭 `_RECONCILIATION_MIN_WINDOW`
+    原始值,不套下限)是刻意拆開的兩個不同的窗(見 `tools_podcast` 開頭 `_RECONCILIATION_MIN_WINDOW`
     的常數註解)。Codex 實跑抓到:`promised=60`、dispatch 在 1500 秒前、
     `wait_timeout=1` 重呼——候選窗早在 120 秒就關了,但 1 小時的關閉判斷窗還沒關,
     這裡卻回「候選窗還沒關」,把兩個窗混成一個。措辭改成講**這句話實際依據的那個

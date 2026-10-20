@@ -494,10 +494,10 @@ async def _dispatch_prepared_attempt(
 
 
 def _series_redispatch_kind(attempt: dict, *, after: str | None = None) -> str | None:
-    """Which new dispatch podcast_series auto-performs on this attempt; None = finalize path.
+    """podcast_series 對這顆 attempt 會自動做哪一種新 dispatch;None = 走 finalize 那條。
 
-    Arm order == the active-branch chain order; `after` skips arms at or before it
-    (re-read after a mutation only moves forward, exactly like the old sequential ifs).
+    arms 的順序就是 active 分支 if 鏈的順序;`after` 跳過它本身與之前的 arm
+    (mutation 後重讀只往後走,逐格等於舊的循序 if)。
     """
     d = (attempt.get("dispatch") or {}).get("status")
     r = (attempt.get("remote") or {}).get("status")
@@ -3229,9 +3229,8 @@ async def podcast_series(
                             ACTION_SERIES,
                         )
                     if isinstance(outcome, DispatchStopped):
-                        # Kept separate from `_run_episode`'s classification on purpose:
-                        # `recorded is None` re-raises here, while `_run_episode` treats it as a
-                        # clean refusal unless the exception is `unconfirmed`.
+                        # 刻意不與 `_run_episode` 的分類合併:這裡 `recorded is None` 會原樣
+                        # 拋出,`_run_episode` 則除非例外是 `unconfirmed`,一律當乾淨的拒絕。
                         exc = outcome.exc
                         if isinstance(exc, asyncio.CancelledError):
                             raise exc
