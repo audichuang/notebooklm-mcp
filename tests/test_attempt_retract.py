@@ -82,7 +82,7 @@ def _assert_public_guidance_matches_capabilities(
     post_retract: bool = False,
 ) -> None:
     snapshot = ManifestStore(manifest_path).read()
-    episode, attempt = p._attempt_record(snapshot, 1, attempt_id, allow_retracted=post_retract)
+    episode, attempt = p.find_attempt(snapshot, 1, attempt_id, allow_retracted=post_retract)
     caps = p._attempt_capabilities(
         episode,
         attempt,
@@ -1068,13 +1068,13 @@ def _pending_ids(manifest_path):
 
 def _upload(manifest_path, attempt_id):
     snapshot = ManifestStore(manifest_path).read()
-    _, attempt = p._attempt_record(snapshot, 1, attempt_id, allow_retracted=True)
+    _, attempt = p.find_attempt(snapshot, 1, attempt_id, allow_retracted=True)
     return attempt["finalize"]["feedback_source_upload"]
 
 
 def _attempt_next_step_for(manifest_path, attempt_id):
     snapshot = ManifestStore(manifest_path).read()
-    episode, attempt = p._attempt_record(snapshot, 1, attempt_id, allow_retracted=True)
+    episode, attempt = p.find_attempt(snapshot, 1, attempt_id, allow_retracted=True)
     caps = p._attempt_capabilities(episode, attempt, attempt_id, post_retract=True)
     return p._attempt_next_step(caps)
 
@@ -1084,7 +1084,7 @@ def _age_the_dispatch_window(manifest_path, attempt_id):
     old = datetime.now(UTC) - (audio_finalize.UPLOAD_DISPATCH_WINDOW + timedelta(minutes=1))
 
     def mutate(manifest):
-        _, attempt = p._attempt_record(manifest, 1, attempt_id, allow_retracted=True)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id, allow_retracted=True)
         attempt["finalize"]["feedback_source_upload"]["dispatched_at"] = old.isoformat()
 
     ManifestStore(manifest_path).update(mutate)
@@ -1369,7 +1369,7 @@ async def test_gate_settles_verified_deletions_before_it_raises_on_the_window(
     attempt_id = before["output_attempt_id"]
 
     def unresolve(manifest):
-        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id)
         attempt["finalize"]["feedback_source_upload"].update(
             {"status": "acceptance_unknown", "source_id": None}
         )
@@ -1810,7 +1810,7 @@ async def test_gate_names_the_attempt_when_its_checkpoint_cannot_be_reconciled(
     )
 
     def corrupt_checkpoint(manifest):
-        _, attempt = p._attempt_record(manifest, 1, attempt_id, allow_retracted=True)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id, allow_retracted=True)
         attempt["finalize"]["feedback_source_upload"]["dispatched_at"] = None
 
     ManifestStore(manifest_path).update(corrupt_checkpoint)
@@ -1843,7 +1843,7 @@ async def test_every_unresolved_upload_status_carries_the_obligation(fake_client
     candidates = ["src-ambiguous-a", "src-ambiguous-b"]
 
     def unresolve(manifest):
-        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id)
         attempt["finalize"]["feedback_source_upload"].update(
             {
                 "status": status,

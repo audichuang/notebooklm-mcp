@@ -243,13 +243,15 @@ async def test_series_auth_expiry_preserves_prior_results_without_mutation(
             audio_format="deep-dive",
             audio_length="long",
         )
-        assert p._claim_prepared_dispatch(
-            store, 2, attempt_id, [], account="#1", wait_timeout=1200.0
+        assert p.AttemptRef(store, 2, attempt_id).claim_prepared(
+            [], account="#1", wait_timeout=1200.0
         )
         if attempt_state == "not_accepted":
-            p._mark_not_accepted(store, 2, attempt_id, RateLimitError("每日配額已用盡"))
+            p.AttemptRef(store, 2, attempt_id).mark_not_accepted(RateLimitError("每日配額已用盡"))
         else:
-            p._mark_acceptance_unknown(store, 2, attempt_id, TimeoutError("response lost"))
+            p.AttemptRef(store, 2, attempt_id).mark_acceptance_unknown(
+                TimeoutError("response lost")
+            )
 
     original_generate = fake_client.artifacts.generate_audio
     generate_count = 0
@@ -322,10 +324,10 @@ async def test_auth_expiry_hands_a_pinned_attempt_to_its_real_owner(
         source_ids=["src-1"],
     )
     if attempt_state == "not_accepted":
-        assert p._claim_prepared_dispatch(
-            store, 2, attempt_id, [], account="#1", wait_timeout=1200.0
+        assert p.AttemptRef(store, 2, attempt_id).claim_prepared(
+            [], account="#1", wait_timeout=1200.0
         )
-        p._mark_not_accepted(store, 2, attempt_id, RateLimitError("每日配額已用盡"))
+        p.AttemptRef(store, 2, attempt_id).mark_not_accepted(RateLimitError("每日配額已用盡"))
 
     original_generate = fake_client.artifacts.generate_audio
     generate_count = 0
@@ -385,8 +387,8 @@ async def test_auth_handoff_carries_the_sources_the_next_step_needs(
         audio_length="long",
         source_ids=["src-2"],
     )
-    assert p._claim_prepared_dispatch(store, 2, attempt_id, [], account="#1", wait_timeout=1200.0)
-    p._mark_not_accepted(store, 2, attempt_id, RateLimitError("每日配額已用盡"))
+    assert p.AttemptRef(store, 2, attempt_id).claim_prepared([], account="#1", wait_timeout=1200.0)
+    p.AttemptRef(store, 2, attempt_id).mark_not_accepted(RateLimitError("每日配額已用盡"))
 
     async def always_expired(client):
         raise p._AuthProbeError("authentication expired")
@@ -559,8 +561,8 @@ async def test_series_auth_expiry_stops_before_pending_cleanup_rpc(
         audio_format="deep-dive",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(store, 2, attempt_id, [], account="#1", wait_timeout=1200.0)
-    p._mark_not_accepted(store, 2, attempt_id, RateLimitError("每日配額已用盡"))
+    assert p.AttemptRef(store, 2, attempt_id).claim_prepared([], account="#1", wait_timeout=1200.0)
+    p.AttemptRef(store, 2, attempt_id).mark_not_accepted(RateLimitError("每日配額已用盡"))
 
     expired = False
     original_finalize = p.finalize_attempt
@@ -617,8 +619,8 @@ async def test_series_reconcile_reuses_per_episode_auth_probe(fake_client, tmp_p
         audio_format="deep-dive",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(store, 1, attempt_id, [], account="#1", wait_timeout=1200.0)
-    p._mark_acceptance_unknown(store, 1, attempt_id, TimeoutError("response lost"))
+    assert p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="#1", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).mark_acceptance_unknown(TimeoutError("response lost"))
     probes = 0
     original_probe = fake_client.notebooks.list
 

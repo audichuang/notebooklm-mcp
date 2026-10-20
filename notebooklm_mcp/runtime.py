@@ -144,7 +144,7 @@ def snapshot() -> tuple[str | None, Any]:
     """一次取出作用中的 `(label, client)`——**記帳點專用**。
 
     `active_account()` 與 `get_client()` 分開讀是有縫的:`tools_podcast` 在
-    `_claim_prepared_dispatch(..., account=…)`(await)與真正 `generate(client)`
+    `AttemptRef.claim_prepared(..., account=…)`(await)與真正 `generate(client)`
     之間隔著至少一次 await,而 MCP 是並行的 —— 另一個工具呼叫在那個縫裡撞到配額
     並 `rotate_client()`,manifest 就會記下 A、實際卻由 B 送出。
 

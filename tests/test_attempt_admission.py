@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from notebooklm_mcp import attempt_admission as adm
+from notebooklm_mcp import attempt_admission as adm, output_projection as op
 from notebooklm_mcp.attempt_admission import (
     Admit,
     Origin,
@@ -450,13 +450,13 @@ def test_series_identity(subject, holder, message):
 
 def test_output_predicates_keep_their_documented_differences():
     legacy_prep = {"episode": 1, "attempts": [], "label": "EP01 T"}
-    assert adm.output_blocks_generate(legacy_prep)
-    assert not adm.has_output_pointer_or_hard(legacy_prep)
-    assert adm.has_output_pointer_or_hard({"output_attempt_id": "a"})
-    assert adm.has_output_pointer_or_hard({"mp3_path": "/x"})
+    assert op.output_blocks_generate(legacy_prep)
+    assert not op.has_output_pointer_or_hard(legacy_prep)
+    assert op.has_output_pointer_or_hard({"output_attempt_id": "a"})
+    assert op.has_output_pointer_or_hard({"mp3_path": "/x"})
     # generate 用真值、series 用 is-not-None:空字串只在 series 算有 output。
-    assert not adm.output_blocks_generate({"output_attempt_id": "", "attempts": [{}]})
-    assert adm.has_output_pointer_or_hard({"output_attempt_id": ""})
+    assert not op.output_blocks_generate({"output_attempt_id": "", "attempts": [{}]})
+    assert op.has_output_pointer_or_hard({"output_attempt_id": ""})
 
 
 def test_record_builders_have_single_shape():

@@ -32,12 +32,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .attempt_state import find_attempt, new_resume_binding
-from .audio_finalize import (
-    has_durable_output_evidence,
-    has_hard_output_evidence,
-    new_finalize_state,
-)
+from .audio_finalize import new_finalize_state
 from .naming import episode_label
+from .output_projection import (
+    has_hard_output_evidence,
+    output_blocks_generate,
+)
 
 NextStep = Callable[[dict, dict, str], str]
 
@@ -100,24 +100,6 @@ Decision = Admit | Refusal
 
 def brief_sha256(brief: str) -> str:
     return hashlib.sha256(brief.encode("utf-8")).hexdigest()
-
-
-# ---- 既有輸出的述詞(各入口刻意不同,集中命名,不是統一) -------------------------------
-
-
-def has_output_pointer_or_hard(episode: dict) -> bool:
-    """`output_attempt_id` 已指向某顆,或有 legacy 硬證據。series 的跨集洩漏判斷用。"""
-    return episode.get("output_attempt_id") is not None or has_hard_output_evidence(episode)
-
-
-def output_blocks_generate(episode: dict) -> bool:
-    """generate 的「拒絕靜默覆蓋」:比 series 多一格 legacy preparatory,且 pointer 用真值。"""
-    legacy_preparatory_output = not episode.get("attempts") and has_durable_output_evidence(episode)
-    return bool(
-        episode.get("output_attempt_id")
-        or has_hard_output_evidence(episode)
-        or legacy_preparatory_output
-    )
 
 
 # ---- 守門 ---------------------------------------------------------------------------

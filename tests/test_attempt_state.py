@@ -5,7 +5,7 @@
 
 import pytest
 
-from notebooklm_mcp import attempt_state as st
+from notebooklm_mcp import attempt_state as st, output_projection as op
 
 DISPATCH_STATES = (
     "prepared",
@@ -243,7 +243,7 @@ def test_bind_reconciled_refusals():
         lambda m: st.mark_reconciliation_ambiguous(m, 1, "a1", ["art-9"]),
         lambda m: st.claim_prepared(m, 1, "a1", [], None, 60.0),
         lambda m: st.bind_caller_verified(m, m["episodes"][0]["attempts"][0], "a1", "art-9"),
-        lambda m: st.apply_promotion(
+        lambda m: op.apply_promotion(
             m["episodes"][0], m["episodes"][0]["attempts"][0], "a1", {"artifact_id": "art-9"}
         ),
         lambda m: st.reset_for_resend(m["episodes"][0]["attempts"][0]),
@@ -323,7 +323,7 @@ def test_apply_promotion_writes_pointers_and_echoes_published_at(tmp_path):
     episode["attempts"].append(
         {"attempt_id": "old", "retraction": {"retracted_output": {"published_at": "first"}}}
     )
-    st.apply_promotion(episode, attempt, "a1", output)
+    op.apply_promotion(episode, attempt, "a1", output)
     assert attempt["remote"]["status"] == "completed"
     assert episode["output_attempt_id"] == "a1"
     assert episode["published_at"] == "first" == output["published_at"]
@@ -349,12 +349,26 @@ def test_every_key_promotion_writes_is_either_output_projection_or_identity(tmp_
         "published_at": "now",
         "feedback_source_id": "src-1",
     }
-    for key in (*st.OUTPUT_PROJECTION_KEYS, *st.EPISODE_IDENTITY_KEYS):
+    for key in (*op.OUTPUT_PROJECTION_KEYS, *op.EPISODE_IDENTITY_KEYS):
         episode.pop(key, None)
     before = set(episode)
 
-    st.apply_promotion(episode, attempt, "a1", output)
+    op.apply_promotion(episode, attempt, "a1", output)
 
     written = set(episode) - before
-    assert written <= {*st.OUTPUT_PROJECTION_KEYS, *st.EPISODE_IDENTITY_KEYS}
-    assert not set(st.OUTPUT_PROJECTION_KEYS) & set(st.EPISODE_IDENTITY_KEYS)
+    assert written <= {*op.OUTPUT_PROJECTION_KEYS, *op.EPISODE_IDENTITY_KEYS}
+    assert not set(op.OUTPUT_PROJECTION_KEYS) & set(op.EPISODE_IDENTITY_KEYS)
+
+
+def test_hard_output_evidence_is_a_subset_of_the_output_projection():
+    """`has_hard_output_evidence` 認的硬證據必須都在 retract 會 pop 的投影裡。
+
+    這條紅了代表某個硬證據鍵不在 `OUTPUT_PROJECTION_KEYS`:retract 拔不掉它,作廢後
+    殘留的值會讓 `has_hard_output_evidence` 永遠為真,取代版重生撞死路(ADR-0009 的
+    「legacy 證據沒清等於換個地方繼續擋死」)。**正確的反應是把它加進投影**,不是從
+    硬證據拿掉。
+    """
+    assert set(op.HARD_OUTPUT_EVIDENCE_KEYS) <= set(op.OUTPUT_PROJECTION_KEYS)
+    episode = dict.fromkeys(op.OUTPUT_PROJECTION_KEYS, "x")
+    op.pop_output_projection(episode)
+    assert not op.has_hard_output_evidence(episode)

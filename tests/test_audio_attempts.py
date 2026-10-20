@@ -187,7 +187,7 @@ async def test_reconcile_with_no_candidate_past_the_window_offers_retract(fake_c
     stale_dispatched_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
 
     def backdate(manifest: dict) -> None:
-        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = stale_dispatched_at
 
     store.update(backdate)
@@ -220,7 +220,7 @@ async def test_reconciliation_window_closure_has_a_conservative_floor_the_caller
 
     def backdate(seconds: float):
         def _mutate(manifest: dict) -> None:
-            _, attempt = p._attempt_record(manifest, 1, attempt_id)
+            _, attempt = p.find_attempt(manifest, 1, attempt_id)
             attempt["dispatch"]["dispatched_at"] = (
                 datetime.now(UTC) - timedelta(seconds=seconds)
             ).isoformat()
@@ -308,7 +308,7 @@ async def test_reconcile_does_not_auto_bind_when_another_attempt_is_still_unreso
 
     def backdate(episode_n: int, attempt_id: str, seconds_ago: float):
         def _mutate(manifest: dict) -> None:
-            _, attempt = p._attempt_record(manifest, episode_n, attempt_id)
+            _, attempt = p.find_attempt(manifest, episode_n, attempt_id)
             attempt["dispatch"]["dispatched_at"] = (
                 datetime.now(UTC) - timedelta(seconds=seconds_ago)
             ).isoformat()
@@ -611,7 +611,7 @@ async def test_reconcile_honors_the_original_promise_over_a_smaller_retry_timeou
     store = p.ManifestStore(str(manifest_path))
 
     def backdate(manifest: dict) -> None:
-        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
             datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
@@ -649,7 +649,7 @@ async def test_legacy_attempt_without_a_persisted_promise_still_uses_the_floor(
     store = p.ManifestStore(str(manifest_path))
 
     def strip_and_backdate(manifest: dict) -> None:
-        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id)
         del attempt["dispatch"]["wait_timeout"]  # 模擬 legacy manifest 沒有這個欄位
         attempt["dispatch"]["dispatched_at"] = (
             datetime.now(UTC) - timedelta(seconds=4000)
@@ -696,7 +696,7 @@ async def test_reconciliation_closure_floor_can_exceed_the_candidate_window(fake
     store = p.ManifestStore(str(manifest_path))
 
     def backdate(manifest: dict) -> None:
-        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
             datetime.now(UTC) - timedelta(seconds=1500)
         ).isoformat()
@@ -745,7 +745,7 @@ async def test_candidate_window_also_honors_the_original_promise(fake_client, tm
     store = p.ManifestStore(str(manifest_path))
 
     def backdate(manifest: dict) -> None:
-        _, attempt = p._attempt_record(manifest, 1, attempt_id)
+        _, attempt = p.find_attempt(manifest, 1, attempt_id)
         attempt["dispatch"]["dispatched_at"] = (
             datetime.now(UTC) - timedelta(seconds=4000)
         ).isoformat()
@@ -874,8 +874,8 @@ async def test_late_dispatch_outcomes_cannot_downgrade_or_replace_mapping(fake_c
     await p.podcast_episode_reconcile(str(manifest_path), episode_n=1, attempt_id=attempt_id)
 
     store = p.ManifestStore(manifest_path)
-    p._mark_acceptance_unknown(
-        store, episode_n=1, attempt_id=attempt_id, error=TimeoutError("late timeout")
+    p.AttemptRef(store, episode_n=1, attempt_id=attempt_id).mark_acceptance_unknown(
+        error=TimeoutError("late timeout")
     )
     after_timeout = json.loads(manifest_path.read_text(encoding="utf-8"))
     attempt = after_timeout["episodes"][0]["attempts"][0]
@@ -883,28 +883,25 @@ async def test_late_dispatch_outcomes_cannot_downgrade_or_replace_mapping(fake_c
     assert attempt["remote"]["artifact_id"] == "remote-audio-1"
 
     failed_status = SimpleNamespace(error="late failure", error_code=None, status="failed")
-    p._mark_not_accepted(store, episode_n=1, attempt_id=attempt_id, status=failed_status)
+    p.AttemptRef(store, episode_n=1, attempt_id=attempt_id).mark_not_accepted(status=failed_status)
     after_failure = json.loads(manifest_path.read_text(encoding="utf-8"))
     attempt = after_failure["episodes"][0]["attempts"][0]
     assert attempt["dispatch"]["status"] == "accepted"
     assert attempt["remote"]["status"] == "pending"
 
     with pytest.raises(ValueError, match="another artifact|不同"):
-        p._bind_accepted_artifact(
-            store, episode_n=1, attempt_id=attempt_id, artifact_id="remote-audio-2"
+        p.AttemptRef(store, episode_n=1, attempt_id=attempt_id).bind_sdk_heuristic(
+            artifact_id="remote-audio-2"
         )
     final = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert final["episodes"][0]["attempts"][0]["remote"]["artifact_id"] == ("remote-audio-1")
 
     def mark_completed(manifest):
-        _, current = p._attempt_record(manifest, 1, attempt_id)
+        _, current = p.find_attempt(manifest, 1, attempt_id)
         current["remote"]["status"] = "completed"
 
     store.update(mark_completed)
-    p._bind_accepted_artifact(
-        store,
-        episode_n=1,
-        attempt_id=attempt_id,
+    p.AttemptRef(store, episode_n=1, attempt_id=attempt_id).bind_sdk_heuristic(
         artifact_id="remote-audio-1",
     )
     completed = json.loads(manifest_path.read_text(encoding="utf-8"))

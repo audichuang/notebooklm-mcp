@@ -775,8 +775,8 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
         audio_format="no-such-format",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
-    p._mark_not_accepted(store, 1, attempt_id, RateLimitError("每日配額已用盡"))
+    assert p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="a@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).mark_not_accepted(RateLimitError("每日配額已用盡"))
 
     with pytest.raises(ValueError, match="no-such-format"):
         await p.podcast_series(
@@ -786,7 +786,7 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
             audio_format="no-such-format",
         )
 
-    _, attempt = p._attempt_record(store.read(), 1, attempt_id)
+    _, attempt = p.find_attempt(store.read(), 1, attempt_id)
     assert attempt["dispatch"]["status"] != "dispatching", (
         "本地轉換失敗不得留下『正在送』的 durable 狀態 —— 遠端一次都沒被碰到"
     )

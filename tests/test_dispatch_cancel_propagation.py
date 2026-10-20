@@ -47,7 +47,7 @@ async def test_podcast_series_fresh_episode_reraises_cancel(fake_client, tmp_pat
 
 
 async def test_podcast_series_prepared_resend_reraises_cancel(fake_client, tmp_path, monkeypatch):
-    original_claim = p._claim_prepared_dispatch
+    original_claim = p.AttemptRef.claim_prepared
     crashed = False
 
     def crash_once(*args, **kwargs):
@@ -57,7 +57,7 @@ async def test_podcast_series_prepared_resend_reraises_cancel(fake_client, tmp_p
             raise ConnectionError("crash before dispatch")
         return original_claim(*args, **kwargs)
 
-    monkeypatch.setattr(p, "_claim_prepared_dispatch", crash_once)
+    monkeypatch.setattr(p.AttemptRef, "claim_prepared", crash_once)
     first = await p.podcast_series("nb-1", episodes=EPS, output_dir=str(tmp_path))
     assert first["observed_state"] == "prepared"  # 留下一顆 prepared attempt 走重送路徑
 

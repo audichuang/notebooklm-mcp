@@ -256,7 +256,7 @@ async def test_acceptance_unknown_records_the_real_reason_not_an_object_repr(fak
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="a@x", wait_timeout=1200.0)
     runtime.set_clients([("a@x", fake_client)])
 
     async def accepted_then_failed(client):

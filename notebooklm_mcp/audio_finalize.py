@@ -25,9 +25,10 @@ from ._atomic import (
     sha256_file,
 )
 from ._status import TerminalGenerationError, ensure_completed, wait_for_artifact
-from .attempt_state import find_attempt
+from .attempt_state import AttemptRef
 from .manifest_store import ManifestStore
 from .naming import episode_label
+from .output_projection import has_durable_output_evidence
 
 _SOURCE_CLOCK_SKEW = timedelta(minutes=1)
 _SOURCE_DISPATCH_WINDOW = timedelta(minutes=11)
@@ -43,30 +44,6 @@ _UNRESOLVED_UPLOAD_STATUSES = (
 # `upload_dispatch_window_closed()` 用的是同一個,不能在別的 module 再加一次。
 UPLOAD_DISPATCH_WINDOW = _SOURCE_DISPATCH_WINDOW + _SOURCE_CLOCK_SKEW
 _TZ = timezone(timedelta(hours=8))
-
-
-def has_hard_output_evidence(episode: dict) -> bool:
-    """已生成或發布的 legacy 證據；即使後來出現 attempt 也不可隱式覆寫。"""
-    hard_fields = ("artifact_id", "task_id", "mp3_path", "published_at")
-    return any(
-        isinstance(episode.get(field), str) and episode[field].strip() for field in hard_fields
-    )
-
-
-def has_durable_output_evidence(episode: dict) -> bool:
-    """既有輸出留下任一耐久證據時，不得覆寫相容路徑。"""
-    if has_hard_output_evidence(episode):
-        return True
-    # 被 retract 的那版本機 mp3 就是拒收證據,不能讓取代版蓋掉它——否則同一集有沒有
-    # 保留證據會取決於「那時剛好生過封面沒有」,不可預測。取代版一律走
-    # attempts/<attempt_id>/ 子目錄(見下方 finalize 的 mp3_path 選擇)。
-    if episode.get("retracted_attempt_ids"):
-        return True
-    cover = episode.get("cover_path")
-    if isinstance(cover, str) and cover.strip():
-        return True
-    label = episode.get("label")
-    return not episode.get("attempts") and isinstance(label, str) and bool(label.strip())
 
 
 def new_finalize_state() -> dict:
@@ -158,44 +135,25 @@ def adopt_feedback_source(
     return previous, stale_candidates
 
 
-def _record(manifest: dict, episode_n: int, attempt_id: str) -> tuple[dict, dict]:
+# finalize 場景的 tombstone 拒絕訊息尾巴;查找與拒絕的本體在 `attempt_state.find_attempt`。
+_FINALIZE_RETRACTED_HINT = "generate a replacement instead of finalizing it"
+
+
+def _attempt_ref(store: ManifestStore, episode_n: int, attempt_id: str) -> AttemptRef:
     # Tombstone。`podcast_attempt_retract` 作廢的 attempt 不得再被 finalize:所有 finalize
-    # checkpoint 的讀寫都走這裡,所以一個 in-flight finalizer 在 retract 之後的第一次
+    # checkpoint 的讀寫都走這個 ref,所以一個 in-flight finalizer 在 retract 之後的第一次
     # manifest 觸碰就會停住,不會繼續 upload／rename／promote 把被拒收的那版復活。
-    # 查找與拒絕的本體在 `attempt_state.find_attempt`;這裡只換 finalize 場景的訊息尾巴。
-    return find_attempt(
-        manifest,
-        episode_n,
-        attempt_id,
-        retracted_hint="generate a replacement instead of finalizing it",
-    )
+    return AttemptRef(store, episode_n, attempt_id, retracted_hint=_FINALIZE_RETRACTED_HINT)
 
 
-def _ensure_finalize(store: ManifestStore, episode_n: int, attempt_id: str) -> None:
-    def mutate(manifest: dict) -> None:
-        _, attempt = _record(manifest, episode_n, attempt_id)
-        attempt.setdefault("finalize", new_finalize_state())
+def _mutate(ref: AttemptRef, callback: Callable[[dict, dict], None]) -> None:
+    """finalize checkpoint 的寫入口;checkpoint 初始形狀(`new_finalize_state`)只在本模組補。"""
 
-    store.update(mutate)
-
-
-def _mutate(
-    store: ManifestStore,
-    episode_n: int,
-    attempt_id: str,
-    callback: Callable[[dict, dict], None],
-) -> None:
-    def mutate(manifest: dict) -> None:
-        episode, attempt = _record(manifest, episode_n, attempt_id)
+    def mutate(_manifest: dict, episode: dict, attempt: dict) -> None:
         attempt.setdefault("finalize", new_finalize_state())
         callback(episode, attempt)
 
-    store.update(mutate)
-
-
-def _subject(store: ManifestStore, episode_n: int, attempt_id: str) -> tuple[dict, dict]:
-    snapshot = store.read()
-    return _record(snapshot, episode_n, attempt_id)
+    ref.mutate(mutate)
 
 
 def _claimed_source_ids(manifest: dict, excluding_attempt_id: str) -> set[str]:
@@ -364,8 +322,8 @@ def unresolved_upload_candidates(
     回錄誤判成這次的孤兒(或反過來漏掉真的孤兒),而兩邊各寫一份就等於保證有一天
     只有一邊被修到——本 repo 對「各寫一份」記過的帳已經夠多了。
 
-    刻意收 `attempt` 而不是走 `_record()`:tombstone 之後的對帳是這支的主要用途,
-    而 `_record()` 對已 retract 的 attempt 一律 raise(default-deny)。
+    刻意收 `attempt` 而不是走 `_attempt_ref(...).find()`:tombstone 之後的對帳是這支的
+    主要用途,而它對已 retract 的 attempt 一律 raise(default-deny)。
     """
     upload = attempt["finalize"]["feedback_source_upload"]
     baseline = set(upload.get("source_ids_before") or [])
@@ -404,8 +362,9 @@ async def _reconcile_source_upload(
     attempt_id: str,
     notebook_id: str,
 ) -> str:
+    ref = _attempt_ref(store, episode_n, attempt_id)
     snapshot = store.read()
-    _, attempt = _record(snapshot, episode_n, attempt_id)
+    _, attempt = ref.find(snapshot)
     sources = await client.sources.list(notebook_id)
     candidates = unresolved_upload_candidates(snapshot, attempt, attempt_id, sources)
     if len(candidates) == 1:
@@ -413,7 +372,7 @@ async def _reconcile_source_upload(
 
         # CAS 式重新檢查由 ManifestStore.update 的鎖定 read-modify-write 完成。
         def mutate(manifest: dict) -> None:
-            _, current = _record(manifest, episode_n, attempt_id)
+            _, current = ref.find(manifest)
             if source_id in _claimed_source_ids(manifest, attempt_id):
                 raise ValueError(f"feedback source {source_id!r} was claimed during reconciliation")
             current_upload = current["finalize"]["feedback_source_upload"]
@@ -437,7 +396,7 @@ async def _reconcile_source_upload(
             "reconciliation_ambiguous" if candidates else "acceptance_unknown"
         )
 
-    _mutate(store, episode_n, attempt_id, unresolved)
+    _mutate(ref, unresolved)
     if candidates:
         raise RuntimeError("feedback source reconciliation is ambiguous: " + ", ".join(candidates))
     raise RuntimeError(
@@ -512,8 +471,9 @@ async def finalize_attempt(
     wait_timeout: float,
 ) -> dict:
     """從 durable checkpoint 補完一個已 accepted 的 audio attempt。"""
-    _ensure_finalize(store, episode_n, attempt_id)
-    episode, attempt = _subject(store, episode_n, attempt_id)
+    ref = _attempt_ref(store, episode_n, attempt_id)
+    _mutate(ref, lambda _episode, _attempt: None)
+    episode, attempt = ref.read()
     notebook_id = attempt.get("notebook_id")
     artifact_id = attempt.get("remote", {}).get("artifact_id")
     if not isinstance(notebook_id, str) or not notebook_id:
@@ -585,7 +545,7 @@ async def finalize_attempt(
                     }
                 )
 
-            _mutate(store, episode_n, attempt_id, remote_terminal)
+            _mutate(ref, remote_terminal)
             raise
 
         def remote_completed(_episode: dict, current: dict) -> None:
@@ -597,9 +557,9 @@ async def finalize_attempt(
                 }
             )
 
-        _mutate(store, episode_n, attempt_id, remote_completed)
+        _mutate(ref, remote_completed)
 
-    _, attempt = _subject(store, episode_n, attempt_id)
+    _, attempt = ref.read()
     rename = attempt["finalize"]["artifact_rename"]
     artifact_title_state = await _artifact_title_state(client, notebook_id, artifact_id, label)
     if artifact_title_state is None:
@@ -614,8 +574,8 @@ async def finalize_attempt(
         def adopt_rename(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "completed"
 
-        _mutate(store, episode_n, attempt_id, adopt_rename)
-        _, attempt = _subject(store, episode_n, attempt_id)
+        _mutate(ref, adopt_rename)
+        _, attempt = ref.read()
         rename = attempt["finalize"]["artifact_rename"]
 
     if rename["status"] != "completed" or artifact_title_state is False:
@@ -623,7 +583,7 @@ async def finalize_attempt(
         def rename_dispatching(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "dispatching"
 
-        _mutate(store, episode_n, attempt_id, rename_dispatching)
+        _mutate(ref, rename_dispatching)
 
         def rename_unknown(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "outcome_unknown"
@@ -633,20 +593,20 @@ async def finalize_attempt(
         except Exception:
             landed = await _artifact_title_state(client, notebook_id, artifact_id, label)
             if landed is not True:
-                _mutate(store, episode_n, attempt_id, rename_unknown)
+                _mutate(ref, rename_unknown)
                 raise
         else:
             landed = await _artifact_title_state(client, notebook_id, artifact_id, label)
             if landed is not True:
-                _mutate(store, episode_n, attempt_id, rename_unknown)
+                _mutate(ref, rename_unknown)
                 raise RuntimeError(f"artifact {artifact_id!r} rename postcondition failed")
 
         def rename_completed(_episode: dict, current: dict) -> None:
             current["finalize"]["artifact_rename"]["status"] = "completed"
 
-        _mutate(store, episode_n, attempt_id, rename_completed)
+        _mutate(ref, rename_completed)
 
-    _, attempt = _subject(store, episode_n, attempt_id)
+    _, attempt = ref.read()
     download = attempt["finalize"]["download"]
     download_complete = (
         download["status"] == "completed"
@@ -675,7 +635,7 @@ async def finalize_attempt(
                 {"status": "dispatching", "temp_path": temp_path}
             )
 
-        _mutate(store, episode_n, attempt_id, download_dispatching)
+        _mutate(ref, download_dispatching)
         replaced = False
         try:
             await client.artifacts.download_audio(notebook_id, temp_path, artifact_id)
@@ -709,7 +669,7 @@ async def finalize_attempt(
                     return
                 download_state.update({"status": "failed", "temp_path": None})
 
-            _mutate(store, episode_n, attempt_id, download_failed)
+            _mutate(ref, download_failed)
             raise
         finally:
             # CancelledError 是 BaseException 子類,不會落進上面的 except Exception——
@@ -748,9 +708,9 @@ async def finalize_attempt(
                 }
             )
 
-        _mutate(store, episode_n, attempt_id, download_completed)
+        _mutate(ref, download_completed)
 
-    _, attempt = _subject(store, episode_n, attempt_id)
+    _, attempt = ref.read()
     upload = attempt["finalize"]["feedback_source_upload"]
     source_id = upload.get("source_id")
     if isinstance(source_id, str) and source_id:
@@ -772,7 +732,7 @@ async def finalize_attempt(
         expected_title = os.path.basename(mp3_path)
 
         def claim_upload(manifest: dict) -> bool:
-            _, current = _record(manifest, episode_n, attempt_id)
+            _, current = ref.find(manifest)
             current_upload = current["finalize"]["feedback_source_upload"]
             if current_upload["status"] != "not_started":
                 return False
@@ -820,9 +780,9 @@ async def finalize_attempt(
                     upload_state["status"] = "acceptance_unknown"
 
                 try:
-                    _mutate(store, episode_n, attempt_id, upload_unknown)
+                    _mutate(ref, upload_unknown)
                 except Exception as checkpoint_error:  # noqa: BLE001 —— checkpoint 寫入失敗不該蓋掉呼叫端真正要讀的例外
-                    # 並行 retract 已經 tombstone 掉這顆(`_record` default-deny),或
+                    # 並行 retract 已經 tombstone 掉這顆(`_attempt_ref` default-deny),或
                     # manifest 根本寫不進去。兩種都不該蓋掉呼叫端真正要讀的那個例外
                     # ——retract 那條路自己會留下 unresolved 清理義務。
                     exc.add_note(
@@ -838,9 +798,9 @@ async def finalize_attempt(
                     {"status": "accepted", "source_id": source_id}
                 )
 
-            _mutate(store, episode_n, attempt_id, upload_accepted)
+            _mutate(ref, upload_accepted)
 
-    _, attempt = _subject(store, episode_n, attempt_id)
+    _, attempt = ref.read()
     sources = await client.sources.list(notebook_id)
     source = next((row for row in sources if getattr(row, "id", None) == source_id), None)
     if source is None:
@@ -851,7 +811,7 @@ async def finalize_attempt(
         def source_rename_dispatching(_episode: dict, current: dict) -> None:
             current["finalize"]["feedback_source_rename"]["status"] = "dispatching"
 
-        _mutate(store, episode_n, attempt_id, source_rename_dispatching)
+        _mutate(ref, source_rename_dispatching)
         try:
             await client.sources.rename(notebook_id, source_id, label, return_object=False)
         except Exception:
@@ -871,7 +831,7 @@ async def finalize_attempt(
                 def source_rename_unknown(_episode: dict, current: dict) -> None:
                     current["finalize"]["feedback_source_rename"]["status"] = "outcome_unknown"
 
-                _mutate(store, episode_n, attempt_id, source_rename_unknown)
+                _mutate(ref, source_rename_unknown)
                 raise
     check = await client.sources.list(notebook_id)
     verified = next(
@@ -898,8 +858,8 @@ async def finalize_attempt(
             }
         )
 
-    _mutate(store, episode_n, attempt_id, source_completed)
-    episode, attempt = _subject(store, episode_n, attempt_id)
+    _mutate(ref, source_completed)
+    episode, attempt = ref.read()
     completed = _completed_output(episode, attempt, episode_n, attempt_id)
     if completed is None:
         raise RuntimeError("finalize postconditions are incomplete")

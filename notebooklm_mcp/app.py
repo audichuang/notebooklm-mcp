@@ -232,7 +232,7 @@ def _reject_duplicate_accounts(pool: list[tuple[str, object]]) -> None:
 
     ADR-0010 自己點名的 `dev_alt` 陷阱(Doppler branch config 會繼承 root 未覆寫的
     secret,於是 root 的 `_2`/`_3` 被一起繼承進來)此前**沒有任何機器檢查**:
-    `rotate_client()` 照樣回報「換到第二格」,`_record_dispatch_failover` 照樣寫
+    `rotate_client()` 照樣回報「換到第二格」,`AttemptRef.record_dispatch_failover` 照樣寫
     `from_account` → `to_account`,而實際上兩邊是同一個帳號,配額當然照樣是滿的。
 
     **偵測的前提是拿得到 email**:`_account_label` 取不到就退回 `#N`,而 `#1`/`#2`

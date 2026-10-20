@@ -472,7 +472,7 @@ async def test_attempt_rotate_for_quota_tells_runtime_which_account_was_actually
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="a@x", wait_timeout=1200.0)
 
     captured: dict = {}
 
@@ -521,7 +521,7 @@ async def test_attempt_rotate_for_quota_does_not_give_up_when_the_first_scanned_
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="b@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="b@x", wait_timeout=1200.0)
 
     import time as time_mod
 
@@ -573,7 +573,7 @@ async def test_dispatch_failover_terminates_even_if_rotate_never_reports_exhaust
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="a@x", wait_timeout=1200.0)
 
     calls: list = []
 
@@ -624,7 +624,7 @@ async def test_dispatch_failover_terminates_via_the_ensure_started_path_too(
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="a@x", wait_timeout=1200.0)
 
     calls: list = []
 
@@ -691,7 +691,7 @@ async def test_tried_guard_does_not_leave_a_phantom_failover_record(
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="a@x", wait_timeout=1200.0)
 
     calls: list = []
 
@@ -773,12 +773,12 @@ async def test_record_failure_still_marks_terminal_state_before_reraising(
         audio_format=None,
         audio_length=None,
     )
-    p._claim_prepared_dispatch(store, 1, attempt_id, [], account="a@x", wait_timeout=1200.0)
+    p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="a@x", wait_timeout=1200.0)
 
     def record_blows_up(*args, **kwargs):
         raise OSError("disk full (ENOSPC)")
 
-    monkeypatch.setattr(p, "_record_dispatch_failover", record_blows_up)
+    monkeypatch.setattr(p.AttemptRef, "record_dispatch_failover", record_blows_up)
     monkeypatch.setattr(runtime, "rotate_client", lambda refused=None, skip=frozenset(): "b@x")
 
     with pytest.raises(OSError, match="disk full"):

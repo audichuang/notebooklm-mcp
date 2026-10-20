@@ -122,7 +122,7 @@ def describe_refusal(reason: object) -> tuple[str, str]:
     `type` 會是 `"NoneType"` 之類的無用字串。
 
     抽到 `_errors`(無上行依賴,狀態層與派送層都能引)是因為
-    音檔的 `_record_dispatch_failover` 與附件的 recorder 都要同一份 ——
+    音檔的 `AttemptRef.record_dispatch_failover` 與附件的 recorder 都要同一份 ——
     各寫一份就是「上游改了 status 的欄位名、只有一處被改到」。
     """
     if isinstance(reason, BaseException):

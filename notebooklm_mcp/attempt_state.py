@@ -1,30 +1,40 @@
 """Attempt dispatch 狀態轉換的集中處。
 
-每個函式都是「套在 manifest dict 上的轉換」,設計成在 `ManifestStore.update` 的 mutate
+每個轉換函式都是「套在 manifest dict 上的轉換」,設計成在 `ManifestStore.update` 的 mutate
 closure **裡面**呼叫(鎖、CAS、落盤仍歸 `manifest_store`,這裡不碰)。過去這些寫入散在
 `tools_podcast.py` 十幾個 ad-hoc closure 裡,各自抄一份「綁定 artifact / 標記 dispatch
 狀態」的欄位寫入,允許的來源狀態是各處的字面 tuple——補一條路徑、漏另一條的老毛病
 (ADR-0009)。現在欄位寫入只有一份,**每個轉換自己的守門條件刻意保持各自原樣**
 (它們本來就不同,見各函式 docstring;要不要統一是行為變更,不在這裡做)。
 
-範圍:`dispatch.status` / `remote` / output 指標的轉換(含 claim/reset 這一對)。仍在模組外
-的寫入:audio_finalize 的 remote 終態(`remote_terminal` / `remote_completed`)、retract
-的 tombstone 與 episode 投影 pop、`_record_dispatch_failover` 的 `dispatch.account`、
-`active_attempt_id` 指標、`_create_audio_attempt` 的初始 prepared 骨架。
+store-bound 的那一面是 `AttemptRef`:`(store, episode_n, attempt_id)` 一組位址,讀
+(`read`)、寫(`mutate`)、各轉換(同名方法)都從它進,`find_attempt` 的 tombstone
+default-deny 在它裡面——呼叫端不必再記得「包進 `store.update`、先查 `find_attempt`」。
+`tools_podcast` 與 `audio_finalize` 共用它(後者以 `retracted_hint` 換訊息尾巴)。
+
+範圍:`dispatch.status` / `remote` / `dispatch.account` 的轉換(含 claim/reset 這一對與
+failover 稽核)。仍在模組外的寫入:audio_finalize 的 remote 終態(`remote_terminal` /
+`remote_completed`)與 finalize checkpoint 形狀、retract 的 tombstone 組裝、
+`active_attempt_id` 指標、`_create_audio_attempt` 的初始 prepared 骨架。Episode 級 output
+投影(鍵集合、promotion、retract 的 pop、述詞)在 `output_projection`。
 
 不放在這裡的東西:
 - 指引訊息(`_attempt_capabilities()` / `_attempt_next_step()` 在 `tools_podcast`,
   docs/gotchas-attempt.md 的紅線)——需要它們的守門(promotion 的 legacy 衝突)留在
   呼叫端,本模組只收守門之後的純欄位寫入。
-- 鎖內/鎖外算 caps 的時機(F7)——呼叫端各自維持原樣。
+- 鎖內/鎖外算 caps 的時機(F7)——呼叫端各自維持原樣(`AttemptRef.mutate` 的 callback
+  在鎖內跑,caps 要在鎖內算就放進 callback)。
 """
 
 from __future__ import annotations
 
-import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from ._errors import describe_refusal
+from .manifest_store import ManifestStore
 
 # `can_reconcile` 認的「還可能對帳得到東西」的 dispatch 狀態(T10:單一事實來源)。
 RECONCILABLE_DISPATCH_STATES = frozenset(
@@ -305,6 +315,37 @@ def mark_acceptance_unknown(
     )
 
 
+def record_dispatch_failover(
+    manifest: dict,
+    episode_n: int,
+    attempt_id: str,
+    reason: object,
+    from_account: str | None,
+    to_account: str,
+) -> None:
+    """記下「A 拒絕 → 改用 B 重送」,並把 dispatch 的 account 換成 B。
+
+    **對 client 透明可以,對稽核紀錄不行**(ADR-0010)。errors[] 是唯一只 append、
+    從不被清除的欄位 —— `reset_for_resend` 會把 dispatch/remote 清回
+    prepared,診斷放那裡會被抹掉,放這裡不會。
+    """
+    _, attempt = find_attempt(manifest, episode_n, attempt_id)
+    # 兩種拒絕形狀的判讀共用 `_errors.describe_refusal`(附件家族的 recorder 也用
+    # 同一支)——各寫一份等於上游改了 status 欄位名時只有一處被改到。
+    reason_type, message = describe_refusal(reason)
+    attempt["dispatch"]["account"] = to_account
+    attempt["errors"].append(
+        {
+            "phase": "dispatch_failover",
+            "type": reason_type,
+            "message": message,
+            "from_account": from_account,
+            "to_account": to_account,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+    )
+
+
 def mark_not_accepted(manifest: dict, episode_n: int, attempt_id: str, status: object) -> None:
     """dispatching → not_accepted(伺服器明確拒絕、沒有建出任何 artifact);其他狀態 no-op。
 
@@ -442,76 +483,128 @@ def rearm_not_accepted(manifest: dict, episode_n: int, attempt_id: str) -> bool:
     return True
 
 
-# ───────────────────────── promotion(守門之後的純欄位寫入) ─────────────────────────
+def record_retraction(episode: dict, attempt: dict, attempt_id: str, retraction: dict) -> None:
+    """寫下 tombstone(ADR-0009):此後 `find_attempt` 對這顆一律拒絕(default-deny)。
 
-
-def first_published_at(episode: dict) -> str | None:
-    """回頭重生一集時,pubDate 必須是首發時間、不能漂成重生當下(真實事故:
-    saa-drill EP05/EP09——GUID 不變＝同集更新,episodic feed 按 pubDate 倒序,漂移
-    會讓重生集跳到列表前面;RSS 排序假設 pubDate 隨集號遞增,見 tools_publish.py
-    的 fallback 註解)。沿 attempts 建立順序(即 list 的 append 順序)找回第一筆
-    非空的 retracted_output.published_at——那是 retract 當時從 episode 級投影搶救
-    下來的首發時間。取「第一筆非空」而非「第一筆有 retraction」:
-    abandons_unauthorized_candidate 分支(從未 promote 就被作廢的 candidate)留下的
-    retracted_output 是空 dict,必須跳過,不能誤判成「這集從沒發過」。"""
-    for attempt in episode.get("attempts", []):
-        retraction = attempt.get("retraction")
-        if not isinstance(retraction, dict):
-            continue
-        # `or {}` 而非 default {}:手改的 manifest 可能把 retracted_output 寫成 null,
-        # default 只在 key 不存在時生效,擋不住顯式 null(本模組的前提就是手改會發生)。
-        published_at = (retraction.get("retracted_output") or {}).get("published_at")
-        if isinstance(published_at, str) and published_at:
-            return published_at
-    return None
-
-
-# Episode 級 output 投影:promotion(本模組 `apply_promotion`)與 adopt 寫入,
-# `podcast_attempt_retract` 整批 pop 進 `retraction.retracted_output`(ADR-0009:pop,
-# 不設 None——殘留的 None 會擋住取代版用 setdefault 寫回真值)。`task_id` 是 legacy
-# 路徑寫的同義欄位,新路徑不寫,但作廢時一樣要清。
-OUTPUT_PROJECTION_KEYS = (
-    "output_attempt_id",
-    "artifact_id",
-    "task_id",
-    "mp3_path",
-    "published_at",
-    "feedback_source_id",
-    "feedback_source_adopted_at",
-)
-# 集的身分:promotion 只 setdefault、retract 不碰——取代版不得改標題(ADR-0009)。
-EPISODE_IDENTITY_KEYS = ("title", "label")
-
-
-def apply_promotion(episode: dict, attempt: dict, attempt_id: str, output: dict) -> None:
-    """守門通過後,把 attempt 的產出掛成 episode 級 output 並寫回 `output["published_at"]`。
-
-    守門(已 retract／owned-by-another／legacy 不同 artifact)留在
-    `tools_podcast._promote_attempt_output`——legacy 那道要用 `_attempt_capabilities`。
+    tombstone 的內容(`retracted_output`、清理義務、授權依據…)由
+    `podcast_attempt_retract` 組好傳進來——要讀 finalize checkpoint,那個形狀只在
+    `audio_finalize`。前後兩次 `_attempt_capabilities` 也留在呼叫端的 mutate 裡(F7)。
     """
-    _refuse_retracted(attempt, attempt_id)
-    attempt["remote"]["status"] = "completed"
-    attempt["remote"]["observed_at"] = datetime.now(UTC).isoformat()
-    episode["artifact_id"] = output["artifact_id"]
-    episode["mp3_path"] = os.path.abspath(output["mp3_path"])
-    episode["output_attempt_id"] = attempt_id
-    for key in EPISODE_IDENTITY_KEYS:
-        episode.setdefault(key, output[key])
-    # published_at 不能跟 title／label 一樣用 output 自己的 setdefault:output 裡
-    # 那個值是「這次生成完成的時刻」,取代版每一次重生都會不一樣。已驗證的安全
-    # 互動(見 `find_attempt` 的 tombstone 與 retract 冪等分支的 ownership guard):
-    # 取代版 B 帶著 A 的首發時間上任後,對 A 重打冪等 retract 不會誤刪 B 的投影——
-    # 那條 guard 只在 output_attempt_id in (None, attempt_id) 時才動手,B 是現任
-    # output 時整段會跳過。
-    episode.setdefault("published_at", first_published_at(episode) or output["published_at"])
-    # 回寫進 output:`_promote_attempt_output` 的四個呼叫點都是 `…(…, output); return output`,
-    # 只改 manifest 會讓**回傳值**仍帶著「這次重生的時刻」——feed 對、呼叫端拿到的
-    # 卻是錯的 pubDate(v0.6.0 實測抓到:manifest 12:07:20、回傳值 12:16:39)。
-    # 修在這個匯流點,四條路徑一起正確。
-    output["published_at"] = episode["published_at"]
-    # episode 級 continuity 證據:attempt 裡的 source_id 是主要真相,但 legacy
-    # projection 只認得 episode 級欄位。不寫 feedback_source_adopted_at——那是
-    # podcast_attempt_adopt 的人工驗證標記,resume 靠它判斷可否沿用舊 source。
-    source_id = output.get("feedback_source_id")
-    if isinstance(source_id, str) and source_id:
-        episode["feedback_source_id"] = source_id
+    attempt["retraction"] = retraction
+    episode.setdefault("retracted_attempt_ids", []).append(attempt_id)
+
+
+# ───────────────────────── store-bound 的單一入口 ─────────────────────────
+
+
+@dataclass(frozen=True)
+class AttemptRef:
+    """一顆 attempt 在某個 store 裡的位址;store-bound 的讀、寫、狀態轉換都從這裡進。
+
+    每條路徑都經 `find_attempt`(tombstone default-deny,ADR-0009):`read` / `mutate`
+    用本物件的 `retracted_hint`,轉換方法由各轉換函式自己查。唯一放行 tombstone 的是
+    `mutate(..., allow_retracted=True)`——只給 `podcast_attempt_retract` 的冪等重呼用。
+    轉換方法是同名 manifest 級函式的 store-bound 版:一次 `store.update`、回傳轉換的結果,
+    守門差異全在那些函式裡(這裡不加任何判斷)。
+    """
+
+    store: ManifestStore
+    episode_n: int
+    attempt_id: str
+    retracted_hint: str = _DEFAULT_RETRACTED_HINT
+
+    def find(self, manifest: dict, *, allow_retracted: bool = False) -> tuple[dict, dict]:
+        """在一份 manifest(snapshot 或 mutate 內)裡取 (episode, attempt)。"""
+        return find_attempt(
+            manifest,
+            self.episode_n,
+            self.attempt_id,
+            allow_retracted=allow_retracted,
+            retracted_hint=self.retracted_hint,
+        )
+
+    def read(self) -> tuple[dict, dict]:
+        """鎖外 snapshot 的 (episode, attempt)。"""
+        return self.find(self.store.read())
+
+    def mutate(
+        self,
+        fn: Callable[[dict, dict, dict], Any],
+        *,
+        allow_retracted: bool = False,
+    ) -> Any:
+        """在 `store.update` 的鎖內取 (episode, attempt) 後跑 `fn(manifest, episode, attempt)`。"""
+
+        def mutate(manifest: dict) -> Any:
+            episode, attempt = self.find(manifest, allow_retracted=allow_retracted)
+            return fn(manifest, episode, attempt)
+
+        _, result = self.store.update(mutate)
+        return result
+
+    def _apply(self, transition: Callable[..., Any], *args: Any) -> Any:
+        _, result = self.store.update(
+            lambda manifest: transition(manifest, self.episode_n, self.attempt_id, *args)
+        )
+        return result
+
+    def claim_prepared(
+        self, artifact_ids: list[str], account: str | None = None, *, wait_timeout: float
+    ) -> bool:
+        """原子保存 baseline 並取得 prepared attempt 的 dispatch ownership。
+
+        `account` 是「這次由哪個帳號送出」(ADR-0010 的 pool)。單帳號時它只是一條事實,
+        多帳號 failover 時它會被 `record_dispatch_failover` 更新成實際成功的那個 ——
+        沒有它,「EP35 是誰生的」事後答不出來。
+
+        `wait_timeout` 是**這次 dispatch 原始承諾要等多久**(呼叫端傳給
+        `podcast_episode`/`podcast_series` 的那個秒數,不是之後 reconcile 時想等多久)。
+        存原始秒數而不是算好的 window_end——window_end 還混進了時鐘容錯常數
+        (`_RECONCILIATION_CLOCK_SKEW`),那個常數以後可能改,秒數不會變(P1 修復,見
+        `_RECONCILIATION_MIN_WINDOW` 的常數註解)。**兩個呼叫端都要傳**
+        (`_run_episode` 與 `podcast_series` 的 inline 重送分支)——只補一條正是
+        docs/gotchas-attempt.md 紅線①點名的病灶。
+        """
+        return self._apply(claim_prepared, artifact_ids, account, wait_timeout)
+
+    def record_dispatch_failover(
+        self, reason: object, from_account: str | None, to_account: str
+    ) -> None:
+        self._apply(record_dispatch_failover, reason, from_account, to_account)
+
+    def mark_acceptance_unknown(self, error: object) -> None:
+        """標成「受理不明」並留診斷。
+
+        **`error` 不一定是例外。** 「有 `task_id` 卻 `is_failed`」那條分支傳進來的是
+        **status 物件**(`_failover.dispatch_with_failover` 的 `on_acceptance_unknown(status)`),
+        而舊版本用 `type(error).__name__` / `str(error)` 直接處理 —— 實測落盤的是
+        `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"`,**真正的原因
+        (`status.error`)整條蒸發**,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個
+        記憶體地址。簽名原本宣告 `BaseException` 也是錯的(從來就有非例外的呼叫端)。
+        改用 `_errors.describe_refusal`,與 `record_dispatch_failover` / 附件家族同源。
+        """
+        self._apply(mark_acceptance_unknown, error)
+
+    def mark_not_accepted(self, status: object) -> None:
+        """把 attempt 標成「伺服器明確拒絕、沒有建出任何 artifact」。
+
+        `status` 吃兩種形狀,因為 SDK 的錯誤契約在 0.8.0 換了邊:
+          - 0.7.x 的 `GenerationStatus(task_id="", status="failed")`(由 `ensure_started`
+            判定後傳進來)——讀 `.error` / `.error_code`;
+          - 0.8.0 起同步拒絕改成 **raise**(ADR-0019 #1342),傳進來的是例外本身。
+        兩條路都必須寫進同一個 not_accepted 終態,否則同一件事會依 SDK 版本落到不同狀態。
+        """
+        self._apply(mark_not_accepted, status)
+
+    def rearm_not_accepted(self) -> bool:
+        """只在下一次明確呼叫時，將未受理的同一 attempt 恢復為 prepared。"""
+        return self._apply(rearm_not_accepted)
+
+    def bind_reconciled(self, artifact_id: str) -> list[str]:
+        return self._apply(bind_reconciled, artifact_id)
+
+    def mark_reconciliation_ambiguous(self, candidate_ids: list[str]) -> None:
+        self._apply(mark_reconciliation_ambiguous, candidate_ids)
+
+    def bind_sdk_heuristic(self, artifact_id: str) -> None:
+        self._apply(bind_sdk_heuristic, artifact_id)

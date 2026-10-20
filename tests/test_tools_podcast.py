@@ -519,14 +519,14 @@ def _dispatching_reconcile_attempt(tmp_path):
         audio_format="deep-dive",
         audio_length="long",
     )
-    assert p._claim_prepared_dispatch(store, 1, attempt_id, [], account="#1", wait_timeout=1200.0)
+    assert p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="#1", wait_timeout=1200.0)
     return manifest_path, store, attempt_id
 
 
 async def test_reconcile_reads_an_accepted_attempt_while_auth_is_unavailable(fake_client, tmp_path):
     """已 accepted 的耐久對應是純本機讀取,認證斷掉時仍必須讀得到。"""
     manifest_path, store, attempt_id = _dispatching_reconcile_attempt(tmp_path)
-    p._bind_accepted_artifact(store, 1, attempt_id, "art-accepted")
+    p.AttemptRef(store, 1, attempt_id).bind_sdk_heuristic("art-accepted")
     fake_client.notebooks.fail_list = True
 
     result = await p.podcast_episode_reconcile(
@@ -543,7 +543,7 @@ async def test_reconcile_reports_invalid_local_state_before_auth(fake_client, tm
     from notebooklm.exceptions import RateLimitError
 
     manifest_path, store, attempt_id = _dispatching_reconcile_attempt(tmp_path)
-    p._mark_not_accepted(store, 1, attempt_id, RateLimitError("quota refused"))
+    p.AttemptRef(store, 1, attempt_id).mark_not_accepted(RateLimitError("quota refused"))
     fake_client.notebooks.fail_list = True
 
     with pytest.raises(ValueError, match="cannot be reconciled"):

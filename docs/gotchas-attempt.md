@@ -153,7 +153,7 @@
   `podcast_attempt_adopt`(`_attempt_capabilities` 在 `store.update` 的 mutate closure
   **裡面**算,拿 `store.update` 已經回傳的一致 manifest)與 `podcast_attempt_retract`
   同樣如此;但 `podcast_episode_reconcile` 的四個回傳點丟掉 `store.update` 回傳的一致
-  manifest,改在鎖**外面**重新 `store.read()` + `_attempt_record()`。單 process 不可達
+  manifest,改在鎖**外面**重新 `store.read()` + `find_attempt()`。單 process 不可達
   (`store.update`/`store.read()`之間沒有東西會改這顆 attempt,需要第二個 writer
   process 才會讓兩次讀出現落差),所以這一輪沒有改 code——改了也證不了,需要兩
   process 的整合測試才驗得出來。之後要動 reconcile 的回傳點時,順手改成跟

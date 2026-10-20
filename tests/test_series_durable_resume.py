@@ -291,7 +291,7 @@ async def test_first_call_not_accepted_returns_structured_safe_stop(fake_client,
 async def test_series_retries_same_prepared_attempt_after_pre_dispatch_crash(
     fake_client, tmp_path, monkeypatch
 ):
-    original_claim = p._claim_prepared_dispatch
+    original_claim = p.AttemptRef.claim_prepared
     crashed = False
 
     def crash_once(*args, **kwargs):
@@ -301,7 +301,7 @@ async def test_series_retries_same_prepared_attempt_after_pre_dispatch_crash(
             raise ConnectionError("crash before dispatch")
         return original_claim(*args, **kwargs)
 
-    monkeypatch.setattr(p, "_claim_prepared_dispatch", crash_once)
+    monkeypatch.setattr(p.AttemptRef, "claim_prepared", crash_once)
     first = await p.podcast_series("nb-1", episodes=EPS3[:1], output_dir=str(tmp_path))
 
     manifest_path = tmp_path / "series_manifest.json"

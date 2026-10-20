@@ -52,7 +52,7 @@
     workspace、binding 時序倒置或 schema／identity 不符，都會在 `probe_auth`、cleanup 與 generation
     RPC 前拒絕，不能重用 attempt ID 再生一次。**驗證與綁定都在第一個遠端副作用之前**(ADR-0001),雜湊不符就在寫 manifest、
     打 RPC 之前 raise。重跑冪等:`read_attempt_binding` 讀回既有綁定沿用同一 attempt_id
-    (`_reuse_frozen_input_attempt` 走 `_attempt_record` 這個 tombstone gate、且擋
+    (`_reuse_frozen_input_attempt` 走 `find_attempt` 這個 tombstone gate、且擋
     `output_attempt_id` 已存在),所以斷線重跑不會重複建 attempt 或重燒配額;取代版要凍新
     bundle。coverage ledger 與 evidence manifest 不只驗 bytes/hash，還要 strict 驗
     `schema_version`、`qa_kind`、episode identity、disposition-specific row keys，以及 evidence
@@ -118,9 +118,11 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 
 ### `attempt_state.py` —— attempt 狀態轉換
 
-`dispatch.status` 轉換(含 `claim_prepared` / `reset_for_resend` 這一對)、artifact 綁定的 `remote` 寫入與 output 指標收在這裡。**仍在模組外**:audio_finalize 的 remote 終態、retract 的 tombstone 與 episode 投影 pop、`_record_dispatch_failover` 的 `dispatch.account`、`active_attempt_id` 指標、`_create_audio_attempt` 的初始 prepared 骨架。函式簽名是
+`dispatch.status` 轉換(含 `claim_prepared` / `reset_for_resend` 這一對)、artifact 綁定的 `remote` 寫入、failover 稽核(`record_dispatch_failover` 的 `dispatch.account` + `errors[]`)與 tombstone 的落筆(`record_retraction`)收在這裡。**仍在模組外**:audio_finalize 的 remote 終態與 finalize checkpoint 形狀、retract 的 tombstone 組裝、`active_attempt_id` 指標、`_create_audio_attempt` 的初始 prepared 骨架;episode 級 output 投影在 `output_projection.py`。轉換函式簽名是
 `(manifest, episode_n, attempt_id, …)`,設計成在 `ManifestStore.update` 的 mutate 內呼叫
-(鎖與 CAS 仍歸 `manifest_store`)。重點:
+(鎖與 CAS 仍歸 `manifest_store`)。store-bound 的一面是 `AttemptRef(store, episode_n, attempt_id)`:
+`read` / `find` / `mutate(fn(manifest, episode, attempt))` 與各轉換的同名方法,tombstone default-deny 在裡面;
+`tools_podcast` 與 `audio_finalize` 共用(後者帶自己的 `retracted_hint`)。重點:
 
 - `apply_accepted(attempt, artifact_id, origin, reset_error=)` 是「attempt 擁有 artifact、dispatch 已受理」
   的唯一欄位寫入;`bind_reconciled` / `bind_sdk_heuristic` / `bind_caller_verified` 各帶自己的守門(`new_resume_binding` 只建底稿,不帶守門),**守門差異是現況而非 bug 清單**:reconciled 不查來源狀態、sdk 允許四個來源且重複綁為 no-op、
@@ -136,7 +138,7 @@ tunnel;完整部署/驗收步驟在該 repo README)。feed identity = 穩定 `sh
 過去各抄一份守門。現在 `decide()` 依請求來源選分支,按 `_GUARDS` 表的**固定順序**跑守門,回
 `Admit(kind)` 或 `Refusal(exc_type, message)`;呼叫端只負責寫(`attach_new_attempt` / reset / rearm)
 或 `raise_()`。順序即「同時違反兩條時讀到哪一句」,不可調換。紀錄 literal 各一份
-(`new_prepared_attempt` / `new_resume_attempt`)。依賴方向:本模組 → `attempt_state` / `audio_finalize` /
+(`new_prepared_attempt` / `new_resume_attempt`)。依賴方向:本模組 → `attempt_state` / `audio_finalize` / `output_projection` /
 `naming`,不 import `tools_podcast`(指引以 callable 注入,避免循環 import)。
 
 刻意保留的差異(各入口原本就不同,統一是行為變更):

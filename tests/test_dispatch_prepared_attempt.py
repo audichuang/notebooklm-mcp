@@ -68,7 +68,7 @@ async def test_accepted_returns_dispatching_identity_and_binds(fake_client, tmp_
 
 async def test_not_claimed_sends_nothing(fake_client, tmp_path):
     _, store, attempt_id = _prepared(tmp_path)
-    assert p._claim_prepared_dispatch(store, 1, attempt_id, [], account="x", wait_timeout=1.0)
+    assert p.AttemptRef(store, 1, attempt_id).claim_prepared([], account="x", wait_timeout=1.0)
     called = []
 
     async def generate(client):
