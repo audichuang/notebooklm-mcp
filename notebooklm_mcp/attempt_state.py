@@ -84,7 +84,7 @@ def find_attempt(
     return episode, attempt
 
 
-def _refuse_retracted(attempt: dict, attempt_id: str | None = None) -> None:
+def refuse_retracted(attempt: dict, attempt_id: str | None = None) -> None:
     """吃 raw attempt dict 的轉換點用的 tombstone 守門(與 `find_attempt` 同一個拒絕語意)。
 
     這些函式的呼叫端都已走過 `find_attempt`;這裡是縱深防禦,讓「每個狀態轉換都拒絕
@@ -155,7 +155,7 @@ def apply_accepted(
     adopt 傳 True:它是從 `acceptance_unknown` 人工收養,要清掉殘留的 error 欄位;
     其他路徑從來沒清過,維持原樣(已知分歧,保留不修)。
     """
-    _refuse_retracted(attempt)
+    refuse_retracted(attempt)
     now = datetime.now(UTC).isoformat()
     attempt["dispatch"]["status"] = "accepted"
     attempt["dispatch"]["accepted_at"] = now
@@ -257,12 +257,12 @@ def bind_sdk_heuristic(manifest: dict, episode_n: int, attempt_id: str, artifact
 def bind_caller_verified(manifest: dict, attempt: dict, attempt_id: str, artifact_id: str) -> None:
     """`podcast_attempt_adopt` 的綁定(origin=caller_verified);唯一會清 error 欄位的一條。
 
-    本函式收 attempt 物件,tombstone 拒絕由 `_refuse_retracted` 在入口補上
+    本函式收 attempt 物件,tombstone 拒絕由 `refuse_retracted` 在入口補上
     (呼叫端也已先走 `find_attempt`)。
     身分驗證(`_validate_adoption_identity`)與 caps 計算留在呼叫端的 mutate 裡,
     維持「caps 在鎖內算」的 F7 時機。
     """
-    _refuse_retracted(attempt, attempt_id)
+    refuse_retracted(attempt, attempt_id)
     current_dispatch = attempt["dispatch"]
     current_status = current_dispatch.get("status")
     if current_status not in ("acceptance_unknown", "reconciliation_ambiguous"):
@@ -295,7 +295,15 @@ def mark_acceptance_unknown(
 
     傳 `error` 才會 append 診斷(dispatch 失敗路徑);不傳(`NO_ERROR_RECORD`)是
     reconcile 先把 dispatching 升級成可對帳狀態的路徑——它從來不留 errors[] 紀錄,
-    保留。`error` 不一定是例外(可能是 status 物件),一律走 `describe_refusal`。
+    保留。
+
+    **`error` 不一定是例外。** 「有 `task_id` 卻 `is_failed`」那條分支傳進來的是
+    **status 物件**(`_failover.dispatch_with_failover` 的 `on_acceptance_unknown(status)`),
+    而舊版本用 `type(error).__name__` / `str(error)` 直接處理 —— 實測落盤的是
+    `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"`,**真正的原因
+    (`status.error`)整條蒸發**,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個
+    記憶體地址。簽名原本宣告 `BaseException` 也是錯的(從來就有非例外的呼叫端)。
+    改用 `_errors.describe_refusal`,與 `record_dispatch_failover` / 附件家族同源。
     """
     _, attempt = find_attempt(manifest, episode_n, attempt_id)
     if attempt["dispatch"].get("status") != "dispatching":
@@ -349,9 +357,11 @@ def record_dispatch_failover(
 def mark_not_accepted(manifest: dict, episode_n: int, attempt_id: str, status: object) -> None:
     """dispatching → not_accepted(伺服器明確拒絕、沒有建出任何 artifact);其他狀態 no-op。
 
-    `status` 吃兩種形狀(SDK 錯誤契約在 0.8.0 換了邊):0.7.x 的 `GenerationStatus`
-    (讀 `.error`/`.error_code`),或 0.8.0 起同步拒絕 raise 的例外本身。兩條路必須寫進
-    同一個終態,否則同一件事會依 SDK 版本落到不同狀態。
+    `status` 吃兩種形狀,因為 SDK 的錯誤契約在 0.8.0 換了邊:
+      - 0.7.x 的 `GenerationStatus(task_id="", status="failed")`(由 `ensure_started`
+        判定後傳進來)——讀 `.error` / `.error_code`;
+      - 0.8.0 起同步拒絕改成 **raise**(ADR-0019 #1342),傳進來的是例外本身。
+    兩條路都必須寫進同一個 not_accepted 終態,否則同一件事會依 SDK 版本落到不同狀態。
     """
     _, attempt = find_attempt(manifest, episode_n, attempt_id)
     if attempt["dispatch"]["status"] != "dispatching":
@@ -407,7 +417,7 @@ def reset_for_resend(attempt: dict) -> None:
     兩個呼叫端共用:`rearm_not_accepted`(series 續跑)與 `_create_audio_attempt`
     的同請求沿用分支(podcast_episode 原樣重呼,見 `attempt_admission.is_resendable_same_request`)。
     """
-    _refuse_retracted(attempt)
+    refuse_retracted(attempt)
     dispatch = attempt["dispatch"]
     dispatch.update(
         {
@@ -449,11 +459,23 @@ def claim_prepared(
     account: str | None,
     wait_timeout: float,
 ) -> bool:
-    """prepared → dispatching(取得 dispatch ownership);不是 prepared 回 False。
+    """prepared → dispatching(原子保存 baseline 並取得 dispatch ownership);不是 prepared 回 False。
 
     與 `reset_for_resend` 是一對:這裡寫入的 dispatch 欄位(`dispatched_at` /
     `wait_timeout` / `account`)就是 reset 要清的那些,新增欄位時兩處一起改。
     `datetime.now` 在 mutate 內呼叫,時機與搬動前相同。
+
+    `account` 是「這次由哪個帳號送出」(ADR-0010 的 pool)。單帳號時它只是一條事實,
+    多帳號 failover 時它會被 `record_dispatch_failover` 更新成實際成功的那個 ——
+    沒有它,「EP35 是誰生的」事後答不出來。
+
+    `wait_timeout` 是**這次 dispatch 原始承諾要等多久**(呼叫端傳給
+    `podcast_episode`/`podcast_series` 的那個秒數,不是之後 reconcile 時想等多久)。
+    存原始秒數而不是算好的 window_end——window_end 還混進了時鐘容錯常數
+    (`_RECONCILIATION_CLOCK_SKEW`),那個常數以後可能改,秒數不會變(P1 修復,見
+    `_RECONCILIATION_MIN_WINDOW` 的常數註解)。**兩個呼叫端都要傳**
+    (`_run_episode` 與 `podcast_series` 的 inline 重送分支)——只補一條正是
+    docs/gotchas-attempt.md 紅線①點名的病灶。
     """
     _, attempt = find_attempt(manifest, episode_n, attempt_id)
     dispatch = attempt["dispatch"]
@@ -551,20 +573,7 @@ class AttemptRef:
     def claim_prepared(
         self, artifact_ids: list[str], account: str | None = None, *, wait_timeout: float
     ) -> bool:
-        """原子保存 baseline 並取得 prepared attempt 的 dispatch ownership。
-
-        `account` 是「這次由哪個帳號送出」(ADR-0010 的 pool)。單帳號時它只是一條事實,
-        多帳號 failover 時它會被 `record_dispatch_failover` 更新成實際成功的那個 ——
-        沒有它,「EP35 是誰生的」事後答不出來。
-
-        `wait_timeout` 是**這次 dispatch 原始承諾要等多久**(呼叫端傳給
-        `podcast_episode`/`podcast_series` 的那個秒數,不是之後 reconcile 時想等多久)。
-        存原始秒數而不是算好的 window_end——window_end 還混進了時鐘容錯常數
-        (`_RECONCILIATION_CLOCK_SKEW`),那個常數以後可能改,秒數不會變(P1 修復,見
-        `_RECONCILIATION_MIN_WINDOW` 的常數註解)。**兩個呼叫端都要傳**
-        (`_run_episode` 與 `podcast_series` 的 inline 重送分支)——只補一條正是
-        docs/gotchas-attempt.md 紅線①點名的病灶。
-        """
+        """store-bound 版的 `claim_prepared`;守門與理由見該函式。"""
         return self._apply(claim_prepared, artifact_ids, account, wait_timeout)
 
     def record_dispatch_failover(
@@ -573,31 +582,15 @@ class AttemptRef:
         self._apply(record_dispatch_failover, reason, from_account, to_account)
 
     def mark_acceptance_unknown(self, error: object) -> None:
-        """標成「受理不明」並留診斷。
-
-        **`error` 不一定是例外。** 「有 `task_id` 卻 `is_failed`」那條分支傳進來的是
-        **status 物件**(`_failover.dispatch_with_failover` 的 `on_acceptance_unknown(status)`),
-        而舊版本用 `type(error).__name__` / `str(error)` 直接處理 —— 實測落盤的是
-        `type: "GenerationStatus"` / `message: "<... object at 0x7f...>"`,**真正的原因
-        (`status.error`)整條蒸發**,卡在 `acceptance_unknown` 的人打開 manifest 只看到一個
-        記憶體地址。簽名原本宣告 `BaseException` 也是錯的(從來就有非例外的呼叫端)。
-        改用 `_errors.describe_refusal`,與 `record_dispatch_failover` / 附件家族同源。
-        """
+        """store-bound 版的 `mark_acceptance_unknown`;守門與理由見該函式。"""
         self._apply(mark_acceptance_unknown, error)
 
     def mark_not_accepted(self, status: object) -> None:
-        """把 attempt 標成「伺服器明確拒絕、沒有建出任何 artifact」。
-
-        `status` 吃兩種形狀,因為 SDK 的錯誤契約在 0.8.0 換了邊:
-          - 0.7.x 的 `GenerationStatus(task_id="", status="failed")`(由 `ensure_started`
-            判定後傳進來)——讀 `.error` / `.error_code`;
-          - 0.8.0 起同步拒絕改成 **raise**(ADR-0019 #1342),傳進來的是例外本身。
-        兩條路都必須寫進同一個 not_accepted 終態,否則同一件事會依 SDK 版本落到不同狀態。
-        """
+        """store-bound 版的 `mark_not_accepted`;守門與理由見該函式。"""
         self._apply(mark_not_accepted, status)
 
     def rearm_not_accepted(self) -> bool:
-        """只在下一次明確呼叫時，將未受理的同一 attempt 恢復為 prepared。"""
+        """store-bound 版的 `rearm_not_accepted`;守門與理由見該函式。"""
         return self._apply(rearm_not_accepted)
 
     def bind_reconciled(self, artifact_id: str) -> list[str]:

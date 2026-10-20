@@ -106,7 +106,7 @@
   ⚠️ **`itunes:type=serial` 救不了**:Apple 文件說 serial 用 `itunes:episode` 排,**實測多數
   播放器(含 Apple 自己的列表視圖)仍以 pubDate 為準**;`build_feed_xml` 的 `lastBuildDate`
   也取 `eps[-1]`(集號最大那集),非單調時它不是真正最新的時間。
-  - **這條前提早就寫在 `tools_podcast._first_published_at` 的註解裡,但註解不是檢查。**
+  - **這條前提早就寫在 `output_projection.first_published_at` 的註解裡,但註解不是檢查。**
     同一條前提已經以兩種形狀出事(v0.6.0 重生漂移、v0.9.19 亂序生成),兩次都是**發布出去
     以後才在 App 上看到**。要驗的東西寫成註解,就等於沒驗。
   - **不綁 `itunes_type`,兩種型別都擋。** episodic 的「最新在前」與 serial 的「依序收聽」
@@ -131,7 +131,7 @@
     沒被接住的 `AttributeError` 出去。缺席是唯一該 fallback 的情形。
   - ⚠️ **reorder 與 `backfill_published_at.py` 會互相打架 —— 而這個洞在 reorder 之前就在了。**
     reorder 只改 episode 頂層,但重生過的集在 `retraction.retracted_output.published_at` 另有
-    一份首發時間(`_first_published_at` 讀它),backfill 會照它把頂層**改回去**。實測
+    一份首發時間(`first_published_at` 讀它),backfill 會照它把頂層**改回去**。實測
     podcast-lab 那份 50 集:6 集有這種歷史,EP42/EP43 的歷史值(07:18:43 / 07:17:36)
     **本身就是亂序的** —— backfill 現在跑下去就會讓整季發不出去。
     **修法不是加一個 `rss_published_at` 正本欄位**(要動 promote / backfill / 渲染 / 文件四處,

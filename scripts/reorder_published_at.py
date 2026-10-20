@@ -19,7 +19,7 @@ EP01 變成「最新一集」卡在列表第一個。`itunes:type=serial` 救不
   一個時間戳,不在這支的授權範圍內 —— 直接報錯讓人決定,不猜。
 - 重排後若仍有兩集**同時間**(池子裡本來就有重複值),也報錯:嚴格遞增靠換配對修不了。
 - **只改 episode 頂層 `published_at`,不動 attempt 歷史。** 重生過的集,首發時間的另一份
-  記錄在 `retraction.retracted_output.published_at`(`_first_published_at` 讀它),那是撤回
+  記錄在 `retraction.retracted_output.published_at`(`first_published_at` 讀它),那是撤回
   當時搶救的稽核快照,不該被這支改寫 —— 但它會讓
   `backfill_published_at.py` 想把重排的結果**改回去**,所以本支會對這種集印警告,而
   backfill 自己也加了一道「回填後若非單調就拒絕」的守衛。真正的最終防線是
@@ -39,8 +39,8 @@ import os
 import sys
 
 from notebooklm_mcp.manifest_store import ManifestStore
+from notebooklm_mcp.output_projection import first_published_at
 from notebooklm_mcp.publish import state as state_mod
-from notebooklm_mcp.tools_podcast import _first_published_at
 from notebooklm_mcp.tools_publish import _parse_pub_date
 
 
@@ -99,7 +99,7 @@ def _history_warnings(manifest: dict, changed: list[tuple[int, str, str]]) -> li
     by_n = {int(ep["episode"]): ep for ep in _feed_episodes(manifest)}
     out = []
     for n, _cur, new in changed:
-        first = _first_published_at(by_n[n])
+        first = first_published_at(by_n[n])
         if first and first != new:
             out.append(f"  EP{n:02d}: attempt 首發歷史記著 {first!r},與重排後的 {new!r} 不同")
     return out

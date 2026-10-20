@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 
-from .attempt_state import _refuse_retracted
+from .attempt_state import refuse_retracted
 
 # Episode 級 output 投影:promotion(本模組 `apply_promotion`)與 adopt 寫入,
 # `podcast_attempt_retract` 整批 pop 進 `retraction.retracted_output`(ADR-0009:pop,
@@ -69,7 +69,7 @@ def apply_promotion(episode: dict, attempt: dict, attempt_id: str, output: dict)
     守門(已 retract／owned-by-another／legacy 不同 artifact)留在
     `tools_podcast._promote_attempt_output`——legacy 那道要用 `attempt_capabilities`。
     """
-    _refuse_retracted(attempt, attempt_id)
+    refuse_retracted(attempt, attempt_id)
     attempt["remote"]["status"] = "completed"
     attempt["remote"]["observed_at"] = datetime.now(UTC).isoformat()
     episode["artifact_id"] = output["artifact_id"]

@@ -108,7 +108,7 @@
   相同。兩者故意不是同一個判準,別把它們合併成一個。
 - **`published_at` 是「首發時間」不是「產製時間」**(v0.6.0):retract 必須把它 pop 進
   `retraction.retracted_output`(它是 `has_hard_output_evidence` 的硬證據,留著會擋死重生),
-  但 promote 補回時要走 `_first_published_at()` ——沿 attempts 建立順序找**第一筆非空**的
+  但 promote 補回時要走 `output_projection.first_published_at()` ——沿 attempts 建立順序找**第一筆非空**的
   `retracted_output.published_at`(abandon 分支留的是空 dict,要跳過)。舊行為用
   `setdefault` 補成重生當下的 wall clock,GUID 不變(同集更新)pubDate 卻漂,episodic feed
   按 pubDate 倒序 → 重生集跳到列表最前(saa-drill EP05/EP09 實際事故)。**改 code 不會回溯

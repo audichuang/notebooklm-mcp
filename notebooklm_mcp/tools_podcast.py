@@ -61,7 +61,7 @@ from .attempt_guidance import (
     ACTION_SHARE_WITH_POOL,
     ACTION_SOURCE_DELETE,
     SAFE_NEXT_ACTIONS,
-    TERMINAL_REMOTE as _TERMINAL_REMOTE,
+    TERMINAL_REMOTE,
     attempt_capabilities,
     attempt_next_step,
     cleanup_sentence,
@@ -112,7 +112,6 @@ from .naming import episode_label as _episode_label
 from .output_projection import (
     apply_promotion,
     drop_own_residue,
-    first_published_at as _first_published_at,  # noqa: F401 —— 舊名,tests 與 scripts/ 沿用
     has_durable_output_evidence,
     has_hard_output_evidence,
     has_output_pointer_or_hard,
@@ -140,7 +139,7 @@ def _promised_reconciliation_window_seconds(dispatch: dict, wait_timeout: float)
     """算出**那次 dispatch 原始承諾要等多久**（`promised`），不套任何保守下限。
 
     `promised = max(持久化值 if 有, 這次呼叫的 wait_timeout)`——只取大不取小：
-    持久化值（`AttemptRef.claim_prepared` 存的原始秒數，見該函式 docstring）是真的
+    持久化值（`AttemptRef.claim_prepared` 存的原始秒數，見 `attempt_state.claim_prepared`）是真的
     承諾，呼叫端不能用一次較小的 `wait_timeout` 把它讀小；但呼叫端也可以**顯式放大**
     `wait_timeout` 去撈遲到的 artifact（救援路徑的逃生口），這裡要讓那個放大生效，
     不能被持久化值蓋掉。讀不到持久化值（v0.9.9 以前建立的 legacy attempt）時就只剩
@@ -323,11 +322,10 @@ def _attempt_failover_recorder(store: ManifestStore | None, episode_n: int, atte
     """
     if store is None:
         return None
+    ref = AttemptRef(store, episode_n, attempt_id)
 
     def record(reason: object, from_account: str | None, to_account: str) -> None:
-        AttemptRef(store, episode_n, attempt_id).record_dispatch_failover(
-            reason, from_account, to_account
-        )
+        ref.record_dispatch_failover(reason, from_account, to_account)
 
     return record
 
@@ -370,6 +368,7 @@ async def _dispatch_audio_with_failover(
     (finalize 的身分必須是「這次是誰送的」而不是「此刻游標指到誰」)。兩條的完整推導在
     `_failover.dispatch_with_failover` 的 docstring。
     """
+    ref = AttemptRef(store, episode_n, attempt_id) if store is not None else None
     return await dispatch_with_failover(
         generate,
         account=account,
@@ -381,18 +380,10 @@ async def _dispatch_audio_with_failover(
         # `account` 用不到 —— attempt 的 `dispatch.account` 已經記著這次是誰送的,
         # 而那個欄位在 failover 換帳號時就被 `AttemptRef.record_dispatch_failover` 更新過了。
         on_clean_refusal=(
-            None
-            if store is None
-            else lambda reason, account: AttemptRef(store, episode_n, attempt_id).mark_not_accepted(
-                reason
-            )
+            None if ref is None else lambda reason, account: ref.mark_not_accepted(reason)
         ),
         on_acceptance_unknown=(
-            None
-            if store is None
-            else lambda reason, account: AttemptRef(
-                store, episode_n, attempt_id
-            ).mark_acceptance_unknown(reason)
+            None if ref is None else lambda reason, account: ref.mark_acceptance_unknown(reason)
         ),
     )
 
@@ -447,7 +438,7 @@ def _recorded_dispatch_status(store: ManifestStore, episode_n: int, attempt_id: 
     handler 裡再拋會蓋掉真正該讓人看到的那個例外。
     """
     try:
-        _, attempt = find_attempt(store.read(), episode_n, attempt_id)
+        _, attempt = AttemptRef(store, episode_n, attempt_id).read()
         return attempt["dispatch"]["status"]
     except Exception:  # noqa: BLE001 —— manifest 讀不到就視為沒有紀錄(None)
         return None
@@ -473,9 +464,10 @@ async def _dispatch_prepared_attempt(
     唯一已知的時序差異:series 的 cancel／泛用例外分支在傳播前多一次唯讀、持鎖的
     manifest 讀取(`_recorded_dispatch_status`),不改任何狀態。
     """
-    if store is not None:
+    ref = AttemptRef(store, episode_n, attempt_id) if store is not None else None
+    if ref is not None:
         baseline = await client.artifacts.list(notebook_id, artifact_type=ArtifactType.AUDIO)
-        if not AttemptRef(store, episode_n, attempt_id).claim_prepared(
+        if not ref.claim_prepared(
             [artifact.id for artifact in baseline],
             account=account,
             wait_timeout=wait_timeout,
@@ -496,12 +488,9 @@ async def _dispatch_prepared_attempt(
             None if store is None else _recorded_dispatch_status(store, episode_n, attempt_id)
         )
         return DispatchStopped(exc, recorded)
-    if store is not None:
-        AttemptRef(store, episode_n, attempt_id).bind_sdk_heuristic(artifact_id)
+    if ref is not None:
+        ref.bind_sdk_heuristic(artifact_id)
     return DispatchAccepted(artifact_id, account, client)
-
-
-_REDISPATCH_ORDER = ("rearm", "supersede", "send")
 
 
 def _series_redispatch_kind(attempt: dict, *, after: str | None = None) -> str | None:
@@ -512,12 +501,12 @@ def _series_redispatch_kind(attempt: dict, *, after: str | None = None) -> str |
     """
     d = (attempt.get("dispatch") or {}).get("status")
     r = (attempt.get("remote") or {}).get("status")
-    start = 0 if after is None else _REDISPATCH_ORDER.index(after) + 1
     arms = (
         ("rearm", d == "not_accepted"),
-        ("supersede", r in _TERMINAL_REMOTE),
+        ("supersede", r in TERMINAL_REMOTE),
         ("send", d == "prepared"),
     )
+    start = 0 if after is None else [k for k, _ in arms].index(after) + 1
     for kind, hit in arms[start:]:
         if hit:
             return kind
@@ -1476,6 +1465,7 @@ async def _podcast_episode_reconcile(
     """用呼叫端固定的 client 執行已驗證參數的 artifact 對帳。"""
 
     store = ManifestStore(manifest_path)
+    ref = AttemptRef(store, episode_n, attempt_id)
     snapshot = store.read()
     attempt, notebook_id, baseline, dispatched_at = _reconciliation_subject(
         snapshot, episode_n, attempt_id
@@ -1563,12 +1553,9 @@ async def _podcast_episode_reconcile(
         )
         if not blocking_attempt_ids:
             artifact_id = candidate_ids[0]
-            blocking_attempt_ids = AttemptRef(store, episode_n, attempt_id).bind_reconciled(
-                artifact_id
-            )
+            blocking_attempt_ids = ref.bind_reconciled(artifact_id)
             if not blocking_attempt_ids:
-                latest = store.read()
-                episode_row, accepted_attempt = find_attempt(latest, episode_n, attempt_id)
+                episode_row, accepted_attempt = ref.read()
                 caps = attempt_capabilities(episode_row, accepted_attempt, attempt_id)
                 return {
                     "complete": False,
@@ -1582,9 +1569,8 @@ async def _podcast_episode_reconcile(
         # 跟「真的有多筆候選」共用同一個安全停點(`reconciliation_ambiguous` +
         # `podcast_attempt_adopt`):道理相同,都是「manifest 自己分不出這顆屬於誰,
         # 需要呼叫端帶外部知識來指名」。
-        AttemptRef(store, episode_n, attempt_id).mark_reconciliation_ambiguous(candidate_ids)
-        latest = store.read()
-        episode_row, ambiguous_attempt = find_attempt(latest, episode_n, attempt_id)
+        ref.mark_reconciliation_ambiguous(candidate_ids)
+        episode_row, ambiguous_attempt = ref.read()
         caps = attempt_capabilities(
             episode_row,
             ambiguous_attempt,
@@ -1602,9 +1588,8 @@ async def _podcast_episode_reconcile(
             "next_step": attempt_next_step(caps),
         }
     if len(candidate_ids) > 1:
-        AttemptRef(store, episode_n, attempt_id).mark_reconciliation_ambiguous(candidate_ids)
-        latest = store.read()
-        episode_row, ambiguous_attempt = find_attempt(latest, episode_n, attempt_id)
+        ref.mark_reconciliation_ambiguous(candidate_ids)
+        episode_row, ambiguous_attempt = ref.read()
         caps = attempt_capabilities(
             episode_row,
             ambiguous_attempt,
@@ -3100,8 +3085,7 @@ async def podcast_series(
                     mismatch.raise_()
 
                 dispatch_state = attempt.get("dispatch", {}).get("status")
-                remote = attempt.get("remote", {})
-                artifact_id = remote.get("artifact_id")
+                artifact_id = attempt.get("remote", {}).get("artifact_id")
                 step = _series_redispatch_kind(attempt)
                 # 這三種狀態接下來都會產生新的 dispatch(`prepared` 直接送、
                 # `not_accepted` 先 re-arm 再送、`failed`/`removed` 建 superseding
@@ -3152,21 +3136,18 @@ async def podcast_series(
                             active_attempt_id,
                         )
                 if step == "rearm":
-                    rearmed = AttemptRef(store, episode_n, active_attempt_id).rearm_not_accepted()
-                    if not rearmed:
-                        latest = store.read()
-                        _, latest_attempt = find_attempt(latest, episode_n, active_attempt_id)
+                    ref = AttemptRef(store, episode_n, active_attempt_id)
+                    if not ref.rearm_not_accepted():
+                        _, latest_attempt = ref.read()
                         return partial(
                             episode_n,
                             active_attempt_id,
                             latest_attempt["dispatch"]["status"],
                             ACTION_SERIES,
                         )
-                    snapshot = store.read()
-                    episode, attempt = find_attempt(snapshot, episode_n, active_attempt_id)
+                    episode, attempt = ref.read()
                     dispatch_state = attempt["dispatch"]["status"]
-                    remote = attempt["remote"]
-                    artifact_id = remote["artifact_id"]
+                    artifact_id = attempt["remote"]["artifact_id"]
                     step = _series_redispatch_kind(attempt, after="rearm")
                 if step == "supersede":
                     superseded_attempt_id = active_attempt_id
@@ -3181,11 +3162,9 @@ async def podcast_series(
                         audio_length=audio_length,
                         supersedes_attempt_id=superseded_attempt_id,
                     )
-                    snapshot = store.read()
-                    episode, attempt = find_attempt(snapshot, episode_n, active_attempt_id)
+                    episode, attempt = AttemptRef(store, episode_n, active_attempt_id).read()
                     dispatch_state = attempt["dispatch"]["status"]
-                    remote = attempt["remote"]
-                    artifact_id = remote["artifact_id"]
+                    artifact_id = attempt["remote"]["artifact_id"]
                     step = _series_redispatch_kind(attempt, after="supersede")
 
                 if step == "send":
@@ -3242,8 +3221,7 @@ async def podcast_series(
                         wait_timeout=wait_timeout,
                     )
                     if isinstance(outcome, DispatchNotClaimed):
-                        latest = store.read()
-                        _, latest_attempt = find_attempt(latest, episode_n, active_attempt_id)
+                        _, latest_attempt = AttemptRef(store, episode_n, active_attempt_id).read()
                         return partial(
                             episode_n,
                             active_attempt_id,

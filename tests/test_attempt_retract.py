@@ -23,6 +23,7 @@ from notebooklm.types import ArtifactType
 from notebooklm_mcp import (
     attempt_guidance as g,
     audio_finalize,
+    output_projection,
     tools_basic as b,
     tools_podcast as p,
 )
@@ -163,8 +164,8 @@ def test_first_published_at_skips_abandoned_empty_retraction():
             },
         ]
     }
-    assert p._first_published_at(episode) == "Fri, 24 Jul 2026 09:00:00 +0800"
-    assert p._first_published_at({"attempts": []}) is None
+    assert output_projection.first_published_at(episode) == "Fri, 24 Jul 2026 09:00:00 +0800"
+    assert output_projection.first_published_at({"attempts": []}) is None
 
 
 async def test_replacement_keeps_the_original_published_at_not_the_regeneration_time(

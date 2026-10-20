@@ -15,7 +15,7 @@ docs/gotchas-attempt.md 的紅線:**狀態相關的指引訊息一律由 `attemp
 
 from __future__ import annotations
 
-from .attempt_state import RECONCILABLE_DISPATCH_STATES as _RECONCILABLE_DISPATCH_STATES
+from .attempt_state import RECONCILABLE_DISPATCH_STATES
 from .audio_finalize import feedback_upload, unresolved_upload_descriptor
 from .cleanup_obligation import list_obligations
 from .output_projection import has_hard_output_evidence
@@ -67,8 +67,6 @@ _SERIES_SETTINGS_KEYS = frozenset({"language", "audio_format", "audio_length"})
 TERMINAL_REMOTE = frozenset({"failed", "removed"})
 # dispatch 從沒離開本機:契約保證伺服器沒建出 task(ADR-0010 紀律④的立論基礎)。
 NEVER_DISPATCHED = frozenset({"prepared", "not_accepted"})
-# `_RECONCILABLE_DISPATCH_STATES`(`can_reconcile` 認的三個狀態)已搬到
-# `attempt_state.RECONCILABLE_DISPATCH_STATES`,上面 import 時沿用舊名。
 
 
 def regeneration_entry_point(attempt: dict) -> str:
@@ -310,7 +308,7 @@ def attempt_capabilities(
     can_resend = never_dispatched and not is_output
     can_resume = bool(remote.get("artifact_id")) and not is_output
     can_reconcile = (
-        dispatch_status in _RECONCILABLE_DISPATCH_STATES and not reconciliation_window_closed
+        dispatch_status in RECONCILABLE_DISPATCH_STATES and not reconciliation_window_closed
     )
     regeneration_entry = regeneration_entry_point(attempt)
     preserves_existing_output = post_retract and episode.get("output_attempt_id") not in (
@@ -741,7 +739,7 @@ def attempt_next_step(caps: dict) -> str:
             "受理結果不明:先 podcast_episode_reconcile 對帳(它可能已經在遠端跑完)。"
             + retract_advice
         )
-    if caps["dispatch_status"] in _RECONCILABLE_DISPATCH_STATES:
+    if caps["dispatch_status"] in RECONCILABLE_DISPATCH_STATES:
         # can_reconcile 在這裡已經是 False,而 dispatch_status 仍落在可對帳的集合裡,
         # 只可能是呼叫端傳了 `reconciliation_window_closed=True`(明確算過、窗真的
         # 關了——`None`/`False` 都會讓 can_reconcile 維持 True,走不到這裡)。把

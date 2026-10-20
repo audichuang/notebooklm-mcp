@@ -371,8 +371,7 @@ async def _reconcile_source_upload(
         source_id = candidates[0]
 
         # CAS 式重新檢查由 ManifestStore.update 的鎖定 read-modify-write 完成。
-        def mutate(manifest: dict) -> None:
-            _, current = ref.find(manifest)
+        def mutate(manifest: dict, _episode: dict, current: dict) -> None:
             if source_id in _claimed_source_ids(manifest, attempt_id):
                 raise ValueError(f"feedback source {source_id!r} was claimed during reconciliation")
             current_upload = current["finalize"]["feedback_source_upload"]
@@ -386,7 +385,7 @@ async def _reconcile_source_upload(
                 }
             )
 
-        store.update(mutate)
+        ref.mutate(mutate)
         return source_id
 
     def unresolved(_episode: dict, current: dict) -> None:
@@ -731,8 +730,7 @@ async def finalize_attempt(
         dispatched_at = datetime.now(UTC).isoformat()
         expected_title = os.path.basename(mp3_path)
 
-        def claim_upload(manifest: dict) -> bool:
-            _, current = ref.find(manifest)
+        def claim_upload(_manifest: dict, _episode: dict, current: dict) -> bool:
             current_upload = current["finalize"]["feedback_source_upload"]
             if current_upload["status"] != "not_started":
                 return False
@@ -747,7 +745,7 @@ async def finalize_attempt(
             )
             return True
 
-        _, owns_upload = store.update(claim_upload)
+        owns_upload = ref.mutate(claim_upload)
         if not owns_upload:
             source_id = await _reconcile_source_upload(
                 client, store, episode_n, attempt_id, notebook_id

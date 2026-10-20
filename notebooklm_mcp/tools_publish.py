@@ -134,7 +134,7 @@ def _assert_pub_dates_ascend(eps: list[dict]) -> None:
     `lastBuildDate` 取 `eps[-1]`(集號最大的那集),非單調時它也不是真正最新的時間。
 
     這條「RSS 排序假設 pubDate 隨集號遞增」的前提一直只寫在
-    `tools_podcast._first_published_at` 的註解裡,**沒有任何 preflight 驗過它** ——
+    `output_projection.first_published_at` 的註解裡,**沒有任何 preflight 驗過它** ——
     它在「一集一集依序生成」時才自動成立。相等也擋:同一秒的兩集在播放器裡順序不定。
 
     修法不是放寬這道檢查,而是把時間戳依集號重新配對(不發明新時間):

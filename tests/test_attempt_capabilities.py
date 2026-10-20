@@ -434,7 +434,7 @@ def test_every_state_that_trips_the_source_guard_retracts_without_a_flag(dispatc
     純不變式測試的盲區:語意選擇錯了,自洽性看不出來。
     """
     # T10(測試債):改引用具名常數而不是手抄一份 tuple——守門的觸發條件（`_NEVER_
-    # DISPATCHED`/`_TERMINAL_REMOTE`）哪天前移，這裡若還是手抄字面值就會靜默 skip
+    # DISPATCHED`/`TERMINAL_REMOTE`）哪天前移，這裡若還是手抄字面值就會靜默 skip
     # 掉，不會紅。
     guard_trips = dispatch in g.NEVER_DISPATCHED or remote in g.TERMINAL_REMOTE
     if not guard_trips:
@@ -626,7 +626,7 @@ def test_window_closed_narrative_never_names_the_tool_it_just_ruled_out(
     """
     # T10(測試債):改引用 SUT 的具名常數，不再手抄一份 tuple —— 手抄的那份哪天
     # 跟 `can_reconcile` 的判準前移／改了範圍，這裡會靜默變成 skip 而不是紅。
-    if dispatch not in g._RECONCILABLE_DISPATCH_STATES:
+    if dispatch not in g.RECONCILABLE_DISPATCH_STATES:
         pytest.skip("這個 dispatch 狀態走不到窗關閉分支")
     episode, attempt = _case(dispatch, remote, role, shape)
     caps = g.attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)
@@ -656,7 +656,7 @@ def test_window_closed_narrative_reaches_the_assertion_on_exactly_fifteen_cases(
     絕大多數——只有 15 格真的跑到最後兩條斷言。這本身不是問題(skip 條件都有
     各自的理由),但代表：**優先序的回歸如果剛好把某一格從「會走到斷言」變成
     「被前面的 skip 條件吸收」,測試套件看到的是 0 failed,不是紅。**(突變實測:
-    把 `_TERMINAL_REMOTE` 拿掉一項,`test_window_closed_narrative_…` 的 skip
+    把 `TERMINAL_REMOTE` 拿掉一項,`test_window_closed_narrative_…` 的 skip
     數量與 pass 數量都會變,但這個變化本身不會被任何斷言擋下——它只會讓某些格
     從「執行斷言」變成「被 skip」或反過來,而 parametrize 的 skip 不算 failure。)
 
@@ -667,7 +667,7 @@ def test_window_closed_narrative_reaches_the_assertion_on_exactly_fifteen_cases(
     """
     reached = 0
     for dispatch, remote, role, shape in ALL_CASES:
-        if dispatch not in g._RECONCILABLE_DISPATCH_STATES:
+        if dispatch not in g.RECONCILABLE_DISPATCH_STATES:
             continue
         episode, attempt = _case(dispatch, remote, role, shape)
         caps = g.attempt_capabilities(episode, attempt, "att-me", reconciliation_window_closed=True)

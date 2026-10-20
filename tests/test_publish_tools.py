@@ -2689,7 +2689,7 @@ def _backfill_script():
 
 def _retracted_ep(tmp_path, n, top, first):
     """重生過的集:頂層 pubDate 是 `top`,而首發時間的另一份記錄在撤回快照裡(`first`)。
-    `_first_published_at` 讀的是後者,`backfill_published_at.py` 會照它回填。"""
+    `first_published_at` 讀的是後者,`backfill_published_at.py` 會照它回填。"""
     ep = _dated_live_ep(tmp_path, n, top)
     ep["attempts"] = [
         {
