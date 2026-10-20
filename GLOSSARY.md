@@ -36,6 +36,10 @@ _Avoid_: finalize（只指 checkpoint 那半）、重試
 Output 投影是 episode 層級、指向目前正式輸出的欄位（output attempt、artifact、mp3、首發時間、Feedback Source）；作廢時整批移除，取代版必須重新寫入。集的身分（標題、label）只在第一次寫入，作廢不移除，取代版也不得更改。
 _Avoid_: episode 狀態、輸出欄位
 
+**指引（Guidance）**:
+工具在停點或回傳中告訴呼叫端「這顆生成嘗試現在能做什麼、下一步呼叫哪支工具、帶哪些身分」的結構化結論與可執行句子；只由 `attempt_guidance` 依嘗試狀態產生，呼叫點不得自行拼寫。
+_Avoid_: 提示、錯誤訊息
+
 **Feedback Source**:
 為後續集數提供 continuity 而上傳到 NotebookLM Sources 的單集音檔；工具保存並驗證其 source identity，讓重跑不會重複上傳。
 _Avoid_: 暫存檔、最新同名 source

@@ -6,6 +6,52 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.37 —— attempt 叢集深化:AttemptRef / output_projection / attempt_guidance / series 自動轉換表;外來 not_accepted 不再先 re-arm 才被拒
+
+**為什麼**:2026-10-20 的架構審查(improve-codebase-architecture)指出 attempt 叢集仍是淺模組:
+`tools_podcast` 有 9 支一行的 `store.update` 薄包、`audio_finalize` 另有一套同型;Output 投影的寫入 / pop / 述詞
+分在三個模組;「指引只准由 caps 產生」這條紅線的唯一來源是 4000+ 行檔裡的私有符號;`podcast_series`
+重入分支自己讀 dispatch/remote 狀態決定自動轉換,與 `_series_will_redispatch` 只靠註解對齊(efad5b6、c4dc5b0、
+3a7504c、813fe6c、2097add、daa6bc2 都是「series 那條路落後」)。
+
+**改了什麼**(除下面一條修正外零行為變更):
+- `attempt_state.AttemptRef(store, episode_n, attempt_id)`:store-bound 單一入口(`read` / `mutate` / 同名轉換),
+  tombstone default-deny 在裡面;`tools_podcast` 與 `audio_finalize` 共用,薄包全刪。`_refuse_retracted` 公開為
+  `refuse_retracted`(跨模組契約)。
+- 新 `output_projection.py`:投影 / 集的身分 / 硬證據鍵、`apply_promotion`、retract 的 pop、各入口述詞同住;
+  硬證據 ⊆ 投影由 tripwire 鎖住。
+- 新 `attempt_guidance.py`:capabilities / next-step / retract hint / 清理句原樣搬出(訊息字串逐字相同,AST 比對);
+  import 方向(guidance 不回 import tools_podcast、admission 不直接 import guidance)由 tripwire 鎖住;
+  清理句 tripwire 改掃整個套件。
+- `tools_podcast._series_redispatch_kind(attempt, *, after=)`:series 自動 rearm / supersede / send 的唯一判準,
+  `_series_will_redispatch` 是它的布林投影;新測窮舉狀態格並與 `attempt_capabilities` 互查。
+- `tools_podcast.py` 4347 → 3457 行。
+
+**修正**:「這一集已有硬輸出證據 + 不是 series 建的 `not_accepted` attempt」時,`podcast_series` 先 re-arm 成
+`prepared`、到 send 前的第二道歸屬檢查才拒絕 —— v0.7.1 F-7 的半成品形狀。根因:`defers_to_output_guard` 用
+remote 終態判準,而 `mark_not_accepted` 一律寫 `remote=failed`,於是 `not_accepted` 也被當成 supersede 讓位。
+改成 `step == "supersede"`。實作者與突變測試各自獨立指出;回歸測試先紅(`prepared`)後綠。
+
+**刻意沒做**:
+- 審查報告的 #1 原構想是 episode / resume / series 共用一個 `advance()`。三份設計裁決後縮成 series 單表:
+  `_run_episode` / resume 的決策在 `attempt_admission._GUARDS`(紅線),本來就不是第二張表。
+- #3 只做到搬家,沒有收成單一 `for_attempt()` 入口:呼叫端要 caps dict 本身(結構化欄位進公開回傳)加文字,
+  片段組合目前只有一處重複。
+- #4(ffmpeg / chrome 的 media port)延後:另一個叢集,放大這一版的爆炸半徑。#6(lifespan client 工廠)不做:
+  只有一個真 adapter,是假想的 seam。
+- 既有缺口(非本版引入):**自己的** `not_accepted` attempt 在已有硬輸出的集上,re-arm 後直接送出、不經過
+  `_create_audio_attempt` 的輸出守門。這次只補回歸屬檢查,沒有替 rearm/send 加輸出守門。
+
+**驗收**:第一層(離線)推導結案,沒有跑真帳號:
+- 遠端呼叫面沒變:`_dispatch_prepared_attempt` / `_failover.py` 未動,行為審查者逐處確認呼叫點只是改名;
+  Codex 對抗審查 approve(no material regression vs v0.9.36)。
+- persist → claim → dispatch → bind 的順序由 `runtime` seam 的第二個 adapter(`tests/conftest.py` 的 `FakeClient`)
+  離線全程走過;ADR-0001 的順序(re-arm/supersede 前守門、claim 前轉換)由新風險審查者逐條確認。
+- `_series_redispatch_kind` 與舊 if 鏈在 960 個狀態格(dispatch × remote × after × 形狀)逐格相同。
+- 突變測試 16 個變異:原本存活的 `defers_to_output_guard` 那條現在由新回歸測試殺掉。
+
+**對呼叫端零契約變更**:37 支工具的描述、input schema 與 server `instructions` 不變,skill repo 不需同步。
+
 ## v0.9.36 —— adopt 的清理指引不再指錯 notebook;晚集音檔格式不支援時零 PUT
 
 **為什麼**:2026-10-13 的架構審查用離線 probe 重現兩件事。
