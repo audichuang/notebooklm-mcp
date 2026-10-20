@@ -134,6 +134,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
      定位都是這樣結的)。**推導要逐條指出前提在哪次實測被證明**,不能只說「應該沒事」。
   2. **改到呼叫端讀得到的那一面**(工具描述 / `_INSTRUCTIONS` / skill 文字)→ `claude -p` + dry-run stub
      (`scripts/eval_harness/`):供應**真實** schema 但不執行任何呼叫,零帳號風險、零配額。
+     **工具回傳文字不在這層**(stub 只回 DRY RUN):回傳指引的可執行性由 gotchas-attempt 的 E2E 紅線在離線測試驗。
   3. **碰到 `generate` / `add_user` / `delete`** 這類會在雲端留下東西的呼叫 → 真帳號,同樣自己跑
      (`doppler run -c dev -- claude -p …`),跑完自己清測試產物。**只有不可逆的才停下來問**:
      發布到公網 feed、刪既有 notebook/source、動到別人已訂閱得到的東西。

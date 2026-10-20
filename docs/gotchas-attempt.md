@@ -23,6 +23,9 @@
   一句可執行的話)已經把這個結構收斂掉了:新程式碼要教呼叫端「下一步該做什麼」,
   **先查這兩個函式有沒有覆蓋這個狀態**,沒覆蓋就擴充它們的笛卡爾積或加新 key,
   不要在呼叫點旁邊再長一條 if/else——那條 if/else 就是第八次現形的種子。
+  **清理句(`source_delete(notebook_id=…, source_id=…)`)只准由 `_cleanup_sentence(rows)` 產生**,
+  逐筆讀義務自己記錄的 notebook:v0.9.36 前 adopt 自己拼一份、對每筆套這次 adopt 的
+  notebook,結構化資料對、文字指錯本(tripwire 在 `test_attempt_retract.py` 鎖 f-string 只出現一次)。
   **這條紅線只管「訊息從哪裡來」,不管「回傳完不完整」——那是下一條的守備範圍**
   （第十一次現形正是在這條紅線徹底遵守之後才發生的:`safe_next_action` 確實是
   `_attempt_capabilities()` 算的,但公開回傳漏了那個動作要用的目標身分)。
