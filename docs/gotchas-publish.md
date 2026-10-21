@@ -39,7 +39,11 @@
     (v0.9.33-rc 真實驗收量到):拋 `RateLimitError`、換帳號重送成功、`attachment_errors` 照記,
     **但遠端多出一顆 `pending` 的 slide_deck**(created_at 早於 failover 約 1 秒),manifest 與
     回傳都沒記它,只有 `artifact_list` 看得到。ADR-0010 的 1.35s 零副作用拒絕是對 **audio** 量的。
-    未結案:那顆會不會自己完成/計費 —— 下一輪刻意讓 slides 撞配額,事後輪詢它的終態。
+    **現在每一腿都量**:`_dispatch_attachment` 在送出前後各列一次同 kind 的 artifact,被拒的那一腿
+    差集非空就記進那筆 `attachment_errors` 的 `stray_artifact_ids`、成功時也回在工具回傳。只記不綁
+    (同 notebook 並行生成會落進同一個時間窗),換帳號決策不變。list 失敗 = 那一腿沒證據,不擋 dispatch。
+    **2026-10-22 stg 已結案**:被拒 2/2 都留空殼、40 分鐘不前進(同批正常 4 顆 5–9 分鐘 completed)
+    —— 空殼不生成,別等它;`pending` = 空殼、`in_progress` = 真的在跑。算不算配額沒量到。
 - **發布用的 HTML guard 是標籤/屬性允許清單,不是關鍵字黑名單**(`publish/notes_html.py`):
   黑名單會把「設定 online=1」「JavaScript:動態語言的起點」這種普通中文散文誤殺(誤判成本 =
   整季 publish raise),又漏掉 `<svg><image href>`、`<input type=image>` 等。允許清單走

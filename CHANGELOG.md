@@ -6,6 +6,30 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## Unreleased —— 附件被配額拒絕的那一腿若在遠端留下 artifact,記下來並回給呼叫端
+
+**為什麼**:v0.9.33-rc 真實驗收(④)量到 `generate_slides` 被乾淨拒絕、換帳號成功後,遠端多一顆
+`pending` slide_deck,manifest 與回傳都沒記 —— ADR-0010/0011 的「配額拒絕 = 零副作用」在 slides 上
+只是偶發成立(v0.9.16 量了三次都是空差集)。上游 `notebooklm-py` 的 `unconfirmed` 標記沒掛在它上面,
+留下空殼的是 NotebookLM 伺服器本身,所以等上游修不到;看得到「這一腿前後遠端多了什麼」的只有我們。
+
+**改了什麼**:`_dispatch_attachment` 在每一腿 kickoff 前後各列一次同 kind 的 artifact,被拒那一腿的
+差集記進該筆 `attachment_errors` 的 `stray_artifact_ids`,成功時也回在 `generate_slides` /
+`generate_report` / `artifact_revise_slide` 的回傳。只記不綁不刪、換帳號決策不變、list 失敗不擋
+dispatch(ADR-0011 Amendment 2026-10-22)。正常路徑多一次 list RPC。
+
+**驗收**:第一層(離線)。11 條新測試:三支工具各一、耗盡時每一腿各記自己的、乾淨拒絕不多欄位、
+list 失敗 / 卡住不影響,以及獨立審查補的四格(權限被拒會換掉例外、受理不明那個 phase、0.7.x 空
+`task_id` 形狀、不收屬性的例外型別)。證據最初掛在例外上,審查指出那兩條會漏 / 會改變分類,改走
+closure。突變(recorder 不帶證據 / 不重置每腿 / 差集不扣 baseline / 不量空 task_id)各讓 1–5 條轉紅。
+**真實驗收**(2026-10-22,stg,只開兩個免費槽位,[紀錄](docs/acceptance-2026-10-22-stray-artifacts.md)):
+連送 5 次 `generate_slides`,第 3、5 次被拒,**2/2 都留下 `pending` 空殼且都記進 `stray_artifact_ids`**
+(failover 一筆、耗盡的 refused 一筆)。輪詢 40 分鐘:空殼完全不前進,同批正常 4 顆 5–9 分鐘 completed
+→ 空殼不生成,換帳號不會造成重複簡報;指引因此從「等它的終態」改成「`pending` 的不會動,別等」。
+
+**對呼叫端的契約變更**:新增回傳 / manifest 欄位 `stray_artifact_ids`;`generate_slides` /
+`generate_report` 描述各多一句。skill repo 需同步(tool-reference 的 slides / report 節)。
+
 ## v0.9.37 —— attempt 叢集深化:AttemptRef / output_projection / attempt_guidance / series 自動轉換表;外來 not_accepted 不再先 re-arm 才被拒
 
 **為什麼**:2026-10-20 的架構審查(improve-codebase-architecture)指出 attempt 叢集仍是淺模組:

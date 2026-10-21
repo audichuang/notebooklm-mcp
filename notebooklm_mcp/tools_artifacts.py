@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta
 
 from mcp.types import ToolAnnotations
+from notebooklm.types import ArtifactType
 
 from . import runtime
 from ._atomic import download_atomically
@@ -122,18 +124,63 @@ async def _dispatch_attachment(
     episode_n: int,
     kind: str,
     notebook_id: str,
-) -> tuple[str, str | None, object]:
+) -> tuple[str, str | None, object, list[str]]:
     """附件家族的 dispatch:共用 failover 迴圈 + episode 級稽核。
 
     三支工具(`generate_slides` / `generate_report` / `artifact_revise_slide`)共用這一支,
     **不各自接一次線** —— 三段一樣的 wiring 就是「只補一條路徑」的溫床,而這個 repo
     在 v0.8.0 已經因此吃過一次(failover 只補了 `_run_episode`,漏了 series 的重送分支)。
 
-    回 `(artifact_id, account, client)`:後兩個是**實際送出的**那一組,呼叫端必須拿它們
-    去做「等完成 → 下載」(推導見 `_failover.dispatch_with_failover` 的 docstring)。
+    回 `(artifact_id, account, client, stray_artifact_ids)`:中間兩個是**實際送出的**那一組,
+    呼叫端必須拿它們去做「等完成 → 下載」(推導見 `_failover.dispatch_with_failover` 的
+    docstring);最後一個見下面 `probed`。
     """
+    artifact_type = _PROBED_ARTIFACT_TYPE[kind]
+    strays: list[str] = []  # 整次呼叫累積,回給呼叫端
+    leg: list[str] = []  # 只有「剛失敗的那一腿」,給下面三個 recorder
+
+    async def probed(active_client):
+        """每一腿送出前後各列一次同 kind 的 artifact,失敗那一腿的差集交給 recorder。
+
+        ADR-0010/0011 的換帳號前提是「配額拒絕 = 零副作用」。v0.9.16 在 slides 上量了三次
+        差集都是空的,v0.9.33-rc 卻量到一顆 created_at 早於 failover 的 pending 空殼 ——
+        **偶發**,所以只能每一次被拒都量。只記不綁、不刪:同一本 notebook 可能有別的生成
+        同時在跑,差集只是「這一腿的時間窗內新出現的」,不是已證明的歸屬。換帳號的決策不變:
+        2026-10-22 stg 實測被拒 2/2 都留下 `pending` 空殼,40 分鐘不前進(同批正常的 4 顆
+        5–9 分鐘內 completed)—— 空殼不生成,換帳號重送不會變成重複的簡報。
+
+        **證據走 closure,不掛在例外上**:權限被拒時 `_failover` 會換成新的例外再記終態,
+        而不收屬性的例外型別會讓 setattr 本身變成新例外、把乾淨拒絕翻成受理不明。
+        recorder 一定在這一腿失敗之後、下一腿開始之前被呼叫(`_failover` 同步記帳),所以
+        `leg` 永遠只有剛失敗那一腿的。
+        list 是觀測不是守門:失敗或逾時只是這一腿沒有證據,不改變 dispatch 的結果。
+        """
+        leg.clear()
+        before = await _artifact_ids(active_client, notebook_id, artifact_type)
+
+        async def note_leftovers():
+            if before is None:
+                return
+            after = await _artifact_ids(active_client, notebook_id, artifact_type)
+            if after is not None:
+                leg.extend(sorted(after - before))
+                strays.extend(leg)
+
+        try:
+            status = await dispatch(active_client)
+        except Exception:
+            await note_leftovers()
+            raise
+        if not getattr(status, "task_id", None):
+            # 0.7.x 形狀的拒絕(不 raise、回空 task_id):`_failover` 的孿生 rotate 路徑。
+            await note_leftovers()
+        return status
+
+    def evidence() -> dict:
+        return {"stray_artifact_ids": list(leg)} if leg else {}
+
     artifact_id, account, client = await dispatch_with_failover(
-        dispatch,
+        probed,
         account=account,
         client=client,
         notebook_id=notebook_id,
@@ -145,6 +192,7 @@ async def _dispatch_attachment(
             reason,
             from_account=from_account,
             to_account=to_account,
+            **evidence(),
         ),
         on_clean_refusal=lambda reason, refused: _append_attachment_event(
             manifest_path,
@@ -153,6 +201,7 @@ async def _dispatch_attachment(
             "attachment_dispatch_refused",
             reason,
             account=refused,
+            **evidence(),
         ),
         on_acceptance_unknown=lambda reason, used: _append_attachment_event(
             manifest_path,
@@ -161,9 +210,40 @@ async def _dispatch_attachment(
             "attachment_acceptance_unknown",
             reason,
             account=used,
+            **evidence(),
         ),
     )
-    return artifact_id, account, client
+    return artifact_id, account, client, strays
+
+
+# kind → 對帳時列哪一種 artifact。revise 會 fork 出新的 slide_deck,所以同列 slide_deck。
+_PROBED_ARTIFACT_TYPE = {
+    "slides": ArtifactType.SLIDE_DECK,
+    "revise_slide": ArtifactType.SLIDE_DECK,
+    "report": ArtifactType.REPORT,
+}
+
+
+def _with_strays(out: dict, strays: list[str]) -> dict:
+    """被拒的腿在遠端留下的 artifact 一併回給呼叫端;沒有就不多一個 key。"""
+    if strays:
+        out["stray_artifact_ids"] = strays
+    return out
+
+
+# 對帳 list 的上限。剛被限流的帳號上 list 也可能卡住,不設上限會讓整個 failover 停在這裡。
+_PROBE_TIMEOUT_S = 15.0
+
+
+async def _artifact_ids(client, notebook_id: str, artifact_type) -> set[str] | None:
+    """`None` = 這次沒量到(list 失敗或逾時),與「量到零顆」分開。"""
+    try:
+        arts = await asyncio.wait_for(
+            client.artifacts.list(notebook_id, artifact_type=artifact_type), _PROBE_TIMEOUT_S
+        )
+    except Exception:  # noqa: BLE001 —— 對帳是觀測,失敗不得改變 dispatch 的結果
+        return None
+    return {a.id for a in arts}
 
 
 def _load_ep_and_write(manifest_path: str, episode_n: int, **fields) -> dict:
@@ -455,7 +535,10 @@ async def generate_slides(
 
     配額被拒會自動換 pool 下一個帳號**原地重送**(實際生成的帳號寫進該集的
     `slides_account`,每次換人往 `attachment_errors` append 一筆);**拋出配額錯誤 =
-    整個 pool 都被拒,不要自己再重試**。"""
+    整個 pool 都被拒,不要自己再重試**。
+    被拒那一腿的時間窗內遠端新出現的 artifact 記在那一筆的 `stray_artifact_ids` 並回在回傳
+    (只記不綁)。`pending` 的那種是被拒請求留下的空殼,**不會生成**(實測 40 分鐘不動),
+    不必等它、也不影響重呼;`in_progress` 的才是並行的別次生成。"""
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)  # 打錯集號別燒一次生成配額
     # 記帳與送出同源:`snapshot()` 一次取 `(label, client)`,之後任何並行的 rotate 都
@@ -489,7 +572,7 @@ async def generate_slides(
     # 後兩個回傳值是**實際送出的**帳號與 client。下載一定要用它們 —— 風險視窗幾乎全在
     # 後半段(dispatch 幾秒,等生成 + 下載是數十分鐘),回頭讀全域會在十幾分鐘後爆 401
     # 而根因在遠處(推導見 `_failover.dispatch_with_failover` 的 docstring)。
-    artifact_id, account, client = await _dispatch_attachment(
+    artifact_id, account, client, strays = await _dispatch_attachment(
         _generate,
         account=account,
         client=client,
@@ -498,7 +581,7 @@ async def generate_slides(
         kind="slides",
         notebook_id=notebook_id,
     )
-    return await _finish_slides(
+    out = await _finish_slides(
         client,
         notebook_id,
         manifest_path,
@@ -507,6 +590,7 @@ async def generate_slides(
         wait_timeout,
         account=account,
     )
+    return _with_strays(out, strays)
 
 
 @mcp.tool()
@@ -577,7 +661,7 @@ async def artifact_revise_slide(
     # `ArtifactFeatureUnavailableError` 觸發,那條沒被排除),而「被拒時會不會 fork 出
     # 一顆孤兒 `(2)`」也就一直是**待確認**(ADR-0011)。接著它是為了不留缺口,不是因為
     # 已經證明過它冪等。
-    revised_id, account, client = await _dispatch_attachment(
+    revised_id, account, client, strays = await _dispatch_attachment(
         _revise,
         account=account,
         client=client,
@@ -604,7 +688,7 @@ async def artifact_revise_slide(
     # 不一樣」的回傳值,無從判斷是 fork 還是自己記錯。
     if revised_id != artifact_id:
         out["superseded_artifact_id"] = artifact_id
-    return out
+    return _with_strays(out, strays)
 
 
 async def _finish_report(
@@ -702,7 +786,10 @@ async def generate_report(
 
     配額被拒會自動換 pool 下一個帳號**原地重送**(實際生成的帳號寫進該集的
     `report_account`,每次換人往 `attachment_errors` append 一筆);**拋出配額錯誤 =
-    整個 pool 都被拒,不要自己再重試**。"""
+    整個 pool 都被拒,不要自己再重試**。
+    被拒那一腿的時間窗內遠端新出現的 artifact 記在那一筆的 `stray_artifact_ids` 並回在回傳
+    (只記不綁)。`pending` 的那種是被拒請求留下的空殼,**不會生成**(實測 40 分鐘不動),
+    不必等它、也不影響重呼;`in_progress` 的才是並行的別次生成。"""
     custom_prompt = _validate_report_prompt(report_format, custom_prompt, extra_instructions)
     selected = to_source_ids(source_ids)
     _require_episode(manifest_path, episode_n)  # 同上
@@ -726,7 +813,7 @@ async def generate_report(
             language=resolved_language,
         )
 
-    artifact_id, account, client = await _dispatch_attachment(
+    artifact_id, account, client, strays = await _dispatch_attachment(
         _generate,
         account=account,
         client=client,
@@ -735,7 +822,7 @@ async def generate_report(
         kind="report",
         notebook_id=notebook_id,
     )
-    return await _finish_report(
+    out = await _finish_report(
         client,
         notebook_id,
         manifest_path,
@@ -745,6 +832,7 @@ async def generate_report(
         wait_timeout,
         account=account,
     )
+    return _with_strays(out, strays)
 
 
 @mcp.tool()

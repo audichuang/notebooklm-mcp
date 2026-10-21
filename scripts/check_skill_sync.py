@@ -108,6 +108,8 @@ REQUIRED_CONTRACT_TERMS = (
     # 逃生口。呼叫端要知道這一集卡住不代表整季卡住
     "promotion_refused",  # v0.9.28:series 在 promote 撞到三道守門(已 retract / 別顆
     # attempt 擁有 output / legacy 綁的是別顆 artifact)的結構化停點
+    "stray_artifact_ids",  # 附件被配額拒絕的那一腿在遠端留下的 artifact(ADR-0011 Amendment
+    # 2026-10-22)。純回傳 / manifest 欄位,工具名沒變 —— 正是本 checker 最容易漏的那一類
 )
 
 

@@ -791,3 +791,316 @@ async def test_series_resend_converts_before_the_durable_claim(fake_client, tmp_
         "本地轉換失敗不得留下『正在送』的 durable 狀態 —— 遠端一次都沒被碰到"
     )
     assert [c for c in fake_client.artifacts.calls if c[0] == "generate_audio"] == [], "零生成 RPC"
+
+
+# ---- 被拒的那一腿在遠端留下 artifact(v0.9.33-rc 驗收 ④)-------------------------------
+
+
+def _refuse_leaving_orphan(
+    client, method_name, calls, fail_first_n, *, kind, orphan_ids, exc=None, status=None
+):
+    """前 N 次被配額拒絕,而且每次拒絕前伺服器**已經建出一顆 pending artifact**。
+
+    v0.9.33-rc 真實驗收的形狀:`RateLimitError`(decoder 那種,契約說「沒建出 task」)、
+    換帳號重送成功,但 `artifact_list` 多一顆 created_at 早於 failover 的 pending 空殼。
+    v0.9.16 同樣量了三次差集都是空的 —— 所以這是**偶發**的,只能每一次被拒都量。
+    """
+    from notebooklm.exceptions import RateLimitError
+
+    original = getattr(client.artifacts, method_name)
+    orphans = iter(orphan_ids)
+
+    async def flaky(*args, **kwargs):
+        calls.append(runtime.active_account())
+        if len(calls) <= fail_first_n:
+            client.artifacts.seed_artifact(
+                next(orphans), kind=kind, title="筆記本標題", completed=False, status="pending"
+            )
+            if status is not None:
+                return status
+            raise exc or RateLimitError("每日配額已用盡", rpc_code="USER_DISPLAYABLE_ERROR")
+        return await original(*args, **kwargs)
+
+    setattr(client.artifacts, method_name, flaky)
+
+
+def _events(manifest_path, phase):
+    return [e for e in _episode(manifest_path).get("attachment_errors", []) if e["phase"] == phase]
+
+
+async def test_refused_leg_that_left_an_artifact_is_recorded_and_returned(fake_client, tmp_path):
+    """乾淨拒絕照舊換帳號,但那一腿在遠端多出來的 artifact 要**記下來、回給呼叫端**。
+
+    以前它只在 `artifact_list` 看得到:manifest 與回傳都說「被拒、換人、成功」,而遠端
+    多了一顆沒人綁得到的 pending deck。不改換帳號的決策(n=1 的觀察,那顆會不會完成 /
+    計費都還不知道)—— 只是讓下一次發生時留下證據。
+    """
+    from notebooklm.types import ArtifactType
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    fake_client.artifacts.seed_artifact("old-deck")  # 拒絕之前就在的,不能被算進去
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "generate_slide_deck",
+        calls,
+        1,
+        kind=ArtifactType.SLIDE_DECK,
+        orphan_ids=["orphan-1"],
+    )
+
+    res = await a.generate_slides("nb-1", manifest_path, 1)
+
+    assert calls == ["a@x", "b@x"], "換帳號的決策不變"
+    assert res["stray_artifact_ids"] == ["orphan-1"]
+    (failover,) = _events(manifest_path, "attachment_dispatch_failover")
+    assert failover["stray_artifact_ids"] == ["orphan-1"]
+    assert failover["from_account"] == "a@x"
+
+
+async def test_clean_refusal_without_leftovers_adds_no_field(fake_client, tmp_path):
+    """v0.9.16 量到的那種乾淨拒絕(差集為空):不多一個空欄位,回傳也不多 key。"""
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    calls: list = []
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=1)
+
+    res = await a.generate_slides("nb-1", manifest_path, 1)
+
+    assert "stray_artifact_ids" not in res
+    (failover,) = _events(manifest_path, "attachment_dispatch_failover")
+    assert "stray_artifact_ids" not in failover
+
+
+async def test_exhausted_pool_records_every_leftover_on_the_leg_that_left_it(fake_client, tmp_path):
+    """整個 pool 都被拒時工具會 raise —— 回傳不存在,所以 manifest 是唯一的證據。
+
+    每一筆只記**那一腿**留下的,不累積:A→B 那筆記 A 的空殼、最後一腿(C)那筆記 C 的。
+    """
+    from notebooklm.exceptions import RateLimitError
+    from notebooklm.types import ArtifactType
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "generate_slide_deck",
+        calls,
+        99,
+        kind=ArtifactType.SLIDE_DECK,
+        orphan_ids=["orphan-a", "orphan-b"],
+    )
+
+    with pytest.raises(RateLimitError):
+        await a.generate_slides("nb-1", manifest_path, 1)
+
+    (failover,) = _events(manifest_path, "attachment_dispatch_failover")
+    (refused,) = _events(manifest_path, "attachment_dispatch_refused")
+    assert failover["stray_artifact_ids"] == ["orphan-a"]
+    assert refused["stray_artifact_ids"] == ["orphan-b"]
+
+
+async def test_report_refusal_leftovers_are_tracked_too(fake_client, tmp_path):
+    """講義同一條路(不補一半),而且只看 report 那一種 —— 別的 kind 新增不算它的。"""
+    from notebooklm.types import ArtifactType
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "generate_report",
+        calls,
+        1,
+        kind=ArtifactType.REPORT,
+        orphan_ids=["orphan-r"],
+    )
+
+    res = await a.generate_report("nb-1", manifest_path, 1)
+
+    assert res["stray_artifact_ids"] == ["orphan-r"]
+
+
+async def test_probe_failure_never_blocks_or_changes_the_dispatch(fake_client, tmp_path):
+    """對帳用的 list 是**觀測**,不是守門:它自己失敗時生成照常、換帳號照常、不記假證據。"""
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+
+    async def broken_list(*args, **kwargs):
+        raise RuntimeError("list RPC 掛了")
+
+    fake_client.artifacts.list = broken_list
+    calls: list = []
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=1)
+
+    res = await a.generate_slides("nb-1", manifest_path, 1)
+
+    assert calls == ["a@x", "b@x"]
+    assert res["slides_pdf_path"].endswith("ep01-slides.pdf")
+    assert "stray_artifact_ids" not in res
+
+
+async def test_revise_refusal_leftovers_are_tracked_too(fake_client, tmp_path):
+    """改版單頁是第三支(不補一半):被拒時會不會 fork 出孤兒是 ADR-0011 的待確認 Q3,
+    這條讓它一發生就看得到。"""
+    from notebooklm.types import ArtifactType
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    fake_client.artifacts.seed_artifact("deck-1")
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "revise_slide",
+        calls,
+        1,
+        kind=ArtifactType.SLIDE_DECK,
+        orphan_ids=["deck-1 (2)"],
+    )
+
+    res = await a.artifact_revise_slide("nb-1", manifest_path, 1, "deck-1", 0, "把第一頁改短")
+
+    assert res["stray_artifact_ids"] == ["deck-1 (2)"]
+
+
+# ---- 審查補的形狀:證據不能靠「掛在例外上」—— `_failover` 有時會換掉例外 ----------------
+
+
+async def test_permission_denied_leg_keeps_its_leftover(fake_client, tmp_path):
+    """權限被拒時 `_failover` 會**換成新例外**(`access_denied_error`)再記終態 ——
+    證據掛在原例外上的話,那筆 `attachment_dispatch_refused` 就看不到它。"""
+    from notebooklm.exceptions import ClientError
+    from notebooklm.types import ArtifactType
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "generate_slide_deck",
+        calls,
+        99,
+        kind=ArtifactType.SLIDE_DECK,
+        orphan_ids=["orphan-p"],
+        exc=ClientError("permission denied", rpc_code=7),
+    )
+
+    with pytest.raises(NotebookAccessDenied):
+        await a.generate_slides("nb-1", manifest_path, 1)
+
+    (refused,) = _events(manifest_path, "attachment_dispatch_refused")
+    assert refused["stray_artifact_ids"] == ["orphan-p"]
+
+
+async def test_unconfirmed_rate_limit_leg_keeps_its_leftover(fake_client, tmp_path):
+    """第三種 phase(受理不明):送出後才被 429 打回的,正是最可能真的留下一顆的那種。"""
+    from notebooklm.exceptions import RateLimitError
+    from notebooklm.types import ArtifactType
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    from notebooklm._idempotency import mark_unconfirmed
+
+    # 用 SDK 自己的 mark_unconfirmed 造 —— 驗的是上游真的會掛上去的那個標記。
+    exc = mark_unconfirmed(RateLimitError("429 after send"))
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "generate_slide_deck",
+        calls,
+        99,
+        kind=ArtifactType.SLIDE_DECK,
+        orphan_ids=["orphan-u"],
+        exc=exc,
+    )
+
+    with pytest.raises(RateLimitError):
+        await a.generate_slides("nb-1", manifest_path, 1)
+
+    assert calls == ["a@x"], "受理不明不換帳號(紅線①)"
+    (unknown,) = _events(manifest_path, "attachment_acceptance_unknown")
+    assert unknown["stray_artifact_ids"] == ["orphan-u"]
+
+
+async def test_status_shaped_refusal_leg_is_probed_too(fake_client, tmp_path):
+    """0.7.x 形狀(不 raise、回空 `task_id`)是共用迴圈的孿生 rotate 路徑,一樣要量。"""
+    from notebooklm.types import ArtifactType
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    empty = type(
+        "S", (), {"task_id": "", "is_failed": True, "status": "failed", "error": "quota"}
+    )()
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "generate_slide_deck",
+        calls,
+        1,
+        kind=ArtifactType.SLIDE_DECK,
+        orphan_ids=["orphan-s"],
+        status=empty,
+    )
+
+    res = await a.generate_slides("nb-1", manifest_path, 1)
+
+    assert calls == ["a@x", "b@x"]
+    assert res["stray_artifact_ids"] == ["orphan-s"]
+    (failover,) = _events(manifest_path, "attachment_dispatch_failover")
+    assert failover["stray_artifact_ids"] == ["orphan-s"]
+
+
+async def test_leftover_tracking_never_swaps_an_exception_that_rejects_attributes(
+    fake_client, tmp_path
+):
+    """被拒的例外型別若不收屬性(`__slots__` / 未來 SDK 改型別),不得因此被換成
+    AttributeError —— 那會讓 `_failover` 把乾淨拒絕分類成受理不明、停止換帳號。"""
+    from notebooklm.exceptions import RateLimitError
+    from notebooklm.types import ArtifactType
+
+    class Slotted(RateLimitError):
+        def __setattr__(self, name, value):
+            if name == "stray_artifact_ids":
+                raise AttributeError(name)
+            super().__setattr__(name, value)
+
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+    calls: list = []
+    _refuse_leaving_orphan(
+        fake_client,
+        "generate_slide_deck",
+        calls,
+        1,
+        kind=ArtifactType.SLIDE_DECK,
+        orphan_ids=["orphan-x"],
+        exc=Slotted("每日配額已用盡", rpc_code="USER_DISPLAYABLE_ERROR"),
+    )
+
+    res = await a.generate_slides("nb-1", manifest_path, 1)
+
+    assert calls == ["a@x", "b@x"], "仍是乾淨拒絕 → 換帳號"
+    assert res["stray_artifact_ids"] == ["orphan-x"]
+
+
+async def test_hung_probe_does_not_stall_the_failover(fake_client, tmp_path, monkeypatch):
+    """對帳 list 卡住時(剛被限流的帳號),逾時就放棄這一腿的證據,換帳號照常。"""
+    import asyncio
+
+    monkeypatch.setattr(a, "_PROBE_TIMEOUT_S", 0.05)
+    runtime.set_clients([("a@x", fake_client), ("b@x", fake_client)])
+    manifest_path = _manifest(tmp_path)
+
+    async def hung_list(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    fake_client.artifacts.list = hung_list
+    calls: list = []
+    refuse_first(fake_client, "generate_slide_deck", calls, fail_first_n=1)
+
+    res = await asyncio.wait_for(a.generate_slides("nb-1", manifest_path, 1), timeout=3)
+
+    assert calls == ["a@x", "b@x"]
+    assert "stray_artifact_ids" not in res

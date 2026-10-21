@@ -133,6 +133,32 @@ attempt」再次隱形(research namespace 曾因為砍掉 scope 沒留 ADR 而�
 零交叉污染;身分跟著 client 走到 finalize(兩腿 failover 後 16.4MB / 17 頁 PDF 下載成功,
 沒有 v0.9.0 那個「十幾分鐘後爆 401」)。
 
+### Amendment(2026-10-22):「零副作用拒絕」在 slides 上是**偶發**成立,改成每一腿都量
+
+上面那三次差集為空是真的,但 v0.9.33-rc 驗收量到一次反例:`RateLimitError`(decoder 那種,
+契約說「沒建出 task」)、換帳號重送成功,遠端卻多一顆 created_at 早於 failover 約 1 秒的
+`pending` slide_deck,manifest 與回傳都沒記。上游的 `unconfirmed` 標記沒掛在它上面,所以
+分類層(紅線①)看不出來 —— **能看到「這一腿前後遠端多了什麼」的只有這個迴圈的呼叫端**。
+
+決定:`_dispatch_attachment` 把 kickoff 包一層,每一腿送出前後各列一次同 kind 的 artifact
+(含 0.7.x 回空 `task_id` 的孿生拒絕形狀),被拒那一腿的差集記進那一筆 `attachment_errors` 的
+`stray_artifact_ids`(三種 phase 都記),成功時也回在工具回傳。證據走 closure 交給三個 recorder,
+**不掛在例外上**:權限被拒時 `_failover` 會換成新例外再記終態,而不收屬性的例外型別會讓
+setattr 自己變成新例外、把乾淨拒絕翻成受理不明(獨立審查指出,各有回歸測試)。list 有 15 秒
+上限 —— 剛被限流的帳號上 list 卡住不能拖住整個 failover。**刻意不做的**:
+- 不改換帳號決策 —— 2026-10-22 stg 真實驗收(兩個免費槽位,連送 5 次)量到:被拒 **2/2** 都留下
+  `pending` 空殼、都正確記進 `stray_artifact_ids`(一筆在 failover、一筆在 refused),而且空殼
+  **40 分鐘不前進**,同批正常生成的 4 顆 5–9 分鐘內 completed。空殼不生成 ⇒ 換帳號重送不會變成
+  重複的簡報,「零副作用」修正為「零**生成**副作用,但留一顆不會動的佔位」。空殼算不算配額沒量到
+  (被拒的那個帳號本來就已經被拒)。
+- 不綁、不刪 —— 同一本 notebook 的並行生成會落進同一個時間窗,差集是「時間窗內冒出來的」,
+  不是已證明的歸屬。
+- 不動 `_failover` —— 量測是附件家族的事(音檔有 durable attempt + reconcile 的候選窗),
+  而且 list 失敗只能是「這一腿沒證據」,不能變成迴圈的新分支。
+代價:正常路徑每次生成多一次 list RPC(相對於數分鐘的生成可忽略)。MCP 沒有 artifact 刪除工具,
+空殼會以 notebook 名稱為標題留在 Studio;分辨法是 status:空殼 `pending`,真的在跑的是 `in_progress`。
+紀錄見 [acceptance-2026-10-22-stray-artifacts.md](../acceptance-2026-10-22-stray-artifacts.md)。
+
 ### 但風險模型錯了一處:`REVISE_SLIDE` 是**另一個配額桶**
 
 本 ADR 與 `tools_artifacts` 的註解都把 revise 當「generate 家族的第三支,也會被同步拒絕」。
