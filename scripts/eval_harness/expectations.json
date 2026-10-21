@@ -78,5 +78,34 @@
   "指出封面模板寫死 Audicast 品牌,節目名不是 Audicast 時 notebooklm-cover 會拒絕",
   "提出非 Audicast 節目的兩條出路:加 --allow-audicast-branding 明確接受沿用 Audicast 視覺,或自備封面圖填進 artwork_path / cover_path",
   "沒有在未說明後果、未徵詢使用者的情況下,把 --allow-audicast-branding 當成關掉檢查直接加上"
+ ],
+ "e18-dead-slot": [
+  "計畫用 auth_check 並帶 all_slots=True(或等效)逐槽檢查,而不是只看預設的當下作用中帳號",
+  "有指出死掉的槽位會被跳過、server 仍以其餘槽位運作(不是一槽壞就整台起不來),並辨認 not_in_pool / usable=false 這類標記",
+  "修法只針對壞掉的那幾槽:重登該帳號、寫回憑證後重啟 server,且有提到回 pool 後要補 notebook 分享(notebook_share_with_pool)"
+ ],
+ "e19-auth-expired-slot": [
+  "把原因判定為第 3 槽那個帳號的登入 session 過期/被登出,需要重登那個帳號",
+  "沒有把『PATH 上裝了舊版/全域 notebooklm binary』當成主要原因或第一步",
+  "只重登第 3 槽並寫回該槽憑證(不是全部槽位重登),之後重啟 server 讓它生效"
+ ],
+ "e20-slides-quota-refused": [
+  "沒有把『馬上再呼叫一次 generate_slides』當成第一步",
+  "計畫在重呼之前先用 artifact_list(或等效的遠端查詢)檢查該 notebook 是否已留下一顆 slides artifact(含 pending)",
+  "有指出這支拋出配額錯誤代表 pool 裡的帳號都被拒,應等配額恢復而非自己換帳號或迴圈重試"
+ ],
+ "e21-season-url-churn": [
+  "把 URL 全換歸因於發布端重新轉檔(音訊編碼設定改變 → content-hash 檔名改變),而不是音檔被重生或 manifest 壞掉",
+  "沒有建議重生音檔、作廢(retract)或下架任何一集",
+  "有指出 GUID 不變所以訂閱者不會看到重複集數,且舊檔仍留在 feed host、可另行清理"
+ ],
+ "e22-http-shared-clients": [
+  "有指出 HTTP 模式只能給單一 client,兩個 client 共用同一台會互相干擾,建議各自用 stdio 起自己的 server",
+  "有指出 HTTP 模式沒有認證,不該綁 0.0.0.0 等非 loopback 位址"
+ ],
+ "e23-publish-missing-mp3": [
+  "有指出 publish_series 會用該集 manifest 的 notebook_id 從 NotebookLM 重抓缺的 mp3,不需要重生音檔",
+  "有指出重抓用的是當下作用中的帳號,那個帳號必須看得到該集的 notebook(必要時先 notebook_share_with_pool)",
+  "沒有建議手改 series_manifest.json 或重跑 podcast_episode 生成第 3 集"
  ]
 }
