@@ -63,7 +63,7 @@ turns -25.5%、cache_creation -30.5%,盲評 57/60 → 58/60。
 舊版那一臂**從 git worktree 起跑**(`git worktree add --detach <dir> <舊 commit>`),
 stub 的 `NBLM_REPO` 指過去 —— 不要靠記憶描述舊版長怎樣。
 
-### 三個會讓數字說謊的坑(都實際踩過)
+### 會讓數字說謊的坑(都實際踩過)
 
 1. **`total_cost_usd` 不是受測 agent 的成本。** 它含受測 agent 自己 spawn 出去的 subagent
    (v0.9.26 實際出現 haiku-4.5 與 fable-5.1,後者佔原始總成本 **61%**),而「這次跑有沒有
@@ -77,6 +77,10 @@ stub 的 `NBLM_REPO` 指過去 —— 不要靠記憶描述舊版長怎樣。
 3. **stub 不轉發 protocol 層 instructions。** 它自己建 `Server(...)`,只代理 `list_tools`
    —— 實測 stub 送 0 字元、正式 server 送 1,271。所以**改 `_INSTRUCTIONS` 的效果這套量不到**,
    別拿 eval 分數替它背書(v0.9.26 就誤以為量到了)。
+4. **user 層已安裝的 skill 會摻進受測臂。** 不帶 `--setting-sources project`,`~/.claude/skills/`
+   的那份 notebooklm 與 box 裡的受測版並存,transcript 顯示 agent 讀的是已安裝那份 —— 兩臂量到
+   同一份 skill(v0.9.26 的數字有這個污染)。另外兩個同類坑(真實資料外洩、skill 沒被載入)見
+   [`scripts/eval_harness/README.md`](../scripts/eval_harness/README.md)。
 
 ### 真帳號驗收也自己跑
 

@@ -43,6 +43,9 @@ def grade(path):
             os.environ.get("NBLM_GRADE_MODEL", "sonnet"),
             "--output-format",
             "json",
+            # 評分者也不吃 user 層的 skills / hooks(同 run.sh)
+            "--setting-sources",
+            "project",
             "--dangerously-skip-permissions",
             "--strict-mcp-config",
             "--mcp-config",
@@ -51,6 +54,8 @@ def grade(path):
         capture_output=True,
         text=True,
         timeout=900,
+        # 不在 repo 裡跑:`--setting-sources project` 會把 repo 的 CLAUDE.md / AGENTS.md 灌給評分者
+        cwd=WORK,
     )
     try:
         txt = json.loads(r.stdout)["result"]

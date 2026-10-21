@@ -24,7 +24,7 @@ python3 grade.py          # 盲評,印各臂通過率
 v0.9.26 的實跑紀錄與結論見 [`../../docs/acceptance-v0.9.26-eval.md`](../../docs/acceptance-v0.9.26-eval.md);
 `results-v0.9.26.json` 是那次的逐題摘要(可重算)。
 
-## 三個會讓數字說謊的坑(都實際踩過)
+## 會讓數字說謊的坑(都實際踩過)
 
 1. **`total_cost_usd` 不是受測 agent 的成本** —— 含它自己 spawn 的 subagent(v0.9.26 那次
    fable 佔原始總成本 61%),而「這次有沒有 spawn」是擲硬幣。用 `cost_sonnet_only`。
@@ -37,3 +37,14 @@ v0.9.26 的實跑紀錄與結論見 [`../../docs/acceptance-v0.9.26-eval.md`](..
    `fatal: already exists` 直接 `exit 1`,那個臂的樣本數就少了 9 個。`run.sh` 已用
    `flock` 序列化這一段;`grade.py` 印各臂樣本數(`n=`)並在兩臂 id 集合不同時警告 ——
    但**先跑過一次讓 worktree 建好**(或確認 `n` 對齊)再信通過率,不然分數不可比較。
+5. **user 層的 skill / hooks 會摻進兩臂** —— 不加 `--setting-sources project` 時,`~/.claude/skills/`
+   裡**已安裝的那份 notebooklm** 跟 box 裡的受測版並存,transcript 顯示受測 agent 讀的是已安裝那份
+   (`~/.claude/skills/notebooklm/references/…`),外加 user 的 SessionStart hook 注入。兩臂都摻到
+   同一份 skill,差異被抹平。`run.sh` / `grade.py` 已加上;**2026-10-21 前的結果(含 v0.9.26 那份)
+   都有這個污染**。驗法:transcript 裡 Skill 工具的 `Base directory` 要指向 box。
+6. **受測 agent 讀得到真實資料** —— box 只隔離 cwd,prompt 提到 `~/podcast/audicast` 時它會真的去讀
+   那份 manifest,於是同一題在兩臂各自撞到/沒撞到真實狀態(實測 e3 因此掉分,與 skill 無關)。
+   n 小時任何單格翻轉先讀 `grade.json` 的 `evidence`,證據沒有指到 skill 文字就不算進差異。
+7. **看 skill 有沒有載入再談 body** —— e0/e1 兩臂都沒呼叫 Skill 工具(把「用 notebooklm」讀成直接
+   呼叫 MCP),那兩題量的是 description 不是 body。transcript 在
+   `~/.claude/projects/*evalwork-box-<arm>-<id>-<n>/`,數 `tool_use` 的 `Skill`。

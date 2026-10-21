@@ -129,7 +129,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 - commit 訊息寫清楚「症狀 + 根因 + 為何這樣修」(commit 與 docs 是團隊經驗庫)。
 - **驗收分三層,而且三層都自己跑 —— 不要產出「可貼的啟動 prompt」叫使用者開 session。**
   headless `claude -p --model sonnet` 每題約 $0.2,所以跑得起「每題 n 次取平均 + 盲評 + 每次改完重跑」;
-  交 prompt 只跑得到一次、拿不到數字,而且改一次就要再麻煩人一次。手段與**三個會讓數字說謊的坑**見
+  交 prompt 只跑得到一次、拿不到數字,而且改一次就要再麻煩人一次。手段與**會讓數字說謊的坑**見
   [docs/acceptance-testing.md](docs/acceptance-testing.md),實跑紀錄見
   [docs/acceptance-v0.9.26-eval.md](docs/acceptance-v0.9.26-eval.md)。
   1. **沒碰遠端副作用** → 離線測試 + 用既有實測前提推導結案(`source_delete` 的清理義務、v0.9.2 的 owner

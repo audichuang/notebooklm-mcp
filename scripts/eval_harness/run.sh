@@ -6,7 +6,7 @@
 #     arm = <git-ish>      → 先開 worktree 跑那個版本(例:./run.sh v0.9.26 e0 "…" 1)
 #
 # 為什麼是 sonnet:每題約 $0.2,所以跑得起「每題 n 次取平均 + 盲評 + 每次改完重跑」。
-# 三個會讓數字說謊的坑見 docs/acceptance-testing.md —— 尤其 **cost 欄不要直接用
+# 會讓數字說謊的坑見 docs/acceptance-testing.md —— 尤其 **cost 欄不要直接用
 # total_cost_usd**(含受測 agent 自己 spawn 的 subagent),要從 modelUsage 取主迴圈。
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -20,7 +20,7 @@ if [ "$ARM" = "new" ]; then
   SRC="$REPO_ROOT"; SKILL="$SKILL_SRC"
 else
   SRC="$WORK/worktree-$ARM"
-  # README 推薦一次跑「兩臂 x n 次 x 全部 id」平行(見 README「三個坑」第四條):同一個
+  # README 推薦一次跑「兩臂 x n 次 x 全部 id」平行(見 README「會讓數字說謊的坑」第四條):同一個
   # $ARM 的所有平行呼叫都搶同一個 $SRC,`[ -d ] || git worktree add` 沒有互斥就是
   # 9 個併發全撞 `fatal: already exists` → exit 1 → 9 個樣本消失。flock 序列化這一段,
   # 鎖內再檢查一次(冪等):第一個贏家建好之後,其餘拿到鎖的都會看到 -d 已成立而跳過。
@@ -55,7 +55,10 @@ json.dump({"mcpServers": {"notebooklm": {"type": "stdio",
 PY
 
 cd "$BOX"
-timeout 900 claude -p "$PROMPT" --model sonnet --output-format json \
+# `--setting-sources project`:不載入 user 層的 skills / plugins / hooks。少了它,`~/.claude/skills/`
+# 裡**已安裝的那份 notebooklm** 會跟 box 裡的受測版並存,兩臂都摻到同一份舊 skill,外加 user 的
+# SessionStart hook 注入 —— 比較在量的就不是 skill 差異(2026-10-21 前的 eval 都有這個污染)。
+timeout 900 claude -p "$PROMPT" --model sonnet --output-format json --setting-sources project \
   --dangerously-skip-permissions --strict-mcp-config --mcp-config "$CFG" \
   > "$OUT/$ID-$N.json" 2>"$OUT/$ID-$N.err"
 RC=$?
