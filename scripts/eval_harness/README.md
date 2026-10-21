@@ -48,3 +48,6 @@ v0.9.26 的實跑紀錄與結論見 [`../../docs/acceptance-v0.9.26-eval.md`](..
 7. **看 skill 有沒有載入再談 body** —— e0/e1 兩臂都沒呼叫 Skill 工具(把「用 notebooklm」讀成直接
    呼叫 MCP),那兩題量的是 description 不是 body。transcript 在
    `~/.claude/projects/*evalwork-box-<arm>-<id>-<n>/`,數 `tool_use` 的 `Skill`。
+8. **搬移 / 瘦身 skill 文字後跑全量,不要只跑子集** —— 子集是照「這次改到哪」挑的,而被搬走或
+   改寫的一句話傷到的往往是你沒挑的題:v0.9.38 瘦身時一句「`artifact_list` 不是救援入口」被套到
+   slides,e20 從 8/9 掉到 4/9,變體子集剛好沒有 e20(子集 124/126 看起來還變好)。

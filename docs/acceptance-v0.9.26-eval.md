@@ -3,6 +3,11 @@
 **這份記的是量測本身怎麼做的、量到什麼、以及哪些數字不能信。** 版本敘事在 CHANGELOG;
 harness 與重跑指令在 [`scripts/eval_harness/`](../scripts/eval_harness/)。
 
+> ⚠️ **2026-10-21 發現這輪兩臂都有污染**:當時 `claude -p` 沒帶 `--setting-sources project`,
+> 受測 agent 讀到的是 user 層**已安裝的那份 skill**(不是 box 裡的受測版),外加 user hooks。
+> 下面的 skill 側差異(尤其 cache_creation / turns 的下降)因此不能歸因到 skill 改版;
+> 工具描述側的確定性量測(`tools/list` 字元數)不受影響。修法與驗法見 harness README 第 5 條。
+
 ## 怎麼量的
 
 - **sonnet**,每題 $0.2 等級 —— 所以跑得起「每題兩次取平均 + 盲評」。
