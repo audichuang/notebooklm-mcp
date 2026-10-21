@@ -6,7 +6,7 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
-## Unreleased —— 附件被配額拒絕的那一腿若在遠端留下 artifact,記下來並回給呼叫端
+## v0.9.38 —— 附件被配額拒絕的那一腿若在遠端留下 artifact,記下來並回給呼叫端
 
 **為什麼**:v0.9.33-rc 真實驗收(④)量到 `generate_slides` 被乾淨拒絕、換帳號成功後,遠端多一顆
 `pending` slide_deck,manifest 與回傳都沒記 —— ADR-0010/0011 的「配額拒絕 = 零副作用」在 slides 上
@@ -26,6 +26,12 @@ closure。突變(recorder 不帶證據 / 不重置每腿 / 差集不扣 baseline
 連送 5 次 `generate_slides`,第 3、5 次被拒,**2/2 都留下 `pending` 空殼且都記進 `stray_artifact_ids`**
 (failover 一筆、耗盡的 refused 一筆)。輪詢 40 分鐘:空殼完全不前進,同批正常 4 顆 5–9 分鐘 completed
 → 空殼不生成,換帳號不會造成重複簡報;指引因此從「等它的終態」改成「`pending` 的不會動,別等」。
+
+**eval harness**:受測臂與評分者帶 `--setting-sources project` —— 以前 user 層已安裝的 skill 與 hooks
+會摻進兩臂(v0.9.26 的數字有這個污染);新增 e18–e23 六題。
+
+**依賴**:`uv lock --upgrade` 對齊消費端實裝(certifi 2026.10.19、filelock 4.2.4、markdown 3.11.2、
+pydantic-settings 2.16.1、starlette 1.9.0 等),全套綠。
 
 **對呼叫端的契約變更**:新增回傳 / manifest 欄位 `stray_artifact_ids`;`generate_slides` /
 `generate_report` 描述各多一句。skill repo 需同步(tool-reference 的 slides / report 節)。
