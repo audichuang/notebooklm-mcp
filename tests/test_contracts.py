@@ -73,6 +73,19 @@ def test_generate_audio_signature():
     assert "audio_length" in p
 
 
+@pytest.mark.parametrize(
+    "method",
+    ["generate_audio", "generate_slide_deck", "generate_report", "generate_study_guide"],
+)
+def test_generation_stays_immediate_by_default(method):
+    """我們不傳 later;上游預設若改成排程,既有等待流程就會卡到逾時。"""
+    from notebooklm._web.artifacts import WebArtifactsAPI
+
+    later = inspect.signature(getattr(WebArtifactsAPI, method)).parameters["later"]
+    assert later.kind is inspect.Parameter.KEYWORD_ONLY
+    assert later.default is False
+
+
 def test_download_audio_arg_order():
     from notebooklm._artifacts import ArtifactsAPI
 
@@ -440,6 +453,7 @@ def test_slide_deck_signatures():
         "instructions",
         "slide_format",
         "slide_length",
+        "later",
     ]
     assert _params(ArtifactsAPI.download_slide_deck) == [
         "self",
@@ -462,6 +476,7 @@ def test_report_signatures():
         "language",
         "custom_prompt",
         "extra_instructions",
+        "later",
     ]
     assert _params(ArtifactsAPI.generate_study_guide) == [
         "self",
@@ -469,6 +484,7 @@ def test_report_signatures():
         "source_ids",
         "language",
         "extra_instructions",
+        "later",
     ]
     assert _params(ArtifactsAPI.download_report) == [
         "self",
@@ -725,7 +741,9 @@ def test_notebooklm_py_lower_bound_excludes_versions_we_cannot_import():
         # structure has changed" (upstream #2479) — the misleading startup_error from the
         # v0.9.30 incident. Excluded so the tested version equals the installed one.
         assert Version("0.8.4") not in requirement.specifier
-        assert Version("0.8.5") in requirement.specifier
+        # 0.8.5 仍可執行,但契約測試已驗 0.8.6 的 later=False,消費端也必須用同版。
+        assert Version("0.8.5") not in requirement.specifier
+        assert Version("0.8.6") in requirement.specifier
 
 
 def test_rotation_lock_and_file_lock_semantics_that_app_lifespan_depends_on(tmp_path):

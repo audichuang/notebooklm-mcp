@@ -6,6 +6,34 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## 未發版 —— notebooklm-py 升至 0.8.6,鎖住既有生成仍預設立即送出
+
+**為什麼**:上游 2026-10-29 發布 0.8.6,新增延後生成與 Android Live Voice,並修正同步
+cookie recovery 的 transport 選擇。消費端安裝不讀 lock,所以一般依賴與 `login` extra 的
+下界一起抬到 `>=0.8.6,<0.9`,讓測的版本與宣告一致;lock 只更新 SDK 與新增的
+`typing-extensions` 依賴邊,其他套件版本不變。
+
+**相容性**:surface 比對後,兩條簽名契約測試因新增 `later` 參數轉紅;更新簡報、講義與
+研讀指南的簽名斷言,另加四格 web backend 的 `later=False` / keyword-only 契約。
+我們不傳 `later`,音檔、簡報與四種講義的 6 組 RPC payload 與 0.8.5 逐字相同。
+未新增工具參數,37 支工具的完整 schema、描述與 server instructions 與原實裝版完全相同,
+skill repo 不需同步。
+
+**離線與安裝驗證**:0.8.5 基線 13,493 passed;升級後 13,497 passed、614 個既有狀態矩陣
+skip、覆蓋率 93.34%。lint / format、lock 自洽、wheel 建置與隔離安裝後兩支 CLI `--help`
+通過。本機既有 tool venv 也只更新 SDK,從中性目錄確認實裝路徑與 0.8.6,依賴檢查通過。
+
+**真實 MCP**:stdio 握手、37 工具、`auth_check(all_slots=True)` 與 `notebook_list` 通過。
+stg 槽位 1–7 可用,8/9 已登出;0.8.5 與 0.8.6 對照結果相同,啟動均正確跳過失效槽位。
+
+**真實音檔**:只用 stg 前兩個免費帳號,建合成教材筆記本並共享,來源入庫與問答通過。
+`podcast_episode` 產出 56.49 秒、1,819,011 bytes 音檔,命名、下載 hash、四個 finalize
+checkpoint 與回錄全文非空檢查通過;ffmpeg 全檔解碼成功,測試筆記本已刪除。
+初版驗收腳本誤把 `.mp3` 副檔名當成 MP3 codec 而轉紅;實際是既有的 MP4/AAC
+(見 gotchas-publish),核對原檔與既有契約後通過,沒有為驗收腳本的錯誤修改產品行為。
+另以相同 stg 帳號跑 SDK `generate_report(STUDY_GUIDE)`,立即受理為 `in_progress`,完成後
+下載 1,695 字元 Markdown,該測試筆記本也已刪除;未測延後生成、Android 與公網發布。
+
 ## v0.9.38 —— 附件被配額拒絕的那一腿若在遠端留下 artifact,記下來並回給呼叫端
 
 **為什麼**:v0.9.33-rc 真實驗收(④)量到 `generate_slides` 被乾淨拒絕、換帳號成功後,遠端多一顆
