@@ -540,6 +540,9 @@ from . import (  # noqa: E402,F401
     tools_publish,
     tools_research,
 )
+from ._param_docs import apply as _apply_param_docs  # noqa: E402 —— 要等工具都註冊完才套用
+
+_apply_param_docs(mcp._tool_manager.list_tools())
 
 
 def main() -> None:

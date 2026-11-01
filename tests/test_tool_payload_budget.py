@@ -13,9 +13,8 @@ session 用不用得到 NotebookLM。v0.9.26 實測(`claude -p --output-format j
   `audi-skill/notebooklm/references/tool-reference.md`,總量換回來。
 - 不會 → 它本來就該住在 reference 或 gotchas。
 
-`inputSchema` 也算在內,但那一半**不是靠文字瘦身能動的** —— 它由參數名與型別推導
-(全 repo 沒有任何 `Field(description=...)`),要降只能刪參數。所以實務上這條上限
-擋的是 docstring。
+`inputSchema` 也算在內:參數描述來自 `_param_docs.py`,自動產生的 `title` 已拿掉。新增
+參數描述一樣佔這份預算,只寫呼叫端看名字猜不到的事。
 """
 
 import json
