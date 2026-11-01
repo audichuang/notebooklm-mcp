@@ -7,7 +7,7 @@ description: 為一次改動建立「使用者實際會遇到的環境」與驗�
 
 離線測試用 mock client,結構上證不了「配額真的被拒」「身分真的錯了」那一類事。這個 skill
 產出的是一個**拋棄式專案目錄** —— MCP 配置、skill 快照、CLAUDE.md、計畫與本機檢查
-—— 讓使用者開一個新 session 就站在使用者實際會遇到的環境裡。
+—— 讓步驟 5 的 headless session 一開就站在使用者實際會遇到的環境裡。
 
 **要驗的是兩件事,不是一件**:MCP 工具本身,**以及 agent 讀 skill 去用 MCP 那條路**。
 後者是獨立 project 存在的理由 —— 真正的呼叫端讀的是 skill 文件,不是原始碼,而那條路
@@ -15,7 +15,7 @@ description: 為一次改動建立「使用者實際會遇到的環境」與驗�
 的停點指引呼叫端跑某支工具,而那支工具在該狀態下自己也 permission denied —— **從 MCP 端看,
 回傳值完全正確**;只有照著指引做才會撞上死路。
 
-**產出是環境與計畫,不是驗收本身。** 跑的是使用者開的新 session。
+**先產出環境與計畫,再由你自己跑完驗收(步驟 5)。**
 
 ## 五個判準
 
@@ -64,10 +64,10 @@ WS=$HOME/research/audiskill/nblm-acceptance-<版本>
 cp -r "$SKILL_DIR/template" "$WS"
 
 # 佔位符：__VERSION__(v0.9.1)、__VERSION_BARE__(0.9.1)、
-#         __TOOL_COUNT__(當下工具數)、__WORKSPACE_PATH__
-grep -rl '__VERSION__\|__VERSION_BARE__\|__TOOL_COUNT__\|__WORKSPACE_PATH__' "$WS" \
+#         __TOOL_COUNT__(當下工具數)
+grep -rl '__VERSION__\|__VERSION_BARE__\|__TOOL_COUNT__' "$WS" \
   | xargs sed -i "s|__VERSION__|v0.9.1|g; s|__VERSION_BARE__|0.9.1|g; \
-                  s|__TOOL_COUNT__|35|g; s|__WORKSPACE_PATH__|$WS|g"
+                  s|__TOOL_COUNT__|35|g"
 
 # skill 快照（範本刻意不含，必須從上游現拉；git 不追蹤空目錄，所以自己 mkdir）
 UP=$HOME/research/audi-skill/notebooklm
@@ -129,8 +129,9 @@ done
 n 次取平均與盲評,而交 prompt 只跑得到一次、拿不到數字、改一次就要再麻煩人一次。
 
 ```bash
-cd <workspace> && doppler run -p notebooklm -c dev -- \
-  claude -p "<驗收 brief>" --model sonnet --output-format json --dangerously-skip-permissions
+cd <workspace> && doppler run -p notebooklm -c stg -- \
+  claude -p "<驗收 brief>" --model sonnet --output-format json --setting-sources project \
+  --dangerously-skip-permissions
 ```
 
 brief 要含:這一輪的 scope 與**不做什麼**、結果寫進 `FINDINGS.md` 記可觀測事實、
@@ -153,7 +154,7 @@ brief 要含:這一輪的 scope 與**不做什麼**、結果寫進 `FINDINGS.md`
 4. 修正若**碰到 runtime code**，發一個新 patch 版 —— 照 `docs/release-checklist.md`
    §Release Pin Sites，**只改一處版本號**（`pyproject.toml`，再跑 `uv lock` 帶上 `uv.lock`）。
    🔴 **發版後才修的東西，不再發一版就等於沒出貨** —— 消費端裝的是 tag，而 `latest` 只跟
-   最高 semver；修正 push 上 master 不會讓任何機器拿到（v0.9.27 就是為這件事發的）。
+   最高 semver；修正 push 上 master 不會讓任何機器拿到。
 
 ## 這個 repo 的既有材料
 

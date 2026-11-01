@@ -3,22 +3,17 @@
 拋棄式測試工作區。**不是**任何專案的正式資料,測完整個刪掉。
 帳號 / 命令 / 憑證落檔 / 發布的鐵律在 [CLAUDE.md](CLAUDE.md) —— **開工前先讀那份**。
 
-```bash
-cd __WORKSPACE_PATH__
-claude
-```
-
 `.mcp.json`(測試帳號 pool)與 `.claude/skills/notebooklm/`(上游 skill 的**逐字快照**)
-都備好了,開 session 就是完整的真實環境。
+都備好了,在這個目錄跑下面的 brief 就是完整的真實環境。
 
 ---
 
 ## 驗收 brief(給 `claude -p`,不是給使用者貼)
 
 <!-- 這段是餵給 headless 的 brief,含:scope、不做什麼、紀律、指向完整劇本。
-     跑法:cd <workspace> && doppler run -p notebooklm -c dev -- \
+     跑法:cd <workspace> && doppler run -p notebooklm -c stg -- \
              claude -p "$(sed -n '/^> /,/^$/p' README.md)" --model sonnet \
-             --output-format json --dangerously-skip-permissions
+             --output-format json --setting-sources project --dangerously-skip-permissions
      🔴 不要把它貼給使用者叫他開 session —— 見 AGENTS.md §Conventions。 -->
 
 > 這是 notebooklm-mcp **__VERSION__** 的真實環境驗收工作區。先讀 `CLAUDE.md`(鐵律)與
@@ -32,7 +27,7 @@ claude
 > - 判斷不了的標 **inconclusive**,不要猜成通過 —— 這比漏測更危險。
 > - 遇到文件或工具訊息給的指引,**照著執行它**,不是讀完判斷它看起來對不對。
 > - 遇到與文件不符的行為,先確認是不是 skill 快照過期,再判定是 bug。
-> - `publish_series` 動到之前**先問我**(它會永久推 blob 上 NAS)。
+> - 不要跑 `publish_series`(它會永久推 blob 上 NAS);這一步需要它就停下,把狀況寫進 `FINDINGS.md`。
 > - 不用替我省配額 —— **覆蓋完整比省幾次生成重要**。真的撞到配額耗盡反而是好事,
 >   照工具給的 `safe_next_action` 續跑即可。
 > - 收工前跑〈收工〉的覆蓋自檢,確認每支工具都被碰過;刻意不測的要寫明理由。
@@ -136,4 +131,4 @@ bash local-checks.sh
 3. **刪掉這輪建的 notebook**(標題含 `ZZ-TEST __VERSION__`),並清憑證殘留與 server 孤兒
    (指令見 CLAUDE.md §三)。
 4. 把 `FINDINGS.md` 收進 `../notebooklm-mcp/docs/acceptance-__VERSION__-findings.md`,
-   結論摘要進 CHANGELOG,並把 AGENTS.md 那句「尚未跑真實驗收」拿掉。
+   結論摘要進 CHANGELOG。

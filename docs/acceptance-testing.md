@@ -84,7 +84,7 @@ stub 的 `NBLM_REPO` 指過去 —— 不要靠記憶描述舊版長怎樣。
 
 ### 真帳號驗收也自己跑
 
-同一套換成 `doppler run -p notebooklm -c dev -- claude -p --model sonnet …` 就能對真帳號跑,
+同一套換成 `doppler run -p notebooklm -c stg -- claude -p --model sonnet …` 就能對真帳號跑,
 **不必交 prompt 給人**。前提是工作根 AGENTS.md 那條:自己清得掉的測試資料不必問,但跑完要清;
 **不可逆的動作**(發布到公網 feed、刪既有 notebook/source)一律先問。
 
@@ -231,7 +231,7 @@ v0.7.0 把配額拒絕從「回傳 failed status」改成「拋例外」。離�
 
 ## 驗收怎麼跑(不要交一段提示詞給使用者)
 
-**自己跑**:`doppler run -p notebooklm -c dev -- claude -p --model sonnet …`,跑完自己清
+**自己跑**:`doppler run -p notebooklm -c stg -- claude -p --model sonnet …`,跑完自己清
 測試產物。**只有不可逆的才停下來問**:發布到公網 feed、刪既有 notebook/source、動到別人
 已訂閱得到的東西。規則正本在 [AGENTS.md](../AGENTS.md) §Conventions。
 

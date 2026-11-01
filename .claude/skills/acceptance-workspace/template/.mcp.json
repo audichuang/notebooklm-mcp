@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "notebooklm": {
+      "command": "doppler",
+      "args": ["run", "-p", "notebooklm", "-c", "stg", "--", "nblm-mcp", "--transport", "stdio"]
+    }
+  }
+}
