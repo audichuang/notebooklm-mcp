@@ -79,12 +79,15 @@ def _explain_no_research(exc: BaseException, account: str | None) -> BaseExcepti
     """
     if "no_research" not in str(exc):
         return exc
+    return RuntimeError(f"{exc}\n全程只輪詢到 no_research,{_wrong_account_hint(account)}")
+
+
+def _wrong_account_hint(account: str | None) -> str:
     who = account or f"{runtime.active_account()!r}(未傳 account,用的是此刻作用中的帳號)"
-    return RuntimeError(
-        f"{exc}\n"
-        f"全程只輪詢到 no_research,而這次用的帳號是 {who} —— research handle **只有發起它的"
-        "那個帳號**輪詢得到(把 notebook 分享給全 pool 也沒用)。請把 `research_start` 回傳的 "
-        f"`account` 原樣傳進來重跑(這個 server 的 pool:{runtime.all_accounts()});"
+    return (
+        f"而這次用的帳號是 {who} —— research handle **只有發起它的那個帳號**輪詢得到"
+        "(把 notebook 分享給全 pool 也沒用)。請把 `research_start` 回傳的 `account` 原樣傳"
+        f"進來重跑(這個 server 的 pool:{runtime.all_accounts()});"
         "不要重新 research_start,那會再燒一次配額。"
     )
 
@@ -246,6 +249,13 @@ async def research_import(
     # 每筆 metadata 原封不動 round-trip 過 host context。
     task = await client.research.poll(notebook_id, task_id)
     status_str = _status_str(task)
+    if status_str in ("not_found", "no_research"):
+        # stg 實測:非發起帳號 poll 回 not_found。叫人「先跑 research_wait」的話,帶同一個
+        # 錯帳號要空等滿 timeout 才知道傳錯。
+        raise RuntimeError(
+            f"task {task_id} 看不到(status={status_str!r}),不匯入。可能是 task_id 或 "
+            f"notebook_id 錯了,{_wrong_account_hint(account)}"
+        )
     if status_str != "completed":
         # 沒有這道 gate 就能繞過 research_wait 直接匯入:in_progress 會收到半套候選,
         # failed 的 task **仍可能留著解析出來的 sources**,兩種都會靜默匯入錯東西。

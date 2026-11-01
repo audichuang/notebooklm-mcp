@@ -4,6 +4,8 @@
 URL——研究能力進來的同時,不能讓 NotebookLM 自己找到的來源一股腦落進筆記本。
 """
 
+from types import SimpleNamespace
+
 import pytest
 from conftest import FakeClient
 from notebooklm._types.research import ResearchStatus
@@ -213,8 +215,6 @@ async def test_research_import_on_an_empty_task_blames_the_task_not_the_urls(fak
     [
         ResearchStatus.IN_PROGRESS,
         ResearchStatus.FAILED,
-        ResearchStatus.NO_RESEARCH,
-        ResearchStatus.NOT_FOUND,
     ],
 )
 async def test_research_import_refuses_a_task_that_is_not_completed(fake_client, status):
@@ -456,3 +456,25 @@ async def test_research_import_reports_sources_that_were_already_present(fake_cl
     out = await r.research_import("nb-1", "res-1", urls=["https://a.example/post"])
     assert out["imported"] == []
     assert out["already_present"] == [{"source_id": "src-a", "title": "A"}]
+
+
+@pytest.mark.parametrize("status", ("not_found", "no_research"))
+async def test_research_import_names_the_account_when_the_task_is_invisible(
+    fake_client, monkeypatch, status
+):
+    """stg 實測:非發起帳號 poll 回 `not_found`。舊訊息叫人先跑 research_wait,帶同一個錯帳號
+    就要空等滿 timeout(預設 30 分鐘)才知道傳錯。"""
+    runtime.set_clients([("a@x", FakeClient()), ("b@x", fake_client)])
+
+    async def invisible(*args, **kwargs):
+        return SimpleNamespace(status=status, sources=())
+
+    monkeypatch.setattr(fake_client.research, "poll", invisible)
+    with pytest.raises(RuntimeError) as excinfo:
+        await r.research_import("nb-1", task_id="res-1", urls=["https://x.example"], account="b@x")
+    msg = str(excinfo.value)
+    assert "b@x" in msg and "a@x" in msg
+    assert "research_start" in msg
+    assert "task_id" in msg  # 也可能是 task_id 或 notebook 錯了,不能只講帳號
+    assert "先跑 research_wait" not in msg
+    assert not [c for c in fake_client.research.calls if c[0] == "import"]
