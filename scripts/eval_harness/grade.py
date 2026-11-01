@@ -17,6 +17,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.environ.get("NBLM_EVAL_WORK", os.path.join(os.environ.get("TMPDIR", "/tmp"), "nblm-eval"))
 EXPECTATIONS = json.load(open(os.path.join(HERE, "expectations.json"), encoding="utf-8"))
 EMPTY_MCP = os.path.join(WORK, "empty-mcp.json")
+GRADE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "expectations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "passed": {"type": "boolean"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["text", "passed", "evidence"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["expectations"],
+    "additionalProperties": False,
+}
 
 
 def grade(path):
@@ -30,8 +50,8 @@ def grade(path):
         + s["answer"]
         + "\n\n## 要檢查的期望\n"
         + "\n".join(f"{i + 1}. {t}" for i, t in enumerate(items))
-        + '\n\n## 輸出\n只輸出 JSON:{"expectations":[{"text":"期望原文","passed":true/false,"evidence":"證據片段"}]}\n'
-        "每條都要有。passed 只有在回答**明確做到**時才 true;沒提到就是 false。"
+        + "\n\n## 輸出\n每條期望都要有一筆,text 用期望原文,evidence 放證據片段。"
+        "passed 只有在回答**明確做到**時才 true;沒提到就是 false。"
     )
     r = subprocess.run(
         [
@@ -43,6 +63,8 @@ def grade(path):
             os.environ.get("NBLM_GRADE_MODEL", "sonnet"),
             "--output-format",
             "json",
+            "--json-schema",
+            json.dumps(GRADE_SCHEMA),
             # 評分者也不吃 user 層的 skills / hooks(同 run.sh)
             "--setting-sources",
             "project",
@@ -58,8 +80,7 @@ def grade(path):
         cwd=WORK,
     )
     try:
-        txt = json.loads(r.stdout)["result"]
-        g = json.loads(txt[txt.find("{") : txt.rfind("}") + 1])
+        g = json.loads(r.stdout)["structured_output"]
     except Exception as e:
         g = {
             "expectations": [
