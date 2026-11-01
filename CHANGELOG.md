@@ -6,6 +6,20 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.40 —— 工具訊息與描述對齊實作;skill 修掉 25 處不符
+
+**為什麼**:`check_skill_sync` 只驗名詞存在,查不出語意矛盾。逐條對程式碼查 skill 與工具文字,找到 25 處不符。
+
+**MCP**:serial 缺前綴的錯誤不再說「補不回去」(`ManifestStore.update` 改 title 即可發);`podcast_episode`
+描述的 `workspace_root` 改成選填,並註明 `prepared`/`not_accepted` 可原樣重呼;retract 描述補上
+`reconciliation_ambiguous`;legacy 停點的 `next_step` 改指 `podcast_series`。行為不變。
+
+**skill**:最重要的是 `acceptance_unknown` 零候選不再寫成死路(太早 retract 會多一顆孤兒)、feed 身分閘的
+描述與救援步驟。工具名與參數不變。
+
+**驗證**:e6/e13/e14/e23 新舊兩臂各 3 次盲評 35/36 → 34/36,差距在雜訊內。`research_import` 帶錯帳號的訊息
+沒提帳號,SDK 行為未驗,未修。
+
 ## v0.9.39 —— notebooklm-py 0.8.6;prompt 審計:補工具描述、驗收範本進版控、驗收統一走 stg
 
 **prompt 審計(`/claude-api prompt-audit`,對 Opus 5.5 / Sonnet 5.5)**:工具描述補齊
