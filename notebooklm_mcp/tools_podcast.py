@@ -1337,11 +1337,11 @@ async def podcast_episode(
     只在「共用 notebook + 整季 <=5 集 + 不必指名來源」時用。
 
     ``brief`` 與 ``input_bundle_path`` **二擇一**:給 bundle 時 ``brief`` 必須是 ``None``,
-    且須同時給 ``manifest_path`` 與 ``workspace_root``(bundle 路徑相對於它)。
+    且須同時給 ``manifest_path``;``workspace_root`` 選填(bundle 路徑相對於它,省略 = manifest 的祖父目錄)。
 
     傳 ``manifest_path`` = durable attempt:timeout／斷線後依錯誤裡的 ``attempt_id`` 呼叫
-    ``podcast_episode_reconcile``,**不可重送本工具重生**;finalize 中斷走
-    ``podcast_episode_resume``。不傳則是 standalone best-effort(無 durable 對帳)。
+    ``podcast_episode_reconcile``,**不可重送本工具重生**(只有 ``prepared``／``not_accepted``
+    能原樣重呼);finalize 中斷走 ``podcast_episode_resume``。不傳則是 standalone best-effort(無 durable 對帳)。
 
     ``source_ids`` 指名這一集只讀哪幾筆來源(id 用 ``source_list`` 取),省略 = 讀筆記本
     全部來源。**回頭重生某一集時必須傳** —— 否則後續各集的題目與音檔回錄會洩進這一集。
@@ -2179,8 +2179,8 @@ async def podcast_attempt_retract(
     或掛在 ``active_attempt_id`` 但從未 promote 的 candidate;``reason`` 必填非空。重呼
     冪等;取代版不得改標題。
 
-    **``abandon_in_flight=True`` 只在這三個狀態需要**:``acceptance_unknown`` /
-    ``dispatching`` / ``accepted`` 且遠端未回終態 —— manifest 推導不出有沒有東西在跑,只有
+    **``abandon_in_flight=True`` 只在這四個狀態需要**:``acceptance_unknown`` /
+    ``dispatching`` / ``reconciliation_ambiguous`` / ``accepted`` 且遠端未回終態 —— manifest 推導不出有沒有東西在跑,只有
     呼叫端握有外部知識(例如 ``artifact_list`` 實際查過雲端零 artifact,或明知送進去的
     brief 就是錯的)。其餘都不用旗標:``prepared`` / ``not_accepted``、``remote`` 已
     ``failed`` / ``removed``、它本身已是正式輸出、該集已有別顆 attempt 接手。已被 supersede
@@ -3055,7 +3055,7 @@ async def podcast_series(
                             f"(不要傳 artifact_id——這裡的 artifact_id 只是告訴你"
                             "這一集對應哪顆音檔,adopt 認的是 feedback_source_id),"
                             f"adopt 完再照它回傳的 safe_next_action 續跑(通常是 "
-                            f"{ACTION_RESUME},帶回上面同一個 artifact_id)。"
+                            f"{ACTION_SERIES},再呼一次會給 {ACTION_RESUME} 與同一個 artifact_id)。"
                         ),
                     )
 

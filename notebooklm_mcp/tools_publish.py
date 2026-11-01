@@ -629,8 +629,9 @@ async def publish_series(
             raise ValueError(
                 f"episode {n}: serial 節目的標題必須以 'EP{n:02d}. ' 開頭"
                 f"(現在是 {ep['title']!r})—— itunes:episode 多數播放器不顯示,"
-                "集號要進標題才是給人看的。title 生成時就鎖死、沒有 episode_set_title,"
-                "缺前綴補不回去;整個節目不編號請把 itunes_type 設成 episodic"
+                "集號要進標題才是給人看的。沒有 episode_set_title,但發布層補得回來:"
+                "用 ManifestStore.update 改 title 後重跑(GUID 與音檔 URL 不變);"
+                "整個節目不編號請把 itunes_type 設成 episodic"
             )
         # 單集封面每集必做(程式對齊 skill 政策):缺 cover_path 直接 fail,不再靜默
         # fallback 節目封面——否則漏生封面的集數會「發布成功」卻掛錯圖(EP03 就這樣漏掉)。
