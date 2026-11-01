@@ -401,8 +401,8 @@ def _nothing_to_share(notebook_id: str, executor_label: str | None) -> dict:
 @mcp.tool()
 async def notebook_share_with_pool(notebook_id: str) -> dict:
     """把**既有** notebook 分享給多帳號 pool 的其餘帳號(EDITOR)。少了它,配額耗盡
-    failover 換帳號時會 `NotebookAccessDenied`。`notebook_create`(v0.8.1 起)已自動做,
-    這支是補給網頁上手動建的、或 v0.8.1 之前建的。
+    failover 換帳號時會 `NotebookAccessDenied`。`notebook_create` 已自動做,
+    這支是補給網頁上手動建的、或還沒分享過的舊筆記本。
 
     **冪等,重跑安全**:已是 EDITOR/OWNER 的列在 `already_shared`(手動分享的 **VIEWER
     不算**已分享,會補成 EDITOR);單帳號模式 no-op。
@@ -492,7 +492,12 @@ async def source_add_url(notebook_id: str, url: str, wait: bool = True) -> dict:
 
 @mcp.tool()
 async def source_add_text(notebook_id: str, title: str, content: str, wait: bool = True) -> dict:
-    """Add plain text as a source."""
+    """Add plain text as a source. 回 `{source_id}`。
+
+    `title` 是來源在筆記本裡的名稱,`content` 是全文。`wait=True`(預設)等 NotebookLM 吃完
+    再回(上限 600 秒);`wait=False` 立即回,之後用 `source_list` 看 `ready`。
+    URL 用 `source_add_url`,本機檔案用 `source_add_file`。
+    """
     with reconcile_hint_if_unconfirmed(notebook_id):
         src = await runtime.get_client().sources.add_text(
             notebook_id, title, content, wait=wait, wait_timeout=600.0
@@ -594,10 +599,10 @@ async def generate_audio(
     ``source_ids`` 指名這次只讀哪幾筆來源(用 `source_list` 取真實 id);省略 = 筆記本
     **全部**來源。要排除哪些是呼叫端的政策。
 
-    ⚠️ **帶進生成的來源 >= 10 筆會在打 RPC 之前 raise**(判準是筆數,不是有沒有指名)。
+    **帶進生成的來源 >= 10 筆會在打 RPC 之前 raise**(判準是筆數,不是有沒有指名)。
     實測 11–15 筆會讓模型拿別的來源內容填空,而 task_id 與時長全部正常 —— 看不出來。
 
-    ⚠️ **這支沒有配額 failover**:撞到配額直接 raise,多帳號 pool 也一樣,要由呼叫端自己
+    **這支沒有配額 failover**:撞到配額直接 raise,多帳號 pool 也一樣,要由呼叫端自己
     處理。要 failover 走 manifest-backed 的 `podcast_episode`。"""
     selected = to_source_ids(source_ids)
     client = runtime.get_client()
@@ -670,7 +675,12 @@ async def artifact_download_audio(
     output_path: str,
     artifact_id: str | None = None,
 ) -> dict:
-    """Download an audio artifact to output_path."""
+    """Download an audio artifact to output_path. 回 `{path}`。
+
+    不傳 `artifact_id` = 這本筆記本**最新一顆已完成**的音檔;還沒有已完成的就 raise。傳了 id
+    但對不上已完成的音檔也 raise。只落地檔案,不回寫 manifest、不算收尾 —— manifest-backed
+    的集走 `podcast_episode_resume`。id 用 `artifact_list(kind="audio")` 取。
+    """
     path = await runtime.get_client().artifacts.download_audio(
         notebook_id, output_path, artifact_id
     )
@@ -679,7 +689,11 @@ async def artifact_download_audio(
 
 @mcp.tool()
 async def artifact_rename(notebook_id: str, artifact_id: str, new_title: str) -> dict:
-    """Rename an artifact so it stays identifiable in the notebook."""
+    """Rename an artifact so it stays identifiable in the notebook.
+
+    `artifact_id` 不在這本 `notebook_id` 裡會在送出前 raise(RPC 只靠 id 定位,所以先查);
+    id 用 `artifact_list` 取。只改遠端標題,不回寫 manifest。
+    """
     client = runtime.get_client()
     if await client.artifacts.get_or_none(notebook_id, artifact_id) is None:
         raise ValueError(

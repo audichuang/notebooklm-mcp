@@ -498,7 +498,7 @@ async def _lifespan_client_pool(_app: FastMCP) -> AsyncIterator[None]:
 # Protocol-level server instructions: surfaced to ANY MCP client (even one
 # without our external skill). Deliberately a SKELETON — workflow order + env
 # vars + the few killer gotchas — with detail delegated to the skill, so it does
-# not drift from SKILL.md (see the Cross-Repo Sync Checklist in AGENTS.md).
+# not drift from SKILL.md (see the Cross-Repo Sync Checklist in docs/release-checklist.md).
 _INSTRUCTIONS = """\
 建在 notebooklm-py 之上的薄 MCP + 確定性 podcast 續集工具。認證由環境變數
 NOTEBOOKLM_AUTH_JSON 注入(通常來自 Doppler,唯讀)。
