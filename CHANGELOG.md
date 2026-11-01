@@ -6,6 +6,17 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.41 —— 170 個參數補上 schema 描述;research_import 帶錯帳號立刻診斷
+
+**參數描述**:全部 170 個參數都有 `description`,集中在 `_param_docs.py`,註冊後套用。拿掉 pydantic 自動產生的
+`title`(5,370 字元、沒有資訊)換預算,`tools/list` 從 38,289 變 39,002 字元,仍在 40,000 內。
+
+**`research_import`**:stg 實測非發起帳號 poll 回 `not_found`。舊訊息叫人先跑 `research_wait`,帶同一個錯帳號要
+空等滿 timeout;現在直接報帳號診斷,並列出 `task_id`、`notebook_id` 錯誤的可能。仍不匯入。
+
+**驗證**:e0/e1/e2/e9 兩臂各 3 次盲評 27/36 → 36/36,差異集中在 e1 與 e9,樣本小;主迴圈平均成本 $0.0887 → $0.0968。
+真帳號重跑 import 訊息正確,測試筆記本已刪。工具名與參數不變。
+
 ## v0.9.40 —— 工具訊息與描述對齊實作;skill 修掉 25 處不符
 
 **為什麼**:`check_skill_sync` 只驗名詞存在,查不出語意矛盾。逐條對程式碼查 skill 與工具文字,找到 25 處不符。
