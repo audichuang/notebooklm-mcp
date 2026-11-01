@@ -6,7 +6,22 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
-## 未發版 —— notebooklm-py 升至 0.8.6,鎖住既有生成仍預設立即送出
+## v0.9.39 —— notebooklm-py 0.8.6;prompt 審計:補工具描述、驗收範本進版控、驗收統一走 stg
+
+**prompt 審計(`/claude-api prompt-audit`,對 Opus 5.5 / Sonnet 5.5)**:工具描述補齊
+`source_add_text` / `artifact_download_audio` / `artifact_rename`;工具本身會 raise 的 `>= 10 筆`
+與無 failover 兩句拿掉 ⚠️,文字不動。`grade.py` 改走 `--json-schema`,不再因解析失敗把整題算不及格。
+
+**驗收範本**:`**/CLAUDE.md` 與 `.mcp.json` 的 ignore 吃掉了 `template/` 的兩個檔,clone 下來的工作區
+沒有「只准打測試帳號」的鐵律 —— 加例外進版控。驗收命令的 `-c dev` 全改 `stg`,補 `--setting-sources
+project`,headless brief 不再要 agent「先問我」。
+
+**驗證**:routing eval e16 + e5,新舊兩臂各 3 次盲評 16/18 → 17/18(差距在雜訊內,沒有退步)。
+`_INSTRUCTIONS` 未改。170 個參數仍沒有 schema 描述,留待另一輪。工具名與參數不變,skill repo 不需同步。
+
+**依賴**:`uv lock --upgrade` 對齊消費端實裝。以下是 0.8.6 升級本身的紀錄。
+
+### notebooklm-py 升至 0.8.6,鎖住既有生成仍預設立即送出
 
 **為什麼**:上游 2026-10-29 發布 0.8.6,新增延後生成與 Android Live Voice,並修正同步
 cookie recovery 的 transport 選擇。消費端安裝不讀 lock,所以一般依賴與 `login` extra 的
