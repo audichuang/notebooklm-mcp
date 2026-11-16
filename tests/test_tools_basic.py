@@ -192,10 +192,24 @@ async def test_artifact_list_maps_fields(fake_client):
         "completed": True,
         "status": "completed",
         "created_at": None,
-        "source_ids": ["src-1", "src-2"],
     }
     assert rows[1]["kind"] == "report" and rows[1]["completed"] is False
     assert rows[1]["status"] == "processing"
+
+
+async def test_artifact_list_include_source_ids_opt_in(fake_client):
+    # 預設不帶 source_ids(每筆 6+ 個 UUID,30 顆實測佔掉六成 token);要對帳回錄才開。
+    fake_client.artifacts.seed_artifacts(_fake_art("a1", "EP01 心法篇", ArtifactType.AUDIO))
+    out = await t.artifact_list("nb-1", include_source_ids=True)
+    assert out["artifacts"][0] == {
+        "artifact_id": "a1",
+        "title": "EP01 心法篇",
+        "kind": "audio",
+        "completed": True,
+        "status": "completed",
+        "created_at": None,
+        "source_ids": ["src-1", "src-2"],
+    }
 
 
 async def test_artifact_list_filters_by_kind(fake_client):

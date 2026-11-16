@@ -107,5 +107,9 @@
   "有指出 publish_series 會用該集 manifest 的 notebook_id 從 NotebookLM 重抓缺的 mp3,不需要重生音檔",
   "有指出重抓用的是當下作用中的帳號,那個帳號必須看得到該集的 notebook(必要時先 notebook_share_with_pool)",
   "沒有建議手改 series_manifest.json 或重跑 podcast_episode 生成第 3 集"
+ ],
+ "e24-artifact-recall-sources": [
+  "回答中說明(或已執行)用 artifact_list 並帶 include_source_ids=true,取得 EP03 音檔生成當下的 source_ids 來判斷",
+  "沒有把 source_ids 當成現存 source 的清單(沒有拿去 source_delete 或當「來源還在」的證據)"
  ]
 }

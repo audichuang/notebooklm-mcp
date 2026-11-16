@@ -20,3 +20,4 @@ e20-slides-quota-refused	我叫 generate_slides 幫 audicast 第 4 集生簡報,
 e21-season-url-churn	我升級了 nblm-mcp,然後對 audicast 整季重跑一次 publish_series(內容什麼都沒改)。讀回 feed 發現 12 集的 enclosure URL 全都換了。是不是出事了?用 notebooklm 規劃怎麼確認、要不要處理,先別執行。
 e22-http-shared-clients	我想讓 Claude Code 跟另一個 agent 同時用同一台 nblm-mcp,打算用 streamable-http 開在 0.0.0.0:8484 讓兩邊共用。用 notebooklm 規劃怎麼設定,先別執行。
 e23-publish-missing-mp3	audicast 第 3 集的本機 mp3 被我誤刪了,manifest 其他都在。我現在要用 publish_series 發布整季。用 notebooklm 規劃怎麼做,先別執行。
+e24-artifact-recall-sources	連載 podcast 全季共用的筆記本 notebook_id 是 3f2b9c1e-7a4d-4e8b-9c6f-0d1e2a3b4c5d。我懷疑 EP03 的音檔生成時沒有吃到 EP02 的回錄來源。用 notebooklm 直接查雲端上 EP03 那顆音檔 artifact 當初實際是用哪些來源生成的,據此判斷(只讀,不要生成、刪除或改名任何東西)。

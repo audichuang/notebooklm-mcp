@@ -649,7 +649,7 @@ def test_from_storage_has_allow_headless_guard():
 def test_artifact_exposes_source_ids():
     """這條紅了代表要跟著改 notebooklm_mcp/tools_basic.py 的 artifact_list。
 
-    artifact_list 會把 source_ids 帶出來作為觀測面；本輪尚未以真實驗收把它當 gate。
+    artifact_list 在 include_source_ids=True 時把 source_ids 帶出來作為觀測面；本輪尚未以真實驗收把它當 gate。
     """
     import dataclasses
     from datetime import datetime

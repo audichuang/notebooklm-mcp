@@ -62,6 +62,7 @@ BY_TOOL: dict[tuple[str, str], str] = {
     ("source_add_file", "title"): "來源名稱;省略 = 檔名",
     ("generate_audio", "instructions"): "給生成模型的額外要求",
     ("artifact_list", "kind"): "只列這一類;省略 = 全部",
+    ("artifact_list", "include_source_ids"): "每筆附生成當下的來源 id;對帳回錄才開",
     ("artifact_wait", "task_id"): "`generate_*` 回的 task_id,不是 notebook_id",
     ("artifact_wait", "timeout"): _TIMEOUT,
     ("artifact_download_audio", "output_path"): "下載到哪個檔案",
