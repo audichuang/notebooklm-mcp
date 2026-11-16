@@ -6,6 +6,24 @@
 深入的專題另有獨立文件:
 [notebooklm-py 0.8.0 升級筆記](docs/notebooklm-py-0.8-upgrade.md)、[ADR](docs/adr/)。
 
+## v0.9.42 —— 長呼叫不再被 host 砍掉;工具回傳與 skill 瘦身
+
+**長呼叫(心跳 + host 逾時)**:Claude Code 2.1.325 對 stdio 工具呼叫有 30 分鐘 idle 中止(既無回應也無 progress
+就 abort),而 skill 教的 `MCP_TOOL_TIMEOUT=1800000` 其實是每次呼叫的硬上限、把預設約 28 小時縮成 30 分鐘 ——
+`podcast_series` 連跑多集兩頭都會撞到,attempt 落在 `acceptance_unknown`。新模組 `_heartbeat` 在 client 帶
+progressToken 時每 20 秒送一次 progress;不變式是心跳失敗、卡住或被取消都不影響工具本體。文件改教 `.mcp.json` 的
+per-server `"timeout"`(同時是 idle 下限)。Codex 的 `tool_timeout_sec` 是硬截止、progress 不延長,只能調設定。
+
+**token**:dict 回傳改緊湊 JSON(FastMCP 預設 indent=2;30 筆 artifact_list 假資料 9,263 → 7,937 tokens),
+工具描述去 docstring 縮排。`artifact_list` 的 `source_ids` 改成 `include_source_ids` 選用(同一份資料再降到
+2,915),只有「對帳某集有沒有吃到回錄」要開。`check_skill_sync` 不再逼 SKILL.md 列出全部工具名(那份清單
+host 本來就給了)。實測 Claude Code 預設延遲載入 MCP 工具,接上本 server 每個 session 只多 629 tokens,
+`test_tool_payload_budget` 的前提照實改寫。
+
+**驗證**:13,514 離線測試;Claude Code idle 60s 下包心跳的 150 秒 stub 呼叫跑完、對照組被砍;stg 真實 server
+跑 216 秒 deep research 收到 10 拍遞增 progress(測試筆記本已刪);routing eval 22 題×2 為 119/130 → 124/130,
+新增 e24 驗 `include_source_ids`。Opus、Codex、Sonnet 三方審查無須修的問題。`uv lock --upgrade` 對齊傳遞依賴。
+
 ## v0.9.41 —— 170 個參數補上 schema 描述;research_import 帶錯帳號立刻診斷
 
 **參數描述**:全部 170 個參數都有 `description`,集中在 `_param_docs.py`,註冊後套用。拿掉 pydantic 自動產生的
