@@ -544,6 +544,10 @@ from ._param_docs import apply as _apply_param_docs  # noqa: E402 —— 要等�
 
 _apply_param_docs(mcp._tool_manager.list_tools())
 
+from ._heartbeat import install as _install_heartbeat  # noqa: E402 —— 同上,要等工具都註冊完
+
+_install_heartbeat(mcp._tool_manager.list_tools())
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NotebookLM MCP server")
