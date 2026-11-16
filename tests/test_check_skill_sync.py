@@ -84,3 +84,36 @@ async def test_fully_covered_docs_pass(tmp_path, capsys):
     rc = await module.main(skill_md=skill_md, tool_reference=tool_reference)
 
     assert rc == 0
+
+
+async def test_skill_md_need_not_list_every_tool(tmp_path):
+    """SKILL.md 是路由層,工具名單 host 已經給了(Claude Code 延遲載入時也列出全部工具名);
+    逼它抄一份 37 支清單只是每次觸發都多付的重複。工具名覆蓋只對 tool-reference 要求。"""
+    module = _load_check_skill_sync()
+    names = await module._tool_names()
+
+    skill_dir = tmp_path / "skill"
+    (skill_dir / "references").mkdir(parents=True)
+    skill_md = skill_dir / "SKILL.md"
+    tool_reference = skill_dir / "references" / "tool-reference.md"
+    tool_reference.write_text(_full_doc(names, module.REQUIRED_CONTRACT_TERMS), encoding="utf-8")
+    skill_md.write_text(_full_doc([], module.SKILL_MD_REQUIRED_TERMS), encoding="utf-8")
+
+    assert await module.main(skill_md=skill_md, tool_reference=tool_reference) == 0
+
+
+async def test_tool_reference_must_still_cover_every_tool(tmp_path, capsys):
+    module = _load_check_skill_sync()
+    names = await module._tool_names()
+
+    skill_dir = tmp_path / "skill"
+    (skill_dir / "references").mkdir(parents=True)
+    skill_md = skill_dir / "SKILL.md"
+    tool_reference = skill_dir / "references" / "tool-reference.md"
+    tool_reference.write_text(
+        _full_doc(names[1:], module.REQUIRED_CONTRACT_TERMS), encoding="utf-8"
+    )
+    skill_md.write_text(_full_doc(names, module.SKILL_MD_REQUIRED_TERMS), encoding="utf-8")
+
+    assert await module.main(skill_md=skill_md, tool_reference=tool_reference) == 1
+    assert names[0] in capsys.readouterr().out

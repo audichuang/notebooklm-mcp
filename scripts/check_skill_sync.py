@@ -199,10 +199,11 @@ async def main(skill_md: Path | None = None, tool_reference: Path | None = None)
 
     names = await _tool_names()
     failures: list[str] = []
-    for path in (skill_md, tool_reference):
-        missing = _missing(names, path)
-        if missing:
-            failures.append(f"{path}: missing {', '.join(missing)}")
+    # 工具名覆蓋只對 tool-reference 要求:SKILL.md 是路由層,工具名單 host 本來就給了,
+    # 逼它抄一份清單只是每次觸發都多付的重複。SKILL.md 該講的詞在 SKILL_MD_REQUIRED_TERMS。
+    missing = _missing(names, tool_reference)
+    if missing:
+        failures.append(f"{tool_reference}: missing {', '.join(missing)}")
 
     for path, terms in (
         (tool_reference, REQUIRED_CONTRACT_TERMS),
