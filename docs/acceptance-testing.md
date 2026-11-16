@@ -82,6 +82,17 @@ stub 的 `NBLM_REPO` 指過去 —— 不要靠記憶描述舊版長怎樣。
    同一份 skill(v0.9.26 的數字有這個污染)。另外兩個同類坑(真實資料外洩、skill 沒被載入)見
    [`scripts/eval_harness/README.md`](../scripts/eval_harness/README.md)。
 
+### 量 token、驗 host 行為:也用 `claude -p`,不碰帳號
+
+- **token 要量,不要從字元數估**:CJK 與 JSON 縮排的換算都不準。把要比的 payload 接在同一句
+  prompt 後面跑 `claude -p --output-format json`,比 `usage` 裡 input + cache_creation +
+  cache_read 的差值;每個 session 的固定成本則比「`--mcp-config` 給空設定 vs 給 stub」。
+- **host 的逾時、進度、背景化這類行為用自寫的 stub MCP 驗**:幾行 FastMCP,工具只 sleep
+  或送 progress,再用 `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 這類環境變數把門檻縮短,幾分鐘就有
+  結論。這類行為會隨 Claude Code 版本改,文件寫 host 設定時附上實測版本。
+- `--allowedTools` 吃多個值,寫在它後面的 prompt 會被當成工具名吃掉(報 `Input must be
+  provided`):prompt 放在 `claude -p` 正後方。
+
 ### 真帳號驗收也自己跑
 
 同一套換成 `doppler run -p notebooklm -c stg -- claude -p --model sonnet …` 就能對真帳號跑,
