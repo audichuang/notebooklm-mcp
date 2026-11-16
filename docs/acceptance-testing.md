@@ -111,6 +111,11 @@ server 於是改讀本機 `~/.notebooklm` 的舊 storage_state:單帳號分支�
 照抄會在 rc 輪驗錯東西);`claude -p` 加 `--strict-mcp-config --mcp-config .mcp.json` 直接吃工作區那份。
 發 tag 之後仍要照 release-checklist 從中立目錄驗一次實裝。v0.9.33-rc 照這樣跑,見 `acceptance-v0.9.33-rc-findings.md`。
 
+**要一個真的會跑幾分鐘的呼叫**(驗心跳、逾時這類)時:fast research 幾秒就回來,量不到;deep research
+在 stg 約 3–4 分鐘(v0.9.42 實測 216 秒),只在拋棄式 `ZZ-TEST …` 筆記本上跑。MCP 沒有刪筆記本的工具,
+清理走 SDK `notebooks.delete()`,且**先把 `app._INLINE_AUTH_ENV_OVERRIDES` 套進環境**再建 client ——
+直接 `from_storage()` 可能在本 process 重鑄 cookie,把共用的那份作廢。刪前先 `notebooks.get` 核對標題。
+
 ## 工作區長什麼樣
 
 ```
