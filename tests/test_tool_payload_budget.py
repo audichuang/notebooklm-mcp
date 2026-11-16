@@ -1,12 +1,10 @@
 """Tripwire:`tools/list` 的總量有上限。
 
-這份 payload 會被灌進**每一個**連上這台 server 的 session 的 system prompt,不管那個
-session 用不用得到 NotebookLM。v0.9.26 實測(`claude -p --output-format json` 的
-`usage`):沒接 MCP 的 session 18,685 tokens,接上之後 33,021 —— 工具清單本身就是
-**14,336 tokens**,而且每多一個 turn 就在 `cache_read` 裡再付一次。
-
-所以描述的長度是**跨所有使用者的固定成本**,不是這個 repo 內部的事。沒有上限的話它
-只會單向長回去:每次加紅線都加在描述裡最省事,而代價不出現在任何人的畫面上。
+v0.9.26 時這份 payload 整份進每個 session 的 system prompt(實測 +14,336 tokens)。
+Claude Code 現在預設延遲載入 MCP 工具:2.1.325 實測接上本 server 每個 session 只多
+629 tokens(工具名),描述與 schema 等 ToolSearch 選到那支才載入。預算仍然要守:
+不做延遲載入的 host 照付整份,Claude Code 每載入一支就付那一支。沒有上限的話它只會
+單向長回去:每次加紅線都加在描述裡最省事,而代價不出現在任何人的畫面上。
 
 紅了要做的**不是**把上限調高,是回答「這段新加的字,少了它呼叫端會不會做錯?」
 - 會做錯 → 留在描述裡,把同一支裡的事故敘事/設計理由搬去

@@ -3,11 +3,18 @@
 集中一張表,不在每個簽名寫 `Annotated[..., Field(...)]`:同一個參數在 28 支工具裡語意相同,
 寫一次就好,簽名與直接呼叫也完全不動。`tests/test_tool_schema_docs.py` 鎖住不漏也不孤兒。
 
-每句都算進 `tools/list` 預算(每個 session 都付),所以只寫呼叫端看名字猜不到的事;
+每句都算進 `tools/list` 預算(見 `tests/test_tool_payload_budget.py`),所以只寫呼叫端看名字猜不到的事;
 怎麼選工具、事故與流程留給 docstring 與 skill。
+
+`apply` 也順手做兩件註冊後才做得到的瘦身:工具描述去掉 docstring 縮排、dict 回傳改成緊湊 JSON。
 """
 
 from __future__ import annotations
+
+import functools
+import inspect
+
+import pydantic_core
 
 _TIMEOUT = "等待上限(秒)"
 _FEED = "首發必填,之後沿用 manifest"
@@ -128,12 +135,31 @@ BY_TOOL: dict[tuple[str, str], str] = {
 }
 
 
+def _compact_result(fn):
+    """dict 回傳先序列化成緊湊 JSON:FastMCP 對非字串一律 `indent=2`,實測多 14% token。
+
+    用同一個 `pydantic_core.to_json(fallback=str)`,型別處理與 CJK 輸出都跟原本一致;
+    非 dict(含例外)原樣交回 FastMCP。
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        result = await fn(*args, **kwargs)
+        if isinstance(result, dict):
+            return pydantic_core.to_json(result, fallback=str).decode()
+        return result
+
+    return wrapper
+
+
 def apply(tools) -> None:
     """把描述寫進註冊好的 tool schema,並拿掉 pydantic 自動產生的 `title`。
 
     只動給呼叫端看的 schema;參數驗證走 FastMCP 的 fn_metadata,不讀這份。
     """
     for tool in tools:
+        tool.description = inspect.cleandoc(tool.description or "")
+        tool.fn = _compact_result(tool.fn)
         schema = tool.parameters
         schema.pop("title", None)
         for name, prop in schema["properties"].items():
