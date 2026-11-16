@@ -42,7 +42,7 @@
  "e8-auth-pool": [
   "auth_check 有帶 all_slots(指出預設只量作用中那一槽)",
   "有提到既有 notebook 要 notebook_share_with_pool,否則 failover 會 permission denied",
-  "有提到把 host 的 MCP 工具逾時調長(MCP_TOOL_TIMEOUT)"
+  "有提到把 host 的 MCP 工具逾時調長(Claude Code 是 .mcp.json 的 per-server timeout)"
  ],
  "e9-research": [
   "規劃 research_start → research_wait → research_import 三支",

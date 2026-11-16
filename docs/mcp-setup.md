@@ -17,7 +17,7 @@ prompt and does NOT register — use `add-json`:
 
 ```bash
 claude mcp add-json notebooklm -s local \
-  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","nblm-mcp","--transport","stdio"]}'
+  '{"command":"doppler","args":["run","-p","notebooklm","-c","dev","--","nblm-mcp","--transport","stdio"],"timeout":10800000}'
 ```
 
 Project `.mcp.json` entries should use the same zero-path command:
@@ -37,11 +37,16 @@ Project `.mcp.json` entries should use the same zero-path command:
         "nblm-mcp",
         "--transport",
         "stdio"
-      ]
+      ],
+      "timeout": 10800000
     }
   }
 }
 ```
+
+`timeout`(毫秒)是這個 server 每次工具呼叫的上限,也是 idle 中止的下限:不送進度的 stdio 呼叫
+在 Claude Code 預設 30 分鐘就被中止,而 `podcast_series` 一次連跑多集。別改用 `MCP_TOOL_TIMEOUT`,
+它會作用在所有 server,設短反而把預設約 28 小時的硬上限縮短(Claude Code 2.1.325 實測)。
 
 Each VM runs its own local MCP server process. Doppler injects the same
 `NOTEBOOKLM_AUTH_JSON` value into each process, and the MCP server disables SDK
