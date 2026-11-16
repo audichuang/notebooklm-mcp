@@ -73,6 +73,7 @@ doppler run -p notebooklm -c prd -- nblm-mcp --transport stdio
 | `canonical_audio.py` | 發布端讀「某集 canonical 音檔」的唯一唯讀查詢(sha / 路徑 / artifact / notebook,或型別化 `Unverifiable`);不 raise,擋或標註由 `tools_publish` 決定 | 讀 attempt 形狀的解讀只在這裡;發布仍不寫 attempt(ADR-0002),retired 閘留 `publish/state.py`(ADR-0013) |
 | `generation_input.py` | frozen generation-input bundle + `attempt-binding.json` sidecar | 驗證與綁定都在**第一個遠端副作用之前**(ADR-0001);圍籬由 host 的 `workspace_root` 宣告(ADR-0012) |
 | `_sources.py` | caller 指名的 `source_ids` 驗證與對帳 | **重生某一集不指名,後面各集的回錄會洩進那一集**;選哪幾筆的政策留 host(ADR-0007) |
+| `_heartbeat.py` | 每個工具呼叫期間每 `INTERVAL` 秒送一次 progress,免得慢但活著的呼叫被 client 的閒置窗(Claude Code stdio 預設 30 分鐘)砍掉;Codex 的 `tool_timeout_sec` 是硬截止,心跳救不了;`app.py` 註冊完把每支 `tool.fn` 包一層 | 心跳的失敗/卡住/取消**絕不**取消、延遲或改變工具本體與結果 —— 獨立 asyncio task、只 `cancel()` 不 `await`,別換成 anyio TaskGroup;沒 progressToken 就不送 |
 | `_errors.py` | `NotebookAccessDenied` / `is_permission_denied`(`tools_basic` 與 `tools_podcast` 共用) | 各寫一份 = 上游改 `rpc_code` 時只有一處被改到 |
 | `_status.py` `_atomic.py` `_text.py` `runtime.py` `languages.py` `enums.py` | generation-status 防護 / 原子寫入 / 文字正規化 / client holder / 白名單 / enum 映射 | `_atomic` 見 [gotchas-files](docs/gotchas-files.md) |
 | `auth_probe.py` `auth_cli.py` `cover_cli.py` `assets/` | 認證預檢 / headless 建檔備援 / 封面 CLI + 凍結的 HTML template | 封面見 [gotchas-publish](docs/gotchas-publish.md) |
