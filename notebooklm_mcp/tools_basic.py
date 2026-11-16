@@ -624,13 +624,16 @@ async def generate_audio(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
+async def artifact_list(
+    notebook_id: str, kind: str | None = None, include_source_ids: bool = False
+) -> dict:
     """List artifacts already in a notebook —— 救援/對帳用,例如下載被打斷的音檔(在這裡
     找到 `artifact_id`,再 `artifact_download_audio`)。`kind` 可篩:audio / video / report /
     quiz / flashcards / mind_map / infographic / slide_deck / data_table;省略 = 全部。
 
-    ⚠️ 每筆的 `source_ids` 是**生成當下的歷史快照**,不是即時 join:答「這顆用哪些來源
-    生的」(可對帳某集有沒有把回錄吃進去),**不可反查現存 source** —— 裡面有已刪除的 id。
+    ⚠️ 預設不回 `source_ids`,要對帳回錄才傳 `include_source_ids=true`。它是**生成當下的
+    歷史快照**,不是即時 join:答「這顆用哪些來源生的」(可對帳某集有沒有把回錄吃進去),
+    **不可反查現存 source** —— 裡面有已刪除的 id。
     """
     from notebooklm.types import ArtifactType
 
@@ -640,20 +643,20 @@ async def artifact_list(notebook_id: str, kind: str | None = None) -> dict:
         valid = ", ".join(e.value for e in ArtifactType if e.value != "unknown")
         raise ValueError(f"unknown kind {kind!r}; use one of: {valid}")  # noqa: B904 —— 保留隱式 exception chaining;不為 lint 改執行期行為
     arts = await runtime.get_client().artifacts.list(notebook_id, artifact_type=artifact_type)
-    return {
-        "artifacts": [
-            {
-                "artifact_id": a.id,
-                "title": a.title,
-                "kind": getattr(a.kind, "value", str(a.kind)),
-                "completed": a.is_completed,
-                "status": a.status_str,
-                "created_at": a.created_at.isoformat() if a.created_at else None,
-                "source_ids": list(a.source_ids),
-            }
-            for a in arts
-        ]
-    }
+    rows = []
+    for a in arts:
+        row = {
+            "artifact_id": a.id,
+            "title": a.title,
+            "kind": getattr(a.kind, "value", str(a.kind)),
+            "completed": a.is_completed,
+            "status": a.status_str,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        }
+        if include_source_ids:
+            row["source_ids"] = list(a.source_ids)
+        rows.append(row)
+    return {"artifacts": rows}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))

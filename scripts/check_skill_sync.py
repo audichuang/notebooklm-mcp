@@ -34,6 +34,7 @@ REQUIRED_CONTRACT_TERMS = (
     "input_bundle_path",  # podcast_episode 的凍結輸入;相對路徑契約呼叫端猜不到
     "workspace_root",  # v0.9.24 podcast_episode:圍籬由 host 宣告,show-root manifest 必傳
     "max_report_chars",  # research_wait 預設不回報告本文
+    "include_source_ids",  # artifact_list 預設不回 source_ids,對帳回錄要靠這個旗標
     "source_ids",  # v0.5.0 起 generate_audio/slides/report 與 podcast_episode 可指名來源
     "already_shared",  # notebook_share_with_pool 的回傳:VIEWER 不算「已分享」是硬契約
     "abandon_in_flight",  # podcast_attempt_retract:呼叫端宣告的外部知識,狀態推導不出來
